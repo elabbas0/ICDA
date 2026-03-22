@@ -26,14 +26,78 @@ multiboot_start:
 multiboot_end:
 
 ; bss - page tables, multiboot pointer, stack
+; we map 0-64GB using one PML4 entry -> one PDP -> 64 page directories
+; each page directory covers 1GB using 512 x 2MB huge pages
 section .bss
 align 4096
 pml4_table:     resb 4096
 pdp_table:      resb 4096
-pd_table_0:     resb 4096       ; 0GB - 1GB
-pd_table_1:     resb 4096       ; 1GB - 2GB
-pd_table_2:     resb 4096       ; 2GB - 3GB
-pd_table_3:     resb 4096       ; 3GB - 4GB
+
+; 64 page directories = 64GB total coverage
+pd_table_0:     resb 4096
+pd_table_1:     resb 4096
+pd_table_2:     resb 4096
+pd_table_3:     resb 4096
+pd_table_4:     resb 4096
+pd_table_5:     resb 4096
+pd_table_6:     resb 4096
+pd_table_7:     resb 4096
+pd_table_8:     resb 4096
+pd_table_9:     resb 4096
+pd_table_10:    resb 4096
+pd_table_11:    resb 4096
+pd_table_12:    resb 4096
+pd_table_13:    resb 4096
+pd_table_14:    resb 4096
+pd_table_15:    resb 4096
+pd_table_16:    resb 4096
+pd_table_17:    resb 4096
+pd_table_18:    resb 4096
+pd_table_19:    resb 4096
+pd_table_20:    resb 4096
+pd_table_21:    resb 4096
+pd_table_22:    resb 4096
+pd_table_23:    resb 4096
+pd_table_24:    resb 4096
+pd_table_25:    resb 4096
+pd_table_26:    resb 4096
+pd_table_27:    resb 4096
+pd_table_28:    resb 4096
+pd_table_29:    resb 4096
+pd_table_30:    resb 4096
+pd_table_31:    resb 4096
+pd_table_32:    resb 4096
+pd_table_33:    resb 4096
+pd_table_34:    resb 4096
+pd_table_35:    resb 4096
+pd_table_36:    resb 4096
+pd_table_37:    resb 4096
+pd_table_38:    resb 4096
+pd_table_39:    resb 4096
+pd_table_40:    resb 4096
+pd_table_41:    resb 4096
+pd_table_42:    resb 4096
+pd_table_43:    resb 4096
+pd_table_44:    resb 4096
+pd_table_45:    resb 4096
+pd_table_46:    resb 4096
+pd_table_47:    resb 4096
+pd_table_48:    resb 4096
+pd_table_49:    resb 4096
+pd_table_50:    resb 4096
+pd_table_51:    resb 4096
+pd_table_52:    resb 4096
+pd_table_53:    resb 4096
+pd_table_54:    resb 4096
+pd_table_55:    resb 4096
+pd_table_56:    resb 4096
+pd_table_57:    resb 4096
+pd_table_58:    resb 4096
+pd_table_59:    resb 4096
+pd_table_60:    resb 4096
+pd_table_61:    resb 4096
+pd_table_62:    resb 4096
+pd_table_63:    resb 4096
 
 align 8
 multiboot_info_ptr: resq 1
@@ -55,18 +119,17 @@ gdt64:
     dw $ - gdt64 - 1
     dq gdt64
 
-; entry point - 32-bit protected mode
 section .text
 global _start
 global multiboot_info_ptr
 extern kernel_main
 
-; helper macro: fill a page directory table
-; edi = table address, eax = base physical address (already set)
-; maps 512 x 2MB pages starting at base
+; macro: fill one page directory with 512 x 2MB pages
+; %1 = page directory address
+; %2 = base physical address in GB (e.g. 0 = 0GB, 1 = 1GB)
 %macro map_pd 2
     mov edi, %1
-    mov eax, %2
+    mov eax, (%2 * 0x40000000)
     or eax, 0b10000011
     mov ecx, 512
 %%loop:
@@ -76,6 +139,7 @@ extern kernel_main
     loop %%loop
 %endmacro
 
+; entry point - 32-bit protected mode
 _start:
     mov esp, stack_top
     mov [multiboot_info_ptr], ebx
@@ -96,7 +160,7 @@ _start:
     or eax, 0b11
     mov [pml4_table], eax
 
-    ; wire PDP[0..3] -> 4 page directories
+    ; wire PDP[0..3] -> first 4 page directories (0-4GB, done in 32-bit)
     mov eax, pd_table_0
     or eax, 0b11
     mov [pdp_table + 0 * 8], eax
@@ -113,11 +177,11 @@ _start:
     or eax, 0b11
     mov [pdp_table + 3 * 8], eax
 
-    ; map each 1GB region with 2MB pages
-    map_pd pd_table_0, 0x00000000  ; 0GB - 1GB
-    map_pd pd_table_1, 0x40000000  ; 1GB - 2GB
-    map_pd pd_table_2, 0x80000000  ; 2GB - 3GB
-    map_pd pd_table_3, 0xC0000000  ; 3GB - 4GB
+    ; map first 4GB (32-bit can handle these addresses)
+    map_pd pd_table_0, 0
+    map_pd pd_table_1, 1
+    map_pd pd_table_2, 2
+    map_pd pd_table_3, 3
 
     ; enable PAE
     mov eax, cr4
@@ -143,7 +207,7 @@ _start:
     lgdt [gdt64.pointer]
     jmp gdt64.code:.long_mode
 
-; 64-bit long mode
+; 64-bit long mode - now we can use full 64-bit addresses
 bits 64
 .long_mode:
     mov ax, 0
@@ -153,7 +217,43 @@ bits 64
     mov fs, ax
     mov gs, ax
 
-    ; zero extend 32-bit multiboot ptr into rdi (first argument)
+    ; map 4GB-64GB using 64-bit addresses
+    ; each PDP entry covers 1GB, we fill entries 4-63
+    ; pd_table_0 is contiguous in memory so we can walk through them
+    ; pd_table_N = pd_table_0 + N * 4096
+    mov rcx, 4                         ; start at PDP entry 4 (4GB)
+.map_high:
+    ; calculate pd_table address: pd_table_0 + rcx * 4096
+    mov rax, pd_table_0
+    mov rbx, rcx
+    shl rbx, 12                        ; rbx = rcx * 4096
+    add rax, rbx                       ; rax = address of pd_table_N
+    or rax, 0b11
+    mov [pdp_table + rcx * 8], rax     ; PDP[rcx] -> pd_table_N
+
+    ; fill this page directory: 512 x 2MB pages starting at rcx * 1GB
+    mov r8, pd_table_0
+    add r8, rbx                        ; r8 = pd_table_N address
+    mov r9, rcx
+    shl r9, 30                         ; r9 = rcx * 1GB (base address)
+    or r9, 0b10000011                  ; present + writable + huge
+    mov r10, 0                         ; entry index
+.fill_pd:
+    mov [r8 + r10 * 8], r9
+    add r9, 0x200000                   ; next 2MB
+    inc r10
+    cmp r10, 512
+    jne .fill_pd
+
+    inc rcx
+    cmp rcx, 64                        ; map up to 64GB
+    jne .map_high
+
+    ; reload cr3 to flush TLB with new mappings
+    mov rax, pml4_table
+    mov cr3, rax
+
+    ; pass multiboot info pointer as first argument (rdi)
     xor rdi, rdi
     mov edi, [multiboot_info_ptr]
     call kernel_main
