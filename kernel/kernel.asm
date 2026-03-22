@@ -1,11 +1,11 @@
 bits 32
 
-; Multiboot2 header
+; MULTIBOOT2 HEADER
 section .multiboot
 align 8
 multiboot_start:
-    dd 0xE85250D6               ; magic
-    dd 0                        ; architecture (0 = x86)
+    dd 0xE85250D6
+    dd 0
     dd multiboot_end - multiboot_start
     dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start))
     ; end tag
@@ -14,29 +14,30 @@ multiboot_start:
     dd 8
 multiboot_end:
 
-; STACK 
+; STACK
 section .bss
 align 16
 stack_bottom:
-    resb 16384                  ; 16KB stack
+    resb 16384
 stack_top:
 
-; page tables (each 4KB)
+; page tables
 align 4096
-pml4_table:     resb 4096       ; Page Map Level 4
-pdp_table:      resb 4096       ; Page Directory Pointer
-pd_table:       resb 4096       ; Page Directory
+pml4_table:     resb 4096
+pdp_table:      resb 4096
+pd_table:       resb 4096
+
 
 ; GDT FOR 64-BIT LONG MODE
 section .data
 align 8
 gdt64:
-    dq 0                        ; null descriptor
+    dq 0
 .code: equ $ - gdt64
-    dq (1<<43) | (1<<44) | (1<<47) | (1<<53)  ; 64-bit code segment
+    dq (1<<43) | (1<<44) | (1<<47) | (1<<53)
 .pointer:
-    dw $ - gdt64 - 1            ; GDT limit
-    dq gdt64                    ; GDT base address
+    dw $ - gdt64 - 1
+    dq gdt64
 
 ; 32-bit protected mode
 section .text
@@ -44,9 +45,9 @@ global _start
 extern kernel_main
 
 _start:
-    mov esp, stack_top          ; set up stack
+    mov esp, stack_top
 
-    ; cpu check for long mode
+    ; check long mode support
     mov eax, 0x80000000
     cpuid
     cmp eax, 0x80000001
@@ -54,57 +55,55 @@ _start:
 
     mov eax, 0x80000001
     cpuid
-    test edx, 1 << 29           ; long mode bit
+    test edx, 1 << 29
     jz .no_long_mode
 
-    ; setup paging tables
-    ; PML4[0] → PDP
+    ; set up paging tables
     mov eax, pdp_table
-    or eax, 0b11                ; present + writable
+    or eax, 0b11
     mov [pml4_table], eax
 
-    ; PDP[0] → PD
     mov eax, pd_table
-    or eax, 0b11                ; present + writable
+    or eax, 0b11
     mov [pdp_table], eax
 
-    ; PD — map 1GB using 2MB pages (512 entries)
     mov ecx, 0
 .map_pd:
-    mov eax, 0x200000           ; 2MB
+    mov eax, 0x200000
     mul ecx
-    or eax, 0b10000011          ; present + writable + huge page
+    or eax, 0b10000011
     mov [pd_table + ecx * 8], eax
     inc ecx
     cmp ecx, 512
     jne .map_pd
 
+    ; enable PAE
     mov eax, cr4
-    or eax, 1 << 5              ; PAE bit
+    or eax, 1 << 5
     mov cr4, eax
 
-    ; cr3 to pml4
+    ; point cr3 to pml4
     mov eax, pml4_table
     mov cr3, eax
 
-    ; enable long mode
-    mov ecx, 0xC0000080         ; EFER MSR address
+    ; enable long mode via EFER
+    mov ecx, 0xC0000080
     rdmsr
-    or eax, 1 << 8              ; long mode enable bit
+    or eax, 1 << 8
     wrmsr
 
     ; enable paging
     mov eax, cr0
-    or eax, 1 << 31             ; paging bit
+    or eax, 1 << 31
     mov cr0, eax
 
-    ; gdt and far jump
+    ; load GDT and jump to 64-bit
     lgdt [gdt64.pointer]
-    jmp gdt64.code:.long_mode   ; far jump flushes pipeline
+    jmp gdt64.code:.long_mode
+
 
 bits 64
 .long_mode:
-    ; clear all segment registers
     mov ax, 0
     mov ss, ax
     mov ds, ax
@@ -112,13 +111,13 @@ bits 64
     mov fs, ax
     mov gs, ax
 
-    call kernel_main            ; jump into C
-    hlt                         ; halt if kernel_main returns
+    call kernel_main
+    hlt
 
-; Handle non 64
 bits 32
 .no_long_mode:
-    ; print "NO64" to screen in red so we know what happened
-    mov dword [0xb8000], 0x4F4F4F4E  ; "NO" red on white
-    mov dword [0xb8004], 0x4F34364F  ; "64" red on white
+    mov dword [0xb8000], 0x4F4F4F4E
+    mov dword [0xb8004], 0x4F34364F
     hlt
+
+section .note.GNU-stack noalloc noexec nowrite progbits
