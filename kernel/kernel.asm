@@ -4,14 +4,25 @@ bits 32
 section .multiboot
 align 8
 multiboot_start:
-    dd 0xE85250D6
-    dd 0
-    dd multiboot_end - multiboot_start
-    dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start))
-    ; end tag
-    dw 0
-    dw 0
-    dd 8
+    dd 0xE85250D6                                           ; magic
+    dd 0                                                    ; architecture
+    dd multiboot_end - multiboot_start                      ; header length
+    dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start)); checksum
+ 
+    ; --- framebuffer request tag ---
+    align 8
+    dw 5                    ; type 5 = framebuffer
+    dw 0                    ; flags
+    dd 20                   ; size (2+2+4+4+4+4 = 20 bytes)
+    dd 1024                 ; width
+    dd 768                  ; height
+    dd 32                   ; bits per pixel
+ 
+    ; --- end tag (must be last, must be 8-byte aligned) ---
+    align 8
+    dw 0                    ; type 0 = end
+    dw 0                    ; flags
+    dd 8                    ; size
 multiboot_end:
 
 ; STACK
