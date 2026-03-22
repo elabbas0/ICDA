@@ -1,45 +1,47 @@
 bits 32
 
-; MULTIBOOT2 HEADER
+; multiboot2 header
 section .multiboot
 align 8
 multiboot_start:
-    dd 0xE85250D6                                           ; magic
-    dd 0                                                    ; architecture
-    dd multiboot_end - multiboot_start                      ; header length
-    dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start)); checksum
- 
-    ; --- framebuffer request tag ---
+    dd 0xE85250D6
+    dd 0
+    dd multiboot_end - multiboot_start
+    dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start))
+
+    ; framebuffer request tag
     align 8
-    dw 5                    ; type 5 = framebuffer
-    dw 0                    ; flags
-    dd 20                   ; size (2+2+4+4+4+4 = 20 bytes)
-    dd 1024                 ; width
-    dd 768                  ; height
-    dd 32                   ; bits per pixel
- 
-    ; --- end tag (must be last, must be 8-byte aligned) ---
+    dw 5
+    dw 0
+    dd 20
+    dd 1024
+    dd 768
+    dd 32
+
+    ; end tag
     align 8
-    dw 0                    ; type 0 = end
-    dw 0                    ; flags
-    dd 8                    ; size
+    dw 0
+    dw 0
+    dd 8
 multiboot_end:
 
-; STACK
+; bss - page tables, multiboot pointer, stack
 section .bss
+align 4096
+pml4_table:         resb 4096
+pdp_table:          resb 4096
+pd_table:           resb 4096
+
+align 8
+multiboot_info_ptr: resq 1
+
+; stack must be last so page table setup doesn't overwrite it
 align 16
 stack_bottom:
     resb 16384
 stack_top:
 
-; page tables
-align 4096
-pml4_table:     resb 4096
-pdp_table:      resb 4096
-pd_table:       resb 4096
-
-
-; GDT FOR 64-BIT LONG MODE
+; gdt for 64-bit long mode
 section .data
 align 8
 gdt64:
@@ -50,13 +52,15 @@ gdt64:
     dw $ - gdt64 - 1
     dq gdt64
 
-; 32-bit protected mode
+; entry point - 32-bit protected mode
 section .text
 global _start
+global multiboot_info_ptr
 extern kernel_main
 
 _start:
     mov esp, stack_top
+    mov [multiboot_info_ptr], ebx
 
     ; check long mode support
     mov eax, 0x80000000
@@ -108,11 +112,11 @@ _start:
     or eax, 1 << 31
     mov cr0, eax
 
-    ; load GDT and jump to 64-bit
+    ; load GDT and far jump to 64-bit
     lgdt [gdt64.pointer]
     jmp gdt64.code:.long_mode
 
-
+; 64-bit long mode
 bits 64
 .long_mode:
     mov ax, 0
@@ -122,9 +126,13 @@ bits 64
     mov fs, ax
     mov gs, ax
 
+    ; zero extend 32-bit multiboot ptr into rdi (first argument)
+    xor rdi, rdi
+    mov edi, [multiboot_info_ptr]
     call kernel_main
     hlt
 
+; error - no long mode support
 bits 32
 .no_long_mode:
     mov dword [0xb8000], 0x4F4F4F4E
