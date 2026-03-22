@@ -3,7 +3,7 @@
 static int cursor_row = 0;
 static int cursor_col = 0;
 static unsigned char current_color = VGA_WHITE_ON_BLACK;
-static char* vga = (char*)VGA_MEMORY;
+static volatile char* vga;
 
 // ============================================================
 // helpers
@@ -13,7 +13,6 @@ static void vga_write_cell(int row, int col, char c, unsigned char color) {
     vga[index]     = c;
     vga[index + 1] = color;
 }
-
 // scroll screen up by one line when we hit the bottom
 static void vga_scroll() {
     // move every row one row up
@@ -37,13 +36,31 @@ static void vga_scroll() {
 // ============================================================
 // public API
 // initialize VGA 
-void vga_init() {
-    cursor_row   = 0;
-    cursor_col   = 0;
-    current_color = VGA_WHITE_ON_BLACK;
-    vga_clear();
+// temporary debug function - talks directly to serial port
+static void serial_print(const char* str) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        __asm__ volatile (
+            "mov $0x3F8, %%dx\n"
+            "outb %0, %%dx\n"
+            : : "a"(str[i]) : "dx"
+        );
+    }
 }
 
+void vga_init() {
+    serial_print("VGA1\n");
+    vga = (volatile char*)(unsigned long long)0xB8000;
+
+    serial_print("VGA2\n");
+    cursor_row = 0;
+    cursor_col = 0;
+    current_color = VGA_WHITE_ON_BLACK;
+
+    serial_print("VGA3\n");
+    vga_clear();
+
+    serial_print("VGA4\n");
+}
 // fill entire screen with blank characters
 void vga_clear() {
     for (int row = 0; row < VGA_HEIGHT; row++) {
@@ -134,7 +151,7 @@ void vga_print_int(int n, unsigned char color) {
 void vga_print_hex(unsigned int n, unsigned char color) {
     vga_print("0x", color);
 
-    char hex_chars[] = "0123456789ABCDEF";
+    const char* hex_chars = "0123456789ABCDEF";
     char buf[8];
     int len = 0;
 
