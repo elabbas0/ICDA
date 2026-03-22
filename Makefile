@@ -1,7 +1,7 @@
 CC = gcc
 ASM = nasm
 
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie -fno-asynchronous-unwind-tables -Ikernel
 
 all: kernel.iso
 
@@ -9,13 +9,17 @@ all: kernel.iso
 kernel.o: kernel/kernel.c
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel.o
 
+# compile VGA driver
+vga.o: kernel/drivers/display/vga.c
+	$(CC) $(CFLAGS) -c kernel/drivers/display/vga.c -o vga.o
+
 # compile ASM
 boot.o: kernel/kernel.asm
 	$(ASM) -f elf64 kernel/kernel.asm -o boot.o
 
-# link both together
-kernel.bin: kernel.o boot.o
-	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O2 -nostdlib -fno-pie -no-pie boot.o kernel.o -lgcc
+# link everything together
+kernel.bin: kernel.o vga.o boot.o
+	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O2 -nostdlib -fno-pie -no-pie boot.o kernel.o vga.o -lgcc
 
 # package into bootable ISO
 kernel.iso: kernel.bin
