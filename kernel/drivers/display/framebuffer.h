@@ -1,0 +1,38 @@
+#ifndef FRAMEBUFFER_H
+#define FRAMEBUFFER_H
+
+#include <stdint.h>
+
+// 32 bit ARGB format
+#define FB_BLACK        0x00000000
+#define FB_WHITE        0x00FFFFFF
+#define FB_RED          0x00FF0000
+#define FB_GREEN        0x0000FF00
+#define FB_BLUE         0x000000FF
+#define FB_CYAN         0x0000FFFF
+#define FB_YELLOW       0x00FFFF00
+#define FB_MAGENTA      0x00FF00FF
+#define FB_GRAY         0x00888888
+#define FB_DARK_GRAY    0x00444444
+#define FB_LIGHT_GRAY   0x00CCCCCC
+#define FB_ORANGE       0x00FF8800
+
+// ============================================================
+// functions
+int  fb_init(void* multiboot_info);
+void fb_clear(uint32_t color);
+void fb_put_pixel(int x, int y, uint32_t color);
+void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg);
+void fb_print(const char* str, uint32_t fg, uint32_t bg);
+void fb_print_at(int x, int y, const char* str, uint32_t fg, uint32_t bg);
+void fb_print_int(int n, uint32_t fg, uint32_t bg);
+void fb_print_hex(unsigned int n, uint32_t fg, uint32_t bg);
+void fb_newline();
+void fb_set_cursor(int x, int y);
+int  fb_available();
+
+// screen dimensions (set after fb_init)
+extern int fb_width;
+extern int fb_height;
+
+#endif
