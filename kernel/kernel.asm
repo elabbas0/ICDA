@@ -28,14 +28,17 @@ multiboot_end:
 ; bss - page tables, multiboot pointer, stack
 section .bss
 align 4096
-pml4_table:         resb 4096
-pdp_table:          resb 4096
-pd_table:           resb 4096
+pml4_table:     resb 4096
+pdp_table:      resb 4096
+pd_table_0:     resb 4096       ; 0GB - 1GB
+pd_table_1:     resb 4096       ; 1GB - 2GB
+pd_table_2:     resb 4096       ; 2GB - 3GB
+pd_table_3:     resb 4096       ; 3GB - 4GB
 
 align 8
 multiboot_info_ptr: resq 1
 
-; stack must be last so page table setup doesn't overwrite it
+; stack must be last
 align 16
 stack_bottom:
     resb 16384
@@ -58,6 +61,21 @@ global _start
 global multiboot_info_ptr
 extern kernel_main
 
+; helper macro: fill a page directory table
+; edi = table address, eax = base physical address (already set)
+; maps 512 x 2MB pages starting at base
+%macro map_pd 2
+    mov edi, %1
+    mov eax, %2
+    or eax, 0b10000011
+    mov ecx, 512
+%%loop:
+    mov [edi], eax
+    add eax, 0x200000
+    add edi, 8
+    loop %%loop
+%endmacro
+
 _start:
     mov esp, stack_top
     mov [multiboot_info_ptr], ebx
@@ -73,24 +91,33 @@ _start:
     test edx, 1 << 29
     jz .no_long_mode
 
-    ; set up paging tables
+    ; wire PML4[0] -> PDP
     mov eax, pdp_table
     or eax, 0b11
     mov [pml4_table], eax
 
-    mov eax, pd_table
+    ; wire PDP[0..3] -> 4 page directories
+    mov eax, pd_table_0
     or eax, 0b11
-    mov [pdp_table], eax
+    mov [pdp_table + 0 * 8], eax
 
-    mov ecx, 0
-.map_pd:
-    mov eax, 0x200000
-    mul ecx
-    or eax, 0b10000011
-    mov [pd_table + ecx * 8], eax
-    inc ecx
-    cmp ecx, 512
-    jne .map_pd
+    mov eax, pd_table_1
+    or eax, 0b11
+    mov [pdp_table + 1 * 8], eax
+
+    mov eax, pd_table_2
+    or eax, 0b11
+    mov [pdp_table + 2 * 8], eax
+
+    mov eax, pd_table_3
+    or eax, 0b11
+    mov [pdp_table + 3 * 8], eax
+
+    ; map each 1GB region with 2MB pages
+    map_pd pd_table_0, 0x00000000  ; 0GB - 1GB
+    map_pd pd_table_1, 0x40000000  ; 1GB - 2GB
+    map_pd pd_table_2, 0x80000000  ; 2GB - 3GB
+    map_pd pd_table_3, 0xC0000000  ; 3GB - 4GB
 
     ; enable PAE
     mov eax, cr4
