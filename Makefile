@@ -26,8 +26,15 @@ kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
 	cp kernel.bin isodir/boot/kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
-	grub-mkrescue -o kernel.iso isodir
+	grub-mkrescue -o kernel.iso isodir \
+    --locales="" \
+    --themes="" \
+    --fonts=""
 
 clean:
 	rm -f *.o kernel.bin kernel.iso
 	rm -rf isodir
+
+
+run: kernel.iso
+	qemu-system-x86_64 -cdrom kernel.iso -m 512 -bios /usr/share/ovmf/OVMF.fd
