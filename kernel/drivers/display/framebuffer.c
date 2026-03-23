@@ -18,35 +18,23 @@ int fb_width  = 0;
 int fb_height = 0;
 
 
-static void serial_print(const char* str) {
-    for (int i = 0; str[i]; i++) {
-        __asm__ volatile ("mov $0x3F8, %%dx\noutb %0, %%dx\n" : : "a"(str[i]) : "dx");
-    }
-}
-
 // ============================================================
 // parse multiboot2 info to find framebuffer tag
 int fb_init(void* multiboot_info) {
-    serial_print("fb1\n");
     if (!multiboot_info) return 0;
 
-    serial_print("fb2\n");
     struct multiboot_info* info = (struct multiboot_info*)multiboot_info;
 
-    serial_print("fb3\n");
     uint8_t* tag_ptr = (uint8_t*)multiboot_info + 8;
 
-    serial_print("fb4\n");
     uint8_t* end_ptr = (uint8_t*)multiboot_info + info->total_size;
 
-    serial_print("fb5\n");
     while (tag_ptr < end_ptr) {
         struct multiboot_tag* tag = (struct multiboot_tag*)tag_ptr;
 
         if (tag->type == MULTIBOOT_TAG_TYPE_END) break;
 
         if (tag->type == MULTIBOOT_TAG_TYPE_FRAMEBUFFER) {
-            serial_print("fb-found\n");
             struct multiboot_tag_framebuffer* fb_tag =
                 (struct multiboot_tag_framebuffer*)tag;
 
@@ -57,9 +45,7 @@ int fb_init(void* multiboot_info) {
             fb_height = (int)fb_tag->framebuffer_height;
             fb_ready  = 1;
 
-            serial_print("fb-clearing\n");
             fb_clear(FB_BLACK);
-            serial_print("fb-done\n");
             return 1;
         }
 
@@ -67,7 +53,6 @@ int fb_init(void* multiboot_info) {
         tag_ptr += next;
     }
 
-    serial_print("fb-not-found\n");
     return 0;
 }
 

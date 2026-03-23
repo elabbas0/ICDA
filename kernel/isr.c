@@ -1,7 +1,6 @@
 #include "isr.h"
 #include "pic.h"
 #include "drivers/display/framebuffer.h"
-#include "drivers/display/vga.h"
 
 // table of registered irq handlers
 static irq_handler_t irq_handlers[16] = {0};
@@ -14,25 +13,16 @@ void irq_register(int irq, irq_handler_t handler) {
 
 // called from isr.asm when a cpu exception fires
 void isr_handler(struct registers* regs) {
-    fb_print("\n--- KERNEL EXCEPTION ---\n", 0x00FF0000, 0x00000000);
-    fb_print("exception: ", 0x00FFFFFF, 0x00000000);
 
-    if (regs->int_no < 32) {
-        fb_print(exception_names[regs->int_no], 0x00FF0000, 0x00000000);
+    fb_print("\n*** EXCEPTION: ", FB_WHITE, FB_RED);
+
+    uint64_t num = regs->int_no;
+    if (num < 32) {
+        fb_print(exception_names[num], FB_WHITE, FB_RED);
     }
 
-    fb_print("\ninterrupt: ", 0x00FFFFFF, 0x00000000);
-    fb_print_int((int)regs->int_no, 0x00FFFF00, 0x00000000);
+    fb_print(" ***\n", FB_WHITE, FB_RED);
 
-    fb_print("\nerror code: ", 0x00FFFFFF, 0x00000000);
-    fb_print_int((int)regs->err_code, 0x00FFFF00, 0x00000000);
-
-    fb_print("\nrip: ", 0x00FFFFFF, 0x00000000);
-    fb_print_hex((unsigned int)regs->rip, 0x00FFFF00, 0x00000000);
-
-    fb_print("\n--- system halted ---\n", 0x00FF0000, 0x00000000);
-
-    // halt forever
     __asm__ volatile ("cli; hlt");
 }
 

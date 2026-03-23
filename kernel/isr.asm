@@ -1,7 +1,6 @@
 bits 64
 
 ; macro for exceptions WITHOUT error code
-; cpu doesn't push one so we push a dummy 0
 %macro ISR_NOERR 1
 global isr%1
 isr%1:
@@ -11,7 +10,6 @@ isr%1:
 %endmacro
 
 ; macro for exceptions WITH error code
-; cpu already pushed one so we just push the number
 %macro ISR_ERR 1
 global isr%1
 isr%1:
@@ -20,7 +18,6 @@ isr%1:
 %endmacro
 
 ; macro for hardware irqs
-; none have error codes
 %macro IRQ 2
 global irq%1
 irq%1:
@@ -38,7 +35,7 @@ ISR_NOERR 4   ; overflow
 ISR_NOERR 5   ; bound range exceeded
 ISR_NOERR 6   ; invalid opcode
 ISR_NOERR 7   ; device not available
-ISR_ERR   8   ; double fault (has error code)
+ISR_ERR   8   ; double fault
 ISR_NOERR 9   ; coprocessor segment overrun
 ISR_ERR   10  ; invalid TSS
 ISR_ERR   11  ; segment not present
@@ -82,53 +79,50 @@ IRQ 14, 46    ; primary ATA
 IRQ 15, 47    ; secondary ATA
 
 ; common exception handler
-; saves all registers, calls isr_handler(regs*)
 extern isr_handler
 isr_common:
-    ; save general purpose registers
     push rax
     push rcx
     push rdx
     push rbx
-    push rsp
     push rbp
     push rsi
     push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
-    ; save data segment
-    mov ax, ds
-    push rax
-
-    ; load kernel data segment
     mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; call C handler with pointer to saved registers
-    mov rdi, rsp
+    mov rdi, rsp        ; first arg = pointer to registers on stack
     call isr_handler
 
-    ; restore data segment
-    pop rax
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-
-    ; restore registers
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rdi
     pop rsi
     pop rbp
-    pop rsp
     pop rbx
     pop rdx
     pop rcx
     pop rax
 
-    ; clean up pushed error code and interrupt number
-    add rsp, 16
+    add rsp, 16         ; skip int_no and err_code
     iretq
 
 ; common irq handler
@@ -138,13 +132,17 @@ irq_common:
     push rcx
     push rdx
     push rbx
-    push rsp
     push rbp
     push rsi
     push rdi
-
-    mov ax, ds
-    push rax
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
     mov ax, 0x10
     mov ds, ax
@@ -152,28 +150,29 @@ irq_common:
     mov fs, ax
     mov gs, ax
 
-    mov rdi, rsp
+    mov rdi, rsp        ; first arg = pointer to registers on stack
     call irq_handler
 
-    pop rax
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rdi
     pop rsi
     pop rbp
-    pop rsp
     pop rbx
     pop rdx
     pop rcx
     pop rax
 
-    add rsp, 16
+    add rsp, 16         ; skip int_no and err_code
     iretq
 
-; idt flush - loads the IDT pointer
+; idt flush
 global idt_flush
 idt_flush:
     lidt [rdi]
