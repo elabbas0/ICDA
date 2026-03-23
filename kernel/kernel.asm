@@ -26,7 +26,7 @@ multiboot_start:
 multiboot_end:
 
 ; bss - page tables, multiboot pointer, stack
-; we map 0-64GB using one PML4 entry -> one PDP -> 64 page directories
+; map 0-64GB using one PML4 entry -> one PDP -> 64 page directories
 ; each page directory covers 1GB using 512 x 2MB huge pages
 section .bss
 align 4096
