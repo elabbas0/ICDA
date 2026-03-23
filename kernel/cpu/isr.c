@@ -1,6 +1,6 @@
 #include "isr.h"
 #include "pic.h"
-#include "drivers/display/framebuffer.h"
+#include "../drivers/display/framebuffer.h"
 
 const char *exception_names[32] = {
     "division by zero",       "debug",

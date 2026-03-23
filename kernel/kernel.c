@@ -1,11 +1,11 @@
 #include "drivers/display/vga.h"
 #include "drivers/display/framebuffer.h"
-#include "multiboot2.h"
-#include "gdt.h"
-#include "idt.h"
-#include "isr.h"
-#include "pic.h"
-#include "pmm.h"
+#include "cpu/multiboot2.h"
+#include "cpu/gdt.h"
+#include "cpu/idt.h"
+#include "cpu/isr.h"
+#include "cpu/pic.h"
+#include "memory/pmm.h"
 
 void debug_char(char c)
 {
@@ -56,38 +56,7 @@ void kernel_main(void *multiboot_info)
     fb_print("PMM:        ", FB_WHITE, FB_BLACK);
     pmm_init(multiboot_info);
 
-    // ── PMM smoke test ────────────────────────────────────────
-    fb_print("\n-- PMM smoke test --\n", FB_YELLOW, FB_BLACK);
-
-    uint64_t frames[4];
-    for (int i = 0; i < 4; i++) {
-        frames[i] = pmm_alloc();
-        fb_print("  alloc -> ", FB_WHITE, FB_BLACK);
-        fb_print_hex((unsigned int)(frames[i] >> 32), FB_CYAN, FB_BLACK);
-        fb_print_hex((unsigned int)(frames[i] & 0xFFFFFFFF), FB_CYAN, FB_BLACK);
-        fb_print("\n", FB_WHITE, FB_BLACK);
-    }
-
-    uint64_t free_before = pmm_free_frames();
-    for (int i = 0; i < 4; i++)
-        pmm_free(frames[i]);
-    uint64_t free_after = pmm_free_frames();
-
-    fb_print("  freed 4 frames: ", FB_WHITE, FB_BLACK);
-    if (free_after == free_before + 4)
-        fb_print("OK\n", FB_GREEN, FB_BLACK);
-    else
-        fb_print("FAIL\n", FB_RED, FB_BLACK);
-
-    uint64_t free_check = pmm_free_frames();
-    pmm_free(frames[0]);
-    if (pmm_free_frames() == free_check)
-        fb_print("  double-free guard: OK\n", FB_GREEN, FB_BLACK);
-    else
-        fb_print("  double-free guard: FAIL\n", FB_RED, FB_BLACK);
-
-    fb_print("-- smoke test done --\n\n", FB_YELLOW, FB_BLACK);
-    // ─────────────────────────────────────────────────────────
+    
 
     irq_register(0, timer_handler);
 

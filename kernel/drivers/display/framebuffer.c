@@ -1,6 +1,6 @@
 #include "framebuffer.h"
 #include "font.h"
-#include "../../multiboot2.h"
+#include "../../cpu/multiboot2.h"
 #include <stdint.h>
 
 // internal state
