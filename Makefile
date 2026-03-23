@@ -1,7 +1,7 @@
 CC  = gcc
 ASM = nasm
 
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
+CFLAGS = -ffreestanding -Wall -O0 -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel
 
 all: kernel.iso
@@ -36,11 +36,14 @@ gdt_flush.o: kernel/gdt_flush.asm
 isr_asm.o: kernel/isr.asm
 	$(ASM) -f elf64 kernel/isr.asm -o isr_asm.o
 
-kernel.bin: kernel.o vga.o framebuffer.o gdt.o idt.o isr.o pic.o \
+pmm.o: kernel/pmm.c kernel/pmm.h kernel/multiboot2.h
+	$(CC) $(CFLAGS) -c kernel/pmm.c -o pmm.o
+
+kernel.bin: kernel.o vga.o framebuffer.o gdt.o idt.o isr.o pic.o pmm.o \
             boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O2 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o \
-	      gdt.o idt.o isr.o pic.o gdt_flush.o isr_asm.o -lgcc
+	      gdt.o idt.o isr.o pic.o pmm.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
