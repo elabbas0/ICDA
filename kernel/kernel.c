@@ -5,6 +5,7 @@
 #include "idt.h"
 #include "isr.h"
 #include "pic.h"
+#include "pmm.h"
 
 void debug_char(char c)
 {
@@ -37,34 +38,64 @@ void kernel_main(void *multiboot_info)
         vga_print("display: VGA fallback\n", VGA_WHITE_ON_BLACK);
     }
 
-    // print header
     fb_print("ICDA Kernel\n", FB_CYAN, FB_BLACK);
     fb_print("------------\n", FB_WHITE, FB_BLACK);
-    fb_print("Status: ", FB_WHITE, FB_BLACK);
-    fb_print("RUNNING\n", FB_GREEN, FB_BLACK);
 
-    // init GDT
-    fb_print("GDT: ", FB_WHITE, FB_BLACK);
+    fb_print("GDT:        ", FB_WHITE, FB_BLACK);
     gdt_init();
     fb_print("OK\n", FB_GREEN, FB_BLACK);
 
-    // init PIC
-    fb_print("PIC: ", FB_WHITE, FB_BLACK);
+    fb_print("PIC:        ", FB_WHITE, FB_BLACK);
     pic_init();
     fb_print("OK\n", FB_GREEN, FB_BLACK);
 
-    // init IDT
-    fb_print("IDT: ", FB_WHITE, FB_BLACK);
+    fb_print("IDT:        ", FB_WHITE, FB_BLACK);
     idt_init();
     fb_print("OK\n", FB_GREEN, FB_BLACK);
 
-    // enable interrupts
+    fb_print("PMM:        ", FB_WHITE, FB_BLACK);
+    pmm_init(multiboot_info);
+
+    // ── PMM smoke test ────────────────────────────────────────
+    fb_print("\n-- PMM smoke test --\n", FB_YELLOW, FB_BLACK);
+
+    uint64_t frames[4];
+    for (int i = 0; i < 4; i++) {
+        frames[i] = pmm_alloc();
+        fb_print("  alloc -> ", FB_WHITE, FB_BLACK);
+        fb_print_hex((unsigned int)(frames[i] >> 32), FB_CYAN, FB_BLACK);
+        fb_print_hex((unsigned int)(frames[i] & 0xFFFFFFFF), FB_CYAN, FB_BLACK);
+        fb_print("\n", FB_WHITE, FB_BLACK);
+    }
+
+    uint64_t free_before = pmm_free_frames();
+    for (int i = 0; i < 4; i++)
+        pmm_free(frames[i]);
+    uint64_t free_after = pmm_free_frames();
+
+    fb_print("  freed 4 frames: ", FB_WHITE, FB_BLACK);
+    if (free_after == free_before + 4)
+        fb_print("OK\n", FB_GREEN, FB_BLACK);
+    else
+        fb_print("FAIL\n", FB_RED, FB_BLACK);
+
+    uint64_t free_check = pmm_free_frames();
+    pmm_free(frames[0]);
+    if (pmm_free_frames() == free_check)
+        fb_print("  double-free guard: OK\n", FB_GREEN, FB_BLACK);
+    else
+        fb_print("  double-free guard: FAIL\n", FB_RED, FB_BLACK);
+
+    fb_print("-- smoke test done --\n\n", FB_YELLOW, FB_BLACK);
+    // ─────────────────────────────────────────────────────────
+
+    irq_register(0, timer_handler);
+
     fb_print("Interrupts: ", FB_WHITE, FB_BLACK);
     __asm__ volatile("sti");
     fb_print("OK\n", FB_GREEN, FB_BLACK);
 
-    fb_print("\nStage 3 complete.\n", FB_GREEN, FB_BLACK);
+    fb_print("\nICDA ready.\n", FB_CYAN, FB_BLACK);
 
-
-   
+    while (1) __asm__ volatile("hlt");
 }

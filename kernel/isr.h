@@ -12,35 +12,8 @@ struct registers {
     uint64_t rip, cs, rflags, rsp, ss;
 };
 
-// exception names
-static const char* exception_names[] = {
-    "division by zero",
-    "debug",
-    "non-maskable interrupt",
-    "breakpoint",
-    "overflow",
-    "bound range exceeded",
-    "invalid opcode",
-    "device not available",
-    "double fault",
-    "coprocessor segment overrun",
-    "invalid TSS",
-    "segment not present",
-    "stack-segment fault",
-    "general protection fault",
-    "page fault",
-    "reserved",
-    "x87 floating point",
-    "alignment check",
-    "machine check",
-    "SIMD floating point",
-    "virtualization",
-    "reserved", "reserved", "reserved", "reserved",
-    "reserved", "reserved", "reserved", "reserved",
-    "reserved",
-    "security exception",
-    "reserved"
-};
+// exception names (defined in isr.c)
+extern const char *exception_names[32];
 
 // cpu exception stubs (defined in isr.asm)
 extern void isr0();  extern void isr1();  extern void isr2();

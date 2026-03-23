@@ -30,11 +30,36 @@ struct multiboot_info {
     uint32_t reserved;
 };
 
-// tag types required
+// tag types
 #define MULTIBOOT_TAG_TYPE_END          0
+#define MULTIBOOT_TAG_TYPE_MMAP         6
 #define MULTIBOOT_TAG_TYPE_FRAMEBUFFER  8
 
 // alignment between tags
 #define MULTIBOOT_TAG_ALIGN             8
+
+// memory map entry types
+#define MULTIBOOT_MEMORY_AVAILABLE      1   // free RAM — safe to use
+#define MULTIBOOT_MEMORY_RESERVED       2   // firmware/hardware reserved
+#define MULTIBOOT_MEMORY_ACPI           3   // ACPI reclaimable
+#define MULTIBOOT_MEMORY_NVS            4   // ACPI non-volatile (do not touch)
+#define MULTIBOOT_MEMORY_BADRAM         5   // defective memory
+
+// a single entry in the memory map
+struct multiboot_mmap_entry {
+    uint64_t addr;   // physical base address of this region
+    uint64_t len;    // length in bytes
+    uint32_t type;   // one of MULTIBOOT_MEMORY_* above
+    uint32_t zero;   // reserved, always 0
+} __attribute__((packed));
+
+// tag type 6 = memory map
+struct multiboot_tag_mmap {
+    uint32_t type;          // always 6
+    uint32_t size;          // total size of this tag including entries
+    uint32_t entry_size;    // size of each entry (usually 24 bytes)
+    uint32_t entry_version; // currently 0
+    struct multiboot_mmap_entry entries[0]; // variable-length array of entries
+};
 
 #endif
