@@ -5,9 +5,11 @@
 
 // internal state
 static volatile uint32_t* fb_addr   = 0;
-static uint32_t fb_pitch            = 0;
-static uint32_t fb_bpp              = 0;
-static int      fb_ready            = 0;
+static uint64_t           fb_phys   = 0;
+static uint32_t           fb_pitch  = 0;
+static uint32_t           fb_bpp    = 0;
+static int                fb_ready  = 0;
+static int                fb_hhdm   = 0;
 
 // cursor position in characters
 static int cursor_x = 0;
@@ -38,12 +40,14 @@ int fb_init(void* multiboot_info) {
             struct multiboot_tag_framebuffer* fb_tag =
                 (struct multiboot_tag_framebuffer*)tag;
 
-            fb_addr   = (volatile uint32_t*)(uintptr_t)fb_tag->framebuffer_addr;
+            fb_phys   = (uint64_t)fb_tag->framebuffer_addr;
+            fb_addr   = (volatile uint32_t*)(uintptr_t)fb_phys;
             fb_pitch  = fb_tag->framebuffer_pitch;
             fb_bpp    = fb_tag->framebuffer_bpp;
             fb_width  = (int)fb_tag->framebuffer_width;
             fb_height = (int)fb_tag->framebuffer_height;
             fb_ready  = 1;
+            fb_hhdm   = 0;
 
             fb_clear(FB_BLACK);
             return 1;
@@ -58,6 +62,23 @@ int fb_init(void* multiboot_info) {
 
 int fb_available() {
     return fb_ready;
+}
+
+// return the raw physical address of the framebuffer (0 if not ready)
+uint64_t fb_phys_addr(void) {
+    return fb_ready ? fb_phys : 0;
+}
+
+// return the size of the framebuffer in bytes
+uint64_t fb_phys_size(void) {
+    return fb_ready ? (uint64_t)fb_pitch * (uint64_t)fb_height : 0;
+}
+
+// adjust fb_addr to point through the HHDM; call once after vmm_init
+void fb_remap(uint64_t physical_base) {
+    if (!fb_ready || fb_hhdm) return;
+    fb_addr = (volatile uint32_t *)(fb_phys + physical_base);
+    fb_hhdm = 1;
 }
 
 // ============================================================

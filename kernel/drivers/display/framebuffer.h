@@ -20,6 +20,12 @@
 // ============================================================
 // functions
 int  fb_init(void* multiboot_info);
+// return the raw physical address of the framebuffer (0 if not ready)
+uint64_t fb_phys_addr(void);
+// return the size of the framebuffer in bytes
+uint64_t fb_phys_size(void);
+// remap fb_addr through the HHDM after vmm_init; must be called once after paging is live
+void fb_remap(uint64_t physical_base);
 void fb_clear(uint32_t color);
 void fb_put_pixel(int x, int y, uint32_t color);
 void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg);

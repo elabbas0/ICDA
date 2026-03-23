@@ -6,6 +6,7 @@
 #include "cpu/isr.h"
 #include "cpu/pic.h"
 #include "memory/pmm.h"
+#include "memory/vmm.h"
 
 void debug_char(char c)
 {
@@ -41,26 +42,15 @@ void kernel_main(void *multiboot_info)
     fb_print("ICDA Kernel\n", FB_CYAN, FB_BLACK);
     fb_print("------------\n", FB_WHITE, FB_BLACK);
 
-    fb_print("GDT:        ", FB_WHITE, FB_BLACK);
     gdt_init();
-    fb_print("OK\n", FB_GREEN, FB_BLACK);
-
-    fb_print("PIC:        ", FB_WHITE, FB_BLACK);
     pic_init();
-    fb_print("OK\n", FB_GREEN, FB_BLACK);
-
-    fb_print("IDT:        ", FB_WHITE, FB_BLACK);
     idt_init();
-    fb_print("OK\n", FB_GREEN, FB_BLACK);
-
-    fb_print("PMM:        ", FB_WHITE, FB_BLACK);
     pmm_init(multiboot_info);
+    vmm_init(fb_phys_addr(), fb_phys_size());
 
-    
-
+    fb_remap(PHYSICAL_BASE);
     irq_register(0, timer_handler);
 
-    fb_print("Interrupts: ", FB_WHITE, FB_BLACK);
     __asm__ volatile("sti");
     fb_print("OK\n", FB_GREEN, FB_BLACK);
 
