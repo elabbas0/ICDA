@@ -58,11 +58,11 @@ void isr_handler(struct registers* regs) {
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
 
-    // call registered handler if one exists
+    // send EOI *before* the handler so context switches inside the handler
+    // (e.g. schedule()) don't prevent the PIC from firing further interrupts
+    pic_eoi(irq);
+
     if (irq >= 0 && irq < 16 && irq_handlers[irq]) {
         irq_handlers[irq](regs);
     }
-
-    // send end-of-interrupt to PIC
-    pic_eoi(irq);
 }

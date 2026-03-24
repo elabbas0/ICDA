@@ -13,23 +13,32 @@
 #include "memory/vmm.h"
 #include "memory/pf.h"
 
-// simple timer tick counter (IRQ0)
-volatile uint64_t ticks = 0;
+#include "proc/sched.h"
 
-static void timer_handler(struct registers *regs) {
-    (void)regs;
-    ticks++;
-}
-
-// crude delay using PIT ticks (~18.2 Hz default in your setup)
-static void sleep_seconds(int seconds) {
-    uint64_t target = ticks + (uint64_t)(seconds * 18);
-    while (ticks < target) {
-        __asm__ volatile("hlt");
+// ─────────────────────────────────────────────
+// demo kernel threads, this whole file is testing purposes only
+// ─────────────────────────────────────────────
+static void task_a(void) {
+    while (1) {
+        fb_print("A ", FB_CYAN, FB_BLACK);
+        for (volatile int i = 0; i < 5000000; i++);
     }
 }
 
+static void task_b(void) {
+    while (1) {
+        fb_print("B ", FB_YELLOW, FB_BLACK);
+        for (volatile int i = 0; i < 5000000; i++);
+    }
+}
+
+// timer handler, drives the scheduler
+static void timer_handler(struct registers *regs) {
+    schedule(regs);
+}
+
 // kernel begin
+
 void kernel_main(void *multiboot_info) {
     // framebuffer or fallback VGA
     int has_fb = fb_init(multiboot_info);
@@ -62,20 +71,23 @@ void kernel_main(void *multiboot_info) {
     pf_init();
     fb_print("PF:  OK\n", FB_GREEN, FB_BLACK);
 
+    sched_init();
+    fb_print("SCHED: OK\n", FB_GREEN, FB_BLACK);
+
+    proc_create_kernel(task_a);
+    proc_create_kernel(task_b);
+    fb_print("TASKS: OK\n", FB_GREEN, FB_BLACK);
+
     irq_register(0, timer_handler);
     fb_print("TIMER: OK\n", FB_GREEN, FB_BLACK);
 
     __asm__ volatile("sti");
-    fb_print("INTERRUPTS: OK\n", FB_GREEN, FB_BLACK);
+    fb_print("INTERRUPTS: OK\n\n", FB_GREEN, FB_BLACK);
 
-    fb_print("\nStage 3 complete.\n", FB_WHITE, FB_BLACK);
+    fb_print("Scheduler running. You should see A and B interleaving:\n\n",
+             FB_WHITE, FB_BLACK);
 
-    fb_print("\nWaiting 5 seconds...\n", FB_YELLOW, FB_BLACK);
-    sleep_seconds(5);
-
-    // ── scrolling test ────────────────────────
-    fb_print("\n--- SCROLL TEST START ---\n\n", FB_CYAN, FB_BLACK);
-
+    // idle loop — the boot context becomes the idle process
     while (1) {
         __asm__ volatile("hlt");
     }
