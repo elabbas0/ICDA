@@ -44,4 +44,9 @@ void irq_handler(struct registers* regs);
 typedef void (*irq_handler_t)(struct registers*);
 void irq_register(int irq, irq_handler_t handler);
 
+// register a custom exception handler (0-31)
+// if a handler is registered it is called instead of the default panic
+typedef void (*isr_handler_t)(struct registers*);
+void isr_register(int vec, isr_handler_t handler);
+
 #endif

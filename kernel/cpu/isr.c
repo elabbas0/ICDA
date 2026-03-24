@@ -21,6 +21,12 @@ const char *exception_names[32] = {
     "security exception",     "reserved"
 };
 static irq_handler_t irq_handlers[16] = {0};
+static isr_handler_t isr_handlers[32] = {0};
+
+void isr_register(int vec, isr_handler_t handler) {
+    if (vec >= 0 && vec < 32)
+        isr_handlers[vec] = handler;
+}
 
 void irq_register(int irq, irq_handler_t handler) {
     if (irq >= 0 && irq < 16) {
@@ -30,10 +36,15 @@ void irq_register(int irq, irq_handler_t handler) {
 
 // called from isr.asm when a cpu exception fires
 void isr_handler(struct registers* regs) {
+    uint64_t num = regs->int_no;
+
+    // if a C handler is registered for this vector, call it and return
+    if (num < 32 && isr_handlers[num]) {
+        isr_handlers[num](regs);
+        return;
+    }
 
     fb_print("\n*** EXCEPTION: ", FB_WHITE, FB_RED);
-
-    uint64_t num = regs->int_no;
     if (num < 32) {
         fb_print(exception_names[num], FB_WHITE, FB_RED);
     }

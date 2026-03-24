@@ -1,60 +1,82 @@
-#include "drivers/display/vga.h"
+#include <stdint.h>
+
 #include "drivers/display/framebuffer.h"
-#include "cpu/multiboot2.h"
+#include "drivers/display/vga.h"
+
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
-#include "cpu/isr.h"
 #include "cpu/pic.h"
+
+#include "cpu/isr.h"
+
 #include "memory/pmm.h"
 #include "memory/vmm.h"
+#include "memory/pf.h"
 
-void debug_char(char c)
-{
-    __asm__ volatile("mov $0x3F8, %%dx\noutb %0, %%dx\n" : : "a"(c) : "dx");
-}
+// simple timer tick counter (IRQ0)
+volatile uint64_t ticks = 0;
 
-void debug_print(const char *str)
-{
-    for (int i = 0; str[i]; i++)
-        debug_char(str[i]);
-}
-
-// timer tick counter
-static volatile int ticks = 0;
-
-// timer irq handler - called every tick
-static void timer_handler(struct registers *regs)
-{
+static void timer_handler(struct registers *regs) {
     (void)regs;
     ticks++;
 }
 
-void kernel_main(void *multiboot_info)
-{
-    // init display
+// crude delay using PIT ticks (~18.2 Hz default in your setup)
+static void sleep_seconds(int seconds) {
+    uint64_t target = ticks + (uint64_t)(seconds * 18);
+    while (ticks < target) {
+        __asm__ volatile("hlt");
+    }
+}
+
+// kernel begin
+void kernel_main(void *multiboot_info) {
+    // framebuffer or fallback VGA
     int has_fb = fb_init(multiboot_info);
-    if (!has_fb)
-    {
+    if (!has_fb) {
         vga_init();
-        vga_print("display: VGA fallback\n", VGA_WHITE_ON_BLACK);
     }
 
-    fb_print("ICDA Kernel\n", FB_CYAN, FB_BLACK);
-    fb_print("------------\n", FB_WHITE, FB_BLACK);
+    fb_print("ICDA Kernel Boot\n\n", FB_CYAN, FB_BLACK);
 
     gdt_init();
-    pic_init();
-    idt_init();
-    pmm_init(multiboot_info);
-    vmm_init(fb_phys_addr(), fb_phys_size());
+    fb_print("GDT: OK\n", FB_GREEN, FB_BLACK);
 
-    fb_remap(PHYSICAL_BASE);
+    idt_init();
+    fb_print("IDT: OK\n", FB_GREEN, FB_BLACK);
+
+    pic_init();
+    fb_print("PIC: OK\n", FB_GREEN, FB_BLACK);
+
+    // physical memory manager — must come before vmm
+    pmm_init(multiboot_info);
+    fb_print("PMM: OK\n", FB_GREEN, FB_BLACK);
+
+    // virtual memory manager — sets up paging + HHDM
+    // fb_phys_addr/size are read back so vmm can map the framebuffer
+    // into the higher-half direct map before we switch CR3
+    vmm_init(fb_phys_addr(), fb_phys_size());
+    fb_print("VMM: OK\n", FB_GREEN, FB_BLACK);
+
+    // page fault handler — enables dynamic stack growth
+    pf_init();
+    fb_print("PF:  OK\n", FB_GREEN, FB_BLACK);
+
     irq_register(0, timer_handler);
+    fb_print("TIMER: OK\n", FB_GREEN, FB_BLACK);
 
     __asm__ volatile("sti");
-    fb_print("OK\n", FB_GREEN, FB_BLACK);
+    fb_print("INTERRUPTS: OK\n", FB_GREEN, FB_BLACK);
 
-    fb_print("\nICDA ready.\n", FB_CYAN, FB_BLACK);
+    fb_print("\nStage 3 complete.\n", FB_WHITE, FB_BLACK);
 
-    while (1) __asm__ volatile("hlt");
+    fb_print("\nWaiting 5 seconds...\n", FB_YELLOW, FB_BLACK);
+    sleep_seconds(5);
+
+    // ── scrolling test ────────────────────────
+    fb_print("\n--- SCROLL TEST START ---\n\n", FB_CYAN, FB_BLACK);
+
+    while (1) {
+        __asm__ volatile("hlt");
+    }
 }
