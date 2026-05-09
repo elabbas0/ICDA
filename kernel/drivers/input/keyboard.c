@@ -1,7 +1,7 @@
 #include "keyboard.h"
 
+#include "../../cpu/irq_controller.h"
 #include "../../cpu/isr.h"
-#include "../../cpu/pic.h"
 
 #include <stdint.h>
 
@@ -153,7 +153,7 @@ void keyboard_init(void) {
     }
 
     irq_register(1, keyboard_irq_handler);
-    pic_unmask(1);
+    irq_controller_unmask(1);
 
     outb(KEYBOARD_STATUS_PORT, 0xAE);
 }

@@ -43,6 +43,9 @@ isr.o: kernel/cpu/isr.c
 pic.o: kernel/cpu/pic.c
 	$(CC) $(CFLAGS) -c kernel/cpu/pic.c -o pic.o
 
+irq_controller.o: kernel/cpu/irq_controller.c kernel/cpu/irq_controller.h kernel/cpu/pic.h
+	$(CC) $(CFLAGS) -c kernel/cpu/irq_controller.c -o irq_controller.o
+
 boot.o: kernel/boot.asm
 	$(ASM) -f elf64 kernel/boot.asm -o boot.o
 
@@ -71,11 +74,11 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o vga.o framebuffer.o keyboard.o console.o serial.o gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o vga.o framebuffer.o keyboard.o console.o serial.o gdt.o idt.o isr.o pic.o irq_controller.o pmm.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o keyboard.o console.o serial.o \
-	      gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
+	      gdt.o idt.o isr.o pic.o irq_controller.o pmm.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin

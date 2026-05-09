@@ -32,6 +32,8 @@ struct multiboot_info {
 
 // tag types
 #define MULTIBOOT_TAG_TYPE_END          0
+#define MULTIBOOT_TAG_TYPE_ACPI_OLD     14
+#define MULTIBOOT_TAG_TYPE_ACPI_NEW     15
 #define MULTIBOOT_TAG_TYPE_MMAP         6
 #define MULTIBOOT_TAG_TYPE_FRAMEBUFFER  8
 
@@ -61,5 +63,13 @@ struct multiboot_tag_mmap {
     uint32_t entry_version; // currently 0
     struct multiboot_mmap_entry entries[0]; // variable-length array of entries
 };
+
+// ACPI RSDP handed off directly by the bootloader.
+// The payload is revision-specific, so we treat it as raw bytes for now.
+struct multiboot_tag_acpi {
+    uint32_t type;
+    uint32_t size;
+    uint8_t rsdp[0];
+} __attribute__((packed));
 
 #endif

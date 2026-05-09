@@ -8,8 +8,8 @@
 
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/irq_controller.h"
 #include "cpu/isr.h"
-#include "cpu/pic.h"
 
 #include "memory/pf.h"
 #include "memory/pmm.h"
@@ -38,8 +38,10 @@ void kernel_main(void *multiboot_info) {
     idt_init();
     console_write_status("IDT", "OK", CONSOLE_STYLE_OK);
 
-    pic_init();
-    console_write_status("PIC", "OK", CONSOLE_STYLE_OK);
+    irq_controller_init();
+    console_write("IRQCTL: ", CONSOLE_STYLE_INFO);
+    console_write(irq_controller_name(), CONSOLE_STYLE_OK);
+    console_write("\n", CONSOLE_STYLE_INFO);
 
     pmm_init(multiboot_info);
     if (pmm_free_frames() == 0) {
@@ -66,7 +68,7 @@ void kernel_main(void *multiboot_info) {
     console_write_status("SCHED", "OK", CONSOLE_STYLE_OK);
 
     irq_register(0, timer_handler);
-    pic_unmask(0);
+    irq_controller_unmask(0);
     console_write_status("TIMER", "OK", CONSOLE_STYLE_OK);
 
     keyboard_init();
