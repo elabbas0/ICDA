@@ -207,18 +207,12 @@ void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
 
     const unsigned char* glyph = font_data[c - FONT_FIRST];
 
-    for (int row = 0; row < FONT_CELL_HEIGHT; row++) {
-        for (int col = 0; col < FONT_CELL_WIDTH; col++) {
-            fb_put_pixel(x + col, y + row, bg);
-        }
-    }
-
     for (int row = 0; row < FONT_HEIGHT; row++) {
         unsigned char bits = glyph[row];
         for (int col = 0; col < FONT_WIDTH; col++) {
             // MSB is leftmost pixel
             uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
-            fb_put_pixel(x + col, y + row + 1, color);
+            fb_put_pixel(x + col, y + row, color);
         }
     }
 }

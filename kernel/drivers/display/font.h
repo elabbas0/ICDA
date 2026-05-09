@@ -4,8 +4,8 @@
 
 #define FONT_WIDTH  8
 #define FONT_HEIGHT 16
-#define FONT_GAP_X  1
-#define FONT_GAP_Y  2
+#define FONT_GAP_X  0
+#define FONT_GAP_Y  0
 #define FONT_CELL_WIDTH  (FONT_WIDTH + FONT_GAP_X)
 #define FONT_CELL_HEIGHT (FONT_HEIGHT + FONT_GAP_Y)
 #define FONT_FIRST  32   // first ASCII char in table (space)
