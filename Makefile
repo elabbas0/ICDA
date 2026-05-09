@@ -1,5 +1,8 @@
 CC  = gcc
 ASM = nasm
+QEMU = qemu-system-x86_64
+DOCKER_IMAGE = icda-toolchain
+DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector
@@ -14,6 +17,9 @@ vga.o: kernel/drivers/display/vga.c
 
 framebuffer.o: kernel/drivers/display/framebuffer.c
 	$(CC) $(CFLAGS) -c kernel/drivers/display/framebuffer.c -o framebuffer.o
+
+serial.o: kernel/drivers/serial/serial.c kernel/drivers/serial/serial.h
+	$(CC) $(CFLAGS) -c kernel/drivers/serial/serial.c -o serial.o
 
 gdt.o: kernel/cpu/gdt.c
 	$(CC) $(CFLAGS) -c kernel/cpu/gdt.c -o gdt.o
@@ -55,10 +61,10 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o vga.o framebuffer.o gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o vga.o framebuffer.o serial.o gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o \
+	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o serial.o \
 	      gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 
@@ -69,5 +75,29 @@ kernel.iso: kernel.bin
 	grub-mkrescue -o kernel.iso isodir
 
 clean:
-	rm -f *.o kernel.bin kernel.iso
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir"
+else
+	rm -f *.o kernel.bin kernel.iso qemu-smoke.log
 	rm -rf isodir
+endif
+
+qemu: kernel.iso
+	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none -no-reboot
+
+qemu-smoke: kernel.iso
+	sh scripts/qemu-smoke.sh kernel.iso
+
+docker-image:
+	docker build -t $(DOCKER_IMAGE) .
+
+docker-build: docker-image
+	$(DOCKER_RUN) make
+
+docker-qemu: docker-image
+	$(DOCKER_RUN) make qemu
+
+docker-smoke: docker-image
+	$(DOCKER_RUN) make qemu-smoke
+
+.PHONY: all clean qemu qemu-smoke docker-image docker-build docker-qemu docker-smoke

@@ -55,3 +55,9 @@ dkms.conf
 *.dwo
 
 .vscode/
+
+# Local kernel build artifacts
+kernel.bin
+kernel.iso
+isodir/
+qemu-smoke.log

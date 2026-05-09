@@ -1,5 +1,6 @@
 #include "framebuffer.h"
 #include "font.h"
+#include "../serial/serial.h"
 #include "../../cpu/multiboot2.h"
 #include <stdint.h>
 
@@ -168,7 +169,9 @@ void fb_print_at(int x, int y, const char* str, uint32_t fg, uint32_t bg) {
 }
 
 void fb_print(const char* str, uint32_t fg, uint32_t bg) {
+    serial_write(str);
     if (!fb_ready) return;
+
     int max_cols = fb_width / FONT_WIDTH;
 
     for (int i = 0; str[i] != '\0'; i++) {

@@ -2,6 +2,7 @@
 
 #include "drivers/display/framebuffer.h"
 #include "drivers/display/vga.h"
+#include "drivers/serial/serial.h"
 
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
@@ -40,6 +41,8 @@ static void timer_handler(struct registers *regs) {
 // kernel begin
 
 void kernel_main(void *multiboot_info) {
+    serial_init();
+
     // framebuffer or fallback VGA
     int has_fb = fb_init(multiboot_info);
     if (!has_fb) {
