@@ -6,6 +6,9 @@
 #include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/serial/serial.h"
+#include "fs/initramfs.h"
+#include "fs/vfs.h"
+#include "tty/tty.h"
 
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
@@ -13,6 +16,7 @@
 #include "cpu/isr.h"
 
 #include "memory/pf.h"
+#include "memory/heap.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 
@@ -20,6 +24,37 @@
 
 static void timer_handler(struct registers *regs) {
     schedule(regs);
+}
+
+static void boot_prefix(const char *topic) {
+    console_write("[boot] ", CONSOLE_STYLE_MUTED);
+    console_write(topic, CONSOLE_STYLE_ACCENT);
+    console_write(": ", CONSOLE_STYLE_MUTED);
+}
+
+static void boot_line(const char *topic, const char *message) {
+    boot_prefix(topic);
+    console_write(message, CONSOLE_STYLE_INFO);
+    console_write("\n", CONSOLE_STYLE_INFO);
+}
+
+static void boot_line_dec(const char *topic, const char *message, uint64_t value, const char *suffix) {
+    boot_prefix(topic);
+    console_write(message, CONSOLE_STYLE_INFO);
+    console_write_dec64(value, CONSOLE_STYLE_INFO);
+    if (suffix) {
+        console_write(suffix, CONSOLE_STYLE_INFO);
+    }
+    console_write("\n", CONSOLE_STYLE_INFO);
+}
+
+static void boot_halt(const char *topic, const char *message) {
+    boot_prefix(topic);
+    console_write(message, CONSOLE_STYLE_ERROR);
+    console_write("\n", CONSOLE_STYLE_ERROR);
+    while (1) {
+        __asm__ volatile("cli; hlt");
+    }
 }
 
 void kernel_main(void *multiboot_info) {
@@ -31,68 +66,95 @@ void kernel_main(void *multiboot_info) {
     }
     console_init(has_fb);
 
-    console_write("ICDA Kernel Boot\n\n", CONSOLE_STYLE_INFO);
+    console_write("ICDA Boot Sequence\n\n", CONSOLE_STYLE_INFO);
+    if (has_fb) {
+        boot_prefix("display");
+        console_write("framebuffer attached ", CONSOLE_STYLE_INFO);
+        console_write_dec64((uint64_t)fb_width, CONSOLE_STYLE_INFO);
+        console_write("x", CONSOLE_STYLE_MUTED);
+        console_write_dec64((uint64_t)fb_height, CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
+    } else {
+        boot_line("display", "vga fallback attached");
+    }
 
     gdt_init();
-    console_write_status("GDT", "OK", CONSOLE_STYLE_OK);
+    boot_line("cpu", "gdt loaded");
 
     idt_init();
-    console_write_status("IDT", "OK", CONSOLE_STYLE_OK);
+    boot_line("cpu", "idt loaded");
 
     pmm_init(multiboot_info);
     if (pmm_free_frames() == 0) {
-        console_write_status("PMM", "FAIL", CONSOLE_STYLE_ERROR);
+        boot_prefix("memory");
+        console_write("no free frames discovered\n", CONSOLE_STYLE_ERROR);
         pmm_print_stats();
-        while (1) {
-            __asm__ volatile("cli; hlt");
-        }
+        boot_halt("memory", "physical memory manager refused to start");
     }
-    console_write_status("PMM", "OK", CONSOLE_STYLE_OK);
+    boot_prefix("memory");
+    console_write("pmm online, free=", CONSOLE_STYLE_INFO);
+    console_write_dec64(pmm_free_frames(), CONSOLE_STYLE_INFO);
+    console_write(" total=", CONSOLE_STYLE_MUTED);
+    console_write_dec64(pmm_total_frames(), CONSOLE_STYLE_INFO);
+    console_write(" frames\n", CONSOLE_STYLE_INFO);
 
     if (vmm_init(fb_phys_addr(), fb_phys_size()) != 0) {
-        console_write_status("VMM", "FAIL", CONSOLE_STYLE_ERROR);
-        while (1) {
-            __asm__ volatile("cli; hlt");
-        }
+        boot_halt("memory", "virtual memory manager failed to map kernel space");
     }
-    console_write_status("VMM", "OK", CONSOLE_STYLE_OK);
+    boot_line("memory", "higher-half mappings active");
+
+    if (heap_init() != 0) {
+        boot_halt("memory", "kernel heap allocator failed to initialize");
+    }
+    boot_line_dec("memory", "kernel heap reserved ", heap_bytes_total(), " bytes");
 
     if (irq_controller_init(multiboot_info) != 0) {
-        console_write_status("IRQCTL", "FAIL", CONSOLE_STYLE_ERROR);
-        while (1) {
-            __asm__ volatile("cli; hlt");
-        }
+        boot_halt("interrupts", "failed to enable local apic / ioapic");
     }
-    console_write("IRQCTL: ", CONSOLE_STYLE_INFO);
-    console_write(irq_controller_name(), CONSOLE_STYLE_OK);
-    console_write("\n", CONSOLE_STYLE_INFO);
+    boot_prefix("interrupts");
+    console_write(irq_controller_name(), CONSOLE_STYLE_INFO);
+    console_write(" active\n", CONSOLE_STYLE_INFO);
 
     pf_init();
-    console_write_status("PF", "OK", CONSOLE_STYLE_OK);
+    boot_line("interrupts", "page fault handler armed");
 
     sched_init();
-    console_write_status("SCHED", "OK", CONSOLE_STYLE_OK);
+    boot_line("scheduler", "scheduler core online");
 
     irq_register(0, timer_handler);
-    console_write_status("TIMER", "READY", CONSOLE_STYLE_OK);
+    boot_line("timer", "irq0 handler registered");
 
     keyboard_init();
-    console_write_status("KEYBOARD", "OK", CONSOLE_STYLE_OK);
+    boot_line("input", "ps2 keyboard attached");
 
-    __asm__ volatile("sti");
-    console_write_status("INTERRUPTS", "OK", CONSOLE_STYLE_OK);
+    if (vfs_init() != 0) {
+        boot_halt("storage", "virtual filesystem core failed to initialize");
+    }
+    if (initramfs_init() != 0) {
+        boot_halt("storage", "initramfs image is not valid");
+    }
+    if (initramfs_populate() != 0) {
+        boot_halt("storage", "initramfs could not populate the live filesystem");
+    }
+    boot_prefix("storage");
+    console_write("ramfs online, seeded files=", CONSOLE_STYLE_INFO);
+    console_write_dec64(initramfs_file_count(), CONSOLE_STYLE_INFO);
+    console_write(" bytes=", CONSOLE_STYLE_MUTED);
+    console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
-    console_write("Keyboard echo ready. Type below:\n\n", CONSOLE_STYLE_INFO);
+
+    boot_line("tty", "starting interactive console");
+    if (tty_init() != 0) {
+        console_write("\n", CONSOLE_STYLE_INFO);
+        boot_halt("tty", "interactive console failed to start");
+    }
     irq_controller_unmask(0);
+    __asm__ volatile("sti");
+    console_write("\n", CONSOLE_STYLE_INFO);
 
     while (1) {
-        int c = input_read_char();
-        if (c >= 0) {
-            if (c == '\b') {
-                console_backspace();
-            } else {
-                console_write_char((char)c, CONSOLE_STYLE_INFO);
-            }
+        tty_poll();
+        if (input_has_char()) {
             continue;
         }
 

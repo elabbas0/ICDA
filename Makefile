@@ -33,6 +33,16 @@ pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h 
        kernel/cpu/lapic.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/drivers/pci/pci.c -o pci.o
 
+initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h
+	$(CC) $(CFLAGS) -c kernel/fs/initramfs.c -o initramfs.o
+
+vfs.o: kernel/fs/vfs.c kernel/fs/vfs.h kernel/memory/heap.h
+	$(CC) $(CFLAGS) -c kernel/fs/vfs.c -o vfs.o
+
+tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
+       kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h
+	$(CC) $(CFLAGS) -c kernel/tty/tty.c -o tty.o
+
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
            kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
            kernel/drivers/serial/serial.h
@@ -77,6 +87,9 @@ isr_asm.o: kernel/cpu/isr.asm
 pmm.o: kernel/memory/pmm.c kernel/memory/pmm.h kernel/cpu/multiboot2.h
 	$(CC) $(CFLAGS) -c kernel/memory/pmm.c -o pmm.o
 
+heap.o: kernel/memory/heap.c kernel/memory/heap.h kernel/memory/pmm.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/memory/heap.c -o heap.o
+
 vmm.o: kernel/memory/vmm.c kernel/memory/vmm.h kernel/memory/pmm.h \
        kernel/cpu/multiboot2.h kernel/drivers/display/framebuffer.h
 	$(CC) $(CFLAGS) -c kernel/memory/vmm.c -o vmm.o
@@ -93,11 +106,11 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o console.o serial.o \
-	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o console.o serial.o \
+	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin

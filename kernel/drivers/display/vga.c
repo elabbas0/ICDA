@@ -56,27 +56,11 @@ static void vga_scroll() {
 // ============================================================
 // public API
 // initialize VGA 
-// temporary debug function - talks directly to serial port
-static void serial_print(const char* str) {
-    for (int i = 0; str[i] != '\0'; i++) {
-        __asm__ volatile (
-            "mov $0x3F8, %%dx\n"
-            "outb %0, %%dx\n"
-            : : "a"(str[i]) : "dx"
-        );
-    }
-}
-
 void vga_init() {
-    serial_print("VGA1\n");
     vga = (volatile char*)(unsigned long long)0xB8000;
-
-    serial_print("VGA2\n");
     cursor_row = 0;
     cursor_col = 0;
     current_color = VGA_WHITE_ON_BLACK;
-
-    serial_print("VGA3\n");
     vga_clear();
 
     vga_device.name = "vga";
@@ -90,8 +74,6 @@ void vga_init() {
     vga_device.context = 0;
     vga_device.next = 0;
     device_register(&vga_device);
-
-    serial_print("VGA4\n");
 }
 // fill entire screen with blank characters
 void vga_clear() {

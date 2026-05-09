@@ -13,6 +13,10 @@ static uint32_t fb_color_for(console_style_t style) {
     switch (style) {
         case CONSOLE_STYLE_OK:
             return FB_GREEN;
+        case CONSOLE_STYLE_MUTED:
+            return FB_LIGHT_GRAY;
+        case CONSOLE_STYLE_ACCENT:
+            return FB_CYAN;
         case CONSOLE_STYLE_WARN:
             return FB_YELLOW;
         case CONSOLE_STYLE_ERROR:
@@ -27,6 +31,10 @@ static unsigned char vga_color_for(console_style_t style) {
     switch (style) {
         case CONSOLE_STYLE_OK:
             return VGA_GREEN_ON_BLACK;
+        case CONSOLE_STYLE_MUTED:
+            return VGA_WHITE_ON_BLACK;
+        case CONSOLE_STYLE_ACCENT:
+            return VGA_CYAN_ON_BLACK;
         case CONSOLE_STYLE_WARN:
             return VGA_YELLOW_ON_BLACK;
         case CONSOLE_STYLE_ERROR:
