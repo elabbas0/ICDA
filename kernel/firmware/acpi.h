@@ -72,9 +72,24 @@ struct acpi_madt_lapic_override {
     uint64_t lapic_address;
 } __attribute__((packed));
 
+struct acpi_mcfg {
+    struct acpi_sdt_header header;
+    uint64_t reserved;
+    uint8_t entries[0];
+} __attribute__((packed));
+
+struct acpi_mcfg_entry {
+    uint64_t base_address;
+    uint16_t segment_group;
+    uint8_t start_bus;
+    uint8_t end_bus;
+    uint32_t reserved;
+} __attribute__((packed));
+
 int acpi_init(void *multiboot_info);
 const struct acpi_rsdp *acpi_rsdp(void);
 const struct acpi_sdt_header *acpi_find_table(const char signature[4]);
 const struct acpi_madt *acpi_madt(void);
+const struct acpi_mcfg *acpi_mcfg(void);
 
 #endif

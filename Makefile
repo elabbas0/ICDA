@@ -29,6 +29,10 @@ keyboard.o: kernel/drivers/input/keyboard.c kernel/drivers/input/keyboard.h \
 input.o: kernel/drivers/input/input.c kernel/drivers/input/input.h kernel/drivers/device.h
 	$(CC) $(CFLAGS) -c kernel/drivers/input/input.c -o input.o
 
+pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h \
+       kernel/cpu/lapic.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/drivers/pci/pci.c -o pci.o
+
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
            kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
            kernel/drivers/serial/serial.h
@@ -89,10 +93,10 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 

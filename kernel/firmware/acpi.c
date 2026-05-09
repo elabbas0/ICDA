@@ -5,6 +5,7 @@
 
 static const struct acpi_rsdp *g_rsdp = 0;
 static const struct acpi_madt *g_madt = 0;
+static const struct acpi_mcfg *g_mcfg = 0;
 
 static int checksum_ok(const void *ptr, uint32_t length) {
     const uint8_t *bytes = (const uint8_t *)ptr;
@@ -180,6 +181,7 @@ int acpi_init(void *multiboot_info) {
     if (!g_madt) {
         return -1;
     }
+    g_mcfg = (const struct acpi_mcfg *)acpi_find_table("MCFG");
 
     return 0;
 }
@@ -190,4 +192,8 @@ const struct acpi_rsdp *acpi_rsdp(void) {
 
 const struct acpi_madt *acpi_madt(void) {
     return g_madt;
+}
+
+const struct acpi_mcfg *acpi_mcfg(void) {
+    return g_mcfg;
 }
