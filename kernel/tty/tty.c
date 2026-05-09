@@ -5,6 +5,7 @@
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
+#include "../syscall/syscall.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -111,7 +112,7 @@ static void tty_reset_line(void) {
 }
 
 static void tty_print_help(void) {
-    console_write("commands: help clear mem pwd cd ls cat mkdir touch write stat echo reboot\n", CONSOLE_STYLE_MUTED);
+    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo syscall reboot\n", CONSOLE_STYLE_MUTED);
 }
 
 static void tty_print_mem(void) {
@@ -248,6 +249,12 @@ static void tty_dispatch_line(void) {
         tty_print_mem();
         return;
     }
+    if (streq(line, "pid")) {
+        console_write("pid=", CONSOLE_STYLE_MUTED);
+        console_write_dec64(syscall_kernel_get_pid(), CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
+        return;
+    }
     if (streq(line, "pwd")) {
         tty_print_path(tty_cwd);
         return;
@@ -340,6 +347,10 @@ static void tty_dispatch_line(void) {
     if (streq(line, "echo")) {
         console_write(arg ? arg : "", CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
+        return;
+    }
+    if (streq(line, "syscall")) {
+        syscall_kernel_write("hello from int 0x80\n");
         return;
     }
     if (streq(line, "reboot")) {

@@ -8,6 +8,7 @@
 #include "drivers/serial/serial.h"
 #include "fs/initramfs.h"
 #include "fs/vfs.h"
+#include "syscall/syscall.h"
 #include "tty/tty.h"
 
 #include "cpu/gdt.h"
@@ -142,6 +143,9 @@ void kernel_main(void *multiboot_info) {
     console_write(" bytes=", CONSOLE_STYLE_MUTED);
     console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
+
+    syscall_init();
+    boot_line("syscall", "int 0x80 dispatcher armed");
 
     boot_line("tty", "starting interactive console");
     if (tty_init() != 0) {

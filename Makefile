@@ -40,8 +40,11 @@ vfs.o: kernel/fs/vfs.c kernel/fs/vfs.h kernel/memory/heap.h
 	$(CC) $(CFLAGS) -c kernel/fs/vfs.c -o vfs.o
 
 tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
-       kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h
+       kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/tty/tty.c -o tty.o
+
+syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h
+	$(CC) $(CFLAGS) -c kernel/syscall/syscall.c -o syscall.o
 
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
            kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
@@ -106,12 +109,18 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-            sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
+user.o: kernel/proc/user.c kernel/proc/user.h kernel/proc/process.h kernel/memory/vmm.h kernel/memory/pf.h
+	$(CC) $(CFLAGS) -c kernel/proc/user.c -o user.o
+
+user_enter.o: kernel/proc/user_enter.asm
+	$(ASM) -f elf64 kernel/proc/user_enter.asm -o user_enter.o
+
+kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
+            sched.o sched_asm.o user.o user_enter.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
+	      sched.o sched_asm.o user.o user_enter.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub

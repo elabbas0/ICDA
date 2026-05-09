@@ -4,6 +4,7 @@
 #include "../memory/vmm.h"
 #include "../memory/pf.h"
 #include "../cpu/gdt.h"
+#include "../fs/vfs.h"
 #include "../drivers/console/console.h"
 
 extern void switch_context(thread_t *prev, thread_t *next);
@@ -76,6 +77,7 @@ void sched_init(void) {
     idle_proc->kind = PROCESS_KERNEL;
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
+    idle_proc->cwd = vfs_root();
 
     idle_thread->tid = next_tid++;
     idle_thread->state = THREAD_RUNNING;
@@ -121,6 +123,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
     proc->addr_space = vmm_kernel_address_space();
     proc->parent = sched_current_process();
     proc->main_thread = thread;
+    proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;

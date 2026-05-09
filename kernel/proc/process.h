@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include "../memory/vmm.h"
 
+struct vfs_node;
+
 #define KERNEL_STACK_PAGES  2
 #define KERNEL_STACK_SIZE   (KERNEL_STACK_PAGES * PAGE_SIZE_4K)
 
@@ -27,6 +29,7 @@ typedef struct process {
     addr_space_t    *addr_space;
     struct process  *parent;
     struct thread   *main_thread;
+    struct vfs_node *cwd;
 } process_t;
 
 typedef struct thread {

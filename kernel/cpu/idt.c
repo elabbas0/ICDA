@@ -73,6 +73,7 @@ void idt_init() {
     idt_set_entry(45, (uint64_t)irq13, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(46, (uint64_t)irq14, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(47, (uint64_t)irq15, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
+    idt_set_entry(128, (uint64_t)syscall128, IDT_PRESENT | IDT_RING3 | IDT_TRAP);
 
     idt_flush((uint64_t)&ip);
 }

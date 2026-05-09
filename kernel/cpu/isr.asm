@@ -26,6 +26,14 @@ irq%1:
     jmp irq_common
 %endmacro
 
+%macro SYSCALL 2
+global %1
+%1:
+    push 0
+    push %2
+    jmp syscall_common
+%endmacro
+
 ; cpu exceptions
 ISR_NOERR 0   ; divide by zero
 ISR_NOERR 1   ; debug
@@ -77,6 +85,7 @@ IRQ 12, 44    ; PS/2 mouse
 IRQ 13, 45    ; FPU
 IRQ 14, 46    ; primary ATA
 IRQ 15, 47    ; secondary ATA
+SYSCALL syscall128, 128
 
 ; common exception handler
 extern isr_handler
@@ -170,6 +179,52 @@ irq_common:
     pop rax
 
     add rsp, 16         ; skip int_no and err_code
+    iretq
+
+extern syscall_handler
+syscall_common:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    mov rdi, rsp
+    call syscall_handler
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+
+    add rsp, 16
     iretq
 
 ; idt flush

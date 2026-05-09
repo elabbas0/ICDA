@@ -1,5 +1,6 @@
 #include "isr.h"
 #include "irq_controller.h"
+#include "../syscall/syscall.h"
 #include "../drivers/display/framebuffer.h"
 
 const char *exception_names[32] = {
@@ -65,4 +66,8 @@ void irq_handler(struct registers* regs) {
     if (irq >= 0 && irq < 16 && irq_handlers[irq]) {
         irq_handlers[irq](regs);
     }
+}
+
+void syscall_handler(struct registers* regs) {
+    regs->rax = syscall_dispatch(regs);
 }

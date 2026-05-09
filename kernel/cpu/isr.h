@@ -35,10 +35,12 @@ extern void irq6();  extern void irq7();  extern void irq8();
 extern void irq9();  extern void irq10(); extern void irq11();
 extern void irq12(); extern void irq13(); extern void irq14();
 extern void irq15();
+extern void syscall128();
 
 // c handlers called from assembly stubs
 void isr_handler(struct registers* regs);
 void irq_handler(struct registers* regs);
+void syscall_handler(struct registers* regs);
 
 // register a custom irq handler
 typedef void (*irq_handler_t)(struct registers*);
