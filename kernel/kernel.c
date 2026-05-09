@@ -3,6 +3,7 @@
 #include "drivers/console/console.h"
 #include "drivers/display/framebuffer.h"
 #include "drivers/display/vga.h"
+#include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/serial/serial.h"
 
@@ -38,11 +39,6 @@ void kernel_main(void *multiboot_info) {
     idt_init();
     console_write_status("IDT", "OK", CONSOLE_STYLE_OK);
 
-    irq_controller_init();
-    console_write("IRQCTL: ", CONSOLE_STYLE_INFO);
-    console_write(irq_controller_name(), CONSOLE_STYLE_OK);
-    console_write("\n", CONSOLE_STYLE_INFO);
-
     pmm_init(multiboot_info);
     if (pmm_free_frames() == 0) {
         console_write_status("PMM", "FAIL", CONSOLE_STYLE_ERROR);
@@ -61,6 +57,16 @@ void kernel_main(void *multiboot_info) {
     }
     console_write_status("VMM", "OK", CONSOLE_STYLE_OK);
 
+    if (irq_controller_init(multiboot_info) != 0) {
+        console_write_status("IRQCTL", "FAIL", CONSOLE_STYLE_ERROR);
+        while (1) {
+            __asm__ volatile("cli; hlt");
+        }
+    }
+    console_write("IRQCTL: ", CONSOLE_STYLE_INFO);
+    console_write(irq_controller_name(), CONSOLE_STYLE_OK);
+    console_write("\n", CONSOLE_STYLE_INFO);
+
     pf_init();
     console_write_status("PF", "OK", CONSOLE_STYLE_OK);
 
@@ -68,8 +74,7 @@ void kernel_main(void *multiboot_info) {
     console_write_status("SCHED", "OK", CONSOLE_STYLE_OK);
 
     irq_register(0, timer_handler);
-    irq_controller_unmask(0);
-    console_write_status("TIMER", "OK", CONSOLE_STYLE_OK);
+    console_write_status("TIMER", "READY", CONSOLE_STYLE_OK);
 
     keyboard_init();
     console_write_status("KEYBOARD", "OK", CONSOLE_STYLE_OK);
@@ -78,9 +83,10 @@ void kernel_main(void *multiboot_info) {
     console_write_status("INTERRUPTS", "OK", CONSOLE_STYLE_OK);
     console_write("\n", CONSOLE_STYLE_INFO);
     console_write("Keyboard echo ready. Type below:\n\n", CONSOLE_STYLE_INFO);
+    irq_controller_unmask(0);
 
     while (1) {
-        int c = keyboard_read_char();
+        int c = input_read_char();
         if (c >= 0) {
             if (c == '\b') {
                 console_backspace();

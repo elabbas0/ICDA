@@ -7,6 +7,7 @@
 extern uint8_t kernel_end[];
 
 static addr_space_t kernel_as;
+static uint64_t hhdm_limit = 0;
 
 // tracks whether the HHDM is live; 0 = use phys addr directly, 1 = use PHYS_TO_VIRT
 static int hhdm_ready = 0;
@@ -161,6 +162,28 @@ addr_space_t *vmm_kernel_address_space(void) {
     return &kernel_as;
 }
 
+void *vmm_map_physical(uint64_t phys, uint64_t size, uint64_t flags) {
+    uint64_t aligned_phys = phys & ~0xFFFULL;
+    uint64_t page_offset = phys & 0xFFFULL;
+    uint64_t end = (phys + size + PAGE_SIZE_4K - 1) & ~0xFFFULL;
+
+    if (end <= hhdm_limit) {
+        return PHYS_TO_VIRT(phys);
+    }
+
+    for (uint64_t p = aligned_phys; p < end; p += PAGE_SIZE_4K) {
+        uint64_t virt = PHYSICAL_BASE + p;
+        if (vmm_virt_to_phys(&kernel_as, virt) == p) {
+            continue;
+        }
+        if (vmm_map_page(&kernel_as, virt, p, flags | VMM_GLOBAL) != 0) {
+            return 0;
+        }
+    }
+
+    return (void *)(uintptr_t)(PHYSICAL_BASE + aligned_phys + page_offset);
+}
+
 addr_space_t *vmm_create_address_space(void) {
     // descriptor page and PML4 are separate so the PML4 stays page-aligned
     uint64_t desc_phys = pmm_alloc();
@@ -232,6 +255,7 @@ int vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     uint64_t limit = pmm_total_frames() * PAGE_SIZE_4K;
     if (limit > 512ULL * 1024 * 1024) limit = 512ULL * 1024 * 1024;
     limit = (limit + PAGE_SIZE_2M - 1) & ~(PAGE_SIZE_2M - 1);
+    hhdm_limit = limit;
 
     for (uint64_t off = 0; off < limit; off += PAGE_SIZE_2M)
         if (map_huge_page(&kernel_as, off, off, VMM_WRITE | VMM_GLOBAL) != 0)

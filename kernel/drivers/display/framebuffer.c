@@ -1,6 +1,6 @@
 #include "framebuffer.h"
 #include "font.h"
-#include "../serial/serial.h"
+#include "../device.h"
 #include "../../cpu/multiboot2.h"
 #include <stdint.h>
 
@@ -15,6 +15,22 @@ static int                fb_hhdm   = 0;
 // cursor position in characters
 static int cursor_x = 0;
 static int cursor_y = 0;
+static kernel_device_t framebuffer_device;
+
+static void framebuffer_device_clear(void *context) {
+    (void)context;
+    fb_clear(FB_BLACK);
+}
+
+static void framebuffer_device_write(void *context, const char *str, uint32_t fg, uint32_t bg) {
+    (void)context;
+    fb_print(str, fg, bg);
+}
+
+static void framebuffer_device_backspace(void *context, uint32_t bg) {
+    (void)context;
+    fb_backspace(bg);
+}
 
 // public screen dimensions
 int fb_width  = 0;
@@ -49,6 +65,18 @@ int fb_init(void* multiboot_info) {
             fb_height = (int)fb_tag->framebuffer_height;
             fb_ready  = 1;
             fb_hhdm   = 0;
+
+            framebuffer_device.name = "framebuffer";
+            framebuffer_device.class_id = DEVICE_CLASS_DISPLAY;
+            static const display_device_ops_t ops = {
+                .clear = framebuffer_device_clear,
+                .write = framebuffer_device_write,
+                .backspace = framebuffer_device_backspace
+            };
+            framebuffer_device.ops = &ops;
+            framebuffer_device.context = 0;
+            framebuffer_device.next = 0;
+            device_register(&framebuffer_device);
 
             fb_clear(FB_BLACK);
             return 1;
@@ -177,7 +205,6 @@ void fb_print_at(int x, int y, const char* str, uint32_t fg, uint32_t bg) {
 }
 
 void fb_print(const char* str, uint32_t fg, uint32_t bg) {
-    serial_write(str);
     if (!fb_ready) return;
 
     int max_cols = fb_width / FONT_WIDTH;

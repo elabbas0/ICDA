@@ -1,8 +1,11 @@
 #include "console.h"
 
+#include "../device.h"
 #include "../display/framebuffer.h"
 #include "../display/vga.h"
-#include "../serial/serial.h"
+
+static kernel_device_t *display_device = 0;
+static kernel_device_t *serial_device = 0;
 
 static int console_has_framebuffer = 0;
 
@@ -36,16 +39,24 @@ static unsigned char vga_color_for(console_style_t style) {
 
 void console_init(int has_framebuffer) {
     console_has_framebuffer = has_framebuffer;
+    if (console_has_framebuffer) {
+        display_device = device_find("framebuffer");
+    }
+    if (!display_device) {
+        display_device = device_find("vga");
+    }
+    if (!display_device) {
+        display_device = device_first(DEVICE_CLASS_DISPLAY);
+    }
+    serial_device = device_find("serial");
 }
 
 void console_clear(void) {
-    if (console_has_framebuffer && fb_available()) {
-        fb_clear(FB_BLACK);
+    if (display_device) {
+        const display_device_ops_t *ops = (const display_device_ops_t *)display_device->ops;
+        ops->clear(display_device->context);
         return;
     }
-
-    vga_set_color(VGA_WHITE_ON_BLACK);
-    vga_clear();
 }
 
 void console_write_char(char c, console_style_t style) {
@@ -57,28 +68,39 @@ void console_write_char(char c, console_style_t style) {
 }
 
 void console_write(const char *str, console_style_t style) {
+    const display_device_ops_t *display_ops;
+    const serial_device_ops_t *serial_ops;
+
     if (!str) {
         return;
     }
 
-    if (console_has_framebuffer && fb_available()) {
-        fb_print(str, fb_color_for(style), FB_BLACK);
+    if (serial_device) {
+        serial_ops = (const serial_device_ops_t *)serial_device->ops;
+        serial_ops->write(serial_device->context, str);
+    }
+
+    if (!display_device) {
         return;
     }
 
-    if (serial_ready()) {
-        serial_write(str);
+    display_ops = (const display_device_ops_t *)display_device->ops;
+    if (console_has_framebuffer && display_device == device_find("framebuffer")) {
+        display_ops->write(display_device->context, str, fb_color_for(style), FB_BLACK);
+    } else {
+        display_ops->write(display_device->context, str, vga_color_for(style), FB_BLACK);
     }
-    vga_print(str, vga_color_for(style));
 }
 
 void console_backspace(void) {
-    if (console_has_framebuffer && fb_available()) {
-        fb_backspace(FB_BLACK);
+    const display_device_ops_t *display_ops;
+
+    if (!display_device) {
         return;
     }
 
-    vga_backspace();
+    display_ops = (const display_device_ops_t *)display_device->ops;
+    display_ops->backspace(display_device->context, FB_BLACK);
 }
 
 void console_write_status(const char *label, const char *status, console_style_t style) {

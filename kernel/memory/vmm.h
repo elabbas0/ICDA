@@ -100,6 +100,10 @@ void vmm_switch_address_space(addr_space_t *as);
 // return the kernel address space
 addr_space_t *vmm_kernel_address_space(void);
 
+// make a physical range accessible through the higher-half direct map.
+// returns the virtual base address for the requested physical address.
+void *vmm_map_physical(uint64_t phys, uint64_t size, uint64_t flags);
+
 // invalidate a single TLB entry
 static inline void vmm_invlpg(uint64_t virt) {
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");

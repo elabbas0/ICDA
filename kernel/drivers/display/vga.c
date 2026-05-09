@@ -1,9 +1,29 @@
 #include "vga.h"
+#include "../device.h"
 // internal state
 static int cursor_row = 0;
 static int cursor_col = 0;
 static unsigned char current_color = VGA_WHITE_ON_BLACK;
 static volatile char* vga;
+static kernel_device_t vga_device;
+
+static void vga_device_clear(void *context) {
+    (void)context;
+    vga_clear();
+}
+
+static void vga_device_write(void *context, const char *str, uint32_t fg, uint32_t bg) {
+    (void)context;
+    (void)bg;
+    current_color = (unsigned char)fg;
+    vga_print(str, current_color);
+}
+
+static void vga_device_backspace(void *context, uint32_t bg) {
+    (void)context;
+    (void)bg;
+    vga_backspace();
+}
 
 // ============================================================
 // helpers
@@ -58,6 +78,18 @@ void vga_init() {
 
     serial_print("VGA3\n");
     vga_clear();
+
+    vga_device.name = "vga";
+    vga_device.class_id = DEVICE_CLASS_DISPLAY;
+    static const display_device_ops_t ops = {
+        .clear = vga_device_clear,
+        .write = vga_device_write,
+        .backspace = vga_device_backspace
+    };
+    vga_device.ops = &ops;
+    vga_device.context = 0;
+    vga_device.next = 0;
+    device_register(&vga_device);
 
     serial_print("VGA4\n");
 }

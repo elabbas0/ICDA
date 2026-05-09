@@ -1,5 +1,6 @@
 #include "keyboard.h"
 
+#include "../device.h"
 #include "../../cpu/irq_controller.h"
 #include "../../cpu/isr.h"
 
@@ -49,6 +50,17 @@ static volatile uint32_t queue_tail = 0;
 static int shift_down = 0;
 static int caps_lock = 0;
 static int extended_prefix = 0;
+static kernel_device_t keyboard_device;
+
+static int keyboard_device_has_char(void *context) {
+    (void)context;
+    return keyboard_has_char();
+}
+
+static int keyboard_device_read_char(void *context) {
+    (void)context;
+    return keyboard_read_char();
+}
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -151,6 +163,17 @@ void keyboard_init(void) {
     while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
         (void)inb(KEYBOARD_DATA_PORT);
     }
+
+    keyboard_device.name = "keyboard";
+    keyboard_device.class_id = DEVICE_CLASS_INPUT;
+    static const input_device_ops_t ops = {
+        .has_char = keyboard_device_has_char,
+        .read_char = keyboard_device_read_char
+    };
+    keyboard_device.ops = &ops;
+    keyboard_device.context = 0;
+    keyboard_device.next = 0;
+    device_register(&keyboard_device);
 
     irq_register(1, keyboard_irq_handler);
     irq_controller_unmask(1);

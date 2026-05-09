@@ -13,6 +13,9 @@ all: kernel.iso
 kernel.o: kernel/kernel.c
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel.o
 
+device.o: kernel/drivers/device.c kernel/drivers/device.h
+	$(CC) $(CFLAGS) -c kernel/drivers/device.c -o device.o
+
 vga.o: kernel/drivers/display/vga.c
 	$(CC) $(CFLAGS) -c kernel/drivers/display/vga.c -o vga.o
 
@@ -22,6 +25,9 @@ framebuffer.o: kernel/drivers/display/framebuffer.c
 keyboard.o: kernel/drivers/input/keyboard.c kernel/drivers/input/keyboard.h \
             kernel/cpu/isr.h kernel/cpu/pic.h
 	$(CC) $(CFLAGS) -c kernel/drivers/input/keyboard.c -o keyboard.o
+
+input.o: kernel/drivers/input/input.c kernel/drivers/input/input.h kernel/drivers/device.h
+	$(CC) $(CFLAGS) -c kernel/drivers/input/input.c -o input.o
 
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
            kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
@@ -43,8 +49,17 @@ isr.o: kernel/cpu/isr.c
 pic.o: kernel/cpu/pic.c
 	$(CC) $(CFLAGS) -c kernel/cpu/pic.c -o pic.o
 
+lapic.o: kernel/cpu/lapic.c kernel/cpu/lapic.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/cpu/lapic.c -o lapic.o
+
+ioapic.o: kernel/cpu/ioapic.c kernel/cpu/ioapic.h kernel/firmware/acpi.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/cpu/ioapic.c -o ioapic.o
+
 irq_controller.o: kernel/cpu/irq_controller.c kernel/cpu/irq_controller.h kernel/cpu/pic.h
 	$(CC) $(CFLAGS) -c kernel/cpu/irq_controller.c -o irq_controller.o
+
+acpi.o: kernel/firmware/acpi.c kernel/firmware/acpi.h kernel/cpu/multiboot2.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/firmware/acpi.c -o acpi.o
 
 boot.o: kernel/boot.asm
 	$(ASM) -f elf64 kernel/boot.asm -o boot.o
@@ -74,11 +89,11 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o vga.o framebuffer.o keyboard.o console.o serial.o gdt.o idt.o isr.o pic.o irq_controller.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o keyboard.o console.o serial.o \
-	      gdt.o idt.o isr.o pic.o irq_controller.o pmm.o vmm.o pf.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o console.o serial.o \
+	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
