@@ -250,8 +250,18 @@ void fb_newline() {
 }
 
 void fb_backspace(uint32_t bg) {
+    int max_cols;
+
     if (!fb_ready) return;
-    if (cursor_x == 0) return;
+    max_cols = fb_width / FONT_CELL_WIDTH;
+
+    if (cursor_x == 0) {
+        if (cursor_y == 0 || max_cols <= 0) {
+            return;
+        }
+        cursor_y--;
+        cursor_x = max_cols;
+    }
 
     cursor_x--;
     fb_draw_char(cursor_x * FONT_CELL_WIDTH, cursor_y * FONT_CELL_HEIGHT, ' ', FB_WHITE, bg);

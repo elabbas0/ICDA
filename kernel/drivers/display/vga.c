@@ -102,7 +102,11 @@ void vga_newline() {
 
 void vga_backspace(void) {
     if (cursor_col == 0) {
-        return;
+        if (cursor_row == 0) {
+            return;
+        }
+        cursor_row--;
+        cursor_col = VGA_WIDTH;
     }
 
     cursor_col--;
