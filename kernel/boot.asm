@@ -9,6 +9,14 @@ multiboot_start:
     dd multiboot_end - multiboot_start
     dd -(0xE85250D6 + 0 + (multiboot_end - multiboot_start))
 
+    ; request the memory map tag from the bootloader
+    align 8
+    dw 1
+    dw 0
+    dd 16
+    dd 6
+    dd 0
+
     ; framebuffer request tag
     align 8
     dw 5

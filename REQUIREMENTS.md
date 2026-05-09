@@ -29,6 +29,7 @@ After Docker Desktop starts successfully:
 
 ```powershell
 .\scripts\docker-build.ps1
+.\scripts\docker-qemu.ps1
 .\scripts\docker-smoke.ps1
 ```
 

@@ -25,6 +25,9 @@ If `.ps1` files open in Notepad, use the `.cmd` wrappers:
 scripts\check-requirements.cmd
 scripts\start-hyperv-setup.cmd
 scripts\install-requirements.cmd
+scripts\docker-qemu.cmd
+scripts\docker-qemu-headless.cmd
+scripts\docker-qemu-uefi.cmd
 scripts\docker-smoke.cmd
 ```
 
@@ -38,6 +41,8 @@ On PowerShell:
 
 ```powershell
 .\scripts\docker-build.ps1
+.\scripts\docker-qemu.ps1
+.\scripts\docker-qemu-uefi.ps1
 .\scripts\docker-smoke.ps1
 ```
 

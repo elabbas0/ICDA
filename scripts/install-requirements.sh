@@ -12,12 +12,14 @@ if command -v apt-get >/dev/null 2>&1; then
         build-essential \
         ca-certificates \
         gcc \
+        grub-efi-amd64-bin \
         git \
         grub-common \
         grub-pc-bin \
         make \
         mtools \
         nasm \
+        ovmf \
         qemu-system-x86 \
         xorriso
 else

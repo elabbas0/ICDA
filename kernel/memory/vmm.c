@@ -35,6 +35,16 @@ static void print_dec64(uint64_t v) {
     fb_print(buf + i, FB_WHITE, FB_BLACK);
 }
 
+static void print_alloc_failure(const char *where) {
+    fb_print("VMM alloc failed at ", FB_WHITE, FB_RED);
+    fb_print(where, FB_WHITE, FB_RED);
+    fb_print(" free_frames=", FB_WHITE, FB_RED);
+    print_dec64(pmm_free_frames());
+    fb_print(" next_free=0x", FB_WHITE, FB_RED);
+    print_hex64(FRAME_TO_ADDR(pmm_next_free_frame()));
+    fb_print("\n", FB_WHITE, FB_RED);
+}
+
 // allocate and zero a physical page for use as a page table
 static uint64_t alloc_page_table(void) {
     uint64_t phys = pmm_alloc();
@@ -52,7 +62,7 @@ static int map_huge_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_
 
     if (!(pml4[i4] & PTE_PRESENT)) {
         uint64_t p = alloc_page_table();
-        if (!p) return -1;
+        if (!p) { print_alloc_failure("pml4"); return -1; }
         pml4[i4] = p | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
@@ -61,7 +71,7 @@ static int map_huge_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_
 
     if (!(pdpt[i3] & PTE_PRESENT)) {
         uint64_t p = alloc_page_table();
-        if (!p) return -1;
+        if (!p) { print_alloc_failure("pdpt"); return -1; }
         pdpt[i3] = p | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
@@ -83,7 +93,7 @@ static pte_t *get_pte(addr_space_t *as, uint64_t virt, int alloc) {
     if (!(pml4[i4] & PTE_PRESENT)) {
         if (!alloc) return NULL;
         uint64_t p = alloc_page_table();
-        if (!p) return NULL;
+        if (!p) { print_alloc_failure("get_pte.pml4"); return NULL; }
         pml4[i4] = p | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
 
@@ -93,7 +103,7 @@ static pte_t *get_pte(addr_space_t *as, uint64_t virt, int alloc) {
     if (!(pdpt[i3] & PTE_PRESENT)) {
         if (!alloc) return NULL;
         uint64_t p = alloc_page_table();
-        if (!p) return NULL;
+        if (!p) { print_alloc_failure("get_pte.pdpt"); return NULL; }
         pdpt[i3] = p | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
     if (pdpt[i3] & PTE_HUGE) return NULL; // 1 GiB page, can't descend
@@ -104,7 +114,7 @@ static pte_t *get_pte(addr_space_t *as, uint64_t virt, int alloc) {
     if (!(pd[i2] & PTE_PRESENT)) {
         if (!alloc) return NULL;
         uint64_t p = alloc_page_table();
-        if (!p) return NULL;
+        if (!p) { print_alloc_failure("get_pte.pd"); return NULL; }
         pd[i2] = p | PTE_PRESENT | PTE_WRITE | PTE_USER;
     }
     if (pd[i2] & PTE_HUGE) return NULL; // 2 MiB page, can't descend
@@ -218,11 +228,14 @@ void vmm_destroy_address_space(addr_space_t *as) {
     pmm_free(desc_phys);
 }
 
-void vmm_init(uint64_t fb_phys, uint64_t fb_size) {
+int vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     hhdm_ready = 0;
 
     uint64_t pml4_phys = alloc_page_table();
-    if (!pml4_phys) { fb_print("FAIL\n", FB_RED, FB_BLACK); return; }
+    if (!pml4_phys) {
+        print_alloc_failure("kernel_pml4");
+        return -1;
+    }
     kernel_as.pml4_phys = pml4_phys;
 
     uint64_t limit = pmm_total_frames() * PAGE_SIZE_4K;
@@ -230,23 +243,27 @@ void vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     limit = (limit + PAGE_SIZE_2M - 1) & ~(PAGE_SIZE_2M - 1);
 
     for (uint64_t off = 0; off < limit; off += PAGE_SIZE_2M)
-        map_huge_page(&kernel_as, off, off, VMM_WRITE | VMM_GLOBAL);
+        if (map_huge_page(&kernel_as, off, off, VMM_WRITE | VMM_GLOBAL) != 0)
+            return -1;
 
     for (uint64_t off = 0; off < limit; off += PAGE_SIZE_2M)
-        map_huge_page(&kernel_as, PHYSICAL_BASE + off, off, VMM_WRITE | VMM_GLOBAL);
+        if (map_huge_page(&kernel_as, PHYSICAL_BASE + off, off, VMM_WRITE | VMM_GLOBAL) != 0)
+            return -1;
 
     if (fb_phys && fb_size) {
         uint64_t fb_start = fb_phys & ~(PAGE_SIZE_2M - 1);
         uint64_t fb_end   = (fb_phys + fb_size + PAGE_SIZE_2M - 1) & ~(PAGE_SIZE_2M - 1);
         for (uint64_t off = fb_start; off < fb_end; off += PAGE_SIZE_2M)
-            map_huge_page(&kernel_as, PHYSICAL_BASE + off, off,
-                          VMM_WRITE | VMM_GLOBAL | PTE_NO_CACHE | PTE_WRITE_THRU);
+            if (map_huge_page(&kernel_as, PHYSICAL_BASE + off, off,
+                              VMM_WRITE | VMM_GLOBAL | PTE_NO_CACHE | PTE_WRITE_THRU) != 0)
+                return -1;
     }
 
     uint64_t kstart = 0x100000ULL;
     uint64_t ksize  = (uint64_t)kernel_end - kstart;
     for (uint64_t off = 0; off < ksize + PAGE_SIZE_4K; off += PAGE_SIZE_4K)
-        vmm_map_page(&kernel_as, KERNEL_VMA + off, kstart + off, VMM_FLAGS_KERNEL_RW);
+        if (vmm_map_page(&kernel_as, KERNEL_VMA + off, kstart + off, VMM_FLAGS_KERNEL_RW) != 0)
+            return -1;
 
     // enable PSE (bit 4) and PGE (bit 7) in CR4 before loading CR3
     // PSE is required for 2 MiB huge pages; PGE enables the global page flag
@@ -261,5 +278,5 @@ void vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     // The framebuffer pointer still points at a physical address here.
     // Move it onto the HHDM before any further printing in the new CR3.
     fb_remap(PHYSICAL_BASE);
-
+    return 0;
 }

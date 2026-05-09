@@ -1,6 +1,7 @@
 CC  = gcc
 ASM = nasm
 QEMU = qemu-system-x86_64
+OVMF_CODE = /usr/share/OVMF/OVMF_CODE.fd
 DOCKER_IMAGE = icda-toolchain
 DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
 
@@ -73,7 +74,6 @@ kernel.iso: kernel.bin
 	cp kernel.bin isodir/boot/kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkrescue -o kernel.iso isodir
-
 clean:
 ifeq ($(OS),Windows_NT)
 	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir"
@@ -82,8 +82,17 @@ else
 	rm -rf isodir
 endif
 
-qemu: kernel.iso
+qemu-headless: kernel.iso
 	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none -no-reboot
+
+qemu: kernel.iso
+	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -no-reboot
+
+qemu-uefi-headless: kernel.iso
+	$(QEMU) -bios $(OVMF_CODE) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none -no-reboot
+
+qemu-uefi: kernel.iso
+	$(QEMU) -bios $(OVMF_CODE) -cdrom kernel.iso -m 256M -serial stdio -no-reboot
 
 qemu-smoke: kernel.iso
 	sh scripts/qemu-smoke.sh kernel.iso
@@ -97,7 +106,16 @@ docker-build: docker-image
 docker-qemu: docker-image
 	$(DOCKER_RUN) make qemu
 
+docker-qemu-headless: docker-image
+	$(DOCKER_RUN) make qemu-headless
+
+docker-qemu-uefi: docker-image
+	$(DOCKER_RUN) make qemu-uefi
+
+docker-qemu-uefi-headless: docker-image
+	$(DOCKER_RUN) make qemu-uefi-headless
+
 docker-smoke: docker-image
 	$(DOCKER_RUN) make qemu-smoke
 
-.PHONY: all clean qemu qemu-smoke docker-image docker-build docker-qemu docker-smoke
+.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke

@@ -7,11 +7,13 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         gcc \
+        grub-efi-amd64-bin \
         grub-pc-bin \
         grub-common \
         make \
         mtools \
         nasm \
+        ovmf \
         qemu-system-x86 \
         xorriso \
     && rm -rf /var/lib/apt/lists/*

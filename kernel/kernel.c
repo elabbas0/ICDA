@@ -62,12 +62,20 @@ void kernel_main(void *multiboot_info) {
 
     // physical memory manager — must come before vmm
     pmm_init(multiboot_info);
+    if (pmm_free_frames() == 0) {
+        fb_print("PMM: FAIL\n", FB_RED, FB_BLACK);
+        pmm_print_stats();
+        while (1) __asm__ volatile("cli; hlt");
+    }
     fb_print("PMM: OK\n", FB_GREEN, FB_BLACK);
 
     // virtual memory manager — sets up paging + HHDM
     // fb_phys_addr/size are read back so vmm can map the framebuffer
     // into the higher-half direct map before we switch CR3
-    vmm_init(fb_phys_addr(), fb_phys_size());
+    if (vmm_init(fb_phys_addr(), fb_phys_size()) != 0) {
+        fb_print("VMM: FAIL\n", FB_RED, FB_BLACK);
+        while (1) __asm__ volatile("cli; hlt");
+    }
     fb_print("VMM: OK\n", FB_GREEN, FB_BLACK);
 
     // page fault handler — enables dynamic stack growth

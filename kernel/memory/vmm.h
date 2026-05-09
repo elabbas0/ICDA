@@ -71,7 +71,7 @@ typedef struct {
 #define VMM_FLAGS_USER_RO    (VMM_PRESENT | VMM_USER)
 
 // must be called after pmm_init(); fb_phys/fb_size map the framebuffer into the HHDM
-void vmm_init(uint64_t fb_phys, uint64_t fb_size);
+int  vmm_init(uint64_t fb_phys, uint64_t fb_size);
 
 // map a single 4 KiB page virt -> phys; returns 0 on success, -1 on failure
 int  vmm_map_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags);
