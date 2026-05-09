@@ -157,6 +157,14 @@ void fb_newline() {
     }
 }
 
+void fb_backspace(uint32_t bg) {
+    if (!fb_ready) return;
+    if (cursor_x == 0) return;
+
+    cursor_x--;
+    fb_draw_char(cursor_x * FONT_WIDTH, cursor_y * FONT_HEIGHT, ' ', FB_WHITE, bg);
+}
+
 void fb_set_cursor(int x, int y) {
     cursor_x = x;
     cursor_y = y;

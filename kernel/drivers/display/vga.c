@@ -86,6 +86,15 @@ void vga_newline() {
     }
 }
 
+void vga_backspace(void) {
+    if (cursor_col == 0) {
+        return;
+    }
+
+    cursor_col--;
+    vga_write_cell(cursor_row, cursor_col, ' ', current_color);
+}
+
 // print a single character at current cursor position
 void vga_putchar(char c, unsigned char color) {
     if (c == '\n') {

@@ -12,7 +12,9 @@ typedef enum {
 
 void console_init(int has_framebuffer);
 void console_clear(void);
+void console_write_char(char c, console_style_t style);
 void console_write(const char *str, console_style_t style);
+void console_backspace(void);
 void console_write_status(const char *label, const char *status, console_style_t style);
 void console_write_hex64(uint64_t value, console_style_t style);
 void console_write_dec64(uint64_t value, console_style_t style);

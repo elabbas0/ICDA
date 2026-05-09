@@ -48,6 +48,14 @@ void console_clear(void) {
     vga_clear();
 }
 
+void console_write_char(char c, console_style_t style) {
+    char buf[2];
+
+    buf[0] = c;
+    buf[1] = '\0';
+    console_write(buf, style);
+}
+
 void console_write(const char *str, console_style_t style) {
     if (!str) {
         return;
@@ -62,6 +70,15 @@ void console_write(const char *str, console_style_t style) {
         serial_write(str);
     }
     vga_print(str, vga_color_for(style));
+}
+
+void console_backspace(void) {
+    if (console_has_framebuffer && fb_available()) {
+        fb_backspace(FB_BLACK);
+        return;
+    }
+
+    vga_backspace();
 }
 
 void console_write_status(const char *label, const char *status, console_style_t style) {

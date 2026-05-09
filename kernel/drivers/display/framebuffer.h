@@ -34,6 +34,7 @@ void fb_print_at(int x, int y, const char* str, uint32_t fg, uint32_t bg);
 void fb_print_int(int n, uint32_t fg, uint32_t bg);
 void fb_print_hex(unsigned int n, uint32_t fg, uint32_t bg);
 void fb_newline();
+void fb_backspace(uint32_t bg);
 void fb_set_cursor(int x, int y);
 int  fb_available();
 
