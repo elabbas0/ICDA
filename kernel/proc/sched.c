@@ -5,7 +5,7 @@
 #include "../memory/pf.h"
 #include "../cpu/gdt.h"
 #include "../cpu/isr.h"
-#include "../drivers/display/framebuffer.h"
+#include "../drivers/console/console.h"
 
 extern void switch_context(process_t *prev, process_t *next);
 
@@ -67,7 +67,7 @@ static void enqueue(process_t *p) {
 void sched_init(void) {
     process_t *idle = alloc_pcb();
     if (!idle) {
-        fb_print("sched_init: OOM\n", FB_RED, FB_BLACK);
+        console_write("sched_init: OOM\n", CONSOLE_STYLE_ERROR);
         return;
     }
 

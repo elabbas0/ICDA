@@ -19,6 +19,11 @@ vga.o: kernel/drivers/display/vga.c
 framebuffer.o: kernel/drivers/display/framebuffer.c
 	$(CC) $(CFLAGS) -c kernel/drivers/display/framebuffer.c -o framebuffer.o
 
+console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
+           kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
+           kernel/drivers/serial/serial.h
+	$(CC) $(CFLAGS) -c kernel/drivers/console/console.c -o console.o
+
 serial.o: kernel/drivers/serial/serial.c kernel/drivers/serial/serial.h
 	$(CC) $(CFLAGS) -c kernel/drivers/serial/serial.c -o serial.o
 
@@ -62,10 +67,10 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-kernel.bin: kernel.o vga.o framebuffer.o serial.o gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
+kernel.bin: kernel.o vga.o framebuffer.o console.o serial.o gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
             sched.o sched_asm.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o vga.o framebuffer.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o pmm.o vmm.o pf.o \
 	      sched.o sched_asm.o gdt_flush.o isr_asm.o -lgcc
 

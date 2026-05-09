@@ -1,6 +1,6 @@
 #include "pmm.h"
 #include "../cpu/multiboot2.h"
-#include "../drivers/display/framebuffer.h"
+#include "../drivers/console/console.h"
 
 // kernel_end is exported by the linker script
 extern uint8_t kernel_end[];
@@ -17,26 +17,11 @@ static int       last_saw_mmap = 0;
 #define BIT_INDEX(f)     ((f) % FRAMES_PER_WORD)
 
 static void print_hex64(uint64_t v) {
-    char buf[19];
-    buf[0] = '0'; buf[1] = 'x'; buf[18] = '\0';
-    for (int i = 17; i >= 2; i--) {
-        int n = v & 0xF;
-        buf[i] = (n < 10) ? ('0' + n) : ('a' + n - 10);
-        v >>= 4;
-    }
-    fb_print(buf, FB_WHITE, FB_BLACK);
+    console_write_hex64(v, CONSOLE_STYLE_INFO);
 }
 
 static void print_dec64(uint64_t v) {
-    if (v == 0) { fb_print("0", FB_WHITE, FB_BLACK); return; }
-    char buf[21];
-    int i = 20;
-    buf[20] = '\0';
-    while (v) {
-        buf[--i] = '0' + (v % 10);
-        v /= 10;
-    }
-    fb_print(buf + i, FB_WHITE, FB_BLACK);
+    console_write_dec64(v, CONSOLE_STYLE_INFO);
 }
 
 static inline void frame_set(uint64_t frame) {
@@ -120,13 +105,13 @@ void pmm_init(void *multiboot_info) {
     last_saw_mmap = saw_mmap;
 
     if (!saw_mmap || mem_top == 0) {
-        fb_print("PMM debug: mmap=", FB_YELLOW, FB_BLACK);
-        fb_print(saw_mmap ? "yes" : "no", FB_YELLOW, FB_BLACK);
-        fb_print(" total_size=", FB_YELLOW, FB_BLACK);
+        console_write("PMM debug: mmap=", CONSOLE_STYLE_WARN);
+        console_write(saw_mmap ? "yes" : "no", CONSOLE_STYLE_WARN);
+        console_write(" total_size=", CONSOLE_STYLE_WARN);
         print_dec64(info->total_size);
-        fb_print(" mem_top=", FB_YELLOW, FB_BLACK);
+        console_write(" mem_top=", CONSOLE_STYLE_WARN);
         print_hex64(mem_top);
-        fb_print("\n", FB_YELLOW, FB_BLACK);
+        console_write("\n", CONSOLE_STYLE_WARN);
     }
 
     uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
@@ -250,17 +235,17 @@ uint64_t pmm_total_frames() { return total_frames; }
 uint64_t pmm_next_free_frame() { return next_free; }
 
 void pmm_print_stats() {
-    fb_print("PMM stats: mmap=", FB_YELLOW, FB_BLACK);
-    fb_print(last_saw_mmap ? "yes" : "no", FB_YELLOW, FB_BLACK);
-    fb_print(" mem_top=", FB_YELLOW, FB_BLACK);
+    console_write("PMM stats: mmap=", CONSOLE_STYLE_WARN);
+    console_write(last_saw_mmap ? "yes" : "no", CONSOLE_STYLE_WARN);
+    console_write(" mem_top=", CONSOLE_STYLE_WARN);
     print_hex64(last_mem_top);
-    fb_print(" total=", FB_YELLOW, FB_BLACK);
+    console_write(" total=", CONSOLE_STYLE_WARN);
     print_dec64(total_frames);
-    fb_print(" used=", FB_YELLOW, FB_BLACK);
+    console_write(" used=", CONSOLE_STYLE_WARN);
     print_dec64(used_frames);
-    fb_print(" free=", FB_YELLOW, FB_BLACK);
+    console_write(" free=", CONSOLE_STYLE_WARN);
     print_dec64(pmm_free_frames());
-    fb_print(" next_free=", FB_YELLOW, FB_BLACK);
+    console_write(" next_free=", CONSOLE_STYLE_WARN);
     print_hex64(FRAME_TO_ADDR(next_free));
-    fb_print("\n", FB_YELLOW, FB_BLACK);
+    console_write("\n", CONSOLE_STYLE_WARN);
 }

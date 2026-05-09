@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "../cpu/multiboot2.h"
+#include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 
 extern uint8_t kernel_end[];
@@ -18,31 +19,21 @@ static inline pte_t *pt_ptr(uint64_t phys) {
 
 // print helpers (no libc available)
 static void print_hex64(uint64_t v) {
-    char buf[19];
-    buf[0] = '0'; buf[1] = 'x'; buf[18] = '\0';
-    for (int i = 17; i >= 2; i--) {
-        int n = v & 0xF;
-        buf[i] = (n < 10) ? ('0' + n) : ('a' + n - 10);
-        v >>= 4;
-    }
-    fb_print(buf, FB_WHITE, FB_BLACK);
+    console_write_hex64(v, CONSOLE_STYLE_INFO);
 }
 
 static void print_dec64(uint64_t v) {
-    if (v == 0) { fb_print("0", FB_WHITE, FB_BLACK); return; }
-    char buf[21]; int i = 20; buf[20] = '\0';
-    while (v) { buf[--i] = '0' + (v % 10); v /= 10; }
-    fb_print(buf + i, FB_WHITE, FB_BLACK);
+    console_write_dec64(v, CONSOLE_STYLE_INFO);
 }
 
 static void print_alloc_failure(const char *where) {
-    fb_print("VMM alloc failed at ", FB_WHITE, FB_RED);
-    fb_print(where, FB_WHITE, FB_RED);
-    fb_print(" free_frames=", FB_WHITE, FB_RED);
+    console_write("VMM alloc failed at ", CONSOLE_STYLE_ERROR);
+    console_write(where, CONSOLE_STYLE_ERROR);
+    console_write(" free_frames=", CONSOLE_STYLE_ERROR);
     print_dec64(pmm_free_frames());
-    fb_print(" next_free=0x", FB_WHITE, FB_RED);
+    console_write(" next_free=", CONSOLE_STYLE_ERROR);
     print_hex64(FRAME_TO_ADDR(pmm_next_free_frame()));
-    fb_print("\n", FB_WHITE, FB_RED);
+    console_write("\n", CONSOLE_STYLE_ERROR);
 }
 
 // allocate and zero a physical page for use as a page table
