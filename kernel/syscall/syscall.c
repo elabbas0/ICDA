@@ -3,6 +3,7 @@
 #include "../drivers/console/console.h"
 #include "../fs/vfs.h"
 #include "../proc/sched.h"
+#include "../proc/user.h"
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -68,6 +69,11 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
     return size;
 }
 
+static uint64_t sys_exit(uint64_t code) {
+    user_request_exit_to_kernel(code);
+    return code;
+}
+
 void syscall_init(void) {
 }
 
@@ -85,6 +91,8 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_vfs_write((const char *)(uintptr_t)regs->rdi,
                                  (const char *)(uintptr_t)regs->rsi,
                                  regs->rdx);
+        case SYS_EXIT:
+            return sys_exit(regs->rdi);
         default:
             return (uint64_t)-1;
     }

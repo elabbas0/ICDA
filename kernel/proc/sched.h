@@ -6,6 +6,7 @@
 #include "../cpu/isr.h"
 
 void sched_init(void);
+process_t *proc_create_empty(process_kind_t kind);
 process_t *proc_create_kernel(void (*entry)(void));
 void schedule(struct registers *regs);
 

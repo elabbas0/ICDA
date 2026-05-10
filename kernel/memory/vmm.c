@@ -195,9 +195,13 @@ addr_space_t *vmm_create_address_space(void) {
     addr_space_t *as = (addr_space_t *)PHYS_TO_VIRT(desc_phys);
     as->pml4_phys = pml4_phys;
 
-    // copy kernel half (entries 256-511) so kernel is reachable from user space
+    // The kernel still executes from the low bootstrap mapping while it also
+    // maintains higher-half aliases. Keep PML4[0] as a supervisor-only shared
+    // mapping so interrupt/syscall entry can fetch kernel code after a ring
+    // transition, then inherit the higher-half kernel mappings too.
     pte_t *new_pml4 = (pte_t *)PHYS_TO_VIRT(pml4_phys);
     pte_t *ker_pml4 = (pte_t *)PHYS_TO_VIRT(kernel_as.pml4_phys);
+    new_pml4[0] = ker_pml4[0];
     for (int i = 256; i < 512; i++)
         new_pml4[i] = ker_pml4[i];
 

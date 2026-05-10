@@ -182,6 +182,8 @@ irq_common:
     iretq
 
 extern syscall_handler
+extern user_return_rsp
+extern user_return_pending
 syscall_common:
     push rax
     push rcx
@@ -225,6 +227,12 @@ syscall_common:
     pop rax
 
     add rsp, 16
+    cmp qword [rel user_return_pending], 0
+    je .sysret_user
+    mov qword [rel user_return_pending], 0
+    mov rsp, [rel user_return_rsp]
+    ret
+.sysret_user:
     iretq
 
 ; idt flush

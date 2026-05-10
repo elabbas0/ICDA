@@ -10,7 +10,8 @@ typedef enum {
     SYS_CONSOLE_WRITE = 0,
     SYS_GET_PID       = 1,
     SYS_VFS_READ      = 2,
-    SYS_VFS_WRITE     = 3
+    SYS_VFS_WRITE     = 3,
+    SYS_EXIT          = 4
 } syscall_number_t;
 
 void syscall_init(void);

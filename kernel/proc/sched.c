@@ -64,12 +64,35 @@ static void enqueue(thread_t *thread) {
     thread->next = current_thread;
 }
 
+process_t *proc_create_empty(process_kind_t kind) {
+    process_t *proc = alloc_process();
+
+    if (!proc) {
+        return NULL;
+    }
+
+    proc->pid = next_pid++;
+    proc->kind = kind;
+    proc->addr_space = vmm_kernel_address_space();
+    proc->parent = sched_current_process();
+    proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
+    proc->main_thread = NULL;
+    return proc;
+}
+
 void sched_init(void) {
     process_t *idle_proc = alloc_process();
     thread_t *idle_thread = alloc_thread();
+    uint64_t idle_stack_top;
 
     if (!idle_proc || !idle_thread) {
         console_write("sched_init: OOM\n", CONSOLE_STYLE_ERROR);
+        return;
+    }
+
+    idle_stack_top = alloc_kernel_stack();
+    if (!idle_stack_top) {
+        console_write("sched_init: no kernel stack for idle thread\n", CONSOLE_STYLE_ERROR);
         return;
     }
 
@@ -82,10 +105,11 @@ void sched_init(void) {
     idle_thread->tid = next_tid++;
     idle_thread->state = THREAD_RUNNING;
     idle_thread->owner = idle_proc;
-    idle_thread->kernel_stack_top = 0;
+    idle_thread->kernel_stack_top = idle_stack_top;
     idle_thread->next = idle_thread;
 
     current_thread = idle_thread;
+    tss_set_rsp0(idle_stack_top);
     pf_set_current_as(idle_proc->addr_space);
 }
 
@@ -98,7 +122,7 @@ static void kthread_trampoline(void) {
 }
 
 process_t *proc_create_kernel(void (*entry)(void)) {
-    process_t *proc = alloc_process();
+    process_t *proc = proc_create_empty(PROCESS_KERNEL);
     thread_t *thread = alloc_thread();
     uint64_t stack_top;
     uint64_t *sp;
@@ -118,12 +142,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
         return NULL;
     }
 
-    proc->pid = next_pid++;
-    proc->kind = PROCESS_KERNEL;
-    proc->addr_space = vmm_kernel_address_space();
-    proc->parent = sched_current_process();
     proc->main_thread = thread;
-    proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;

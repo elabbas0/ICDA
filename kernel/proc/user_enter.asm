@@ -4,7 +4,9 @@ bits 64
 %define GDT_USER_DATA 0x20
 
 global user_enter
+extern user_return_rsp
 user_enter:
+    mov [rel user_return_rsp], rsp
     cli
     mov ax, GDT_USER_DATA | 3
     mov ds, ax

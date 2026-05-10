@@ -115,12 +115,15 @@ user.o: kernel/proc/user.c kernel/proc/user.h kernel/proc/process.h kernel/memor
 user_enter.o: kernel/proc/user_enter.asm
 	$(ASM) -f elf64 kernel/proc/user_enter.asm -o user_enter.o
 
+user_demo_blob.o: kernel/proc/user_demo.asm
+	$(ASM) -f elf64 kernel/proc/user_demo.asm -o user_demo_blob.o
+
 kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-            sched.o sched_asm.o user.o user_enter.o boot.o gdt_flush.o isr_asm.o
+            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      sched.o sched_asm.o user.o user_enter.o gdt_flush.o isr_asm.o -lgcc
+	      sched.o sched_asm.o user.o user_enter.o user_demo_blob.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub

@@ -5,6 +5,7 @@
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
+#include "../proc/user.h"
 #include "../syscall/syscall.h"
 
 #include <stddef.h>
@@ -112,7 +113,7 @@ static void tty_reset_line(void) {
 }
 
 static void tty_print_help(void) {
-    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo syscall reboot\n", CONSOLE_STYLE_MUTED);
+    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo syscall userdemo reboot\n", CONSOLE_STYLE_MUTED);
 }
 
 static void tty_print_mem(void) {
@@ -215,7 +216,7 @@ static void tty_print_stat(const char *path) {
     console_write("\n", CONSOLE_STYLE_INFO);
 }
 
-static void tty_dispatch_line(void) {
+static int tty_dispatch_line(void) {
     char *line = tty_line;
     char *arg = 0;
 
@@ -235,50 +236,53 @@ static void tty_dispatch_line(void) {
     }
 
     if (*line == '\0') {
-        return;
+        return 0;
     }
     if (streq(line, "help")) {
         tty_print_help();
-        return;
+        return 0;
     }
     if (streq(line, "clear")) {
+        tty_hide_cursor();
         console_clear();
-        return;
+        tty_reset_line();
+        tty_prompt();
+        return 1;
     }
     if (streq(line, "mem")) {
         tty_print_mem();
-        return;
+        return 0;
     }
     if (streq(line, "pid")) {
         console_write("pid=", CONSOLE_STYLE_MUTED);
         console_write_dec64(syscall_kernel_get_pid(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
-        return;
+        return 0;
     }
     if (streq(line, "pwd")) {
         tty_print_path(tty_cwd);
-        return;
+        return 0;
     }
     if (streq(line, "cd")) {
         vfs_node_t *next;
 
         if (!arg || !*arg) {
             tty_cwd = vfs_root();
-            return;
+            return 0;
         }
         next = vfs_resolve(tty_cwd, arg);
         if (!next || vfs_node_type(next) != VFS_NODE_DIR) {
             console_write("directory not found: ", CONSOLE_STYLE_ERROR);
             console_write(arg, CONSOLE_STYLE_ERROR);
             console_write("\n", CONSOLE_STYLE_ERROR);
-            return;
+            return 0;
         }
         tty_cwd = next;
-        return;
+        return 0;
     }
     if (streq(line, "ls")) {
         tty_list_dir(arg);
-        return;
+        return 0;
     }
     if (streq(line, "cat")) {
         const char *data;
@@ -286,7 +290,7 @@ static void tty_dispatch_line(void) {
 
         if (!arg || !*arg) {
             console_write("usage: cat <path>\n", CONSOLE_STYLE_WARN);
-            return;
+            return 0;
         }
 
         data = vfs_read(tty_cwd, arg, &size);
@@ -294,25 +298,25 @@ static void tty_dispatch_line(void) {
             console_write("file not found: ", CONSOLE_STYLE_ERROR);
             console_write(arg, CONSOLE_STYLE_ERROR);
             console_write("\n", CONSOLE_STYLE_ERROR);
-            return;
+            return 0;
         }
 
         tty_print_file(data, size);
-        return;
+        return 0;
     }
     if (streq(line, "mkdir")) {
         if (!arg || !*arg || vfs_mkdir(tty_cwd, arg) != 0) {
             console_write("mkdir failed\n", CONSOLE_STYLE_WARN);
-            return;
+            return 0;
         }
-        return;
+        return 0;
     }
     if (streq(line, "touch")) {
         if (!arg || !*arg || vfs_create(tty_cwd, arg) != 0) {
             console_write("touch failed\n", CONSOLE_STYLE_WARN);
-            return;
+            return 0;
         }
-        return;
+        return 0;
     }
     if (streq(line, "write")) {
         char *path;
@@ -320,7 +324,7 @@ static void tty_dispatch_line(void) {
 
         if (!arg || !*arg) {
             console_write("usage: write <path> <text>\n", CONSOLE_STYLE_WARN);
-            return;
+            return 0;
         }
 
         path = arg;
@@ -334,42 +338,57 @@ static void tty_dispatch_line(void) {
         if (vfs_write(tty_cwd, path, text, tty_strlen(text)) != 0) {
             console_write("write failed\n", CONSOLE_STYLE_WARN);
         }
-        return;
+        return 0;
     }
     if (streq(line, "stat")) {
         if (!arg || !*arg) {
             console_write("usage: stat <path>\n", CONSOLE_STYLE_WARN);
-            return;
+            return 0;
         }
         tty_print_stat(arg);
-        return;
+        return 0;
     }
     if (streq(line, "echo")) {
         console_write(arg ? arg : "", CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
-        return;
+        return 0;
     }
     if (streq(line, "syscall")) {
         syscall_kernel_write("hello from int 0x80\n");
-        return;
+        return 0;
+    }
+    if (streq(line, "userdemo")) {
+        if (user_run_demo() != 0) {
+            console_write("user demo failed\n", CONSOLE_STYLE_ERROR);
+            return 0;
+        }
+        console_write("user exit=", CONSOLE_STYLE_MUTED);
+        console_write_dec64(user_last_exit_code(), CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
+        return 0;
     }
     if (streq(line, "reboot")) {
         tty_reboot();
-        return;
+        return 0;
     }
 
     console_write("unknown command: ", CONSOLE_STYLE_ERROR);
     console_write(line, CONSOLE_STYLE_ERROR);
     console_write("\n", CONSOLE_STYLE_ERROR);
+    return 0;
 }
 
 static void tty_submit_line(void) {
+    int handled_redraw;
+
     tty_hide_cursor();
     console_write("\n", CONSOLE_STYLE_INFO);
     tty_line[tty_len] = '\0';
-    tty_dispatch_line();
+    handled_redraw = tty_dispatch_line();
     tty_reset_line();
-    tty_prompt();
+    if (!handled_redraw) {
+        tty_prompt();
+    }
 }
 
 static void tty_backspace(void) {
