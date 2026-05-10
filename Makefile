@@ -4,6 +4,7 @@ QEMU = qemu-system-x86_64
 OVMF_CODE = /usr/share/OVMF/OVMF_CODE.fd
 DOCKER_IMAGE = icda-toolchain
 DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
+SHELL_AUTOTEST ?= 0
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector
@@ -143,7 +144,7 @@ shell_start.o: userspace/shell_start.asm
 	$(ASM) -f elf64 userspace/shell_start.asm -o shell_start.o
 
 shell.o: userspace/shell.c userspace/icda_sys.h
-	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -Iuserspace -c userspace/shell.c -o shell.o
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o shell.o
 
 userspace/shell.app: shell_start.o shell.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o userspace/shell.app shell_start.o shell.o

@@ -6,7 +6,7 @@ org 0
 %define SYS_CONSOLE_WRITE 0
 %define SYS_GET_PID       1
 %define SYS_EXIT          4
-%define SYS_YIELD         18
+%define SYS_SLEEP         19
 
 dd ICX_MAGIC
 dw ICX_VERSION
@@ -42,7 +42,8 @@ _start:
     mov eax, SYS_CONSOLE_WRITE
     int 0x80
 
-    mov eax, SYS_YIELD
+    mov edi, 2
+    mov eax, SYS_SLEEP
     int 0x80
 
     loop .loop

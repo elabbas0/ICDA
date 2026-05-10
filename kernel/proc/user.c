@@ -170,10 +170,14 @@ void user_request_exit_to_kernel(uint64_t code) {
     if (thread) {
         thread->state = THREAD_ZOMBIE;
         thread->user_return_pending = 1;
+        thread->block_reason = THREAD_BLOCK_NONE;
+        thread->wake_tick = 0;
     }
     if (proc && proc->parent && proc->parent->main_thread &&
         proc->parent->main_thread->state == THREAD_BLOCKED) {
         proc->parent->main_thread->state = THREAD_READY;
+        proc->parent->main_thread->block_reason = THREAD_BLOCK_NONE;
+        proc->parent->main_thread->wake_tick = 0;
         if (proc->parent->state == PROCESS_BLOCKED) {
             proc->parent->state = PROCESS_READY;
         }
@@ -365,9 +369,12 @@ int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {
         if (!thread) {
             return -1;
         }
+        thread->block_reason = THREAD_BLOCK_WAIT_CHILD;
+        thread->wake_tick = 0;
         thread->state = THREAD_BLOCKED;
         current->state = PROCESS_BLOCKED;
         sched_yield();
+        thread->block_reason = THREAD_BLOCK_NONE;
         if (child->state == PROCESS_REAPED) {
             return -1;
         }

@@ -30,6 +30,12 @@ typedef enum {
     THREAD_ZOMBIE  = 3
 } thread_state_t;
 
+typedef enum {
+    THREAD_BLOCK_NONE = 0,
+    THREAD_BLOCK_SLEEP = 1,
+    THREAD_BLOCK_WAIT_CHILD = 2
+} thread_block_reason_t;
+
 struct thread;
 
 typedef struct process {
@@ -63,6 +69,8 @@ typedef struct thread {
     uint64_t         user_return_r15;
     uint64_t         user_return_pending;
     uint64_t         user_entry_stack_top;
+    uint64_t         block_reason;
+    uint64_t         wake_tick;
 } thread_t;
 
 #endif

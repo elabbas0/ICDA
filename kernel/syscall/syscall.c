@@ -309,6 +309,31 @@ static uint64_t sys_yield(void) {
     return 0;
 }
 
+static uint64_t sys_sleep(uint64_t ticks) {
+    sched_sleep(ticks);
+    return 0;
+}
+
+static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
+    process_t *proc;
+
+    if (!out) {
+        return (uint64_t)-1;
+    }
+
+    proc = sched_find_process(pid);
+    if (!proc) {
+        return (uint64_t)-1;
+    }
+
+    out->pid = proc->pid;
+    out->ppid = proc->parent ? proc->parent->pid : 0;
+    out->kind = (uint64_t)proc->kind;
+    out->state = (uint64_t)proc->state;
+    out->exit_code = proc->exit_code;
+    return 0;
+}
+
 void syscall_init(void) {
 }
 
@@ -359,6 +384,10 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_waitpid(regs->rdi);
         case SYS_YIELD:
             return sys_yield();
+        case SYS_SLEEP:
+            return sys_sleep(regs->rdi);
+        case SYS_PROC_INFO:
+            return sys_proc_info(regs->rdi, (syscall_proc_info_t *)(uintptr_t)regs->rsi);
         default:
             return (uint64_t)-1;
     }

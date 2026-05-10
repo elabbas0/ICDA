@@ -9,6 +9,7 @@
 
 extern void switch_context(thread_t *prev, thread_t *next);
 extern void user_thread_start(void);
+static void kthread_trampoline(void);
 
 thread_t *current_thread_ptr = NULL;
 static process_t *process_list = NULL;
@@ -17,6 +18,7 @@ static uint64_t next_tid = 0;
 
 #define SCHED_TICKS 2
 static uint64_t tick_count = 0;
+static uint64_t uptime_ticks = 0;
 
 static void *alloc_object_page(void) {
     uint64_t phys = pmm_alloc();
@@ -65,6 +67,26 @@ static uint64_t thread_entry_stack_top(const thread_t *thread) {
     return thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top;
 }
 
+static void wake_blocked_threads(void) {
+    process_t *proc = process_list;
+
+    while (proc) {
+        thread_t *thread = proc->main_thread;
+        if (thread &&
+            thread->state == THREAD_BLOCKED &&
+            thread->block_reason == THREAD_BLOCK_SLEEP &&
+            thread->wake_tick <= uptime_ticks) {
+            thread->state = THREAD_READY;
+            thread->block_reason = THREAD_BLOCK_NONE;
+            thread->wake_tick = 0;
+            if (proc->state == PROCESS_BLOCKED) {
+                proc->state = PROCESS_READY;
+            }
+        }
+        proc = proc->next_all;
+    }
+}
+
 static void enqueue(thread_t *thread) {
     if (!current_thread_ptr) {
         thread->next = thread;
@@ -79,6 +101,29 @@ static void enqueue(thread_t *thread) {
 
     tail->next = thread;
     thread->next = current_thread_ptr;
+}
+
+static void idle_thread_main(void) {
+    for (;;) {
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+static void prepare_kernel_thread_stack(thread_t *thread, uint64_t stack_top, void (*entry)(void)) {
+    uint64_t *sp = (uint64_t *)stack_top;
+
+    thread->kernel_stack_top = stack_top;
+    thread->entry = entry;
+
+    *(--sp) = (uint64_t)kthread_trampoline;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+
+    thread->kernel_rsp = (uint64_t)sp;
 }
 
 process_t *proc_create_empty(process_kind_t kind) {
@@ -101,24 +146,42 @@ process_t *proc_create_empty(process_kind_t kind) {
 }
 
 void sched_init(void) {
+    process_t *bootstrap_proc = alloc_process();
+    thread_t *bootstrap_thread = alloc_thread();
     process_t *idle_proc = alloc_process();
     thread_t *idle_thread = alloc_thread();
+    uint64_t bootstrap_stack_top;
     uint64_t idle_stack_top;
 
-    if (!idle_proc || !idle_thread) {
+    if (!bootstrap_proc || !bootstrap_thread || !idle_proc || !idle_thread) {
         console_write("sched_init: OOM\n", CONSOLE_STYLE_ERROR);
         return;
     }
 
+    bootstrap_stack_top = alloc_kernel_stack();
     idle_stack_top = alloc_kernel_stack();
-    if (!idle_stack_top) {
-        console_write("sched_init: no kernel stack for idle thread\n", CONSOLE_STYLE_ERROR);
+    if (!bootstrap_stack_top || !idle_stack_top) {
+        console_write("sched_init: no kernel stack for scheduler bootstrap\n", CONSOLE_STYLE_ERROR);
         return;
     }
 
+    bootstrap_proc->pid = next_pid++;
+    bootstrap_proc->kind = PROCESS_KERNEL;
+    bootstrap_proc->state = PROCESS_RUNNING;
+    bootstrap_proc->exit_code = 0;
+    bootstrap_proc->addr_space = vmm_kernel_address_space();
+    bootstrap_proc->main_thread = bootstrap_thread;
+    bootstrap_proc->cwd = vfs_root();
+    register_process(bootstrap_proc);
+
+    bootstrap_thread->tid = next_tid++;
+    bootstrap_thread->state = THREAD_RUNNING;
+    bootstrap_thread->owner = bootstrap_proc;
+    bootstrap_thread->kernel_stack_top = bootstrap_stack_top;
+
     idle_proc->pid = next_pid++;
     idle_proc->kind = PROCESS_KERNEL;
-    idle_proc->state = PROCESS_RUNNING;
+    idle_proc->state = PROCESS_READY;
     idle_proc->exit_code = 0;
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
@@ -126,14 +189,16 @@ void sched_init(void) {
     register_process(idle_proc);
 
     idle_thread->tid = next_tid++;
-    idle_thread->state = THREAD_RUNNING;
+    idle_thread->state = THREAD_READY;
     idle_thread->owner = idle_proc;
-    idle_thread->kernel_stack_top = idle_stack_top;
-    idle_thread->next = idle_thread;
+    prepare_kernel_thread_stack(idle_thread, idle_stack_top, idle_thread_main);
 
-    current_thread_ptr = idle_thread;
-    tss_set_rsp0(idle_stack_top);
-    pf_set_current_as(idle_proc->addr_space);
+    bootstrap_thread->next = idle_thread;
+    idle_thread->next = bootstrap_thread;
+
+    current_thread_ptr = bootstrap_thread;
+    tss_set_rsp0(bootstrap_stack_top);
+    pf_set_current_as(bootstrap_proc->addr_space);
 }
 
 static void kthread_trampoline(void) {
@@ -148,7 +213,6 @@ process_t *proc_create_kernel(void (*entry)(void)) {
     process_t *proc = proc_create_empty(PROCESS_KERNEL);
     thread_t *thread = alloc_thread();
     uint64_t stack_top;
-    uint64_t *sp;
 
     if (!proc || !thread) {
         return NULL;
@@ -170,19 +234,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
     thread->owner = proc;
-    thread->kernel_stack_top = stack_top;
-    thread->entry = entry;
-
-    sp = (uint64_t *)stack_top;
-    *(--sp) = (uint64_t)kthread_trampoline;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-
-    thread->kernel_rsp = (uint64_t)sp;
+    prepare_kernel_thread_stack(thread, stack_top, entry);
 
     enqueue(thread);
     return proc;
@@ -192,7 +244,6 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
     thread_t *thread = alloc_thread();
     uint64_t stack_top;
     uint64_t entry_stack_top;
-    uint64_t *sp;
 
     if (!proc || !entry || !user_rip || !user_rsp || !thread) {
         return NULL;
@@ -217,22 +268,10 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
     thread->owner = proc;
-    thread->kernel_stack_top = stack_top;
     thread->user_entry_stack_top = entry_stack_top;
-    thread->entry = entry;
     thread->user_rip = user_rip;
     thread->user_rsp = user_rsp;
-
-    sp = (uint64_t *)stack_top;
-    *(--sp) = (uint64_t)kthread_trampoline;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-    *(--sp) = 0;
-
-    thread->kernel_rsp = (uint64_t)sp;
+    prepare_kernel_thread_stack(thread, stack_top, entry);
     enqueue(thread);
     return thread;
 }
@@ -283,10 +322,38 @@ static void schedule_inner(int force) {
 
 void schedule(struct registers *regs) {
     (void)regs;
+    uptime_ticks++;
+    wake_blocked_threads();
     schedule_inner(0);
 }
 
 void sched_yield(void) {
+    schedule_inner(1);
+}
+
+uint64_t sched_ticks(void) {
+    return uptime_ticks;
+}
+
+void sched_sleep(uint64_t ticks) {
+    thread_t *thread = sched_current_thread();
+    process_t *proc = sched_current_process();
+
+    if (!thread) {
+        return;
+    }
+
+    if (ticks == 0) {
+        sched_yield();
+        return;
+    }
+
+    thread->wake_tick = uptime_ticks + ticks;
+    thread->block_reason = THREAD_BLOCK_SLEEP;
+    thread->state = THREAD_BLOCKED;
+    if (proc && proc->state != PROCESS_EXITED && proc->state != PROCESS_REAPED) {
+        proc->state = PROCESS_BLOCKED;
+    }
     schedule_inner(1);
 }
 

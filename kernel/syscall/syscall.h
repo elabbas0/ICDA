@@ -25,8 +25,18 @@ typedef enum {
     SYS_LIST_PROCS    = 15,
     SYS_SPAWN         = 16,
     SYS_WAITPID       = 17,
-    SYS_YIELD         = 18
+    SYS_YIELD         = 18,
+    SYS_SLEEP         = 19,
+    SYS_PROC_INFO     = 20
 } syscall_number_t;
+
+typedef struct {
+    uint64_t pid;
+    uint64_t ppid;
+    uint64_t kind;
+    uint64_t state;
+    uint64_t exit_code;
+} syscall_proc_info_t;
 
 void syscall_init(void);
 uint64_t syscall_dispatch(struct registers *regs);

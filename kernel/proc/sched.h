@@ -17,5 +17,7 @@ process_t *sched_current_process(void);
 process_t *sched_first_process(void);
 process_t *sched_find_process(uint64_t pid);
 const char *sched_process_state_name(process_state_t state);
+uint64_t sched_ticks(void);
+void sched_sleep(uint64_t ticks);
 
 #endif
