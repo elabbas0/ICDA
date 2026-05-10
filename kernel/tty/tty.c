@@ -113,7 +113,7 @@ static void tty_reset_line(void) {
 }
 
 static void tty_print_help(void) {
-    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo syscall userdemo reboot\n", CONSOLE_STYLE_MUTED);
+    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo run userdemo syscall reboot\n", CONSOLE_STYLE_MUTED);
 }
 
 static void tty_print_mem(void) {
@@ -350,6 +350,22 @@ static int tty_dispatch_line(void) {
     }
     if (streq(line, "echo")) {
         console_write(arg ? arg : "", CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
+        return 0;
+    }
+    if (streq(line, "run")) {
+        if (!arg || !*arg) {
+            console_write("usage: run <path>\n", CONSOLE_STYLE_WARN);
+            return 0;
+        }
+        if (user_run_path(arg) != 0) {
+            console_write("run failed: ", CONSOLE_STYLE_ERROR);
+            console_write(arg, CONSOLE_STYLE_ERROR);
+            console_write("\n", CONSOLE_STYLE_ERROR);
+            return 0;
+        }
+        console_write("user exit=", CONSOLE_STYLE_MUTED);
+        console_write_dec64(user_last_exit_code(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
         return 0;
     }

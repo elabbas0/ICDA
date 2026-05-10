@@ -231,6 +231,7 @@ syscall_common:
     je .sysret_user
     mov qword [rel user_return_pending], 0
     mov rsp, [rel user_return_rsp]
+    sti
     ret
 .sysret_user:
     iretq
