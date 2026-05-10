@@ -5,6 +5,8 @@
 #define SHELL_LINE_CAP 128
 #define SHELL_BUF_CAP 1024
 
+static int shell_cursor_visible = 0;
+
 static uint64_t str_len(const char *s) {
     uint64_t n = 0;
     while (s && s[n]) n++;
@@ -39,6 +41,18 @@ static void write_char(char c) {
     icda_write(buf);
 }
 
+static void shell_hide_cursor(void) {
+    if (!shell_cursor_visible) return;
+    icda_backspace();
+    shell_cursor_visible = 0;
+}
+
+static void shell_show_cursor(void) {
+    if (shell_cursor_visible) return;
+    icda_write("_");
+    shell_cursor_visible = 1;
+}
+
 static void write_uint(uint64_t v) {
     char buf[32];
     uint64_t i = sizeof(buf) - 1;
@@ -63,10 +77,11 @@ static void print_prompt(void) {
     icda_write("icda:");
     icda_write(cwd);
     icda_write(" ");
+    shell_show_cursor();
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid pwd cd ls cat mkdir touch write stat run exit\n");
+    icda_write("user commands: help clear pid ps pwd cd ls cat mkdir touch write stat run exit\n");
 }
 
 static void shell_pwd(void) {
@@ -77,6 +92,16 @@ static void shell_pwd(void) {
     }
     icda_write(cwd);
     icda_write("\n");
+}
+
+static void shell_ps(void) {
+    char buf[SHELL_BUF_CAP];
+    long ret = (long)icda_list_procs(buf, sizeof(buf));
+    if (ret < 0) {
+        icda_write("ps failed\n");
+        return;
+    }
+    icda_write(buf);
 }
 
 static void shell_ls(const char *path) {
@@ -245,6 +270,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "help")) { shell_help(); return; }
     if (str_eq(line, "clear")) { icda_clear(); return; }
     if (str_eq(line, "pid")) { icda_write("pid="); write_uint(icda_get_pid()); icda_write("\n"); return; }
+    if (str_eq(line, "ps")) { shell_ps(); return; }
     if (str_eq(line, "pwd")) { shell_pwd(); return; }
     if (str_eq(line, "cd")) { if ((long)icda_chdir((arg && *arg) ? arg : "/") < 0) icda_write("cd failed\n"); return; }
     if (str_eq(line, "ls")) { shell_ls(arg); return; }
@@ -273,6 +299,7 @@ uint64_t shell_main(void) {
         for (;;) {
             long ch = icda_read_char();
             if (ch < 0) continue;
+            shell_hide_cursor();
             if (ch == '\r' || ch == '\n') {
                 icda_write("\n");
                 line[len] = 0;
@@ -284,15 +311,24 @@ uint64_t shell_main(void) {
                     line[len] = 0;
                     icda_backspace();
                 }
+                shell_show_cursor();
                 continue;
             }
             if (ch == '\t') ch = ' ';
-            if (ch < 32 || ch > 126) continue;
-            if (len + 1 >= sizeof(line)) continue;
+            if (ch < 32 || ch > 126) {
+                shell_show_cursor();
+                continue;
+            }
+            if (len + 1 >= sizeof(line)) {
+                shell_show_cursor();
+                continue;
+            }
             line[len++] = (char)ch;
             line[len] = 0;
             write_char((char)ch);
+            shell_show_cursor();
         }
         shell_dispatch(line);
+        shell_cursor_visible = 0;
     }
 }

@@ -48,6 +48,42 @@ static uint64_t append_dir_entry(char *buf, uint64_t out, uint64_t cap, const ch
     return out;
 }
 
+static uint64_t append_text(char *buf, uint64_t out, uint64_t cap, const char *text) {
+    uint64_t i = 0;
+    while (text && text[i] && out + 1 < cap) {
+        buf[out++] = text[i++];
+    }
+    if (out < cap) {
+        buf[out] = '\0';
+    }
+    return out;
+}
+
+static uint64_t append_uint(char *buf, uint64_t out, uint64_t cap, uint64_t value) {
+    char tmp[32];
+    uint64_t len = 0;
+
+    if (value == 0) {
+        if (out + 1 < cap) {
+            buf[out++] = '0';
+            buf[out] = '\0';
+        }
+        return out;
+    }
+
+    while (value && len < sizeof(tmp)) {
+        tmp[len++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    while (len && out + 1 < cap) {
+        buf[out++] = tmp[--len];
+    }
+    if (out < cap) {
+        buf[out] = '\0';
+    }
+    return out;
+}
+
 static uint64_t sys_console_write(const char *text) {
     if (!text) {
         return (uint64_t)-1;
@@ -218,6 +254,33 @@ static uint64_t sys_stat(const char *path, vfs_stat_t *out) {
     return vfs_stat(proc->cwd ? proc->cwd : vfs_root(), path, out) == 0 ? 0 : (uint64_t)-1;
 }
 
+static uint64_t sys_list_procs(char *buf, uint64_t cap) {
+    process_t *proc;
+    uint64_t out = 0;
+
+    if (!buf || cap == 0) {
+        return (uint64_t)-1;
+    }
+
+    buf[0] = '\0';
+    out = append_text(buf, out, cap, "pid kind state exit\n");
+    for (proc = sched_first_process(); proc; proc = proc->next_all) {
+        out = append_uint(buf, out, cap, proc->pid);
+        out = append_text(buf, out, cap, " ");
+        out = append_text(buf, out, cap, proc->kind == PROCESS_USER ? "user" : "kernel");
+        out = append_text(buf, out, cap, " ");
+        out = append_text(buf, out, cap, sched_process_state_name(proc->state));
+        out = append_text(buf, out, cap, " ");
+        out = append_uint(buf, out, cap, proc->exit_code);
+        out = append_text(buf, out, cap, "\n");
+        if (out + 1 >= cap) {
+            break;
+        }
+    }
+
+    return out;
+}
+
 void syscall_init(void) {
 }
 
@@ -260,6 +323,8 @@ uint64_t syscall_dispatch(struct registers *regs) {
         case SYS_STAT:
             return sys_stat((const char *)(uintptr_t)regs->rdi,
                             (vfs_stat_t *)(uintptr_t)regs->rsi);
+        case SYS_LIST_PROCS:
+            return sys_list_procs((char *)(uintptr_t)regs->rdi, regs->rsi);
         default:
             return (uint64_t)-1;
     }

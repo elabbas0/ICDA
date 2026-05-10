@@ -18,7 +18,8 @@ enum {
     SYS_CONSOLE_BACKSPACE = 11,
     SYS_MKDIR         = 12,
     SYS_CREATE        = 13,
-    SYS_STAT          = 14
+    SYS_STAT          = 14,
+    SYS_LIST_PROCS    = 15
 };
 
 typedef struct {
@@ -68,6 +69,7 @@ static inline void icda_backspace(void) { (void)sys_call0(SYS_CONSOLE_BACKSPACE)
 static inline uint64_t icda_mkdir(const char *path) { return sys_call1(SYS_MKDIR, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_create(const char *path) { return sys_call1(SYS_CREATE, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_stat(const char *path, icda_stat_t *out) { return sys_call2(SYS_STAT, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out); }
+static inline uint64_t icda_list_procs(char *buf, uint64_t cap) { return sys_call2(SYS_LIST_PROCS, (uint64_t)(uintptr_t)buf, cap); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

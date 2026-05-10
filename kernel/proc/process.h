@@ -15,6 +15,14 @@ typedef enum {
 } process_kind_t;
 
 typedef enum {
+    PROCESS_NEW = 0,
+    PROCESS_READY = 1,
+    PROCESS_RUNNING = 2,
+    PROCESS_BLOCKED = 3,
+    PROCESS_EXITED = 4
+} process_state_t;
+
+typedef enum {
     THREAD_READY   = 0,
     THREAD_RUNNING = 1,
     THREAD_BLOCKED = 2,
@@ -26,10 +34,13 @@ struct thread;
 typedef struct process {
     uint64_t         pid;
     process_kind_t   kind;
+    process_state_t  state;
+    uint64_t         exit_code;
     addr_space_t    *addr_space;
     struct process  *parent;
     struct thread   *main_thread;
     struct vfs_node *cwd;
+    struct process  *next_all;
 } process_t;
 
 typedef struct thread {

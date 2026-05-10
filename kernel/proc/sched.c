@@ -10,6 +10,7 @@
 extern void switch_context(thread_t *prev, thread_t *next);
 
 static thread_t *current_thread = NULL;
+static process_t *process_list = NULL;
 static uint64_t next_pid = 0;
 static uint64_t next_tid = 0;
 
@@ -38,6 +39,14 @@ static process_t *alloc_process(void) {
 
 static thread_t *alloc_thread(void) {
     return (thread_t *)alloc_object_page();
+}
+
+static void register_process(process_t *proc) {
+    if (!proc) {
+        return;
+    }
+    proc->next_all = process_list;
+    process_list = proc;
 }
 
 static uint64_t alloc_kernel_stack(void) {
@@ -73,10 +82,13 @@ process_t *proc_create_empty(process_kind_t kind) {
 
     proc->pid = next_pid++;
     proc->kind = kind;
+    proc->state = PROCESS_NEW;
+    proc->exit_code = 0;
     proc->addr_space = vmm_kernel_address_space();
     proc->parent = sched_current_process();
     proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
     proc->main_thread = NULL;
+    register_process(proc);
     return proc;
 }
 
@@ -98,6 +110,8 @@ void sched_init(void) {
 
     idle_proc->pid = next_pid++;
     idle_proc->kind = PROCESS_KERNEL;
+    idle_proc->state = PROCESS_RUNNING;
+    idle_proc->exit_code = 0;
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
     idle_proc->cwd = vfs_root();
@@ -215,4 +229,25 @@ thread_t *sched_current_thread(void) {
 
 process_t *sched_current_process(void) {
     return current_thread ? current_thread->owner : NULL;
+}
+
+process_t *sched_first_process(void) {
+    return process_list;
+}
+
+const char *sched_process_state_name(process_state_t state) {
+    switch (state) {
+        case PROCESS_NEW:
+            return "new";
+        case PROCESS_READY:
+            return "ready";
+        case PROCESS_RUNNING:
+            return "running";
+        case PROCESS_BLOCKED:
+            return "blocked";
+        case PROCESS_EXITED:
+            return "exited";
+        default:
+            return "unknown";
+    }
 }

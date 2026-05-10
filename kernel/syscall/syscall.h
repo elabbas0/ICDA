@@ -21,7 +21,8 @@ typedef enum {
     SYS_CONSOLE_BACKSPACE = 11,
     SYS_MKDIR         = 12,
     SYS_CREATE        = 13,
-    SYS_STAT          = 14
+    SYS_STAT          = 14,
+    SYS_LIST_PROCS    = 15
 } syscall_number_t;
 
 void syscall_init(void);

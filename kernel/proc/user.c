@@ -178,6 +178,11 @@ static int user_map_segment(process_t *proc, const char *image, uint64_t image_s
 }
 
 void user_request_exit_to_kernel(uint64_t code) {
+    process_t *proc = sched_current_process();
+    if (proc) {
+        proc->state = PROCESS_EXITED;
+        proc->exit_code = code;
+    }
     user_exit_code = code;
     user_return_pending = 1;
 }
@@ -291,7 +296,12 @@ run_user_image:
     if (!entry_stack_top) {
         return -1;
     }
+    if (saved_proc && saved_proc->kind == PROCESS_USER) {
+        saved_proc->state = PROCESS_BLOCKED;
+    }
     current_thread->owner = user_proc;
+    user_proc->state = PROCESS_RUNNING;
+    user_proc->exit_code = 0;
     user_active_rsp0 = entry_stack_top;
     tss_set_rsp0(entry_stack_top);
     vmm_switch_address_space(user_proc->addr_space);
@@ -319,6 +329,10 @@ run_user_image:
     vmm_switch_address_space(saved_as);
     pf_set_current_as(saved_as);
     current_thread->owner = saved_proc;
+    user_exit_code = user_proc->exit_code;
+    if (saved_proc && saved_proc->state != PROCESS_EXITED) {
+        saved_proc->state = PROCESS_RUNNING;
+    }
     user_active_rsp0 = saved_rsp0;
     tss_set_rsp0(saved_rsp0);
     pmm_free_range(VIRT_TO_PHYS(entry_stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
