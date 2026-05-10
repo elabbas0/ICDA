@@ -11,7 +11,14 @@ typedef enum {
     SYS_GET_PID       = 1,
     SYS_VFS_READ      = 2,
     SYS_VFS_WRITE     = 3,
-    SYS_EXIT          = 4
+    SYS_EXIT          = 4,
+    SYS_INPUT_READ    = 5,
+    SYS_GETCWD        = 6,
+    SYS_CHDIR         = 7,
+    SYS_LIST_DIR      = 8,
+    SYS_EXEC          = 9,
+    SYS_CONSOLE_CLEAR = 10,
+    SYS_CONSOLE_BACKSPACE = 11
 } syscall_number_t;
 
 void syscall_init(void);

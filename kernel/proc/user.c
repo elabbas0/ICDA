@@ -15,6 +15,13 @@ extern uint8_t user_demo_end[];
 
 volatile uint64_t user_return_rsp = 0;
 volatile uint64_t user_return_pending = 0;
+volatile uint64_t user_return_rbx = 0;
+volatile uint64_t user_return_rbp = 0;
+volatile uint64_t user_return_r12 = 0;
+volatile uint64_t user_return_r13 = 0;
+volatile uint64_t user_return_r14 = 0;
+volatile uint64_t user_return_r15 = 0;
+static uint64_t user_active_rsp0 = 0;
 static uint64_t user_exit_code = 0;
 
 #define ICX_MAGIC    0x31584349U
@@ -38,6 +45,14 @@ static void zero_bytes(char *dst, uint64_t size) {
     for (uint64_t i = 0; i < size; i++) {
         dst[i] = 0;
     }
+}
+
+static uint64_t alloc_kernel_entry_stack_top(void) {
+    uint64_t phys = pmm_alloc_contiguous(KERNEL_STACK_PAGES);
+    if (!phys) {
+        return 0;
+    }
+    return (uint64_t)PHYS_TO_VIRT(phys) + KERNEL_STACK_SIZE;
 }
 
 int user_prepare_address_space(process_t *proc) {
@@ -175,6 +190,16 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
     thread_t *current_thread = sched_current_thread();
     process_t *saved_proc;
     addr_space_t *saved_as;
+    uint64_t saved_rsp0;
+    uint64_t saved_return_rsp;
+    uint64_t saved_return_pending;
+    uint64_t saved_return_rbx;
+    uint64_t saved_return_rbp;
+    uint64_t saved_return_r12;
+    uint64_t saved_return_r13;
+    uint64_t saved_return_r14;
+    uint64_t saved_return_r15;
+    uint64_t entry_stack_top;
     uint64_t entry_rip;
 
     if (!current_thread || !user_proc || !image) {
@@ -261,20 +286,42 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
 run_user_image:
     saved_proc = current_thread->owner;
     saved_as = saved_proc ? saved_proc->addr_space : vmm_kernel_address_space();
+    saved_rsp0 = user_active_rsp0 ? user_active_rsp0 : current_thread->kernel_stack_top;
+    entry_stack_top = alloc_kernel_entry_stack_top();
+    if (!entry_stack_top) {
+        return -1;
+    }
     current_thread->owner = user_proc;
-    tss_set_rsp0(current_thread->kernel_stack_top);
+    user_active_rsp0 = entry_stack_top;
+    tss_set_rsp0(entry_stack_top);
     vmm_switch_address_space(user_proc->addr_space);
     pf_set_current_as(user_proc->addr_space);
+    saved_return_rsp = user_return_rsp;
+    saved_return_pending = user_return_pending;
+    saved_return_rbx = user_return_rbx;
+    saved_return_rbp = user_return_rbp;
+    saved_return_r12 = user_return_r12;
+    saved_return_r13 = user_return_r13;
+    saved_return_r14 = user_return_r14;
+    saved_return_r15 = user_return_r15;
     user_return_pending = 0;
 
     user_enter(entry_rip, USER_STACK_TOP - 16);
 
+    user_return_rsp = saved_return_rsp;
+    user_return_pending = saved_return_pending;
+    user_return_rbx = saved_return_rbx;
+    user_return_rbp = saved_return_rbp;
+    user_return_r12 = saved_return_r12;
+    user_return_r13 = saved_return_r13;
+    user_return_r14 = saved_return_r14;
+    user_return_r15 = saved_return_r15;
     vmm_switch_address_space(saved_as);
     pf_set_current_as(saved_as);
     current_thread->owner = saved_proc;
-    if (saved_proc) {
-        tss_set_rsp0(current_thread->kernel_stack_top);
-    }
+    user_active_rsp0 = saved_rsp0;
+    tss_set_rsp0(saved_rsp0);
+    pmm_free_range(VIRT_TO_PHYS(entry_stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
 
     return 0;
 }

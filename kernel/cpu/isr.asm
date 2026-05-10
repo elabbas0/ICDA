@@ -184,6 +184,12 @@ irq_common:
 extern syscall_handler
 extern user_return_rsp
 extern user_return_pending
+extern user_return_rbx
+extern user_return_rbp
+extern user_return_r12
+extern user_return_r13
+extern user_return_r14
+extern user_return_r15
 syscall_common:
     push rax
     push rcx
@@ -230,6 +236,12 @@ syscall_common:
     cmp qword [rel user_return_pending], 0
     je .sysret_user
     mov qword [rel user_return_pending], 0
+    mov rbx, [rel user_return_rbx]
+    mov rbp, [rel user_return_rbp]
+    mov r12, [rel user_return_r12]
+    mov r13, [rel user_return_r13]
+    mov r14, [rel user_return_r14]
+    mov r15, [rel user_return_r15]
     mov rsp, [rel user_return_rsp]
     sti
     ret

@@ -11,6 +11,8 @@ extern const char userprog_hello_elf_start[];
 extern const char userprog_hello_elf_end[];
 extern const char userprog_pid_elf_start[];
 extern const char userprog_pid_elf_end[];
+extern const char usershell_start[];
+extern const char usershell_end[];
 
 static const char motd_txt[] =
     "welcome to icda\n"
@@ -52,6 +54,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/etc/files.txt", files_txt, sizeof(files_txt) - 1 },
     { "/apps/hello.app", 0, 0 },
     { "/apps/pid.app", 0, 0 },
+    { "/apps/shell.app", 0, 0 },
     { "/bin/hello.elf", 0, 0 },
     { "/bin/pid.elf", 0, 0 }
 };
@@ -61,10 +64,12 @@ int initramfs_init(void) {
     initramfs_files[4].size = (uint64_t)(userprog_hello_end - userprog_hello_start);
     initramfs_files[5].data = userprog_pid_start;
     initramfs_files[5].size = (uint64_t)(userprog_pid_end - userprog_pid_start);
-    initramfs_files[6].data = userprog_hello_elf_start;
-    initramfs_files[6].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
-    initramfs_files[7].data = userprog_pid_elf_start;
-    initramfs_files[7].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
+    initramfs_files[6].data = usershell_start;
+    initramfs_files[6].size = (uint64_t)(usershell_end - usershell_start);
+    initramfs_files[7].data = userprog_hello_elf_start;
+    initramfs_files[7].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
+    initramfs_files[8].data = userprog_pid_elf_start;
+    initramfs_files[8].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
     return 0;
 }
 

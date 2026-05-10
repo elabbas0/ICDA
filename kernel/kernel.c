@@ -22,6 +22,7 @@
 #include "memory/vmm.h"
 
 #include "proc/sched.h"
+#include "proc/user.h"
 
 static void timer_handler(struct registers *regs) {
     schedule(regs);
@@ -154,7 +155,21 @@ void kernel_main(void *multiboot_info) {
     }
     irq_controller_unmask(0);
     __asm__ volatile("sti");
-    console_write("\n", CONSOLE_STYLE_INFO);
+    console_clear();
+
+    if (user_run_path("/apps/shell.app") != 0) {
+        console_write("user shell launch failed, falling back to kernel console\n", CONSOLE_STYLE_WARN);
+        if (tty_init() != 0) {
+            boot_halt("tty", "fallback kernel console failed to restart");
+        }
+        console_write("\n", CONSOLE_STYLE_INFO);
+    } else {
+        console_write("user shell exited, falling back to kernel console\n", CONSOLE_STYLE_WARN);
+        if (tty_init() != 0) {
+            boot_halt("tty", "fallback kernel console failed to restart");
+        }
+        console_write("\n", CONSOLE_STYLE_INFO);
+    }
 
     while (1) {
         tty_poll();
