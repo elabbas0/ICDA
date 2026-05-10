@@ -81,7 +81,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps pwd cd ls cat mkdir touch write stat run spawn wait exit\n");
+    icda_write("user commands: help clear pid ps pwd cd ls cat mkdir touch write stat run spawn wait yield exit\n");
 }
 
 static void shell_pwd(void) {
@@ -280,6 +280,10 @@ static void shell_wait_pid(const char *arg) {
     icda_write("\n");
 }
 
+static void shell_yield_once(void) {
+    icda_yield();
+}
+
 static int shell_try_exec_command(const char *cmd) {
     char path[160];
     uint64_t pid = icda_spawn(cmd);
@@ -369,6 +373,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }
     if (str_eq(line, "wait")) { shell_wait_pid(arg); return; }
+    if (str_eq(line, "yield")) { shell_yield_once(); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line)) {
         icda_write("unknown command: ");

@@ -304,7 +304,7 @@ void user_thread_start(void) {
     thread->user_return_pending = 0;
     vmm_switch_address_space(proc->addr_space);
     pf_set_current_as(proc->addr_space);
-    tss_set_rsp0(thread->kernel_stack_top);
+    tss_set_rsp0(thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top);
     user_enter(thread->user_rip, thread->user_rsp);
     user_exit_code = proc->exit_code;
     sched_yield();

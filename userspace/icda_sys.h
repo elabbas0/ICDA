@@ -21,7 +21,8 @@ enum {
     SYS_STAT          = 14,
     SYS_LIST_PROCS    = 15,
     SYS_SPAWN         = 16,
-    SYS_WAITPID       = 17
+    SYS_WAITPID       = 17,
+    SYS_YIELD         = 18
 };
 
 typedef struct {
@@ -74,6 +75,7 @@ static inline uint64_t icda_stat(const char *path, icda_stat_t *out) { return sy
 static inline uint64_t icda_list_procs(char *buf, uint64_t cap) { return sys_call2(SYS_LIST_PROCS, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_spawn(const char *path) { return sys_call1(SYS_SPAWN, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_waitpid(uint64_t pid) { return sys_call1(SYS_WAITPID, pid); }
+static inline void icda_yield(void) { (void)sys_call0(SYS_YIELD); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

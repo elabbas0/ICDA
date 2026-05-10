@@ -24,7 +24,8 @@ typedef enum {
     SYS_STAT          = 14,
     SYS_LIST_PROCS    = 15,
     SYS_SPAWN         = 16,
-    SYS_WAITPID       = 17
+    SYS_WAITPID       = 17,
+    SYS_YIELD         = 18
 } syscall_number_t;
 
 void syscall_init(void);

@@ -9,6 +9,8 @@ global userprog_hello_elf_start
 global userprog_hello_elf_end
 global userprog_pid_elf_start
 global userprog_pid_elf_end
+global userprog_ticker_start
+global userprog_ticker_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -25,5 +27,9 @@ userprog_hello_elf_end:
 userprog_pid_elf_start:
     incbin "userspace/pid.elf"
 userprog_pid_elf_end:
+
+userprog_ticker_start:
+    incbin "userspace/ticker.icx"
+userprog_ticker_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

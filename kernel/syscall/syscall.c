@@ -304,6 +304,11 @@ static uint64_t sys_waitpid(uint64_t pid) {
     return code;
 }
 
+static uint64_t sys_yield(void) {
+    sched_yield();
+    return 0;
+}
+
 void syscall_init(void) {
 }
 
@@ -352,6 +357,8 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_spawn((const char *)(uintptr_t)regs->rdi);
         case SYS_WAITPID:
             return sys_waitpid(regs->rdi);
+        case SYS_YIELD:
+            return sys_yield();
         default:
             return (uint64_t)-1;
     }

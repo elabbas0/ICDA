@@ -58,6 +58,13 @@ static uint64_t alloc_kernel_stack(void) {
     return (uint64_t)PHYS_TO_VIRT(phys) + KERNEL_STACK_SIZE;
 }
 
+static uint64_t thread_entry_stack_top(const thread_t *thread) {
+    if (!thread) {
+        return 0;
+    }
+    return thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top;
+}
+
 static void enqueue(thread_t *thread) {
     if (!current_thread_ptr) {
         thread->next = thread;
@@ -184,6 +191,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
 thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t user_rsp, void (*entry)(void)) {
     thread_t *thread = alloc_thread();
     uint64_t stack_top;
+    uint64_t entry_stack_top;
     uint64_t *sp;
 
     if (!proc || !entry || !user_rip || !user_rsp || !thread) {
@@ -197,6 +205,12 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
         }
         return NULL;
     }
+    entry_stack_top = alloc_kernel_stack();
+    if (!entry_stack_top) {
+        pmm_free_range(VIRT_TO_PHYS(stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
+        pmm_free(VIRT_TO_PHYS((uint64_t)thread));
+        return NULL;
+    }
 
     proc->main_thread = thread;
 
@@ -204,6 +218,7 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
     thread->state = THREAD_READY;
     thread->owner = proc;
     thread->kernel_stack_top = stack_top;
+    thread->user_entry_stack_top = entry_stack_top;
     thread->entry = entry;
     thread->user_rip = user_rip;
     thread->user_rsp = user_rsp;
@@ -254,8 +269,8 @@ static void schedule_inner(int force) {
     next->state = THREAD_RUNNING;
     current_thread_ptr = next;
 
-    if (next->kernel_stack_top) {
-        tss_set_rsp0(next->kernel_stack_top);
+    if (thread_entry_stack_top(next)) {
+        tss_set_rsp0(thread_entry_stack_top(next));
     }
 
     if (next->owner->addr_space != prev->owner->addr_space) {

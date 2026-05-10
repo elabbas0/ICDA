@@ -62,6 +62,7 @@ typedef struct thread {
     uint64_t         user_return_r14;
     uint64_t         user_return_r15;
     uint64_t         user_return_pending;
+    uint64_t         user_entry_stack_top;
 } thread_t;
 
 #endif

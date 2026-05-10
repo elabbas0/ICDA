@@ -124,6 +124,9 @@ userspace/hello.icx: userspace/hello.asm
 userspace/pid.icx: userspace/pid.asm
 	$(ASM) -f bin userspace/pid.asm -o userspace/pid.icx
 
+userspace/ticker.icx: userspace/ticker.asm
+	$(ASM) -f bin userspace/ticker.asm -o userspace/ticker.icx
+
 userspace/hello_elf.o: userspace/hello_elf.asm
 	$(ASM) -f elf64 userspace/hello_elf.asm -o userspace/hello_elf.o
 
@@ -148,7 +151,7 @@ userspace/shell.app: shell_start.o shell.o userspace/user.ld
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 	$(ASM) -f elf64 kernel/proc/shell_blob.asm -o shell_blob.o
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/hello.elf userspace/pid.elf
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
 kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
