@@ -188,6 +188,36 @@ static uint64_t sys_console_backspace(void) {
     return 0;
 }
 
+static uint64_t sys_mkdir(const char *path) {
+    process_t *proc = sched_current_process();
+
+    if (!proc || !path || !*path) {
+        return (uint64_t)-1;
+    }
+
+    return vfs_mkdir(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_create(const char *path) {
+    process_t *proc = sched_current_process();
+
+    if (!proc || !path || !*path) {
+        return (uint64_t)-1;
+    }
+
+    return vfs_create(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_stat(const char *path, vfs_stat_t *out) {
+    process_t *proc = sched_current_process();
+
+    if (!proc || !path || !*path || !out) {
+        return (uint64_t)-1;
+    }
+
+    return vfs_stat(proc->cwd ? proc->cwd : vfs_root(), path, out) == 0 ? 0 : (uint64_t)-1;
+}
+
 void syscall_init(void) {
 }
 
@@ -223,6 +253,13 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_console_clear();
         case SYS_CONSOLE_BACKSPACE:
             return sys_console_backspace();
+        case SYS_MKDIR:
+            return sys_mkdir((const char *)(uintptr_t)regs->rdi);
+        case SYS_CREATE:
+            return sys_create((const char *)(uintptr_t)regs->rdi);
+        case SYS_STAT:
+            return sys_stat((const char *)(uintptr_t)regs->rdi,
+                            (vfs_stat_t *)(uintptr_t)regs->rsi);
         default:
             return (uint64_t)-1;
     }

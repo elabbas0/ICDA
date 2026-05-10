@@ -66,7 +66,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid pwd cd ls cat run exit\n");
+    icda_write("user commands: help clear pid pwd cd ls cat mkdir touch write stat run exit\n");
 }
 
 static void shell_pwd(void) {
@@ -124,6 +124,77 @@ static void shell_run_path(const char *path) {
     icda_write("\n");
 }
 
+static void shell_mkdir(const char *path) {
+    if (!path || !*path) {
+        icda_write("usage: mkdir <path>\n");
+        return;
+    }
+    if ((long)icda_mkdir(path) < 0) {
+        icda_write("mkdir failed\n");
+    }
+}
+
+static void shell_touch(const char *path) {
+    if (!path || !*path) {
+        icda_write("usage: touch <path>\n");
+        return;
+    }
+    if ((long)icda_create(path) < 0) {
+        icda_write("touch failed\n");
+    }
+}
+
+static void shell_write_file(const char *arg) {
+    char *text;
+    long ret;
+
+    if (!arg || !*arg) {
+        icda_write("usage: write <path> <text>\n");
+        return;
+    }
+
+    text = (char *)arg;
+    while (*text && *text != ' ' && *text != '\t') text++;
+    if (!*text) {
+        icda_write("usage: write <path> <text>\n");
+        return;
+    }
+
+    *text++ = 0;
+    while (*text == ' ' || *text == '\t') text++;
+    ret = (long)icda_write_file(arg, text, str_len(text));
+    if (ret < 0) {
+        icda_write("write failed\n");
+    }
+}
+
+static void shell_stat(const char *path) {
+    icda_stat_t st;
+
+    if (!path || !*path) {
+        icda_write("usage: stat <path>\n");
+        return;
+    }
+    if ((long)icda_stat(path, &st) < 0) {
+        icda_write("stat failed\n");
+        return;
+    }
+
+    icda_write("inode=");
+    write_uint(st.inode);
+    icda_write(" type=");
+    icda_write(st.type == 2 ? "dir" : "file");
+    icda_write(" size=");
+    write_uint(st.size);
+    icda_write(" created=");
+    write_uint(st.created);
+    icda_write(" modified=");
+    write_uint(st.modified);
+    icda_write(" readonly=");
+    icda_write(st.readonly ? "yes" : "no");
+    icda_write("\n");
+}
+
 static int shell_try_exec_command(const char *cmd) {
     char path[160];
     long ret = (long)icda_exec(cmd);
@@ -178,6 +249,10 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "cd")) { if ((long)icda_chdir((arg && *arg) ? arg : "/") < 0) icda_write("cd failed\n"); return; }
     if (str_eq(line, "ls")) { shell_ls(arg); return; }
     if (str_eq(line, "cat")) { shell_cat(arg); return; }
+    if (str_eq(line, "mkdir")) { shell_mkdir(arg); return; }
+    if (str_eq(line, "touch")) { shell_touch(arg); return; }
+    if (str_eq(line, "write")) { shell_write_file(arg); return; }
+    if (str_eq(line, "stat")) { shell_stat(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line)) {
@@ -221,4 +296,3 @@ uint64_t shell_main(void) {
         shell_dispatch(line);
     }
 }
-
