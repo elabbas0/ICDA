@@ -124,7 +124,19 @@ userspace/hello.icx: userspace/hello.asm
 userspace/pid.icx: userspace/pid.asm
 	$(ASM) -f bin userspace/pid.asm -o userspace/pid.icx
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx
+userspace/hello_elf.o: userspace/hello_elf.asm
+	$(ASM) -f elf64 userspace/hello_elf.asm -o userspace/hello_elf.o
+
+userspace/pid_elf.o: userspace/pid_elf.asm
+	$(ASM) -f elf64 userspace/pid_elf.asm -o userspace/pid_elf.o
+
+userspace/hello.elf: userspace/hello_elf.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o userspace/hello.elf userspace/hello_elf.o
+
+userspace/pid.elf: userspace/pid_elf.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o userspace/pid.elf userspace/pid_elf.o
+
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/hello.elf userspace/pid.elf
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
 kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o pci.o initramfs.o vfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \

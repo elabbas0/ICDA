@@ -5,6 +5,7 @@
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
+#include "../proc/sched.h"
 #include "../proc/user.h"
 #include "../syscall/syscall.h"
 
@@ -19,6 +20,13 @@ static uint64_t tty_cap = 0;
 static int tty_cursor_visible = 0;
 static vfs_node_t *tty_cwd = 0;
 static char tty_prompt_buf[96];
+
+static void tty_sync_process_cwd(void) {
+    process_t *proc = sched_current_process();
+    if (proc) {
+        proc->cwd = tty_cwd ? tty_cwd : vfs_root();
+    }
+}
 
 static int streq(const char *a, const char *b) {
     uint64_t i = 0;
@@ -114,6 +122,7 @@ static void tty_reset_line(void) {
 
 static void tty_print_help(void) {
     console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo run userdemo syscall reboot\n", CONSOLE_STYLE_MUTED);
+    console_write("examples: run /apps/hello.app, run /bin/hello.elf\n", CONSOLE_STYLE_MUTED);
 }
 
 static void tty_print_mem(void) {
@@ -268,6 +277,7 @@ static int tty_dispatch_line(void) {
 
         if (!arg || !*arg) {
             tty_cwd = vfs_root();
+            tty_sync_process_cwd();
             return 0;
         }
         next = vfs_resolve(tty_cwd, arg);
@@ -278,6 +288,7 @@ static int tty_dispatch_line(void) {
             return 0;
         }
         tty_cwd = next;
+        tty_sync_process_cwd();
         return 0;
     }
     if (streq(line, "ls")) {
@@ -430,6 +441,7 @@ int tty_init(void) {
     tty_reset_line();
     tty_cursor_visible = 0;
     tty_cwd = vfs_root();
+    tty_sync_process_cwd();
     motd = vfs_read(tty_cwd, "/etc/motd.txt", &size);
     if (motd) {
         tty_print_file(motd, size);

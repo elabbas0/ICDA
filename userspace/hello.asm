@@ -26,4 +26,4 @@ _start:
     jmp .hang
 
 msg:
-    db "hello from /bin/hello.icx", 10, 0
+    db "hello from /apps/hello.app", 10, 0

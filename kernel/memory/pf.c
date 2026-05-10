@@ -2,6 +2,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "../cpu/isr.h"
+#include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 
 // scheduler hook 
@@ -37,9 +38,40 @@ static void print_hex(uint64_t v) {
     fb_print(buf, FB_WHITE, FB_RED);
 }
 
+static void console_print_hex(uint64_t v) {
+    console_write_hex64(v, CONSOLE_STYLE_ERROR);
+}
+
 //  panic helper 
 
 static void pf_panic(struct registers *regs, uint64_t cr2) {
+    console_write("\n*** PAGE FAULT ***\n", CONSOLE_STYLE_ERROR);
+    console_write("  CR2 (fault addr): ", CONSOLE_STYLE_ERROR);
+    console_print_hex(cr2);
+    console_write("\n", CONSOLE_STYLE_ERROR);
+    console_write("  RIP: ", CONSOLE_STYLE_ERROR);
+    console_print_hex(regs->rip);
+    console_write("\n", CONSOLE_STYLE_ERROR);
+    console_write("  RSP: ", CONSOLE_STYLE_ERROR);
+    console_print_hex(regs->rsp);
+    console_write("\n", CONSOLE_STYLE_ERROR);
+    console_write("  ERR: ", CONSOLE_STYLE_ERROR);
+    console_print_hex(regs->err_code);
+    console_write("\n", CONSOLE_STYLE_ERROR);
+
+    uint64_t e = regs->err_code;
+    console_write("  flags: ", CONSOLE_STYLE_ERROR);
+    console_write((e & PF_PRESENT) ? "[PROT] " : "[NOT-PRESENT] ", CONSOLE_STYLE_ERROR);
+    console_write((e & PF_WRITE) ? "[WRITE] " : "[READ] ", CONSOLE_STYLE_ERROR);
+    console_write((e & PF_USER) ? "[USER] " : "[KERNEL] ", CONSOLE_STYLE_ERROR);
+    if (e & PF_RESERVED) {
+        console_write("[RSVD] ", CONSOLE_STYLE_ERROR);
+    }
+    if (e & PF_IFETCH) {
+        console_write("[IFETCH] ", CONSOLE_STYLE_ERROR);
+    }
+    console_write("\n", CONSOLE_STYLE_ERROR);
+
     fb_print("\n*** PAGE FAULT ***\n", FB_WHITE, FB_RED);
 
     fb_print("  CR2 (fault addr): ", FB_WHITE, FB_RED);
@@ -50,7 +82,7 @@ static void pf_panic(struct registers *regs, uint64_t cr2) {
     fb_print("  RSP: ", FB_WHITE, FB_RED); print_hex(regs->rsp); fb_print("\n", FB_WHITE, FB_RED);
     fb_print("  ERR: ", FB_WHITE, FB_RED); print_hex(regs->err_code); fb_print("\n", FB_WHITE, FB_RED);
 
-    uint64_t e = regs->err_code;
+    e = regs->err_code;
     fb_print("  flags: ", FB_WHITE, FB_RED);
     if (e & PF_PRESENT)  fb_print("[PROT] ",   FB_WHITE, FB_RED);
     else                 fb_print("[NOT-PRESENT] ", FB_WHITE, FB_RED);

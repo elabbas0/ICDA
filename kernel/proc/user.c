@@ -1,4 +1,5 @@
 #include "user.h"
+#include "elf.h"
 
 #include "sched.h"
 #include "../cpu/gdt.h"
@@ -30,6 +31,12 @@ typedef struct {
 static void copy_bytes(char *dst, const char *src, uint64_t size) {
     for (uint64_t i = 0; i < size; i++) {
         dst[i] = src[i];
+    }
+}
+
+static void zero_bytes(char *dst, uint64_t size) {
+    for (uint64_t i = 0; i < size; i++) {
+        dst[i] = 0;
     }
 }
 
@@ -93,12 +100,65 @@ int user_map_blob(process_t *proc, const void *blob, uint64_t size, uint64_t vir
         }
 
         dst = (char *)PHYS_TO_VIRT(phys);
-        for (uint64_t j = 0; j < PAGE_SIZE_4K; j++) {
-            dst[j] = 0;
-        }
+        zero_bytes(dst, PAGE_SIZE_4K);
         copy_bytes(dst, (const char *)blob + copied, chunk);
         copied += chunk;
     }
+    return 0;
+}
+
+static int user_map_segment(process_t *proc, const char *image, uint64_t image_size,
+                            uint64_t virt, uint64_t file_off, uint64_t file_size,
+                            uint64_t mem_size, uint64_t seg_flags) {
+    uint64_t page_base;
+    uint64_t seg_end;
+    uint64_t map_flags;
+
+    if (!proc || !proc->addr_space || !image) {
+        return -1;
+    }
+    if (file_size > mem_size) {
+        return -1;
+    }
+    if (file_off > image_size || file_size > image_size - file_off) {
+        return -1;
+    }
+    if (mem_size == 0) {
+        return 0;
+    }
+
+    page_base = virt & ~(PAGE_SIZE_4K - 1);
+    seg_end = (virt + mem_size + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+    map_flags = (seg_flags & PF_W) ? VMM_FLAGS_USER_RW : VMM_FLAGS_USER_RO;
+
+    for (uint64_t page = page_base; page < seg_end; page += PAGE_SIZE_4K) {
+        uint64_t phys = pmm_alloc();
+        char *dst;
+        uint64_t page_data_start;
+        uint64_t page_data_end;
+
+        if (!phys) {
+            return -1;
+        }
+        if (vmm_map_page(proc->addr_space, page, phys, map_flags) != 0) {
+            pmm_free(phys);
+            return -1;
+        }
+
+        dst = (char *)PHYS_TO_VIRT(phys);
+        zero_bytes(dst, PAGE_SIZE_4K);
+
+        page_data_start = page > virt ? page : virt;
+        page_data_end = (page + PAGE_SIZE_4K) < (virt + file_size) ? (page + PAGE_SIZE_4K) : (virt + file_size);
+
+        if (page_data_end > page_data_start) {
+            uint64_t copy_size = page_data_end - page_data_start;
+            uint64_t dst_off = page_data_start - page;
+            uint64_t src_off = file_off + (page_data_start - virt);
+            copy_bytes(dst + dst_off, image + src_off, copy_size);
+        }
+    }
+
     return 0;
 }
 
@@ -115,30 +175,90 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
     thread_t *current_thread = sched_current_thread();
     process_t *saved_proc;
     addr_space_t *saved_as;
-    const icx_header_t *hdr = (const icx_header_t *)image;
     uint64_t entry_rip;
 
-    if (!current_thread || !user_proc || !image || image_size < sizeof(icx_header_t)) {
-        return -1;
-    }
-
-    if (hdr->magic != ICX_MAGIC || hdr->version != ICX_VERSION) {
-        return -1;
-    }
-    if (hdr->header_size < sizeof(icx_header_t) || hdr->header_size > image_size) {
-        return -1;
-    }
-    if (hdr->entry_offset < hdr->header_size || hdr->entry_offset >= image_size) {
+    if (!current_thread || !user_proc || !image) {
         return -1;
     }
 
     if (user_prepare_address_space(user_proc) != 0) {
         return -1;
     }
-    if (user_map_blob(user_proc, image, image_size, USER_TEXT_BASE) != 0) {
+
+    if (image_size >= sizeof(icx_header_t)) {
+        const icx_header_t *hdr = (const icx_header_t *)image;
+
+        if (hdr->magic == ICX_MAGIC && hdr->version == ICX_VERSION) {
+            if (hdr->header_size < sizeof(icx_header_t) || hdr->header_size > image_size) {
+                return -1;
+            }
+            if (hdr->entry_offset < hdr->header_size || hdr->entry_offset >= image_size) {
+                return -1;
+            }
+            if (user_map_blob(user_proc, image, image_size, USER_TEXT_BASE) != 0) {
+                return -1;
+            }
+            entry_rip = USER_TEXT_BASE + hdr->entry_offset;
+            goto run_user_image;
+        }
+    }
+
+    if (image_size >= sizeof(elf64_ehdr_t)) {
+        const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
+        const elf64_phdr_t *ph;
+
+        if (eh->e_ident[0] != ELF_MAGIC0 || eh->e_ident[1] != ELF_MAGIC1 ||
+            eh->e_ident[2] != ELF_MAGIC2 || eh->e_ident[3] != ELF_MAGIC3) {
+            return -1;
+        }
+        if (eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB) {
+            return -1;
+        }
+        if (eh->e_ident[6] != EV_CURRENT || eh->e_type != ET_EXEC || eh->e_machine != EM_X86_64) {
+            return -1;
+        }
+        if (eh->e_phentsize != sizeof(elf64_phdr_t) || eh->e_phnum == 0) {
+            return -1;
+        }
+        if (eh->e_phoff > image_size) {
+            return -1;
+        }
+        if ((uint64_t)eh->e_phnum > (image_size - eh->e_phoff) / sizeof(elf64_phdr_t)) {
+            return -1;
+        }
+
+        ph = (const elf64_phdr_t *)((const char *)image + eh->e_phoff);
+        for (uint16_t i = 0; i < eh->e_phnum; i++) {
+            if (ph[i].p_type != PT_LOAD) {
+                continue;
+            }
+            if (ph[i].p_vaddr < USER_TEXT_BASE || ph[i].p_vaddr >= USER_STACK_LIMIT) {
+                return -1;
+            }
+            if (ph[i].p_memsz == 0) {
+                continue;
+            }
+            if (ph[i].p_vaddr + ph[i].p_memsz < ph[i].p_vaddr) {
+                return -1;
+            }
+            if (ph[i].p_vaddr + ph[i].p_memsz >= USER_STACK_LIMIT) {
+                return -1;
+            }
+            if (user_map_segment(user_proc, (const char *)image, image_size, ph[i].p_vaddr,
+                                 ph[i].p_offset, ph[i].p_filesz, ph[i].p_memsz, ph[i].p_flags) != 0) {
+                return -1;
+            }
+        }
+
+        entry_rip = eh->e_entry;
+        if (entry_rip < USER_TEXT_BASE || entry_rip >= USER_STACK_LIMIT) {
+            return -1;
+        }
+    } else {
         return -1;
     }
 
+run_user_image:
     saved_proc = current_thread->owner;
     saved_as = saved_proc ? saved_proc->addr_space : vmm_kernel_address_space();
     current_thread->owner = user_proc;
@@ -147,7 +267,6 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
     pf_set_current_as(user_proc->addr_space);
     user_return_pending = 0;
 
-    entry_rip = USER_TEXT_BASE + hdr->entry_offset;
     user_enter(entry_rip, USER_STACK_TOP - 16);
 
     vmm_switch_address_space(saved_as);
