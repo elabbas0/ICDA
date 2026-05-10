@@ -22,7 +22,9 @@ typedef enum {
     SYS_MKDIR         = 12,
     SYS_CREATE        = 13,
     SYS_STAT          = 14,
-    SYS_LIST_PROCS    = 15
+    SYS_LIST_PROCS    = 15,
+    SYS_SPAWN         = 16,
+    SYS_WAITPID       = 17
 } syscall_number_t;
 
 void syscall_init(void);

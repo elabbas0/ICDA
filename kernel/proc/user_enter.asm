@@ -4,21 +4,24 @@ bits 64
 %define GDT_USER_DATA 0x20
 
 global user_enter
-extern user_return_rsp
-extern user_return_rbx
-extern user_return_rbp
-extern user_return_r12
-extern user_return_r13
-extern user_return_r14
-extern user_return_r15
+extern current_thread_ptr
+
+%define THREAD_USER_RETURN_RSP 72
+%define THREAD_USER_RETURN_RBX 80
+%define THREAD_USER_RETURN_RBP 88
+%define THREAD_USER_RETURN_R12 96
+%define THREAD_USER_RETURN_R13 104
+%define THREAD_USER_RETURN_R14 112
+%define THREAD_USER_RETURN_R15 120
 user_enter:
-    mov [rel user_return_rsp], rsp
-    mov [rel user_return_rbx], rbx
-    mov [rel user_return_rbp], rbp
-    mov [rel user_return_r12], r12
-    mov [rel user_return_r13], r13
-    mov [rel user_return_r14], r14
-    mov [rel user_return_r15], r15
+    mov rax, [rel current_thread_ptr]
+    mov [rax + THREAD_USER_RETURN_RSP], rsp
+    mov [rax + THREAD_USER_RETURN_RBX], rbx
+    mov [rax + THREAD_USER_RETURN_RBP], rbp
+    mov [rax + THREAD_USER_RETURN_R12], r12
+    mov [rax + THREAD_USER_RETURN_R13], r13
+    mov [rax + THREAD_USER_RETURN_R14], r14
+    mov [rax + THREAD_USER_RETURN_R15], r15
     cli
     mov ax, GDT_USER_DATA | 3
     mov ds, ax

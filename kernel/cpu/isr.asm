@@ -182,14 +182,16 @@ irq_common:
     iretq
 
 extern syscall_handler
-extern user_return_rsp
-extern user_return_pending
-extern user_return_rbx
-extern user_return_rbp
-extern user_return_r12
-extern user_return_r13
-extern user_return_r14
-extern user_return_r15
+extern current_thread_ptr
+
+%define THREAD_USER_RETURN_RSP 72
+%define THREAD_USER_RETURN_RBX 80
+%define THREAD_USER_RETURN_RBP 88
+%define THREAD_USER_RETURN_R12 96
+%define THREAD_USER_RETURN_R13 104
+%define THREAD_USER_RETURN_R14 112
+%define THREAD_USER_RETURN_R15 120
+%define THREAD_USER_RETURN_PENDING 128
 syscall_common:
     push rax
     push rcx
@@ -233,16 +235,17 @@ syscall_common:
     pop rax
 
     add rsp, 16
-    cmp qword [rel user_return_pending], 0
+    mov rdx, [rel current_thread_ptr]
+    cmp qword [rdx + THREAD_USER_RETURN_PENDING], 0
     je .sysret_user
-    mov qword [rel user_return_pending], 0
-    mov rbx, [rel user_return_rbx]
-    mov rbp, [rel user_return_rbp]
-    mov r12, [rel user_return_r12]
-    mov r13, [rel user_return_r13]
-    mov r14, [rel user_return_r14]
-    mov r15, [rel user_return_r15]
-    mov rsp, [rel user_return_rsp]
+    mov qword [rdx + THREAD_USER_RETURN_PENDING], 0
+    mov rbx, [rdx + THREAD_USER_RETURN_RBX]
+    mov rbp, [rdx + THREAD_USER_RETURN_RBP]
+    mov r12, [rdx + THREAD_USER_RETURN_R12]
+    mov r13, [rdx + THREAD_USER_RETURN_R13]
+    mov r14, [rdx + THREAD_USER_RETURN_R14]
+    mov r15, [rdx + THREAD_USER_RETURN_R15]
+    mov rsp, [rdx + THREAD_USER_RETURN_RSP]
     sti
     ret
 .sysret_user:

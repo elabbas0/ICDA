@@ -8,8 +8,9 @@
 #include "../drivers/console/console.h"
 
 extern void switch_context(thread_t *prev, thread_t *next);
+extern void user_thread_start(void);
 
-static thread_t *current_thread = NULL;
+thread_t *current_thread_ptr = NULL;
 static process_t *process_list = NULL;
 static uint64_t next_pid = 0;
 static uint64_t next_tid = 0;
@@ -58,19 +59,19 @@ static uint64_t alloc_kernel_stack(void) {
 }
 
 static void enqueue(thread_t *thread) {
-    if (!current_thread) {
+    if (!current_thread_ptr) {
         thread->next = thread;
-        current_thread = thread;
+        current_thread_ptr = thread;
         return;
     }
 
-    thread_t *tail = current_thread;
-    while (tail->next != current_thread) {
+    thread_t *tail = current_thread_ptr;
+    while (tail->next != current_thread_ptr) {
         tail = tail->next;
     }
 
     tail->next = thread;
-    thread->next = current_thread;
+    thread->next = current_thread_ptr;
 }
 
 process_t *proc_create_empty(process_kind_t kind) {
@@ -115,6 +116,7 @@ void sched_init(void) {
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
     idle_proc->cwd = vfs_root();
+    register_process(idle_proc);
 
     idle_thread->tid = next_tid++;
     idle_thread->state = THREAD_RUNNING;
@@ -122,7 +124,7 @@ void sched_init(void) {
     idle_thread->kernel_stack_top = idle_stack_top;
     idle_thread->next = idle_thread;
 
-    current_thread = idle_thread;
+    current_thread_ptr = idle_thread;
     tss_set_rsp0(idle_stack_top);
     pf_set_current_as(idle_proc->addr_space);
 }
@@ -179,22 +181,61 @@ process_t *proc_create_kernel(void (*entry)(void)) {
     return proc;
 }
 
-void schedule(struct registers *regs) {
+thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t user_rsp, void (*entry)(void)) {
+    thread_t *thread = alloc_thread();
+    uint64_t stack_top;
+    uint64_t *sp;
+
+    if (!proc || !entry || !user_rip || !user_rsp || !thread) {
+        return NULL;
+    }
+
+    stack_top = alloc_kernel_stack();
+    if (!stack_top) {
+        if (thread) {
+            pmm_free(VIRT_TO_PHYS((uint64_t)thread));
+        }
+        return NULL;
+    }
+
+    proc->main_thread = thread;
+
+    thread->tid = next_tid++;
+    thread->state = THREAD_READY;
+    thread->owner = proc;
+    thread->kernel_stack_top = stack_top;
+    thread->entry = entry;
+    thread->user_rip = user_rip;
+    thread->user_rsp = user_rsp;
+
+    sp = (uint64_t *)stack_top;
+    *(--sp) = (uint64_t)kthread_trampoline;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+
+    thread->kernel_rsp = (uint64_t)sp;
+    enqueue(thread);
+    return thread;
+}
+
+static void schedule_inner(int force) {
     thread_t *next;
     thread_t *prev;
     int laps = 0;
 
-    (void)regs;
-
-    if (!current_thread) {
+    if (!current_thread_ptr) {
         return;
     }
 
-    if (++tick_count % SCHED_TICKS != 0) {
+    if (!force && ++tick_count % SCHED_TICKS != 0) {
         return;
     }
 
-    next = current_thread->next;
+    next = current_thread_ptr->next;
     while (next->state != THREAD_READY && next->state != THREAD_RUNNING) {
         next = next->next;
         if (++laps > 1024) {
@@ -202,14 +243,16 @@ void schedule(struct registers *regs) {
         }
     }
 
-    if (next == current_thread) {
+    if (next == current_thread_ptr) {
         return;
     }
 
-    prev = current_thread;
-    prev->state = THREAD_READY;
+    prev = current_thread_ptr;
+    if (prev->state == THREAD_RUNNING) {
+        prev->state = THREAD_READY;
+    }
     next->state = THREAD_RUNNING;
-    current_thread = next;
+    current_thread_ptr = next;
 
     if (next->kernel_stack_top) {
         tss_set_rsp0(next->kernel_stack_top);
@@ -223,16 +266,36 @@ void schedule(struct registers *regs) {
     switch_context(prev, next);
 }
 
+void schedule(struct registers *regs) {
+    (void)regs;
+    schedule_inner(0);
+}
+
+void sched_yield(void) {
+    schedule_inner(1);
+}
+
 thread_t *sched_current_thread(void) {
-    return current_thread;
+    return current_thread_ptr;
 }
 
 process_t *sched_current_process(void) {
-    return current_thread ? current_thread->owner : NULL;
+    return current_thread_ptr ? current_thread_ptr->owner : NULL;
 }
 
 process_t *sched_first_process(void) {
     return process_list;
+}
+
+process_t *sched_find_process(uint64_t pid) {
+    process_t *proc = process_list;
+    while (proc) {
+        if (proc->pid == pid) {
+            return proc;
+        }
+        proc = proc->next_all;
+    }
+    return NULL;
 }
 
 const char *sched_process_state_name(process_state_t state) {
@@ -247,6 +310,8 @@ const char *sched_process_state_name(process_state_t state) {
             return "blocked";
         case PROCESS_EXITED:
             return "exited";
+        case PROCESS_REAPED:
+            return "reaped";
         default:
             return "unknown";
     }

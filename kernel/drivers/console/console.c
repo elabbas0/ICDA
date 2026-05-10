@@ -6,6 +6,7 @@
 
 static kernel_device_t *display_device = 0;
 static kernel_device_t *serial_device = 0;
+static int console_display_is_framebuffer = 0;
 
 static int console_has_framebuffer = 0;
 
@@ -46,9 +47,11 @@ static unsigned char vga_color_for(console_style_t style) {
 }
 
 void console_init(int has_framebuffer) {
+    kernel_device_t *framebuffer = device_find("framebuffer");
+
     console_has_framebuffer = has_framebuffer;
-    if (console_has_framebuffer) {
-        display_device = device_find("framebuffer");
+    if (console_has_framebuffer && framebuffer) {
+        display_device = framebuffer;
     }
     if (!display_device) {
         display_device = device_find("vga");
@@ -57,6 +60,7 @@ void console_init(int has_framebuffer) {
         display_device = device_first(DEVICE_CLASS_DISPLAY);
     }
     serial_device = device_find("serial");
+    console_display_is_framebuffer = (display_device && framebuffer && display_device == framebuffer);
 }
 
 void console_clear(void) {
@@ -93,7 +97,7 @@ void console_write(const char *str, console_style_t style) {
     }
 
     display_ops = (const display_device_ops_t *)display_device->ops;
-    if (console_has_framebuffer && display_device == device_find("framebuffer")) {
+    if (console_has_framebuffer && console_display_is_framebuffer) {
         display_ops->write(display_device->context, str, fb_color_for(style), FB_BLACK);
     } else {
         display_ops->write(display_device->context, str, vga_color_for(style), FB_BLACK);

@@ -263,9 +263,11 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
     }
 
     buf[0] = '\0';
-    out = append_text(buf, out, cap, "pid kind state exit\n");
+    out = append_text(buf, out, cap, "pid ppid kind state exit\n");
     for (proc = sched_first_process(); proc; proc = proc->next_all) {
         out = append_uint(buf, out, cap, proc->pid);
+        out = append_text(buf, out, cap, " ");
+        out = append_uint(buf, out, cap, proc->parent ? proc->parent->pid : 0);
         out = append_text(buf, out, cap, " ");
         out = append_text(buf, out, cap, proc->kind == PROCESS_USER ? "user" : "kernel");
         out = append_text(buf, out, cap, " ");
@@ -279,6 +281,27 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
     }
 
     return out;
+}
+
+static uint64_t sys_spawn(const char *path) {
+    uint64_t pid = 0;
+
+    if (!path || !*path) {
+        return (uint64_t)-1;
+    }
+    if (user_spawn_path(path, &pid) != 0) {
+        return (uint64_t)-1;
+    }
+    return pid;
+}
+
+static uint64_t sys_waitpid(uint64_t pid) {
+    uint64_t code = 0;
+
+    if (user_wait_pid(pid, &code) != 0) {
+        return (uint64_t)-1;
+    }
+    return code;
 }
 
 void syscall_init(void) {
@@ -325,6 +348,10 @@ uint64_t syscall_dispatch(struct registers *regs) {
                             (vfs_stat_t *)(uintptr_t)regs->rsi);
         case SYS_LIST_PROCS:
             return sys_list_procs((char *)(uintptr_t)regs->rdi, regs->rsi);
+        case SYS_SPAWN:
+            return sys_spawn((const char *)(uintptr_t)regs->rdi);
+        case SYS_WAITPID:
+            return sys_waitpid(regs->rdi);
         default:
             return (uint64_t)-1;
     }

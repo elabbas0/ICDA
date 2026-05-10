@@ -81,7 +81,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps pwd cd ls cat mkdir touch write stat run exit\n");
+    icda_write("user commands: help clear pid ps pwd cd ls cat mkdir touch write stat run spawn wait exit\n");
 }
 
 static void shell_pwd(void) {
@@ -132,20 +132,31 @@ static void shell_cat(const char *path) {
 }
 
 static void shell_run_path(const char *path) {
-    long ret;
+    uint64_t pid;
+    uint64_t code;
     if (!path || !*path) {
         icda_write("usage: run <path>\n");
         return;
     }
-    ret = (long)icda_exec(path);
-    if (ret < 0) {
+    pid = icda_spawn(path);
+    if ((long)pid < 0) {
         icda_write("run failed: ");
         icda_write(path);
         icda_write("\n");
         return;
     }
+    code = icda_waitpid(pid);
+    if ((long)code < 0) {
+        icda_write("wait failed: ");
+        write_uint(pid);
+        icda_write("\n");
+        return;
+    }
+    icda_write("pid=");
+    write_uint(pid);
+    icda_write(" ");
     icda_write("exit=");
-    write_uint((uint64_t)ret);
+    write_uint(code);
     icda_write("\n");
 }
 
@@ -220,12 +231,70 @@ static void shell_stat(const char *path) {
     icda_write("\n");
 }
 
+static void shell_spawn_path(const char *path) {
+    uint64_t pid;
+    if (!path || !*path) {
+        icda_write("usage: spawn <path>\n");
+        return;
+    }
+    pid = icda_spawn(path);
+    if ((long)pid < 0) {
+        icda_write("spawn failed: ");
+        icda_write(path);
+        icda_write("\n");
+        return;
+    }
+    icda_write("spawned pid=");
+    write_uint(pid);
+    icda_write("\n");
+}
+
+static void shell_wait_pid(const char *arg) {
+    uint64_t pid = 0;
+    uint64_t code;
+    uint64_t i = 0;
+
+    if (!arg || !*arg) {
+        icda_write("usage: wait <pid>\n");
+        return;
+    }
+    while (arg[i]) {
+        if (arg[i] < '0' || arg[i] > '9') {
+            icda_write("usage: wait <pid>\n");
+            return;
+        }
+        pid = pid * 10 + (uint64_t)(arg[i] - '0');
+        i++;
+    }
+    code = icda_waitpid(pid);
+    if ((long)code < 0) {
+        icda_write("wait failed: ");
+        write_uint(pid);
+        icda_write("\n");
+        return;
+    }
+    icda_write("pid=");
+    write_uint(pid);
+    icda_write(" exit=");
+    write_uint(code);
+    icda_write("\n");
+}
+
 static int shell_try_exec_command(const char *cmd) {
     char path[160];
-    long ret = (long)icda_exec(cmd);
-    if (ret >= 0) {
-        icda_write("exit=");
-        write_uint((uint64_t)ret);
+    uint64_t pid = icda_spawn(cmd);
+    if ((long)pid >= 0) {
+        uint64_t code = icda_waitpid(pid);
+        if ((long)code < 0) {
+            icda_write("wait failed: ");
+            write_uint(pid);
+            icda_write("\n");
+            return 1;
+        }
+        icda_write("pid=");
+        write_uint(pid);
+        icda_write(" exit=");
+        write_uint(code);
         icda_write("\n");
         return 1;
     }
@@ -234,10 +303,19 @@ static int shell_try_exec_command(const char *cmd) {
     path[0] = 0;
     append_text(path, "/apps/", sizeof(path));
     append_text(path, cmd, sizeof(path));
-    ret = (long)icda_exec(path);
-    if (ret >= 0) {
-        icda_write("exit=");
-        write_uint((uint64_t)ret);
+    pid = icda_spawn(path);
+    if ((long)pid >= 0) {
+        uint64_t code = icda_waitpid(pid);
+        if ((long)code < 0) {
+            icda_write("wait failed: ");
+            write_uint(pid);
+            icda_write("\n");
+            return 1;
+        }
+        icda_write("pid=");
+        write_uint(pid);
+        icda_write(" exit=");
+        write_uint(code);
         icda_write("\n");
         return 1;
     }
@@ -245,10 +323,19 @@ static int shell_try_exec_command(const char *cmd) {
     path[0] = 0;
     append_text(path, "/bin/", sizeof(path));
     append_text(path, cmd, sizeof(path));
-    ret = (long)icda_exec(path);
-    if (ret >= 0) {
-        icda_write("exit=");
-        write_uint((uint64_t)ret);
+    pid = icda_spawn(path);
+    if ((long)pid >= 0) {
+        uint64_t code = icda_waitpid(pid);
+        if ((long)code < 0) {
+            icda_write("wait failed: ");
+            write_uint(pid);
+            icda_write("\n");
+            return 1;
+        }
+        icda_write("pid=");
+        write_uint(pid);
+        icda_write(" exit=");
+        write_uint(code);
         icda_write("\n");
         return 1;
     }
@@ -280,6 +367,8 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "write")) { shell_write_file(arg); return; }
     if (str_eq(line, "stat")) { shell_stat(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
+    if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }
+    if (str_eq(line, "wait")) { shell_wait_pid(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line)) {
         icda_write("unknown command: ");

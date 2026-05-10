@@ -13,15 +13,6 @@
 extern uint8_t user_demo_start[];
 extern uint8_t user_demo_end[];
 
-volatile uint64_t user_return_rsp = 0;
-volatile uint64_t user_return_pending = 0;
-volatile uint64_t user_return_rbx = 0;
-volatile uint64_t user_return_rbp = 0;
-volatile uint64_t user_return_r12 = 0;
-volatile uint64_t user_return_r13 = 0;
-volatile uint64_t user_return_r14 = 0;
-volatile uint64_t user_return_r15 = 0;
-static uint64_t user_active_rsp0 = 0;
 static uint64_t user_exit_code = 0;
 
 #define ICX_MAGIC    0x31584349U
@@ -45,14 +36,6 @@ static void zero_bytes(char *dst, uint64_t size) {
     for (uint64_t i = 0; i < size; i++) {
         dst[i] = 0;
     }
-}
-
-static uint64_t alloc_kernel_entry_stack_top(void) {
-    uint64_t phys = pmm_alloc_contiguous(KERNEL_STACK_PAGES);
-    if (!phys) {
-        return 0;
-    }
-    return (uint64_t)PHYS_TO_VIRT(phys) + KERNEL_STACK_SIZE;
 }
 
 int user_prepare_address_space(process_t *proc) {
@@ -178,36 +161,34 @@ static int user_map_segment(process_t *proc, const char *image, uint64_t image_s
 }
 
 void user_request_exit_to_kernel(uint64_t code) {
+    thread_t *thread = sched_current_thread();
     process_t *proc = sched_current_process();
     if (proc) {
         proc->state = PROCESS_EXITED;
         proc->exit_code = code;
     }
+    if (thread) {
+        thread->state = THREAD_ZOMBIE;
+        thread->user_return_pending = 1;
+    }
+    if (proc && proc->parent && proc->parent->main_thread &&
+        proc->parent->main_thread->state == THREAD_BLOCKED) {
+        proc->parent->main_thread->state = THREAD_READY;
+        if (proc->parent->state == PROCESS_BLOCKED) {
+            proc->parent->state = PROCESS_READY;
+        }
+    }
     user_exit_code = code;
-    user_return_pending = 1;
 }
 
 uint64_t user_last_exit_code(void) {
     return user_exit_code;
 }
 
-static int user_run_image(process_t *user_proc, const void *image, uint64_t image_size) {
-    thread_t *current_thread = sched_current_thread();
-    process_t *saved_proc;
-    addr_space_t *saved_as;
-    uint64_t saved_rsp0;
-    uint64_t saved_return_rsp;
-    uint64_t saved_return_pending;
-    uint64_t saved_return_rbx;
-    uint64_t saved_return_rbp;
-    uint64_t saved_return_r12;
-    uint64_t saved_return_r13;
-    uint64_t saved_return_r14;
-    uint64_t saved_return_r15;
-    uint64_t entry_stack_top;
+static int user_load_image(process_t *user_proc, const void *image, uint64_t image_size, uint64_t *entry_rip_out) {
     uint64_t entry_rip;
 
-    if (!current_thread || !user_proc || !image) {
+    if (!user_proc || !image || !entry_rip_out) {
         return -1;
     }
 
@@ -229,7 +210,8 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
                 return -1;
             }
             entry_rip = USER_TEXT_BASE + hdr->entry_offset;
-            goto run_user_image;
+            *entry_rip_out = entry_rip;
+            return 0;
         }
     }
 
@@ -288,63 +270,56 @@ static int user_run_image(process_t *user_proc, const void *image, uint64_t imag
         return -1;
     }
 
-run_user_image:
-    saved_proc = current_thread->owner;
-    saved_as = saved_proc ? saved_proc->addr_space : vmm_kernel_address_space();
-    saved_rsp0 = user_active_rsp0 ? user_active_rsp0 : current_thread->kernel_stack_top;
-    entry_stack_top = alloc_kernel_entry_stack_top();
-    if (!entry_stack_top) {
-        return -1;
-    }
-    if (saved_proc && saved_proc->kind == PROCESS_USER) {
-        saved_proc->state = PROCESS_BLOCKED;
-    }
-    current_thread->owner = user_proc;
-    user_proc->state = PROCESS_RUNNING;
-    user_proc->exit_code = 0;
-    user_active_rsp0 = entry_stack_top;
-    tss_set_rsp0(entry_stack_top);
-    vmm_switch_address_space(user_proc->addr_space);
-    pf_set_current_as(user_proc->addr_space);
-    saved_return_rsp = user_return_rsp;
-    saved_return_pending = user_return_pending;
-    saved_return_rbx = user_return_rbx;
-    saved_return_rbp = user_return_rbp;
-    saved_return_r12 = user_return_r12;
-    saved_return_r13 = user_return_r13;
-    saved_return_r14 = user_return_r14;
-    saved_return_r15 = user_return_r15;
-    user_return_pending = 0;
-
-    user_enter(entry_rip, USER_STACK_TOP - 16);
-
-    user_return_rsp = saved_return_rsp;
-    user_return_pending = saved_return_pending;
-    user_return_rbx = saved_return_rbx;
-    user_return_rbp = saved_return_rbp;
-    user_return_r12 = saved_return_r12;
-    user_return_r13 = saved_return_r13;
-    user_return_r14 = saved_return_r14;
-    user_return_r15 = saved_return_r15;
-    vmm_switch_address_space(saved_as);
-    pf_set_current_as(saved_as);
-    current_thread->owner = saved_proc;
-    user_exit_code = user_proc->exit_code;
-    if (saved_proc && saved_proc->state != PROCESS_EXITED) {
-        saved_proc->state = PROCESS_RUNNING;
-    }
-    user_active_rsp0 = saved_rsp0;
-    tss_set_rsp0(saved_rsp0);
-    pmm_free_range(VIRT_TO_PHYS(entry_stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
-
+    *entry_rip_out = entry_rip;
     return 0;
 }
 
 int user_run_path(const char *path) {
+    uint64_t pid;
+    if (user_spawn_path(path, &pid) != 0) {
+        return -1;
+    }
+    return user_wait_pid(pid, &user_exit_code);
+}
+
+void user_thread_start(void) {
+    thread_t *thread = sched_current_thread();
+    process_t *proc = sched_current_process();
+
+    if (!thread || !proc || !thread->user_rip || !thread->user_rsp) {
+        if (thread) {
+            thread->state = THREAD_ZOMBIE;
+        }
+        if (proc) {
+            proc->state = PROCESS_EXITED;
+            proc->exit_code = (uint64_t)-1;
+        }
+        sched_yield();
+        for (;;) {
+            __asm__ volatile("hlt");
+        }
+    }
+
+    proc->state = PROCESS_RUNNING;
+    thread->user_return_pending = 0;
+    vmm_switch_address_space(proc->addr_space);
+    pf_set_current_as(proc->addr_space);
+    tss_set_rsp0(thread->kernel_stack_top);
+    user_enter(thread->user_rip, thread->user_rsp);
+    user_exit_code = proc->exit_code;
+    sched_yield();
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
+int user_spawn_path(const char *path, uint64_t *pid_out) {
     process_t *user_proc;
     process_t *current_proc = sched_current_process();
     const char *image;
     uint64_t image_size = 0;
+    uint64_t entry_rip = 0;
+    thread_t *thread;
 
     if (!path || !*path) {
         return -1;
@@ -360,17 +335,68 @@ int user_run_path(const char *path) {
         return -1;
     }
 
-    return user_run_image(user_proc, image, image_size);
+    user_proc->state = PROCESS_READY;
+    if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {
+        return -1;
+    }
+    thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
+    if (!thread) {
+        return -1;
+    }
+    if (pid_out) {
+        *pid_out = user_proc->pid;
+    }
+    return 0;
+}
+
+int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {
+    process_t *current = sched_current_process();
+    process_t *child = sched_find_process(pid);
+
+    if (!current || !child || child->parent != current) {
+        return -1;
+    }
+    if (child->state == PROCESS_REAPED) {
+        return -1;
+    }
+
+    while (child->state != PROCESS_EXITED) {
+        thread_t *thread = sched_current_thread();
+        if (!thread) {
+            return -1;
+        }
+        thread->state = THREAD_BLOCKED;
+        current->state = PROCESS_BLOCKED;
+        sched_yield();
+        if (child->state == PROCESS_REAPED) {
+            return -1;
+        }
+    }
+
+    if (exit_code_out) {
+        *exit_code_out = child->exit_code;
+    }
+    child->state = PROCESS_REAPED;
+    return 0;
 }
 
 int user_run_demo(void) {
     process_t *user_proc;
     uint64_t blob_size;
+    uint64_t entry_rip = 0;
+    thread_t *thread;
 
     user_proc = proc_create_empty(PROCESS_USER);
     if (!user_proc) {
         return -1;
     }
     blob_size = (uint64_t)(user_demo_end - user_demo_start);
-    return user_run_image(user_proc, user_demo_start, blob_size);
+    if (user_load_image(user_proc, user_demo_start, blob_size, &entry_rip) != 0) {
+        return -1;
+    }
+    thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
+    if (!thread) {
+        return -1;
+    }
+    return user_wait_pid(user_proc->pid, &user_exit_code);
 }

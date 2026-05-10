@@ -19,7 +19,8 @@ typedef enum {
     PROCESS_READY = 1,
     PROCESS_RUNNING = 2,
     PROCESS_BLOCKED = 3,
-    PROCESS_EXITED = 4
+    PROCESS_EXITED = 4,
+    PROCESS_REAPED = 5
 } process_state_t;
 
 typedef enum {
@@ -46,11 +47,21 @@ typedef struct process {
 typedef struct thread {
     uint64_t         kernel_rsp;
     uint64_t         tid;
-    thread_state_t   state;
+    uint64_t         state;
     process_t       *owner;
     uint64_t         kernel_stack_top;
     void           (*entry)(void);
     struct thread   *next;
+    uint64_t         user_rip;
+    uint64_t         user_rsp;
+    uint64_t         user_return_rsp;
+    uint64_t         user_return_rbx;
+    uint64_t         user_return_rbp;
+    uint64_t         user_return_r12;
+    uint64_t         user_return_r13;
+    uint64_t         user_return_r14;
+    uint64_t         user_return_r15;
+    uint64_t         user_return_pending;
 } thread_t;
 
 #endif
