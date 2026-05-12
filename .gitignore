@@ -63,3 +63,5 @@ kernel.iso
 isodir/
 qemu-smoke.log
 userspace/ticker.icx
+icda-disk.img
+qemu-serial.log

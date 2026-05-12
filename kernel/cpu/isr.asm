@@ -183,7 +183,9 @@ irq_common:
 
 extern syscall_handler
 extern current_thread_ptr
+extern user_thread_finish
 
+%define THREAD_KERNEL_STACK_TOP 32
 %define THREAD_USER_RETURN_RSP 72
 %define THREAD_USER_RETURN_RBX 80
 %define THREAD_USER_RETURN_RBP 88
@@ -239,15 +241,16 @@ syscall_common:
     cmp qword [rdx + THREAD_USER_RETURN_PENDING], 0
     je .sysret_user
     mov qword [rdx + THREAD_USER_RETURN_PENDING], 0
-    mov rbx, [rdx + THREAD_USER_RETURN_RBX]
-    mov rbp, [rdx + THREAD_USER_RETURN_RBP]
-    mov r12, [rdx + THREAD_USER_RETURN_R12]
-    mov r13, [rdx + THREAD_USER_RETURN_R13]
-    mov r14, [rdx + THREAD_USER_RETURN_R14]
-    mov r15, [rdx + THREAD_USER_RETURN_R15]
-    mov rsp, [rdx + THREAD_USER_RETURN_RSP]
-    sti
-    ret
+    mov rsp, [rdx + THREAD_KERNEL_STACK_TOP]
+    sub rsp, 8
+    mov qword [rsp], 0
+    mov ax, 0x10
+    mov ss, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    jmp user_thread_finish
 .sysret_user:
     iretq
 

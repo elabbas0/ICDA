@@ -3,6 +3,7 @@
 #include "../drivers/console/console.h"
 #include "../drivers/input/input.h"
 #include "../fs/vfs.h"
+#include "../fs/persistfs.h"
 #include "../proc/sched.h"
 #include "../proc/user.h"
 
@@ -140,8 +141,87 @@ static uint64_t sys_exit(uint64_t code) {
 }
 
 static uint64_t sys_input_read(void) {
-    int c = input_read_char();
-    return c < 0 ? (uint64_t)-1 : (uint64_t)(uint8_t)c;
+    int c;
+
+    while ((c = input_read_char()) < 0) {
+        sched_yield();
+    }
+    return (uint64_t)(uint8_t)c;
+}
+
+static void sys_line_show_cursor(int *visible) {
+    if (!*visible) {
+        console_write("_", CONSOLE_STYLE_INFO);
+        *visible = 1;
+    }
+}
+
+static void sys_line_hide_cursor(int *visible) {
+    if (*visible) {
+        console_backspace();
+        *visible = 0;
+    }
+}
+
+static uint64_t sys_input_readline(char *buf, uint64_t cap) {
+    uint64_t len = 0;
+    int visible = 0;
+
+    if (!buf || cap == 0) {
+        return (uint64_t)-1;
+    }
+
+    buf[0] = '\0';
+    sys_line_show_cursor(&visible);
+
+    for (;;) {
+        int c;
+        char out[2];
+
+        while ((c = input_read_char()) < 0) {
+            sched_yield();
+        }
+
+        sys_line_hide_cursor(&visible);
+
+        if (c == '\r' || c == '\n') {
+            console_write("\n", CONSOLE_STYLE_INFO);
+            buf[len] = '\0';
+            return len;
+        }
+
+        if (c == '\b') {
+            if (len > 0) {
+                len--;
+                buf[len] = '\0';
+                console_backspace();
+                if (len == 0) {
+                    sys_line_show_cursor(&visible);
+                }
+            } else {
+                sys_line_show_cursor(&visible);
+            }
+            continue;
+        }
+
+        if (c == '\t') {
+            c = ' ';
+        }
+        if (c < 32 || c > 126) {
+            sys_line_show_cursor(&visible);
+            continue;
+        }
+        if (len + 1 >= cap) {
+            sys_line_show_cursor(&visible);
+            continue;
+        }
+
+        buf[len++] = (char)c;
+        buf[len] = '\0';
+        out[0] = (char)c;
+        out[1] = '\0';
+        console_write(out, CONSOLE_STYLE_INFO);
+    }
 }
 
 static uint64_t sys_getcwd(char *buf, uint64_t cap) {
@@ -263,11 +343,15 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
     }
 
     buf[0] = '\0';
-    out = append_text(buf, out, cap, "pid ppid kind state exit\n");
+    out = append_text(buf, out, cap, "pid ppid sid pgid kind state exit\n");
     for (proc = sched_first_process(); proc; proc = proc->next_all) {
         out = append_uint(buf, out, cap, proc->pid);
         out = append_text(buf, out, cap, " ");
         out = append_uint(buf, out, cap, proc->parent ? proc->parent->pid : 0);
+        out = append_text(buf, out, cap, " ");
+        out = append_uint(buf, out, cap, proc->session_id);
+        out = append_text(buf, out, cap, " ");
+        out = append_uint(buf, out, cap, proc->process_group_id);
         out = append_text(buf, out, cap, " ");
         out = append_text(buf, out, cap, proc->kind == PROCESS_USER ? "user" : "kernel");
         out = append_text(buf, out, cap, " ");
@@ -328,10 +412,28 @@ static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
 
     out->pid = proc->pid;
     out->ppid = proc->parent ? proc->parent->pid : 0;
+    out->sid = proc->session_id;
+    out->pgid = proc->process_group_id;
     out->kind = (uint64_t)proc->kind;
     out->state = (uint64_t)proc->state;
     out->exit_code = proc->exit_code;
     return 0;
+}
+
+static uint64_t sys_kill(uint64_t pid, uint64_t exit_code) {
+    return sched_kill_process(pid, exit_code) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_suspend(uint64_t pid) {
+    return sched_suspend_process(pid) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_resume(uint64_t pid) {
+    return sched_resume_process(pid) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_sync(void) {
+    return vfs_sync() == 0 ? 0 : (uint64_t)-1;
 }
 
 void syscall_init(void) {
@@ -388,6 +490,16 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_sleep(regs->rdi);
         case SYS_PROC_INFO:
             return sys_proc_info(regs->rdi, (syscall_proc_info_t *)(uintptr_t)regs->rsi);
+        case SYS_KILL:
+            return sys_kill(regs->rdi, regs->rsi);
+        case SYS_SUSPEND:
+            return sys_suspend(regs->rdi);
+        case SYS_RESUME:
+            return sys_resume(regs->rdi);
+        case SYS_INPUT_READLINE:
+            return sys_input_readline((char *)(uintptr_t)regs->rdi, regs->rsi);
+        case SYS_SYNC:
+            return sys_sync();
         default:
             return (uint64_t)-1;
     }

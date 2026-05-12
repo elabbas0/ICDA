@@ -10,8 +10,9 @@
 #define SHELL_AUTOTEST 0
 #endif
 
-#define PROC_STATE_EXITED 4
-#define PROC_STATE_REAPED 5
+#define PROC_STATE_STOPPED 4
+#define PROC_STATE_EXITED 5
+#define PROC_STATE_REAPED 6
 
 typedef struct {
     uint64_t pid;
@@ -20,7 +21,6 @@ typedef struct {
     char command[SHELL_JOB_CMD_CAP];
 } shell_job_t;
 
-static int shell_cursor_visible = 0;
 static shell_job_t shell_job_table[SHELL_JOB_CAP];
 
 static uint64_t str_len(const char *s) {
@@ -60,25 +60,6 @@ static void copy_text(char *dst, const char *src, uint64_t cap) {
     dst[i] = 0;
 }
 
-static void write_char(char c) {
-    char buf[2];
-    buf[0] = c;
-    buf[1] = 0;
-    icda_write(buf);
-}
-
-static void shell_hide_cursor(void) {
-    if (!shell_cursor_visible) return;
-    icda_backspace();
-    shell_cursor_visible = 0;
-}
-
-static void shell_show_cursor(void) {
-    if (shell_cursor_visible) return;
-    icda_write("_");
-    shell_cursor_visible = 1;
-}
-
 static void write_uint(uint64_t v) {
     char buf[32];
     uint64_t i = sizeof(buf) - 1;
@@ -114,8 +95,9 @@ static const char *proc_state_name(uint64_t state) {
         case 1: return "ready";
         case 2: return "running";
         case 3: return "blocked";
-        case 4: return "exited";
-        case 5: return "reaped";
+        case 4: return "stopped";
+        case 5: return "exited";
+        case 6: return "reaped";
         default: return "unknown";
     }
 }
@@ -197,11 +179,10 @@ static void print_prompt(void) {
     icda_write("icda:");
     icda_write(cwd);
     icda_write(" ");
-    shell_show_cursor();
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat run spawn bg fg wait waitall sleep yield exit\n");
+    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
 }
 
 static void shell_pwd(void) {
@@ -403,6 +384,14 @@ static void shell_yield_once(void) {
     icda_yield();
 }
 
+static void shell_sync(void) {
+    if ((long)icda_sync() < 0) {
+        icda_write("sync failed\n");
+        return;
+    }
+    icda_write("synced\n");
+}
+
 static void shell_sleep_ticks(const char *arg) {
     uint64_t ticks = 0;
 
@@ -427,6 +416,10 @@ static void shell_jobs(void) {
         any = 1;
         icda_write("pid=");
         write_uint(info.pid);
+        icda_write(" sid=");
+        write_uint(info.sid);
+        icda_write(" pgid=");
+        write_uint(info.pgid);
         icda_write(" state=");
         icda_write(proc_state_name(info.state));
         icda_write(" exit=");
@@ -467,13 +460,84 @@ static void shell_wait_all(void) {
 }
 
 static void shell_fg(const char *arg) {
+    uint64_t pid = 0;
+    icda_proc_info_t info;
+
+    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
+        icda_write("usage: fg <pid>\n");
+        return;
+    }
+    if ((long)icda_proc_info(pid, &info) >= 0 && info.state == PROC_STATE_STOPPED) {
+        if ((long)icda_resume(pid) < 0) {
+            icda_write("resume failed: ");
+            write_uint(pid);
+            icda_write("\n");
+            return;
+        }
+    }
     shell_wait_pid(arg);
+}
+
+static void shell_stop_pid(const char *arg) {
+    uint64_t pid = 0;
+
+    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
+        icda_write("usage: stop <pid>\n");
+        return;
+    }
+    if ((long)icda_suspend(pid) < 0) {
+        icda_write("stop failed: ");
+        write_uint(pid);
+        icda_write("\n");
+        return;
+    }
+    icda_write("stopped pid=");
+    write_uint(pid);
+    icda_write("\n");
+}
+
+static void shell_resume_pid(const char *arg) {
+    uint64_t pid = 0;
+
+    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
+        icda_write("usage: resume <pid>\n");
+        return;
+    }
+    if ((long)icda_resume(pid) < 0) {
+        icda_write("resume failed: ");
+        write_uint(pid);
+        icda_write("\n");
+        return;
+    }
+    icda_write("resumed pid=");
+    write_uint(pid);
+    icda_write("\n");
+}
+
+static void shell_kill_pid(const char *arg) {
+    uint64_t pid = 0;
+
+    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
+        icda_write("usage: kill <pid>\n");
+        return;
+    }
+    if ((long)icda_kill(pid, 143) < 0) {
+        icda_write("kill failed: ");
+        write_uint(pid);
+        icda_write("\n");
+        return;
+    }
+    icda_write("killed pid=");
+    write_uint(pid);
+    icda_write("\n");
 }
 
 #if SHELL_AUTOTEST
 static void shell_autotest(void) {
     uint64_t pid1;
     uint64_t pid2;
+    uint64_t pid3;
+    uint64_t code;
 
     icda_write("[selftest] spawn ticker x2\n");
     pid1 = icda_spawn("/apps/ticker.app");
@@ -489,7 +553,39 @@ static void shell_autotest(void) {
     icda_write("\n");
     shell_add_job(pid1, "/apps/ticker.app");
     shell_add_job(pid2, "/apps/ticker.app");
-    icda_sleep(12);
+    icda_sleep(3);
+    if ((long)icda_suspend(pid2) < 0) {
+        icda_write("[selftest] suspend failed\n");
+        return;
+    }
+    icda_write("[selftest] stopped pid2\n");
+    icda_sleep(6);
+    if ((long)icda_resume(pid2) < 0) {
+        icda_write("[selftest] resume failed\n");
+        return;
+    }
+    icda_write("[selftest] resumed pid2\n");
+    pid3 = icda_spawn("/apps/ticker.app");
+    if ((long)pid3 < 0) {
+        icda_write("[selftest] spawn pid3 failed\n");
+        return;
+    }
+    shell_add_job(pid3, "/apps/ticker.app");
+    icda_sleep(1);
+    if ((long)icda_kill(pid3, 143) < 0) {
+        icda_write("[selftest] kill failed\n");
+        return;
+    }
+    code = icda_waitpid(pid3);
+    if ((long)code < 0) {
+        icda_write("[selftest] wait pid3 failed\n");
+        return;
+    }
+    icda_write("[selftest] pid3 exit=");
+    write_uint(code);
+    icda_write("\n");
+    shell_remove_job(pid3);
+    icda_sleep(10);
     shell_poll_jobs(1);
     shell_wait_all();
     icda_write("[selftest] done\n");
@@ -583,12 +679,16 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "touch")) { shell_touch(arg); return; }
     if (str_eq(line, "write")) { shell_write_file(arg); return; }
     if (str_eq(line, "stat")) { shell_stat(arg); return; }
+    if (str_eq(line, "sync")) { shell_sync(); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }
     if (str_eq(line, "bg")) { shell_spawn_path(arg); return; }
     if (str_eq(line, "fg")) { shell_fg(arg); return; }
     if (str_eq(line, "wait")) { shell_wait_pid(arg); return; }
     if (str_eq(line, "waitall")) { shell_wait_all(); return; }
+    if (str_eq(line, "stop")) { shell_stop_pid(arg); return; }
+    if (str_eq(line, "resume")) { shell_resume_pid(arg); return; }
+    if (str_eq(line, "kill")) { shell_kill_pid(arg); return; }
     if (str_eq(line, "sleep")) { shell_sleep_ticks(arg); return; }
     if (str_eq(line, "yield")) { shell_yield_once(); return; }
     if (str_eq(line, "exit")) icda_exit(0);
@@ -608,42 +708,11 @@ uint64_t shell_main(void) {
     shell_autotest();
 #endif
     for (;;) {
-        uint64_t len = 0;
         shell_poll_jobs(1);
         print_prompt();
-        for (;;) {
-            long ch = icda_read_char();
-            if (ch < 0) continue;
-            shell_hide_cursor();
-            if (ch == '\r' || ch == '\n') {
-                icda_write("\n");
-                line[len] = 0;
-                break;
-            }
-            if (ch == '\b') {
-                if (len > 0) {
-                    len--;
-                    line[len] = 0;
-                    icda_backspace();
-                }
-                shell_show_cursor();
-                continue;
-            }
-            if (ch == '\t') ch = ' ';
-            if (ch < 32 || ch > 126) {
-                shell_show_cursor();
-                continue;
-            }
-            if (len + 1 >= sizeof(line)) {
-                shell_show_cursor();
-                continue;
-            }
-            line[len++] = (char)ch;
-            line[len] = 0;
-            write_char((char)ch);
-            shell_show_cursor();
+        if ((long)icda_read_line(line, sizeof(line)) < 0) {
+            continue;
         }
         shell_dispatch(line);
-        shell_cursor_visible = 0;
     }
 }

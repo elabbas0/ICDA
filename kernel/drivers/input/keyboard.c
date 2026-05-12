@@ -1,8 +1,7 @@
 #include "keyboard.h"
 
 #include "../device.h"
-#include "../../cpu/irq_controller.h"
-#include "../../cpu/isr.h"
+#include "../../proc/sched.h"
 
 #include <stdint.h>
 
@@ -110,13 +109,8 @@ static char translate_scancode(uint8_t scancode) {
     return c;
 }
 
-static void keyboard_irq_handler(struct registers *regs) {
-    uint8_t scancode;
+static void keyboard_handle_scancode(uint8_t scancode) {
     char c;
-
-    (void)regs;
-
-    scancode = inb(KEYBOARD_DATA_PORT);
 
     if (scancode == 0xE0 || scancode == 0xE1) {
         extended_prefix = 1;
@@ -150,6 +144,14 @@ static void keyboard_irq_handler(struct registers *regs) {
     c = translate_scancode(scancode);
     if (c) {
         queue_push(c);
+        sched_wake_input_waiters();
+    }
+}
+
+static void keyboard_poll_hardware(void) {
+    while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
+        uint8_t scancode = inb(KEYBOARD_DATA_PORT);
+        keyboard_handle_scancode(scancode);
     }
 }
 
@@ -175,18 +177,18 @@ void keyboard_init(void) {
     keyboard_device.next = 0;
     device_register(&keyboard_device);
 
-    irq_register(1, keyboard_irq_handler);
-    irq_controller_unmask(1);
-
     outb(KEYBOARD_STATUS_PORT, 0xAE);
 }
 
 int keyboard_has_char(void) {
+    keyboard_poll_hardware();
     return queue_head != queue_tail;
 }
 
 int keyboard_read_char(void) {
     char c;
+
+    keyboard_poll_hardware();
 
     if (queue_head == queue_tail) {
         return -1;

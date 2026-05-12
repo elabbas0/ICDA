@@ -19,21 +19,24 @@ typedef enum {
     PROCESS_READY = 1,
     PROCESS_RUNNING = 2,
     PROCESS_BLOCKED = 3,
-    PROCESS_EXITED = 4,
-    PROCESS_REAPED = 5
+    PROCESS_STOPPED = 4,
+    PROCESS_EXITED = 5,
+    PROCESS_REAPED = 6
 } process_state_t;
 
 typedef enum {
     THREAD_READY   = 0,
     THREAD_RUNNING = 1,
     THREAD_BLOCKED = 2,
-    THREAD_ZOMBIE  = 3
+    THREAD_STOPPED = 3,
+    THREAD_ZOMBIE  = 4
 } thread_state_t;
 
 typedef enum {
     THREAD_BLOCK_NONE = 0,
     THREAD_BLOCK_SLEEP = 1,
-    THREAD_BLOCK_WAIT_CHILD = 2
+    THREAD_BLOCK_WAIT_CHILD = 2,
+    THREAD_BLOCK_INPUT = 3
 } thread_block_reason_t;
 
 struct thread;
@@ -43,6 +46,8 @@ typedef struct process {
     process_kind_t   kind;
     process_state_t  state;
     uint64_t         exit_code;
+    uint64_t         session_id;
+    uint64_t         process_group_id;
     addr_space_t    *addr_space;
     struct process  *parent;
     struct thread   *main_thread;

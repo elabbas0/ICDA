@@ -36,6 +36,10 @@ static inline int frame_used(uint64_t frame) {
     return (bitmap[WORD_INDEX(frame)] >> BIT_INDEX(frame)) & 1;
 }
 
+static uint64_t align_up_u64(uint64_t value, uint64_t align) {
+    return (value + align - 1) & ~(align - 1);
+}
+
 static void mark_used(uint64_t addr, uint64_t size) {
     uint64_t first = ADDR_TO_FRAME(addr);
     uint64_t last  = ADDR_TO_FRAME(addr + size + PAGE_SIZE - 1);
@@ -116,8 +120,13 @@ void pmm_init(void *multiboot_info) {
 
     uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
     uint64_t bitmap_bytes = bitmap_words * 8;
+    uint64_t multiboot_end = (uint64_t)multiboot_info + info->total_size;
+    uint64_t bitmap_base = (uint64_t)kernel_end;
+    if (multiboot_end > bitmap_base)
+        bitmap_base = multiboot_end;
+    bitmap_base = align_up_u64(bitmap_base, 4096);
 
-    bitmap      = (uint64_t *)kernel_end;
+    bitmap      = (uint64_t *)bitmap_base;
     used_frames = total_frames;
 
     // mark everything used initially

@@ -27,12 +27,19 @@ typedef enum {
     SYS_WAITPID       = 17,
     SYS_YIELD         = 18,
     SYS_SLEEP         = 19,
-    SYS_PROC_INFO     = 20
+    SYS_PROC_INFO     = 20,
+    SYS_KILL          = 21,
+    SYS_SUSPEND       = 22,
+    SYS_RESUME        = 23,
+    SYS_INPUT_READLINE = 24,
+    SYS_SYNC          = 25
 } syscall_number_t;
 
 typedef struct {
     uint64_t pid;
     uint64_t ppid;
+    uint64_t sid;
+    uint64_t pgid;
     uint64_t kind;
     uint64_t state;
     uint64_t exit_code;

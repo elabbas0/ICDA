@@ -19,5 +19,10 @@ process_t *sched_find_process(uint64_t pid);
 const char *sched_process_state_name(process_state_t state);
 uint64_t sched_ticks(void);
 void sched_sleep(uint64_t ticks);
+void sched_wait_input(void);
+void sched_wake_input_waiters(void);
+int sched_suspend_process(uint64_t pid);
+int sched_resume_process(uint64_t pid);
+int sched_kill_process(uint64_t pid, uint64_t exit_code);
 
 #endif

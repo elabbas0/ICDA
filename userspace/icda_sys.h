@@ -24,7 +24,12 @@ enum {
     SYS_WAITPID       = 17,
     SYS_YIELD         = 18,
     SYS_SLEEP         = 19,
-    SYS_PROC_INFO     = 20
+    SYS_PROC_INFO     = 20,
+    SYS_KILL          = 21,
+    SYS_SUSPEND       = 22,
+    SYS_RESUME        = 23,
+    SYS_INPUT_READLINE = 24,
+    SYS_SYNC          = 25
 };
 
 typedef struct {
@@ -39,6 +44,8 @@ typedef struct {
 typedef struct {
     uint64_t pid;
     uint64_t ppid;
+    uint64_t sid;
+    uint64_t pgid;
     uint64_t kind;
     uint64_t state;
     uint64_t exit_code;
@@ -88,6 +95,11 @@ static inline uint64_t icda_waitpid(uint64_t pid) { return sys_call1(SYS_WAITPID
 static inline void icda_yield(void) { (void)sys_call0(SYS_YIELD); }
 static inline void icda_sleep(uint64_t ticks) { (void)sys_call1(SYS_SLEEP, ticks); }
 static inline uint64_t icda_proc_info(uint64_t pid, icda_proc_info_t *out) { return sys_call2(SYS_PROC_INFO, pid, (uint64_t)(uintptr_t)out); }
+static inline uint64_t icda_kill(uint64_t pid, uint64_t exit_code) { return sys_call2(SYS_KILL, pid, exit_code); }
+static inline uint64_t icda_suspend(uint64_t pid) { return sys_call1(SYS_SUSPEND, pid); }
+static inline uint64_t icda_resume(uint64_t pid) { return sys_call1(SYS_RESUME, pid); }
+static inline uint64_t icda_read_line(char *buf, uint64_t cap) { return sys_call2(SYS_INPUT_READLINE, (uint64_t)(uintptr_t)buf, cap); }
+static inline uint64_t icda_sync(void) { return sys_call0(SYS_SYNC); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

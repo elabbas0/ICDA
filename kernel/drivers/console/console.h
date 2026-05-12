@@ -13,6 +13,7 @@ typedef enum {
 } console_style_t;
 
 void console_init(int has_framebuffer);
+void console_set_serial_mirror(int enabled);
 void console_clear(void);
 void console_write_char(char c, console_style_t style);
 void console_write(const char *str, console_style_t style);

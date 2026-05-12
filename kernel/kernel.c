@@ -7,6 +7,7 @@
 #include "drivers/input/keyboard.h"
 #include "drivers/serial/serial.h"
 #include "fs/initramfs.h"
+#include "fs/persistfs.h"
 #include "fs/vfs.h"
 #include "syscall/syscall.h"
 #include "tty/tty.h"
@@ -23,6 +24,10 @@
 
 #include "proc/sched.h"
 #include "proc/user.h"
+
+#ifndef SERIAL_SHELL_MIRROR
+#define SERIAL_SHELL_MIRROR 0
+#endif
 
 static void timer_handler(struct registers *regs) {
     schedule(regs);
@@ -138,12 +143,22 @@ void kernel_main(void *multiboot_info) {
     if (initramfs_populate() != 0) {
         boot_halt("storage", "initramfs could not populate the live filesystem");
     }
+    (void)vfs_mkdir(vfs_root(), "/home");
     boot_prefix("storage");
     console_write("ramfs online, seeded files=", CONSOLE_STYLE_INFO);
     console_write_dec64(initramfs_file_count(), CONSOLE_STYLE_INFO);
     console_write(" bytes=", CONSOLE_STYLE_MUTED);
     console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
+
+    if (persistfs_init() == 0 && persistfs_present()) {
+        boot_prefix("storage");
+        console_write("persistent disk online, loaded entries=", CONSOLE_STYLE_INFO);
+        console_write_dec64(persistfs_loaded_entries(), CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
+    } else {
+        boot_line("storage", "persistent disk unavailable, continuing with ramfs only");
+    }
 
     syscall_init();
     boot_line("syscall", "int 0x80 dispatcher armed");
@@ -153,30 +168,26 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_INFO);
         boot_halt("tty", "interactive console failed to start");
     }
-    irq_controller_unmask(0);
-    __asm__ volatile("sti");
     console_clear();
 
-    if (user_run_path("/apps/shell.app") != 0) {
-        console_write("user shell launch failed, falling back to kernel console\n", CONSOLE_STYLE_WARN);
-        if (tty_init() != 0) {
-            boot_halt("tty", "fallback kernel console failed to restart");
-        }
-        console_write("\n", CONSOLE_STYLE_INFO);
-    } else {
-        console_write("user shell exited, falling back to kernel console\n", CONSOLE_STYLE_WARN);
-        if (tty_init() != 0) {
-            boot_halt("tty", "fallback kernel console failed to restart");
-        }
-        console_write("\n", CONSOLE_STYLE_INFO);
+#if !SERIAL_SHELL_MIRROR
+    if (has_fb) {
+        console_set_serial_mirror(0);
     }
-
+#endif
+    {
+        int shell_rc = user_run_path("/apps/shell.app");
+        console_write("\n", CONSOLE_STYLE_INFO);
+        if (shell_rc < 0) {
+            boot_line("shell", "userspace shell failed to start, falling back to kernel console");
+        } else {
+            boot_prefix("shell");
+            console_write("userspace shell exited rc=", CONSOLE_STYLE_INFO);
+            console_write_dec64((uint64_t)shell_rc, CONSOLE_STYLE_INFO);
+            console_write(", returning to kernel console\n", CONSOLE_STYLE_INFO);
+        }
+    }
     while (1) {
         tty_poll();
-        if (input_has_char()) {
-            continue;
-        }
-
-        __asm__ volatile("hlt");
     }
 }

@@ -20,6 +20,7 @@ static vfs_node_t *vfs_root_node = 0;
 static uint64_t vfs_next_inode = 1;
 static uint64_t vfs_tick = 1;
 static const uint64_t VFS_NAME_CAP = 63;
+static int (*vfs_sync_hook)(void) = 0;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -246,6 +247,17 @@ vfs_node_t *vfs_root(void) {
     return vfs_root_node;
 }
 
+void vfs_set_sync_hook(int (*hook)(void)) {
+    vfs_sync_hook = hook;
+}
+
+int vfs_sync(void) {
+    if (!vfs_sync_hook) {
+        return 0;
+    }
+    return vfs_sync_hook();
+}
+
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path) {
     vfs_node_t *node = (*path == '/') ? vfs_root_node : cwd;
     char part[64];
@@ -344,7 +356,7 @@ int vfs_mkdir(vfs_node_t *cwd, const char *path) {
     }
     append_child(parent, node);
     parent->modified = vfs_tick++;
-    return 0;
+    return vfs_sync();
 }
 
 int vfs_create(vfs_node_t *cwd, const char *path) {
@@ -367,7 +379,7 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
     }
     append_child(parent, node);
     parent->modified = vfs_tick++;
-    return 0;
+    return vfs_sync();
 }
 
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size) {
@@ -400,7 +412,7 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     node->data = next;
     node->size = size;
     node->modified = vfs_tick++;
-    return 0;
+    return vfs_sync();
 }
 
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
@@ -447,6 +459,64 @@ int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
     node->size = size;
     node->readonly = 1;
     node->modified = vfs_tick++;
+    return 0;
+}
+
+int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char *data, uint64_t size,
+                    uint64_t inode, uint64_t created, uint64_t modified) {
+    char leaf[64];
+    vfs_node_t *parent;
+    vfs_node_t *node;
+
+    if (!vfs_root_node || !path || !*path) {
+        return -1;
+    }
+
+    parent = resolve_parent(vfs_root_node, path, leaf, sizeof(leaf), 1);
+    if (!parent || !valid_name(leaf)) {
+        return -1;
+    }
+
+    node = find_child(parent, leaf);
+    if (!node) {
+        node = new_node(leaf, type, readonly);
+        if (!node) {
+            return -1;
+        }
+        append_child(parent, node);
+    } else if (node->type != type) {
+        return -1;
+    }
+
+    if (type == VFS_NODE_FILE) {
+        char *next = (char *)kmalloc((size_t)(size + 1));
+        if (!next) {
+            return -1;
+        }
+        if (size) {
+            copy_bytes(next, data, size);
+        }
+        next[size] = '\0';
+        if (node->data) {
+            kfree(node->data);
+        }
+        node->data = next;
+        node->size = size;
+    }
+
+    node->readonly = readonly;
+    node->inode = inode;
+    node->created = created;
+    node->modified = modified;
+    if (node->inode >= vfs_next_inode) {
+        vfs_next_inode = node->inode + 1;
+    }
+    if (node->modified >= vfs_tick) {
+        vfs_tick = node->modified + 1;
+    }
+    if (node->created >= vfs_tick) {
+        vfs_tick = node->created + 1;
+    }
     return 0;
 }
 
@@ -513,4 +583,28 @@ const char *vfs_node_name(vfs_node_t *node) {
 
 uint8_t vfs_node_type(vfs_node_t *node) {
     return node ? node->type : 0;
+}
+
+uint8_t vfs_node_readonly(vfs_node_t *node) {
+    return node ? node->readonly : 1;
+}
+
+uint64_t vfs_node_size(vfs_node_t *node) {
+    return node ? node->size : 0;
+}
+
+uint64_t vfs_node_inode(vfs_node_t *node) {
+    return node ? node->inode : 0;
+}
+
+uint64_t vfs_node_created(vfs_node_t *node) {
+    return node ? node->created : 0;
+}
+
+uint64_t vfs_node_modified(vfs_node_t *node) {
+    return node ? node->modified : 0;
+}
+
+const char *vfs_node_data(vfs_node_t *node) {
+    return (node && node->data) ? node->data : "";
 }

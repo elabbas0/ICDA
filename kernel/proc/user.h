@@ -15,6 +15,7 @@ void user_request_exit_to_kernel(uint64_t code);
 uint64_t user_last_exit_code(void);
 int user_run_demo(void);
 void user_thread_start(void);
+__attribute__((noreturn)) void user_thread_finish(void);
 void user_enter(uint64_t rip, uint64_t rsp);
 
 #endif

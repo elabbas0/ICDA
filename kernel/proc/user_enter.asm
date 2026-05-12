@@ -32,7 +32,6 @@ user_enter:
     push qword (GDT_USER_DATA | 3)
     push rsi
     pushfq
-    or qword [rsp], 0x200
     push qword (GDT_USER_CODE | 3)
     push rdi
     iretq

@@ -12,6 +12,7 @@ extern void user_thread_start(void);
 static void kthread_trampoline(void);
 
 thread_t *current_thread_ptr = NULL;
+static thread_t *idle_thread_ptr = NULL;
 static process_t *process_list = NULL;
 static uint64_t next_pid = 0;
 static uint64_t next_tid = 0;
@@ -67,6 +68,31 @@ static uint64_t thread_entry_stack_top(const thread_t *thread) {
     return thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top;
 }
 
+static int sched_can_control(process_t *actor, process_t *target) {
+    if (!actor || !target) {
+        return 0;
+    }
+    if (target->kind != PROCESS_USER) {
+        return 0;
+    }
+    if (target->state == PROCESS_REAPED) {
+        return 0;
+    }
+    return actor->session_id == target->session_id;
+}
+
+static void sched_wake_parent_if_waiting(process_t *proc) {
+    if (proc && proc->parent && proc->parent->main_thread &&
+        proc->parent->main_thread->state == THREAD_BLOCKED) {
+        proc->parent->main_thread->state = THREAD_READY;
+        proc->parent->main_thread->block_reason = THREAD_BLOCK_NONE;
+        proc->parent->main_thread->wake_tick = 0;
+        if (proc->parent->state == PROCESS_BLOCKED) {
+            proc->parent->state = PROCESS_READY;
+        }
+    }
+}
+
 static void wake_blocked_threads(void) {
     process_t *proc = process_list;
 
@@ -76,6 +102,25 @@ static void wake_blocked_threads(void) {
             thread->state == THREAD_BLOCKED &&
             thread->block_reason == THREAD_BLOCK_SLEEP &&
             thread->wake_tick <= uptime_ticks) {
+            thread->state = THREAD_READY;
+            thread->block_reason = THREAD_BLOCK_NONE;
+            thread->wake_tick = 0;
+            if (proc->state == PROCESS_BLOCKED) {
+                proc->state = PROCESS_READY;
+            }
+        }
+        proc = proc->next_all;
+    }
+}
+
+void sched_wake_input_waiters(void) {
+    process_t *proc = process_list;
+
+    while (proc) {
+        thread_t *thread = proc->main_thread;
+        if (thread &&
+            thread->state == THREAD_BLOCKED &&
+            thread->block_reason == THREAD_BLOCK_INPUT) {
             thread->state = THREAD_READY;
             thread->block_reason = THREAD_BLOCK_NONE;
             thread->wake_tick = 0;
@@ -139,6 +184,8 @@ process_t *proc_create_empty(process_kind_t kind) {
     proc->exit_code = 0;
     proc->addr_space = vmm_kernel_address_space();
     proc->parent = sched_current_process();
+    proc->session_id = proc->parent ? proc->parent->session_id : proc->pid;
+    proc->process_group_id = proc->pid;
     proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
     proc->main_thread = NULL;
     register_process(proc);
@@ -169,6 +216,8 @@ void sched_init(void) {
     bootstrap_proc->kind = PROCESS_KERNEL;
     bootstrap_proc->state = PROCESS_RUNNING;
     bootstrap_proc->exit_code = 0;
+    bootstrap_proc->session_id = bootstrap_proc->pid;
+    bootstrap_proc->process_group_id = bootstrap_proc->pid;
     bootstrap_proc->addr_space = vmm_kernel_address_space();
     bootstrap_proc->main_thread = bootstrap_thread;
     bootstrap_proc->cwd = vfs_root();
@@ -183,6 +232,8 @@ void sched_init(void) {
     idle_proc->kind = PROCESS_KERNEL;
     idle_proc->state = PROCESS_READY;
     idle_proc->exit_code = 0;
+    idle_proc->session_id = bootstrap_proc->session_id;
+    idle_proc->process_group_id = idle_proc->pid;
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
     idle_proc->cwd = vfs_root();
@@ -192,6 +243,7 @@ void sched_init(void) {
     idle_thread->state = THREAD_READY;
     idle_thread->owner = idle_proc;
     prepare_kernel_thread_stack(idle_thread, idle_stack_top, idle_thread_main);
+    idle_thread_ptr = idle_thread;
 
     bootstrap_thread->next = idle_thread;
     idle_thread->next = bootstrap_thread;
@@ -202,8 +254,8 @@ void sched_init(void) {
 }
 
 static void kthread_trampoline(void) {
-    __asm__ volatile("sti");
-    sched_current_thread()->entry();
+    thread_t *thread = sched_current_thread();
+    thread->entry();
     while (1) {
         __asm__ volatile("hlt");
     }
@@ -279,6 +331,7 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
 static void schedule_inner(int force) {
     thread_t *next;
     thread_t *prev;
+    thread_t *candidate_idle = 0;
     int laps = 0;
 
     if (!current_thread_ptr) {
@@ -290,11 +343,22 @@ static void schedule_inner(int force) {
     }
 
     next = current_thread_ptr->next;
-    while (next->state != THREAD_READY && next->state != THREAD_RUNNING) {
+    while (1) {
+        if ((next->state == THREAD_READY || next->state == THREAD_RUNNING) && next != idle_thread_ptr) {
+            break;
+        }
+        if ((next->state == THREAD_READY || next->state == THREAD_RUNNING) && next == idle_thread_ptr) {
+            candidate_idle = next;
+        }
         next = next->next;
         if (++laps > 1024) {
-            return;
+            next = candidate_idle;
+            break;
         }
+    }
+
+    if (!next) {
+        return;
     }
 
     if (next == current_thread_ptr) {
@@ -357,6 +421,23 @@ void sched_sleep(uint64_t ticks) {
     schedule_inner(1);
 }
 
+void sched_wait_input(void) {
+    thread_t *thread = sched_current_thread();
+    process_t *proc = sched_current_process();
+
+    if (!thread) {
+        return;
+    }
+
+    thread->wake_tick = 0;
+    thread->block_reason = THREAD_BLOCK_INPUT;
+    thread->state = THREAD_BLOCKED;
+    if (proc && proc->state != PROCESS_EXITED && proc->state != PROCESS_REAPED && proc->state != PROCESS_STOPPED) {
+        proc->state = PROCESS_BLOCKED;
+    }
+    schedule_inner(1);
+}
+
 thread_t *sched_current_thread(void) {
     return current_thread_ptr;
 }
@@ -390,6 +471,8 @@ const char *sched_process_state_name(process_state_t state) {
             return "running";
         case PROCESS_BLOCKED:
             return "blocked";
+        case PROCESS_STOPPED:
+            return "stopped";
         case PROCESS_EXITED:
             return "exited";
         case PROCESS_REAPED:
@@ -397,4 +480,91 @@ const char *sched_process_state_name(process_state_t state) {
         default:
             return "unknown";
     }
+}
+
+int sched_suspend_process(uint64_t pid) {
+    process_t *actor = sched_current_process();
+    process_t *target = sched_find_process(pid);
+    thread_t *thread;
+
+    if (!sched_can_control(actor, target) || target == actor) {
+        return -1;
+    }
+    if (target->state == PROCESS_EXITED || target->state == PROCESS_REAPED || target->state == PROCESS_STOPPED) {
+        return -1;
+    }
+
+    thread = target->main_thread;
+    if (!thread) {
+        return -1;
+    }
+
+    target->state = PROCESS_STOPPED;
+    if (thread->state != THREAD_ZOMBIE) {
+        thread->state = THREAD_STOPPED;
+    }
+    return 0;
+}
+
+int sched_resume_process(uint64_t pid) {
+    process_t *actor = sched_current_process();
+    process_t *target = sched_find_process(pid);
+    thread_t *thread;
+
+    if (!sched_can_control(actor, target)) {
+        return -1;
+    }
+    if (!target || target->state != PROCESS_STOPPED) {
+        return -1;
+    }
+
+    thread = target->main_thread;
+    if (!thread || thread->state != THREAD_STOPPED) {
+        return -1;
+    }
+
+    if (thread->block_reason == THREAD_BLOCK_SLEEP && thread->wake_tick > uptime_ticks) {
+        thread->state = THREAD_BLOCKED;
+        target->state = PROCESS_BLOCKED;
+    } else if (thread->block_reason == THREAD_BLOCK_WAIT_CHILD ||
+               thread->block_reason == THREAD_BLOCK_INPUT) {
+        thread->state = THREAD_BLOCKED;
+        target->state = PROCESS_BLOCKED;
+    } else {
+        thread->block_reason = THREAD_BLOCK_NONE;
+        thread->wake_tick = 0;
+        thread->state = THREAD_READY;
+        target->state = PROCESS_READY;
+    }
+    return 0;
+}
+
+int sched_kill_process(uint64_t pid, uint64_t exit_code) {
+    process_t *actor = sched_current_process();
+    process_t *target = sched_find_process(pid);
+    thread_t *thread;
+
+    if (!sched_can_control(actor, target)) {
+        return -1;
+    }
+    if (!target || target->state == PROCESS_EXITED || target->state == PROCESS_REAPED) {
+        return -1;
+    }
+
+    thread = target->main_thread;
+    if (!thread) {
+        return -1;
+    }
+    if (thread == current_thread_ptr) {
+        return -1;
+    }
+
+    target->state = PROCESS_EXITED;
+    target->exit_code = exit_code;
+    thread->block_reason = THREAD_BLOCK_NONE;
+    thread->wake_tick = 0;
+
+    thread->state = THREAD_ZOMBIE;
+    sched_wake_parent_if_waiting(target);
+    return 0;
 }

@@ -286,6 +286,24 @@ int user_run_path(const char *path) {
     return user_wait_pid(pid, &user_exit_code);
 }
 
+__attribute__((noreturn)) void user_thread_finish(void) {
+    process_t *proc = sched_current_process();
+    thread_t *thread = sched_current_thread();
+
+    if (thread && thread->kernel_stack_top) {
+        tss_set_rsp0(thread->kernel_stack_top);
+    }
+
+    vmm_switch_address_space(vmm_kernel_address_space());
+    pf_set_current_as(vmm_kernel_address_space());
+
+    user_exit_code = proc ? proc->exit_code : (uint64_t)-1;
+    sched_yield();
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
 void user_thread_start(void) {
     thread_t *thread = sched_current_thread();
     process_t *proc = sched_current_process();
@@ -310,11 +328,7 @@ void user_thread_start(void) {
     pf_set_current_as(proc->addr_space);
     tss_set_rsp0(thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top);
     user_enter(thread->user_rip, thread->user_rsp);
-    user_exit_code = proc->exit_code;
-    sched_yield();
-    for (;;) {
-        __asm__ volatile("hlt");
-    }
+    user_thread_finish();
 }
 
 int user_spawn_path(const char *path, uint64_t *pid_out) {

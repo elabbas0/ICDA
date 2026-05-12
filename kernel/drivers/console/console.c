@@ -7,6 +7,7 @@
 static kernel_device_t *display_device = 0;
 static kernel_device_t *serial_device = 0;
 static int console_display_is_framebuffer = 0;
+static int console_serial_mirror_enabled = 1;
 
 static int console_has_framebuffer = 0;
 
@@ -63,11 +64,17 @@ void console_init(int has_framebuffer) {
     console_display_is_framebuffer = (display_device && framebuffer && display_device == framebuffer);
 }
 
+void console_set_serial_mirror(int enabled) {
+    console_serial_mirror_enabled = enabled ? 1 : 0;
+}
+
 void console_clear(void) {
-    if (display_device) {
-        const display_device_ops_t *ops = (const display_device_ops_t *)display_device->ops;
-        ops->clear(display_device->context);
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_clear(FB_BLACK);
         return;
+    }
+    if (display_device) {
+        vga_clear();
     }
 }
 
@@ -87,32 +94,28 @@ void console_write(const char *str, console_style_t style) {
         return;
     }
 
-    if (serial_device) {
+    if (serial_device && console_serial_mirror_enabled) {
         serial_ops = (const serial_device_ops_t *)serial_device->ops;
         serial_ops->write(serial_device->context, str);
     }
 
-    if (!display_device) {
-        return;
-    }
-
-    display_ops = (const display_device_ops_t *)display_device->ops;
     if (console_has_framebuffer && console_display_is_framebuffer) {
-        display_ops->write(display_device->context, str, fb_color_for(style), FB_BLACK);
+        if (fb_available()) {
+            fb_print(str, fb_color_for(style), FB_BLACK);
+        }
     } else {
-        display_ops->write(display_device->context, str, vga_color_for(style), FB_BLACK);
+        (void)display_ops;
+        vga_set_color(vga_color_for(style));
+        vga_print(str, vga_color_for(style));
     }
 }
 
 void console_backspace(void) {
-    const display_device_ops_t *display_ops;
-
-    if (!display_device) {
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_backspace(FB_BLACK);
         return;
     }
-
-    display_ops = (const display_device_ops_t *)display_device->ops;
-    display_ops->backspace(display_device->context, FB_BLACK);
+    vga_backspace();
 }
 
 void console_write_status(const char *label, const char *status, console_style_t style) {

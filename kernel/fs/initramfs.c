@@ -19,8 +19,8 @@ extern const char usershell_end[];
 static const char motd_txt[] =
     "welcome to icda\n"
     "\n"
-    "this terminal is still kernel-side, but it now has a tiny initramfs.\n"
-    "try: ls, run /apps/hello.app, run /bin/hello.elf, cat /usr/share/commands.txt\n";
+    "this system now boots with a tiny initramfs plus a persistent writable disk layer.\n"
+    "try: ls, mkdir home, cd home, touch note, write note hello, cat note, reboot and check again.\n";
 
 static const char commands_txt[] =
     "built-ins:\n"
@@ -30,6 +30,7 @@ static const char commands_txt[] =
     "  ls [prefix]    list initramfs files\n"
     "  cat <path>     print a file from initramfs\n"
     "  run <path>     launch a user program (.app, .elf, or other supported format)\n"
+    "  sync           flush the writable filesystem to disk\n"
     "  echo <text>    print text\n"
     "  reboot         restart the machine\n";
 
@@ -47,7 +48,7 @@ static const char files_txt[] =
     "  /apps     native app-facing launch paths\n"
     "  /bin      tiny user programs\n"
     "  /usr/share terminal docs\n"
-    "  /var/log  reserved for later runtime logs\n";
+    "  /home     recommended writable user area\n";
 
 static initramfs_file_t initramfs_files[] = {
     { "/etc/motd.txt", motd_txt, sizeof(motd_txt) - 1 },
