@@ -32,7 +32,13 @@ if grep -Eq "FAIL|OOM|PAGE FAULT|EXCEPTION" "$log"; then
     exit 1
 fi
 
-if grep -q "INTERRUPTS: OK" "$log" && grep -q "Scheduler running" "$log"; then
+if \
+    (grep -q "INTERRUPTS: OK" "$log" && grep -q "Scheduler running" "$log") \
+    || \
+    (grep -q "\\[boot\\] interrupts: Local APIC / IOAPIC active" "$log" \
+        && grep -q "\\[boot\\] scheduler: scheduler core online" "$log" \
+        && grep -q "\\[boot\\] tty: starting interactive console" "$log" \
+        && grep -q "welcome to icda" "$log"); then
     cat "$log"
     echo
     echo "QEMU smoke test passed."

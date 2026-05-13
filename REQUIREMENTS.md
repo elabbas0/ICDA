@@ -7,75 +7,62 @@ ICDA can be built in two supported ways:
 
 ## Windows recommended setup
 
-Install these host requirements for the default path:
-
-- Windows Subsystem for Linux 2
-- Docker Desktop
-- Git
-
-Check the machine:
-
-```powershell
-.\scripts\check-requirements.ps1
-```
-
-Install the Windows requirements with winget and WSL:
-
-```powershell
-.\scripts\install-requirements.ps1 -UseWsl
-```
-
-After Docker Desktop starts successfully:
-
-```powershell
-.\scripts\docker-build.ps1
-.\scripts\docker-qemu.ps1
-.\scripts\docker-smoke.ps1
-```
-
-## Windows without WSL
-
-On Windows Pro/Enterprise/Education, Docker Desktop can use Hyper-V instead of
-WSL2. This project uses Docker's all-users install with `--backend=hyper-v`,
-because Docker's per-user install only supports the WSL 2 backend.
-
-Check the Hyper-V path:
-
-```powershell
-.\scripts\check-requirements.ps1 -NoWsl
-```
-
-Install the Hyper-V path from an elevated PowerShell. This is the default for
-this repo's Windows setup script:
-
-```powershell
-.\scripts\install-requirements.ps1
-```
-
-Or launch the elevated setup from a normal PowerShell:
-
-```powershell
-.\scripts\start-hyperv-setup.ps1
-```
-
-If `.ps1` files open in Notepad, run the command wrappers instead:
+Run the all-in-one command:
 
 ```cmd
-scripts\check-requirements.cmd
-scripts\start-hyperv-setup.cmd
-scripts\install-requirements.cmd
+scripts\icda.cmd ready
 ```
 
-After any reboot, open Docker Desktop. Then run:
+Do not run `.ps1` files directly on Windows. Use `scripts\icda.cmd`; it invokes
+PowerShell with `-ExecutionPolicy Bypass` for this repo command.
 
-```powershell
-.\scripts\check-requirements.ps1 -NoWsl
-.\scripts\docker-smoke.ps1
+The default Windows path is automatic backend selection. The command checks
+requirements, starts the elevated setup when needed, tries Docker Desktop with
+WSL2 first, and falls back to Hyper-V if the WSL setup path fails during
+installation. It then builds the Docker image, builds `kernel.iso`, and runs
+the QEMU smoke test.
+
+Docker Desktop currently requires Windows 10 22H2 build 19045 or newer, or a
+supported Windows 11 install. Git Bash is only a shell; it cannot replace WSL2
+or Hyper-V as Docker's Linux container backend.
+
+If either WSL2 or Hyper-V has to be enabled, Windows may need a reboot before
+Docker Desktop can be installed. The setup registers an automatic resume task
+named `ICDA Docker Desktop Setup Resume`, reboots Windows, and continues the
+selected backend setup after you log back in. After Docker Desktop's first
+launch, run `scripts\icda.cmd ready` again to build and smoke-test the OS.
+
+Useful focused commands:
+
+```cmd
+scripts\icda.cmd check
+scripts\icda.cmd install
+scripts\icda.cmd build
+scripts\icda.cmd smoke
+scripts\icda.cmd qemu
+scripts\icda.cmd ready -UseWsl
+scripts\icda.cmd ready -NoWsl
 ```
 
-The `.cmd` wrappers and `install-requirements.ps1` default to the no-WSL
-Hyper-V path. Pass `-UseWsl` only if you intentionally want Docker's WSL
-backend.
+## Windows WSL path
+
+If you want to force Docker Desktop's WSL backend, pass `-UseWsl`:
+
+```cmd
+scripts\icda.cmd ready -UseWsl
+```
+
+## Windows without direct PowerShell scripts
+
+Use the `.cmd` entry point. It runs PowerShell with `-ExecutionPolicy Bypass`
+for this repo command only:
+
+```cmd
+scripts\icda.cmd ready
+```
+
+The repo keeps the user-facing script surface small: use `scripts\icda.cmd`
+on Windows and `./scripts/icda.sh` from POSIX shells.
 
 ## Native Linux setup
 
@@ -92,7 +79,13 @@ make
 make qemu-smoke
 ```
 
-## Tools provided by Docker
+Or use Docker on Linux:
+
+```sh
+./scripts/icda.sh ready
+```
+
+## Docker image tools
 
 The Docker image installs:
 
@@ -104,4 +97,4 @@ The Docker image installs:
 - `mtools`
 - `qemu-system-x86_64`
 
-That means host machines only need Docker for the normal workflow.
+Host machines only need Docker for the normal workflow.
