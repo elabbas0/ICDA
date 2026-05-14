@@ -60,8 +60,16 @@ dkms.conf
 # Local kernel build artifacts
 kernel.bin
 kernel.iso
+kernel-usb.img
 isodir/
+usbroot/
 qemu-smoke.log
 userspace/ticker.icx
 icda-disk.img
 qemu-serial.log
+qemu-serial-*.log
+*-test.log
+stage-test.log
+usb-boot-test.log
+usb-gpt-test.log
+icda-disk-*-test.img

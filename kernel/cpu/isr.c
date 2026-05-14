@@ -1,5 +1,6 @@
 #include "isr.h"
 #include "irq_controller.h"
+#include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
@@ -60,6 +61,11 @@ static void print_exception_frame(struct registers *regs, uint64_t num) {
     console_write("  RFLAGS: ", CONSOLE_STYLE_ERROR);
     console_write_hex64(regs->rflags, CONSOLE_STYLE_ERROR);
     console_write("\n", CONSOLE_STYLE_ERROR);
+    console_write("  BOOT STAGE: S", CONSOLE_STYLE_ERROR);
+    console_write_dec64((uint64_t)bootstage_current(), CONSOLE_STYLE_ERROR);
+    console_write(" ", CONSOLE_STYLE_ERROR);
+    console_write(bootstage_label(), CONSOLE_STYLE_ERROR);
+    console_write("\n", CONSOLE_STYLE_ERROR);
 
     fb_print("\n*** EXCEPTION: ", FB_WHITE, FB_RED);
     if (num < 32) {
@@ -81,6 +87,11 @@ static void print_exception_frame(struct registers *regs, uint64_t num) {
     fb_print_hex64(regs->cs);
     fb_print("  RFLAGS: ", FB_WHITE, FB_RED);
     fb_print_hex64(regs->rflags);
+    fb_print("\n", FB_WHITE, FB_RED);
+    fb_print("  BOOT STAGE: S", FB_WHITE, FB_RED);
+    fb_print_hex64((uint64_t)bootstage_current());
+    fb_print(" ", FB_WHITE, FB_RED);
+    fb_print(bootstage_label(), FB_WHITE, FB_RED);
     fb_print("\n", FB_WHITE, FB_RED);
 }
 

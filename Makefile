@@ -4,14 +4,16 @@ QEMU = qemu-system-x86_64
 OVMF_CODE = /usr/share/OVMF/OVMF_CODE.fd
 DOCKER_IMAGE = icda-toolchain
 DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
+SGDISK ?= /usr/sbin/sgdisk
 SHELL_AUTOTEST ?= 0
 SERIAL_SHELL_MIRROR ?= 0
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector \
+         -mno-mmx -mno-sse -mno-sse2 \
          -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR)
 
-all: kernel.iso
+all: kernel.iso kernel-usb.img
 
 kernel.o: kernel/kernel.c
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel.o
@@ -32,8 +34,22 @@ keyboard.o: kernel/drivers/input/keyboard.c kernel/drivers/input/keyboard.h \
 input.o: kernel/drivers/input/input.c kernel/drivers/input/input.h kernel/drivers/device.h
 	$(CC) $(CFLAGS) -c kernel/drivers/input/input.c -o input.o
 
+nvme.o: kernel/drivers/storage/nvme.c kernel/drivers/storage/nvme.h kernel/drivers/pci/pci.h \
+        kernel/memory/pmm.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/drivers/storage/nvme.c -o nvme.o
+
+ahci.o: kernel/drivers/storage/ahci.c kernel/drivers/storage/ahci.h kernel/drivers/pci/pci.h \
+        kernel/memory/pmm.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/drivers/storage/ahci.c -o ahci.o
+
 ata.o: kernel/drivers/storage/ata.c kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c kernel/drivers/storage/ata.c -o ata.o
+
+block.o: kernel/drivers/storage/block.c kernel/drivers/storage/block.h
+	$(CC) $(CFLAGS) -c kernel/drivers/storage/block.c -o block.o
+
+partition.o: kernel/drivers/storage/partition.c kernel/drivers/storage/partition.h kernel/drivers/storage/block.h
+	$(CC) $(CFLAGS) -c kernel/drivers/storage/partition.c -o partition.o
 
 pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h \
        kernel/cpu/lapic.h kernel/memory/vmm.h
@@ -47,6 +63,9 @@ vfs.o: kernel/fs/vfs.c kernel/fs/vfs.h kernel/memory/heap.h
 
 persistfs.o: kernel/fs/persistfs.c kernel/fs/persistfs.h kernel/fs/vfs.h kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c kernel/fs/persistfs.c -o persistfs.o
+
+fat32.o: kernel/fs/fat32.c kernel/fs/fat32.h kernel/fs/vfs.h kernel/drivers/storage/partition.h
+	$(CC) $(CFLAGS) -c kernel/fs/fat32.c -o fat32.o
 
 tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
        kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
@@ -89,6 +108,11 @@ acpi.o: kernel/firmware/acpi.c kernel/firmware/acpi.h kernel/cpu/multiboot2.h ke
 
 boot.o: kernel/boot.asm
 	$(ASM) -f elf64 kernel/boot.asm -o boot.o
+
+bootstage.o: kernel/diag/bootstage.c kernel/diag/bootstage.h \
+             kernel/drivers/display/framebuffer.h kernel/drivers/display/vga.h \
+             kernel/drivers/serial/serial.h
+	$(CC) $(CFLAGS) -c kernel/diag/bootstage.c -o bootstage.o
 
 gdt_flush.o: kernel/cpu/gdt_flush.asm
 	$(ASM) -f elf64 kernel/cpu/gdt_flush.asm -o gdt_flush.o
@@ -153,7 +177,7 @@ shell_start.o: userspace/shell_start.asm
 	cp -f /tmp/icda-shell_start.o shell_start.o
 
 shell.o: userspace/shell.c userspace/icda_sys.h
-	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
 
 userspace/shell.app: shell_start.o shell.o userspace/user.ld
@@ -166,24 +190,45 @@ shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o ata.o pci.o initramfs.o vfs.o persistfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
+kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o ata.o pci.o initramfs.o vfs.o persistfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
+	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
+	mkdir -p isodir/EFI/BOOT
 	cp kernel.bin isodir/boot/kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
+	grub-mkstandalone -O x86_64-efi -o isodir/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub.cfg"
 	grub-mkrescue -o kernel.iso isodir
+
+kernel-usb.img: kernel.bin
+	mkdir -p usbroot/EFI/BOOT
+	mkdir -p usbroot/boot/grub
+	cp kernel.bin usbroot/boot/kernel.bin
+	cp boot/grub/grub-usb.cfg usbroot/boot/grub/grub.cfg
+	grub-mkstandalone -O x86_64-efi -o usbroot/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub-usb.cfg"
+	rm -f kernel-usb.img
+	dd if=/dev/zero of=kernel-usb.img bs=1M count=128
+	$(SGDISK) -og kernel-usb.img
+	$(SGDISK) -n 1:2048:0 -t 1:ef00 -c 1:"ICDA EFI" kernel-usb.img
+	mformat -i kernel-usb.img@@1048576 -F ::
+	mmd -i kernel-usb.img@@1048576 ::/EFI
+	mmd -i kernel-usb.img@@1048576 ::/EFI/BOOT
+	mmd -i kernel-usb.img@@1048576 ::/boot
+	mmd -i kernel-usb.img@@1048576 ::/boot/grub
+	mcopy -i kernel-usb.img@@1048576 usbroot/EFI/BOOT/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i kernel-usb.img@@1048576 usbroot/boot/grub/grub.cfg ::/boot/grub/grub.cfg
+	mcopy -i kernel-usb.img@@1048576 usbroot/boot/kernel.bin ::/boot/kernel.bin
 clean:
 ifeq ($(OS),Windows_NT)
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir"
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, kernel-usb.img, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir, usbroot"
 else
-	rm -f *.o kernel.bin kernel.iso qemu-smoke.log
-	rm -rf isodir
+	rm -f *.o kernel.bin kernel.iso kernel-usb.img qemu-smoke.log
+	rm -rf isodir usbroot
 endif
 
 qemu-headless: kernel.iso

@@ -29,7 +29,9 @@ enum {
     SYS_SUSPEND       = 22,
     SYS_RESUME        = 23,
     SYS_INPUT_READLINE = 24,
-    SYS_SYNC          = 25
+    SYS_SYNC          = 25,
+    SYS_CONSOLE_SETCURSOR = 26,
+    SYS_STORAGE_INFO  = 27
 };
 
 typedef struct {
@@ -100,6 +102,8 @@ static inline uint64_t icda_suspend(uint64_t pid) { return sys_call1(SYS_SUSPEND
 static inline uint64_t icda_resume(uint64_t pid) { return sys_call1(SYS_RESUME, pid); }
 static inline uint64_t icda_read_line(char *buf, uint64_t cap) { return sys_call2(SYS_INPUT_READLINE, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_sync(void) { return sys_call0(SYS_SYNC); }
+static inline void icda_set_cursor(uint64_t x, uint64_t y) { (void)sys_call2(SYS_CONSOLE_SETCURSOR, x, y); }
+static inline uint64_t icda_storage_info(char *buf, uint64_t cap) { return sys_call2(SYS_STORAGE_INFO, (uint64_t)(uintptr_t)buf, cap); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

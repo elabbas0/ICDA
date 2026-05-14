@@ -42,6 +42,8 @@ void vga_print_int(int n, unsigned char color);
 void vga_print_hex(unsigned int n, unsigned char color);
 void vga_newline();
 void vga_backspace(void);
+void vga_set_cursor_pos(int col, int row);
 void vga_set_color(unsigned char color);
+void vga_write_at(int row, int col, const char *str, unsigned char color);
 
 #endif

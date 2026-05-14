@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "block.h"
 
 #include <stdint.h>
 
@@ -30,6 +31,23 @@
 
 static int ata_disk_present = 0;
 static uint32_t ata_disk_sectors = 0;
+static block_device_t ata_block0;
+
+static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *buffer) {
+    (void)context;
+    if (count == 0 || count > 255 || lba > 0xFFFFFFFFULL) {
+        return -1;
+    }
+    return ata_read_sectors((uint32_t)lba, (uint8_t)count, buffer);
+}
+
+static int ata_block_write(void *context, uint64_t lba, uint32_t count, const void *buffer) {
+    (void)context;
+    if (count == 0 || count > 255 || lba > 0xFFFFFFFFULL) {
+        return -1;
+    }
+    return ata_write_sectors((uint32_t)lba, (uint8_t)count, buffer);
+}
 
 static inline void io_wait(void) {
     __asm__ volatile("outb %%al, $0x80" : : "a"(0));
@@ -127,6 +145,15 @@ int ata_init(void) {
 
     ata_disk_sectors = ((uint32_t)identify[61] << 16) | identify[60];
     ata_disk_present = ata_disk_sectors != 0;
+    if (ata_disk_present) {
+        ata_block0.name = "ata0";
+        ata_block0.context = 0;
+        ata_block0.sector_size = 512;
+        ata_block0.sector_count = ata_disk_sectors;
+        ata_block0.read = ata_block_read;
+        ata_block0.write = ata_block_write;
+        (void)block_register(&ata_block0);
+    }
     return ata_disk_present ? 0 : -1;
 }
 
@@ -203,4 +230,8 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer) {
     }
 
     return ata_flush_cache();
+}
+
+block_device_t *ata_block_device(void) {
+    return ata_disk_present ? &ata_block0 : 0;
 }

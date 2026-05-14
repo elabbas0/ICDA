@@ -78,6 +78,14 @@ void console_clear(void) {
     }
 }
 
+void console_set_cursor(int x, int y) {
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_set_cursor(x, y);
+        return;
+    }
+    vga_set_cursor_pos(x, y);
+}
+
 void console_write_char(char c, console_style_t style) {
     char buf[2];
 

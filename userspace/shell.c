@@ -6,6 +6,10 @@
 #define SHELL_BUF_CAP 1024
 #define SHELL_JOB_CAP 16
 #define SHELL_JOB_CMD_CAP 80
+#define SHELL_HISTORY_CAP 16
+#define SHELL_EDIT_BUF_CAP 4096
+#define SHELL_EDIT_VIEW_ROWS 18
+#define SHELL_EDIT_VIEW_COLS 68
 #ifndef SHELL_AUTOTEST
 #define SHELL_AUTOTEST 0
 #endif
@@ -22,6 +26,17 @@ typedef struct {
 } shell_job_t;
 
 static shell_job_t shell_job_table[SHELL_JOB_CAP];
+static char shell_history[SHELL_HISTORY_CAP][SHELL_LINE_CAP];
+static uint64_t shell_history_count = 0;
+
+enum {
+    KEY_SPECIAL_BASE = 256,
+    KEY_UP,
+    KEY_DOWN,
+    KEY_LEFT,
+    KEY_RIGHT,
+    KEY_DELETE
+};
 
 static uint64_t str_len(const char *s) {
     uint64_t n = 0;
@@ -60,6 +75,15 @@ static void copy_text(char *dst, const char *src, uint64_t cap) {
     dst[i] = 0;
 }
 
+static int str_prefix(const char *text, const char *prefix) {
+    uint64_t i = 0;
+    while (prefix[i]) {
+        if (text[i] != prefix[i]) return 0;
+        i++;
+    }
+    return 1;
+}
+
 static void write_uint(uint64_t v) {
     char buf[32];
     uint64_t i = sizeof(buf) - 1;
@@ -73,6 +97,41 @@ static void write_uint(uint64_t v) {
         v /= 10;
     }
     icda_write(&buf[i]);
+}
+
+static void write_uint_pad(uint64_t v, uint64_t width) {
+    char buf[32];
+    uint64_t i = sizeof(buf) - 1;
+    uint64_t len;
+    buf[i] = 0;
+    if (v == 0) {
+        buf[--i] = '0';
+    } else {
+        while (v && i > 0) {
+            buf[--i] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    len = str_len(&buf[i]);
+    while (len < width) {
+        icda_write(" ");
+        len++;
+    }
+    icda_write(&buf[i]);
+}
+
+static void write_repeat(char ch, uint64_t count) {
+    char buf[65];
+    uint64_t chunk = sizeof(buf) - 1;
+    for (uint64_t i = 0; i < chunk; i++) buf[i] = ch;
+    buf[chunk] = 0;
+    while (count) {
+        uint64_t take = count > chunk ? chunk : count;
+        buf[take] = 0;
+        icda_write(buf);
+        buf[take] = ch;
+        count -= take;
+    }
 }
 
 static int parse_uint64(const char *text, uint64_t *out) {
@@ -170,6 +229,485 @@ static void shell_poll_jobs(int notify) {
     }
 }
 
+static void shell_history_add(const char *line) {
+    if (!line || !*line) return;
+    if (shell_history_count && str_eq(shell_history[(shell_history_count - 1) % SHELL_HISTORY_CAP], line)) {
+        return;
+    }
+    copy_text(shell_history[shell_history_count % SHELL_HISTORY_CAP], line, SHELL_LINE_CAP);
+    shell_history_count++;
+}
+
+static void shell_rewrite_line(const char *line, uint64_t *shown_len) {
+    while (*shown_len) {
+        icda_backspace();
+        (*shown_len)--;
+    }
+    icda_write(line);
+    *shown_len = str_len(line);
+}
+
+static long shell_read_key(void) {
+    long c = (long)icda_read_char();
+    if (c != 27) {
+        return c;
+    }
+
+    {
+        long c1 = (long)icda_read_char();
+        if (c1 != '[') {
+            return c;
+        }
+
+        switch ((long)icda_read_char()) {
+            case 'A': return KEY_UP;
+            case 'B': return KEY_DOWN;
+            case 'C': return KEY_RIGHT;
+            case 'D': return KEY_LEFT;
+            case '3':
+                if ((long)icda_read_char() == '~') return KEY_DELETE;
+                return c;
+            default: return c;
+        }
+    }
+}
+
+static uint64_t shell_collect_matches(const char *dir, const char *prefix, char matches[][SHELL_LINE_CAP], uint64_t max_matches) {
+    char buf[SHELL_BUF_CAP];
+    uint64_t count = 0;
+    uint64_t start = 0;
+
+    if ((long)icda_list_dir(dir, buf, sizeof(buf)) < 0) {
+        return 0;
+    }
+
+    while (buf[start] && count < max_matches) {
+        char entry[SHELL_LINE_CAP];
+        uint64_t out = 0;
+        while (buf[start] && buf[start] != '\n' && out + 1 < sizeof(entry)) {
+            entry[out++] = buf[start++];
+        }
+        if (buf[start] == '\n') start++;
+        entry[out] = 0;
+        if (out && entry[out - 1] == '/') {
+            entry[out - 1] = 0;
+        }
+        if (str_prefix(entry, prefix)) {
+            copy_text(matches[count++], entry, SHELL_LINE_CAP);
+        }
+    }
+    return count;
+}
+
+static int shell_autocomplete(char *line, uint64_t cap) {
+    char matches[32][SHELL_LINE_CAP];
+    char token[SHELL_LINE_CAP];
+    uint64_t len = str_len(line);
+    uint64_t token_start = len;
+    uint64_t match_count = 0;
+
+    while (token_start > 0 && line[token_start - 1] != ' ' && line[token_start - 1] != '\t') {
+        token_start--;
+    }
+    copy_text(token, &line[token_start], sizeof(token));
+
+    if (token_start == 0 && !str_has_slash(token)) {
+        static const char *builtins[] = {
+            "help","clear","pid","ps","jobs","pwd","cd","ls","cat","mkdir","touch","write","stat","sync","storage",
+            "run","spawn","bg","fg","wait","waitall","stop","resume","kill","sleep","yield","edit","exit"
+        };
+        for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
+            if (str_prefix(builtins[i], token)) {
+                copy_text(matches[match_count++], builtins[i], SHELL_LINE_CAP);
+            }
+        }
+        match_count += shell_collect_matches("/apps", token, &matches[match_count], 32 - match_count);
+        match_count += shell_collect_matches("/bin", token, &matches[match_count], 32 - match_count);
+    } else {
+        char dir[SHELL_LINE_CAP];
+        char prefix[SHELL_LINE_CAP];
+        uint64_t slash = 0;
+        for (uint64_t i = 0; token[i]; i++) {
+            if (token[i] == '/') slash = i + 1;
+        }
+        if (slash) {
+            uint64_t i = 0;
+            for (; i < slash && i + 1 < sizeof(dir); i++) dir[i] = token[i];
+            dir[i] = 0;
+            copy_text(prefix, &token[slash], sizeof(prefix));
+            if (dir[0] == 0) copy_text(dir, "/", sizeof(dir));
+        } else {
+            copy_text(dir, ".", sizeof(dir));
+            copy_text(prefix, token, sizeof(prefix));
+        }
+        match_count = shell_collect_matches(dir, prefix, matches, 32);
+        if (match_count == 1 && slash) {
+            char full[SHELL_LINE_CAP];
+            copy_text(full, dir, sizeof(full));
+            if (!str_eq(dir, "/") && full[str_len(full) - 1] != '/') append_text(full, "/", sizeof(full));
+            append_text(full, matches[0], sizeof(full));
+            copy_text(matches[0], full, SHELL_LINE_CAP);
+        }
+    }
+
+    if (match_count == 0) {
+        return 0;
+    }
+
+    copy_text(&line[token_start], matches[0], cap - token_start);
+    return 1;
+}
+
+static int shell_read_line(char *line, uint64_t cap) {
+    uint64_t len = 0;
+    uint64_t shown_len = 0;
+    uint64_t history_cursor = shell_history_count;
+
+    if (!line || cap == 0) return -1;
+    line[0] = 0;
+
+    for (;;) {
+        long c = shell_read_key();
+        if (c < 0) continue;
+
+        if (c == '\r' || c == '\n') {
+            icda_write("\n");
+            line[len] = 0;
+            if (len) shell_history_add(line);
+            return (int)len;
+        }
+
+        if (c == '\t') {
+            if (shell_autocomplete(line, cap)) {
+                len = str_len(line);
+                shell_rewrite_line(line, &shown_len);
+            }
+            continue;
+        }
+
+        if (c == '\b') {
+            if (len) {
+                len--;
+                line[len] = 0;
+                shell_rewrite_line(line, &shown_len);
+            }
+            continue;
+        }
+
+        if (c == KEY_UP) {
+            if (shell_history_count) {
+                if (history_cursor > 0) history_cursor--;
+                copy_text(line, shell_history[history_cursor % SHELL_HISTORY_CAP], cap);
+                len = str_len(line);
+                shell_rewrite_line(line, &shown_len);
+            }
+            continue;
+        }
+
+        if (c == KEY_DOWN) {
+            if (history_cursor < shell_history_count) history_cursor++;
+            if (history_cursor == shell_history_count) {
+                line[0] = 0;
+            } else {
+                copy_text(line, shell_history[history_cursor % SHELL_HISTORY_CAP], cap);
+            }
+            len = str_len(line);
+            shell_rewrite_line(line, &shown_len);
+            continue;
+        }
+
+        if (c >= 32 && c <= 126 && len + 1 < cap) {
+            line[len++] = (char)c;
+            line[len] = 0;
+            {
+                char out[2] = {(char)c, 0};
+                icda_write(out);
+                shown_len++;
+            }
+        }
+    }
+}
+
+static uint64_t editor_line_start(const char *buf, uint64_t len, uint64_t pos) {
+    if (pos > len) pos = len;
+    while (pos > 0 && buf[pos - 1] != '\n') pos--;
+    return pos;
+}
+
+static uint64_t editor_line_end(const char *buf, uint64_t len, uint64_t pos) {
+    if (pos > len) pos = len;
+    while (pos < len && buf[pos] != '\n') pos++;
+    return pos;
+}
+
+static uint64_t editor_column(const char *buf, uint64_t len, uint64_t pos) {
+    return pos - editor_line_start(buf, len, pos);
+}
+
+static uint64_t editor_line_number(const char *buf, uint64_t pos) {
+    uint64_t line = 1;
+    for (uint64_t i = 0; i < pos && buf[i]; i++) {
+        if (buf[i] == '\n') line++;
+    }
+    return line;
+}
+
+static uint64_t editor_line_count(const char *buf, uint64_t len) {
+    uint64_t lines = 1;
+    for (uint64_t i = 0; i < len; i++) {
+        if (buf[i] == '\n') lines++;
+    }
+    return lines;
+}
+
+static uint64_t editor_find_row_start(const char *buf, uint64_t len, uint64_t target_row) {
+    uint64_t row = 0;
+    uint64_t pos = 0;
+    while (pos < len && row < target_row) {
+        if (buf[pos++] == '\n') row++;
+    }
+    return pos;
+}
+
+static uint64_t editor_cursor_row(const char *buf, uint64_t pos) {
+    uint64_t row = 0;
+    for (uint64_t i = 0; i < pos && buf[i]; i++) {
+        if (buf[i] == '\n') row++;
+    }
+    return row;
+}
+
+static uint64_t editor_view_top_for_cursor(const char *buf, uint64_t cursor) {
+    uint64_t row = editor_cursor_row(buf, cursor);
+    if (row < 3) return 0;
+    if (row + 4 < SHELL_EDIT_VIEW_ROWS) return 0;
+    return row - 3;
+}
+
+static void editor_write_line_segment(const char *buf, uint64_t len, uint64_t start, uint64_t cursor, uint64_t *cursor_shown) {
+    uint64_t end = editor_line_end(buf, len, start);
+    uint64_t pos = start;
+    uint64_t shown = 0;
+    while (pos < end) {
+        if (shown >= SHELL_EDIT_VIEW_COLS) break;
+        if (pos == cursor && !*cursor_shown && shown < SHELL_EDIT_VIEW_COLS) {
+            icda_write("|");
+            *cursor_shown = 1;
+            shown++;
+            if (shown >= SHELL_EDIT_VIEW_COLS) break;
+        }
+        {
+            char out[2] = { buf[pos], 0 };
+            icda_write(out);
+            shown++;
+        }
+        pos++;
+    }
+    if (cursor == end && !*cursor_shown && shown < SHELL_EDIT_VIEW_COLS) {
+        icda_write("|");
+        *cursor_shown = 1;
+        shown++;
+    }
+    if (shown < SHELL_EDIT_VIEW_COLS) {
+        write_repeat(' ', SHELL_EDIT_VIEW_COLS - shown);
+    }
+}
+
+static void editor_redraw(const char *path, const char *buf, uint64_t len, uint64_t cursor, int modified) {
+    uint64_t top_row = editor_view_top_for_cursor(buf, cursor);
+    uint64_t start = editor_find_row_start(buf, len, top_row);
+    uint64_t line_no = top_row + 1;
+    uint64_t cursor_shown = 0;
+    uint64_t lines_total = editor_line_count(buf, len);
+
+    icda_set_cursor(0, 0);
+    icda_write("####################################################################\n");
+    icda_write("# ICDA editor  ");
+    icda_write(path);
+    icda_write(modified ? "   *modified" : "   saved");
+    write_repeat(' ', 68);
+    icda_write("\n");
+    icda_write("# Ctrl+S save   Ctrl+X exit   arrows move   backspace/delete       #\n");
+    icda_write("####################################################################\n");
+
+    for (uint64_t row = 0; row < SHELL_EDIT_VIEW_ROWS; row++) {
+        if (start > len) start = len;
+        write_uint_pad(line_no, 4);
+        icda_write(" # ");
+        if (start <= len) {
+            editor_write_line_segment(buf, len, start, cursor, &cursor_shown);
+            start = editor_line_end(buf, len, start);
+            if (start < len && buf[start] == '\n') start++;
+        } else {
+            write_repeat(' ', SHELL_EDIT_VIEW_COLS);
+        }
+        icda_write(" #\n");
+        line_no++;
+    }
+
+    icda_write("####################################################################\n");
+    icda_write("# Ln ");
+    write_uint(editor_line_number(buf, cursor));
+    icda_write("/");
+    write_uint(lines_total);
+    icda_write("   Col ");
+    write_uint(editor_column(buf, len, cursor) + 1);
+    icda_write("   Size ");
+    write_uint(len);
+    icda_write(" bytes");
+    if (!cursor_shown) {
+        icda_write("   [cursor off-screen]");
+    }
+    write_repeat(' ', 68);
+    icda_write("\n");
+    icda_write("####################################################################\n");
+}
+
+static void editor_insert_char(char *buf, uint64_t *len, uint64_t *cursor, char ch, uint64_t cap) {
+    if (!buf || !len || !cursor || *len + 1 >= cap) return;
+    for (uint64_t i = *len; i > *cursor; i--) {
+        buf[i] = buf[i - 1];
+    }
+    buf[*cursor] = ch;
+    (*len)++;
+    (*cursor)++;
+    buf[*len] = 0;
+}
+
+static void editor_backspace(char *buf, uint64_t *len, uint64_t *cursor) {
+    if (!buf || !len || !cursor || *cursor == 0) return;
+    for (uint64_t i = *cursor - 1; i < *len; i++) {
+        buf[i] = buf[i + 1];
+    }
+    (*cursor)--;
+    (*len)--;
+    buf[*len] = 0;
+}
+
+static void editor_delete(char *buf, uint64_t *len, uint64_t *cursor) {
+    if (!buf || !len || !cursor || *cursor >= *len) return;
+    for (uint64_t i = *cursor; i < *len; i++) {
+        buf[i] = buf[i + 1];
+    }
+    (*len)--;
+    buf[*len] = 0;
+}
+
+static void editor_move_left(uint64_t *cursor) {
+    if (*cursor > 0) (*cursor)--;
+}
+
+static void editor_move_right(uint64_t len, uint64_t *cursor) {
+    if (*cursor < len) (*cursor)++;
+}
+
+static void editor_move_vertical(const char *buf, uint64_t len, uint64_t *cursor, int direction) {
+    uint64_t current_start = editor_line_start(buf, len, *cursor);
+    uint64_t current_col = *cursor - current_start;
+    uint64_t target_start;
+    uint64_t target_end;
+
+    if (direction < 0) {
+        if (current_start == 0) return;
+        target_end = current_start - 1;
+        target_start = editor_line_start(buf, len, target_end);
+    } else {
+        target_end = editor_line_end(buf, len, current_start);
+        if (target_end >= len) return;
+        target_start = target_end + 1;
+        target_end = editor_line_end(buf, len, target_start);
+    }
+
+    *cursor = target_start + current_col;
+    if (*cursor > target_end) *cursor = target_end;
+}
+
+static void shell_edit(const char *path) {
+    char buf[SHELL_EDIT_BUF_CAP];
+    long ret;
+    uint64_t len = 0;
+    uint64_t cursor = 0;
+    int modified = 0;
+
+    if (!path || !*path) {
+        icda_write("usage: edit <path>\n");
+        return;
+    }
+
+    ret = (long)icda_read_file(path, buf, sizeof(buf) - 1);
+    if (ret < 0) {
+        buf[0] = 0;
+        len = 0;
+    } else {
+        len = (uint64_t)ret;
+        buf[len] = 0;
+    }
+
+    icda_clear();
+    editor_redraw(path, buf, len, cursor, modified);
+    for (;;) {
+        long c = shell_read_key();
+        if (c < 0) continue;
+
+        if (c == 24) {
+            icda_clear();
+            return;
+        }
+        if (c == 19) {
+            if ((long)icda_write_file(path, buf, len) < 0) {
+                icda_write("\nsave failed");
+            } else {
+                modified = 0;
+            }
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == '\b') {
+            editor_backspace(buf, &len, &cursor);
+            modified = 1;
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == KEY_DELETE) {
+            editor_delete(buf, &len, &cursor);
+            modified = 1;
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == KEY_LEFT) {
+            editor_move_left(&cursor);
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == KEY_RIGHT) {
+            editor_move_right(len, &cursor);
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == KEY_UP) {
+            editor_move_vertical(buf, len, &cursor, -1);
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c == KEY_DOWN) {
+            editor_move_vertical(buf, len, &cursor, 1);
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if ((c == '\r' || c == '\n')) {
+            editor_insert_char(buf, &len, &cursor, '\n', sizeof(buf));
+            modified = 1;
+            editor_redraw(path, buf, len, cursor, modified);
+            continue;
+        }
+        if (c >= 32 && c <= 126) {
+            editor_insert_char(buf, &len, &cursor, (char)c, sizeof(buf));
+            modified = 1;
+            editor_redraw(path, buf, len, cursor, modified);
+        }
+    }
+}
+
 static void print_prompt(void) {
     char cwd[80];
     if ((long)icda_getcwd(cwd, sizeof(cwd)) < 0) {
@@ -182,7 +720,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
+    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync storage edit run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
 }
 
 static void shell_pwd(void) {
@@ -390,6 +928,16 @@ static void shell_sync(void) {
         return;
     }
     icda_write("synced\n");
+}
+
+static void shell_storage(void) {
+    char buf[SHELL_BUF_CAP];
+    long ret = (long)icda_storage_info(buf, sizeof(buf));
+    if (ret < 0) {
+        icda_write("storage query failed\n");
+        return;
+    }
+    icda_write(buf);
 }
 
 static void shell_sleep_ticks(const char *arg) {
@@ -680,6 +1228,8 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "write")) { shell_write_file(arg); return; }
     if (str_eq(line, "stat")) { shell_stat(arg); return; }
     if (str_eq(line, "sync")) { shell_sync(); return; }
+    if (str_eq(line, "storage")) { shell_storage(); return; }
+    if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }
     if (str_eq(line, "bg")) { shell_spawn_path(arg); return; }
@@ -702,15 +1252,14 @@ static void shell_dispatch(char *line) {
 uint64_t shell_main(void) {
     char line[SHELL_LINE_CAP];
     icda_clear();
-    icda_write("icda user shell\n");
-    icda_write("type 'help' for commands\n\n");
+    icda_write("icda user shell\n\n");
 #if SHELL_AUTOTEST
     shell_autotest();
 #endif
     for (;;) {
         shell_poll_jobs(1);
         print_prompt();
-        if ((long)icda_read_line(line, sizeof(line)) < 0) {
+        if (shell_read_line(line, sizeof(line)) < 0) {
             continue;
         }
         shell_dispatch(line);

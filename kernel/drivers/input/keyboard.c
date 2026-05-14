@@ -47,6 +47,7 @@ static volatile char queue[KEYBOARD_QUEUE_SIZE];
 static volatile uint32_t queue_head = 0;
 static volatile uint32_t queue_tail = 0;
 static int shift_down = 0;
+static int ctrl_down = 0;
 static int caps_lock = 0;
 static int extended_prefix = 0;
 static kernel_device_t keyboard_device;
@@ -81,8 +82,24 @@ static void queue_push(char c) {
     queue_head = next;
 }
 
+static void queue_push_seq(const char *seq) {
+    while (*seq) {
+        queue_push(*seq++);
+    }
+}
+
 static int is_alpha(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static char apply_ctrl(char c) {
+    if (c >= 'a' && c <= 'z') {
+        return (char)(c - 'a' + 1);
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c - 'A' + 1);
+    }
+    return c;
 }
 
 static char translate_scancode(uint8_t scancode) {
@@ -99,11 +116,15 @@ static char translate_scancode(uint8_t scancode) {
 
     if (caps_lock && is_alpha(c)) {
         if (c >= 'a' && c <= 'z') {
-            return (char)(c - 'a' + 'A');
+            c = (char)(c - 'a' + 'A');
         }
-        if (c >= 'A' && c <= 'Z') {
-            return (char)(c - 'A' + 'a');
+        else if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
         }
+    }
+
+    if (ctrl_down && is_alpha(c)) {
+        return apply_ctrl(c);
     }
 
     return c;
@@ -119,7 +140,33 @@ static void keyboard_handle_scancode(uint8_t scancode) {
 
     if (extended_prefix) {
         extended_prefix = 0;
-        return;
+        if (scancode & 0x80) {
+            return;
+        }
+        switch (scancode) {
+            case 0x48:
+                queue_push_seq("\x1b[A");
+                sched_wake_input_waiters();
+                return;
+            case 0x50:
+                queue_push_seq("\x1b[B");
+                sched_wake_input_waiters();
+                return;
+            case 0x4B:
+                queue_push_seq("\x1b[D");
+                sched_wake_input_waiters();
+                return;
+            case 0x4D:
+                queue_push_seq("\x1b[C");
+                sched_wake_input_waiters();
+                return;
+            case 0x53:
+                queue_push_seq("\x1b[3~");
+                sched_wake_input_waiters();
+                return;
+            default:
+                return;
+        }
     }
 
     if (scancode == 0x2A || scancode == 0x36) {
@@ -127,8 +174,18 @@ static void keyboard_handle_scancode(uint8_t scancode) {
         return;
     }
 
+    if (scancode == 0x1D) {
+        ctrl_down = 1;
+        return;
+    }
+
     if (scancode == 0xAA || scancode == 0xB6) {
         shift_down = 0;
+        return;
+    }
+
+    if (scancode == 0x9D) {
+        ctrl_down = 0;
         return;
     }
 
@@ -159,6 +216,7 @@ void keyboard_init(void) {
     queue_head = 0;
     queue_tail = 0;
     shift_down = 0;
+    ctrl_down = 0;
     caps_lock = 0;
     extended_prefix = 0;
 

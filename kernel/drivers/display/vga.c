@@ -113,6 +113,43 @@ void vga_backspace(void) {
     vga_write_cell(cursor_row, cursor_col, ' ', current_color);
 }
 
+void vga_set_cursor_pos(int col, int row) {
+    if (col < 0) col = 0;
+    if (row < 0) row = 0;
+    if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
+    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+    cursor_col = col;
+    cursor_row = row;
+}
+
+void vga_write_at(int row, int col, const char *str, unsigned char color) {
+    int out_row = row;
+    int out_col = col;
+
+    if (!str) {
+        return;
+    }
+
+    while (*str && out_row >= 0 && out_row < VGA_HEIGHT) {
+        if (*str == '\n') {
+            out_row++;
+            out_col = col;
+            str++;
+            continue;
+        }
+
+        if (out_col >= 0 && out_col < VGA_WIDTH) {
+            vga_write_cell(out_row, out_col, *str, color);
+        }
+
+        out_col++;
+        if (out_col >= VGA_WIDTH) {
+            break;
+        }
+        str++;
+    }
+}
+
 // print a single character at current cursor position
 void vga_putchar(char c, unsigned char color) {
     if (c == '\n') {

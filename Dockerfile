@@ -6,7 +6,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
+        dosfstools \
         gcc \
+        gdisk \
         grub-efi-amd64-bin \
         grub-pc-bin \
         grub-common \

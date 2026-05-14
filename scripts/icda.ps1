@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("ready", "check", "install", "repair", "repair-upgrade", "image", "build", "smoke", "qemu", "clean")]
+    [ValidateSet("ready", "check", "install", "repair", "repair-upgrade", "image", "build", "smoke", "qemu", "qemu-inline", "clean")]
     [string]$Action = "ready",
     [ValidateSet("auto", "wsl", "hyperv")]
     [string]$Mode = "auto",
@@ -63,6 +63,7 @@ function Invoke-Docker {
     )
 
     $docker = Get-DockerCli
+    Ensure-DockerReady
     if ($Arguments.Count -eq 1 -and $Arguments[0] -is [array]) {
         $Arguments = $Arguments[0]
     }
@@ -229,11 +230,20 @@ function Test-DockerResponding {
 }
 
 function Start-DockerDesktopIfInstalled {
-    $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    if (Test-Path $dockerDesktop) {
-        Write-Host "Starting Docker Desktop..."
-        Start-Process -FilePath $dockerDesktop -WindowStyle Hidden
+    $dockerDesktopPaths = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        (Join-Path $env:LocalAppData "Docker\Docker Desktop.exe")
+    )
+
+    foreach ($dockerDesktop in $dockerDesktopPaths) {
+        if (Test-Path $dockerDesktop) {
+            Write-Host "Starting Docker Desktop..."
+            Start-Process -FilePath $dockerDesktop -WindowStyle Hidden
+            return $true
+        }
     }
+
+    return $false
 }
 
 function Wait-Docker {
@@ -248,6 +258,24 @@ function Wait-Docker {
     }
 
     return $false
+}
+
+function Ensure-DockerReady {
+    param([int]$WaitSeconds = 120)
+
+    if (Test-DockerResponding) {
+        return
+    }
+
+    $started = Start-DockerDesktopIfInstalled
+    if (-not $started) {
+        throw "Docker CLI is installed, but Docker Desktop was not found. Start the Docker engine manually and try again."
+    }
+
+    Write-Host "Waiting for Docker engine..."
+    if (-not (Wait-Docker -Seconds $WaitSeconds)) {
+        throw "Docker Desktop was started, but the Docker engine did not become ready within $WaitSeconds seconds."
+    }
 }
 
 function Remove-StaleDockerDesktopProgramData {
@@ -624,6 +652,48 @@ function Invoke-DockerMake {
     Invoke-Docker $runArgs
 }
 
+function Invoke-QemuAction {
+    param(
+        [switch]$RunInline
+    )
+
+    Invoke-DockerImage
+    Invoke-DockerMake
+
+    if ($Headless) {
+        $target = "qemu"
+        if ($Uefi) {
+            $target = "qemu-uefi-headless"
+        } else {
+            $target = "qemu-headless"
+        }
+        Invoke-DockerMake -Target $target -Interactive
+        return
+    }
+
+    if ($RunInline) {
+        $target = "qemu"
+        if ($Uefi) {
+            $target = "qemu-uefi"
+        }
+        Invoke-DockerMake -Target $target -Interactive
+        return
+    }
+
+    $launcherScript = Join-Path $PSScriptRoot "run-qemu.ps1"
+    $argList = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$launcherScript`""
+    )
+    if ($Uefi) {
+        $argList += "-Uefi"
+    }
+
+    Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -WorkingDirectory $RepoRoot -ArgumentList $argList | Out-Null
+    Write-Host "Started QEMU in a separate window."
+}
+
 function Invoke-Ready {
     param([string]$InstallMode, [switch]$NoSmokeMode)
 
@@ -684,7 +754,10 @@ try {
         "install" { [void](Invoke-Install -InstallMode $installMode -ResumeMode:$ResumeAfterReboot) }
         "repair" { [void](Invoke-Repair) }
         "repair-upgrade" { [void](Invoke-RepairUpgrade) }
-        "image" { Invoke-DockerImage }
+        "image" {
+            Invoke-DockerImage
+            Invoke-DockerMake
+        }
         "build" {
             Invoke-DockerImage
             Invoke-DockerMake
@@ -693,18 +766,8 @@ try {
             Invoke-DockerImage
             Invoke-DockerMake -Target "qemu-smoke"
         }
-        "qemu" {
-            Invoke-DockerImage
-            $target = "qemu"
-            if ($Uefi -and $Headless) {
-                $target = "qemu-uefi-headless"
-            } elseif ($Uefi) {
-                $target = "qemu-uefi"
-            } elseif ($Headless) {
-                $target = "qemu-headless"
-            }
-            Invoke-DockerMake -Target $target -Interactive
-        }
+        "qemu" { Invoke-QemuAction }
+        "qemu-inline" { Invoke-QemuAction -RunInline }
         "clean" {
             Invoke-DockerImage
             Invoke-DockerMake -Target "clean"

@@ -2,6 +2,9 @@
 
 #include "../drivers/console/console.h"
 #include "../drivers/input/input.h"
+#include "../drivers/storage/block.h"
+#include "../drivers/storage/partition.h"
+#include "../fs/fat32.h"
 #include "../fs/vfs.h"
 #include "../fs/persistfs.h"
 #include "../proc/sched.h"
@@ -436,6 +439,64 @@ static uint64_t sys_sync(void) {
     return vfs_sync() == 0 ? 0 : (uint64_t)-1;
 }
 
+static uint64_t sys_console_set_cursor(uint64_t x, uint64_t y) {
+    console_set_cursor((int)x, (int)y);
+    return 0;
+}
+
+static uint64_t sys_storage_info(char *buf, uint64_t cap) {
+    uint64_t out = 0;
+
+    if (!buf || cap == 0) {
+        return (uint64_t)-1;
+    }
+
+    buf[0] = '\0';
+    out = append_text(buf, out, cap, "devices:\n");
+    for (uint32_t i = 0; i < block_count(); i++) {
+        block_device_t *dev = block_get(i);
+        if (!dev) continue;
+        out = append_text(buf, out, cap, "  ");
+        out = append_text(buf, out, cap, dev->name ? dev->name : "disk");
+        out = append_text(buf, out, cap, " sectors=");
+        out = append_uint(buf, out, cap, dev->sector_count);
+        out = append_text(buf, out, cap, " sector_size=");
+        out = append_uint(buf, out, cap, dev->sector_size);
+        out = append_text(buf, out, cap, "\n");
+    }
+
+    out = append_text(buf, out, cap, "partitions:\n");
+    for (uint32_t i = 0; i < partition_count(); i++) {
+        const partition_info_t *part = partition_get(i);
+        if (!part) continue;
+        out = append_text(buf, out, cap, "  ");
+        out = append_uint(buf, out, cap, i);
+        out = append_text(buf, out, cap, ": ");
+        out = append_text(buf, out, cap, part->name[0] ? part->name : "part");
+        out = append_text(buf, out, cap, " dev=");
+        out = append_text(buf, out, cap, (part->device && part->device->name) ? part->device->name : "disk");
+        out = append_text(buf, out, cap, " fs=");
+        out = append_text(buf, out, cap, partition_fs_name(part->fs_hint));
+        out = append_text(buf, out, cap, " start=");
+        out = append_uint(buf, out, cap, part->start_lba);
+        out = append_text(buf, out, cap, " sectors=");
+        out = append_uint(buf, out, cap, part->sector_count);
+        out = append_text(buf, out, cap, "\n");
+    }
+
+    out = append_text(buf, out, cap, "mounts:\n");
+    if (fat32_mount_count() == 0) {
+        out = append_text(buf, out, cap, "  (none)\n");
+    } else {
+        for (uint32_t i = 0; i < fat32_mount_count(); i++) {
+            out = append_text(buf, out, cap, "  /volumes/fat32-");
+            out = append_uint(buf, out, cap, i);
+            out = append_text(buf, out, cap, "\n");
+        }
+    }
+    return out;
+}
+
 void syscall_init(void) {
 }
 
@@ -500,6 +561,10 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_input_readline((char *)(uintptr_t)regs->rdi, regs->rsi);
         case SYS_SYNC:
             return sys_sync();
+        case SYS_CONSOLE_SETCURSOR:
+            return sys_console_set_cursor(regs->rdi, regs->rsi);
+        case SYS_STORAGE_INFO:
+            return sys_storage_info((char *)(uintptr_t)regs->rdi, regs->rsi);
         default:
             return (uint64_t)-1;
     }

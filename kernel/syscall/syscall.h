@@ -32,7 +32,9 @@ typedef enum {
     SYS_SUSPEND       = 22,
     SYS_RESUME        = 23,
     SYS_INPUT_READLINE = 24,
-    SYS_SYNC          = 25
+    SYS_SYNC          = 25,
+    SYS_CONSOLE_SETCURSOR = 26,
+    SYS_STORAGE_INFO  = 27
 } syscall_number_t;
 
 typedef struct {
