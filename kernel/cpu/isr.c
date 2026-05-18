@@ -2,6 +2,7 @@
 #include "irq_controller.h"
 #include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
+#include "../drivers/audio/speaker.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 
@@ -116,6 +117,7 @@ void isr_handler(struct registers* regs) {
         return;
     }
 
+    speaker_stop();
     print_exception_frame(regs, num);
 
     __asm__ volatile ("cli; hlt");

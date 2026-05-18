@@ -11,6 +11,8 @@ global userprog_pid_elf_start
 global userprog_pid_elf_end
 global userprog_ticker_start
 global userprog_ticker_end
+global asset_hava_wav_start
+global asset_hava_wav_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -31,5 +33,9 @@ userprog_pid_elf_end:
 userprog_ticker_start:
     incbin "userspace/ticker.icx"
 userprog_ticker_end:
+
+asset_hava_wav_start:
+    incbin "userspace/hava_clip.wav"
+asset_hava_wav_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

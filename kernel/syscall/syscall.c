@@ -2,6 +2,8 @@
 
 #include "../drivers/console/console.h"
 #include "../drivers/input/input.h"
+#include "../drivers/audio/speaker.h"
+#include "../drivers/audio/sb16.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
 #include "../fs/fat32.h"
@@ -497,6 +499,18 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
     return out;
 }
 
+static uint64_t sys_sound_play(uint64_t frequency_hz, uint64_t ticks) {
+    speaker_play_for((uint32_t)frequency_hz, ticks);
+    return 0;
+}
+
+static uint64_t sys_audio_pcm_play(const uint8_t *buf, uint64_t size, uint64_t sample_rate) {
+    if (!buf || size == 0 || size > 0xFFFFFFFFULL || sample_rate > 0xFFFFULL) {
+        return (uint64_t)-1;
+    }
+    return sb16_play_pcm_u8_mono(buf, (uint32_t)size, (uint16_t)sample_rate) == 0 ? 0 : (uint64_t)-1;
+}
+
 void syscall_init(void) {
 }
 
@@ -565,6 +579,10 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_console_set_cursor(regs->rdi, regs->rsi);
         case SYS_STORAGE_INFO:
             return sys_storage_info((char *)(uintptr_t)regs->rdi, regs->rsi);
+        case SYS_SOUND_PLAY:
+            return sys_sound_play(regs->rdi, regs->rsi);
+        case SYS_AUDIO_PCM_PLAY:
+            return sys_audio_pcm_play((const uint8_t *)(uintptr_t)regs->rdi, regs->rsi, regs->rdx);
         default:
             return (uint64_t)-1;
     }

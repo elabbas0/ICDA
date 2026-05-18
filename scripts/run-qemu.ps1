@@ -64,8 +64,13 @@ $ovmfCode = Join-Path $qemuShare "edk2-x86_64-code.fd"
 $ovmfVarsSource = Join-Path $qemuShare "edk2-i386-vars.fd"
 $ovmfVars = Join-Path $repoRoot "qemu-uefi-vars.fd"
 
+$machineArg = "pc"
+if (-not $Headless) {
+    $machineArg = "pc,pcspk-audiodev=audio0"
+}
+
 $qemuArgs = @(
-    "-machine", "pc"
+    "-machine", $machineArg
     "-smp", "4"
     "-m", "4G"
     "-cdrom", $isoPath
@@ -77,6 +82,8 @@ $qemuArgs = @(
 
 if ($Headless) {
     $qemuArgs += @("-display", "none", "-monitor", "none")
+} else {
+    $qemuArgs += @("-audiodev", "sdl,id=audio0", "-device", "sb16,audiodev=audio0")
 }
 
 if ($Uefi) {

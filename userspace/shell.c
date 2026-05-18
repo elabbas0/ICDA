@@ -10,6 +10,8 @@
 #define SHELL_EDIT_BUF_CAP 4096
 #define SHELL_EDIT_VIEW_ROWS 18
 #define SHELL_EDIT_VIEW_COLS 68
+#define SHELL_AUDIO_BUF_CAP 320000
+#define SHELL_AUDIO_PLAY_CHUNK 65535
 #ifndef SHELL_AUTOTEST
 #define SHELL_AUTOTEST 0
 #endif
@@ -28,6 +30,8 @@ typedef struct {
 static shell_job_t shell_job_table[SHELL_JOB_CAP];
 static char shell_history[SHELL_HISTORY_CAP][SHELL_LINE_CAP];
 static uint64_t shell_history_count = 0;
+static uint8_t shell_audio_buf[SHELL_AUDIO_BUF_CAP];
+static uint8_t shell_audio_out_buf[SHELL_AUDIO_BUF_CAP];
 
 enum {
     KEY_SPECIAL_BASE = 256,
@@ -82,6 +86,17 @@ static int str_prefix(const char *text, const char *prefix) {
         i++;
     }
     return 1;
+}
+
+static uint16_t read_le16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
 }
 
 static void write_uint(uint64_t v) {
@@ -146,6 +161,148 @@ static int parse_uint64(const char *text, uint64_t *out) {
     }
     *out = value;
     return 1;
+}
+
+static int shell_parse_wav(const uint8_t *buf, uint64_t size,
+                           uint16_t *channels_out, uint32_t *rate_out,
+                           uint16_t *bits_out, const uint8_t **data_out,
+                           uint32_t *data_size_out) {
+    uint64_t off = 12;
+    uint16_t fmt_tag = 0;
+    uint16_t channels = 0;
+    uint32_t rate = 0;
+    uint16_t bits = 0;
+    const uint8_t *data = 0;
+    uint32_t data_size = 0;
+    int have_fmt = 0;
+
+    if (!buf || size < 44) return -1;
+    if (!(buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F')) return -1;
+    if (!(buf[8] == 'W' && buf[9] == 'A' && buf[10] == 'V' && buf[11] == 'E')) return -1;
+
+    while (off + 8 <= size) {
+        const uint8_t *chunk = &buf[off];
+        uint32_t chunk_size = read_le32(chunk + 4);
+        uint64_t next = off + 8ULL + chunk_size + (chunk_size & 1U);
+        if (next > size) break;
+
+        if (chunk[0] == 'f' && chunk[1] == 'm' && chunk[2] == 't' && chunk[3] == ' ') {
+            if (chunk_size < 16) return -1;
+            fmt_tag = read_le16(chunk + 8);
+            channels = read_le16(chunk + 10);
+            rate = read_le32(chunk + 12);
+            bits = read_le16(chunk + 22);
+            have_fmt = 1;
+        } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
+            data = chunk + 8;
+            data_size = chunk_size;
+        }
+        off = next;
+    }
+
+    if (!have_fmt || !data || fmt_tag != 1 || channels == 0 || rate == 0) return -1;
+    if (!(bits == 8 || bits == 16)) return -1;
+
+    *channels_out = channels;
+    *rate_out = rate;
+    *bits_out = bits;
+    *data_out = data;
+    *data_size_out = data_size;
+    return 0;
+}
+
+static int32_t shell_sample_at(const uint8_t *data, uint32_t frame_index, uint16_t channels, uint16_t bits) {
+    uint32_t sample_index = frame_index * channels;
+    if (bits == 8) {
+        int32_t sum = 0;
+        for (uint16_t ch = 0; ch < channels; ch++) {
+            sum += ((int32_t)data[sample_index + ch] - 128) << 8;
+        }
+        return sum / channels;
+    } else {
+        int32_t sum = 0;
+        const uint8_t *p = data + (sample_index * 2U);
+        for (uint16_t ch = 0; ch < channels; ch++) {
+            int16_t s = (int16_t)read_le16(p + (ch * 2U));
+            sum += s;
+        }
+        return sum / channels;
+    }
+}
+
+static uint32_t shell_convert_wav_to_u8_mono(const uint8_t *data, uint32_t frames,
+                                             uint16_t channels, uint16_t bits,
+                                             uint32_t input_rate, uint32_t output_rate,
+                                             uint8_t *out, uint32_t out_cap) {
+    uint64_t out_frames = ((uint64_t)frames * (uint64_t)output_rate + (uint64_t)input_rate - 1ULL) / (uint64_t)input_rate;
+
+    if (out_frames > out_cap) {
+        out_frames = out_cap;
+    }
+
+    for (uint32_t i = 0; i < (uint32_t)out_frames; i++) {
+        uint32_t source_index = (uint32_t)(((uint64_t)i * (uint64_t)input_rate) / (uint64_t)output_rate);
+        if (source_index >= frames) {
+            source_index = frames - 1;
+        }
+        int32_t sample = shell_sample_at(data, source_index, channels, bits);
+        sample += 32768;
+        if (sample < 0) sample = 0;
+        if (sample > 65535) sample = 65535;
+        out[i] = (uint8_t)(sample >> 8);
+    }
+
+    return (uint32_t)out_frames;
+}
+
+static void shell_play_wav_path(const char *path) {
+    uint16_t channels = 0;
+    uint16_t bits = 0;
+    uint32_t sample_rate = 0;
+    const uint8_t *pcm = 0;
+    uint32_t pcm_size = 0;
+    uint32_t total_frames;
+    uint32_t pcm_u8_size;
+    uint32_t output_rate;
+    long size;
+
+    if (!path || !*path) {
+        icda_write("usage: play <path>\n");
+        return;
+    }
+
+    size = (long)icda_read_file(path, (char *)shell_audio_buf, sizeof(shell_audio_buf));
+    if (size < 0) {
+        icda_write("play failed: ");
+        icda_write(path);
+        icda_write("\n");
+        return;
+    }
+
+    if (shell_parse_wav(shell_audio_buf, (uint64_t)size, &channels, &sample_rate, &bits, &pcm, &pcm_size) != 0) {
+        icda_write("unsupported wav format\n");
+        return;
+    }
+
+    total_frames = pcm_size / (channels * (bits / 8U));
+    output_rate = sample_rate;
+    if (total_frames > SHELL_AUDIO_PLAY_CHUNK) {
+        output_rate = (uint32_t)(((uint64_t)sample_rate * (uint64_t)SHELL_AUDIO_PLAY_CHUNK) / (uint64_t)total_frames);
+        if (output_rate < 2000U) {
+            output_rate = 2000U;
+        }
+    }
+
+    pcm_u8_size = shell_convert_wav_to_u8_mono(pcm, total_frames, channels, bits,
+                                               sample_rate, output_rate,
+                                               shell_audio_out_buf, sizeof(shell_audio_out_buf));
+    if (pcm_u8_size == 0) {
+        icda_write("audio conversion failed\n");
+        return;
+    }
+    if ((long)icda_play_pcm_u8(shell_audio_out_buf, pcm_u8_size, output_rate) < 0) {
+        icda_write("pcm playback unavailable\n");
+    }
 }
 
 static const char *proc_state_name(uint64_t state) {
@@ -313,7 +470,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
 
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
-            "help","clear","pid","ps","jobs","pwd","cd","ls","cat","mkdir","touch","write","stat","sync","storage",
+            "help","clear","pid","ps","jobs","pwd","cd","ls","cat","mkdir","touch","write","stat","sync","storage","money","play",
             "run","spawn","bg","fg","wait","waitall","stop","resume","kill","sleep","yield","edit","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
@@ -720,7 +877,28 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync storage edit run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
+    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync storage money play edit run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
+}
+
+static void shell_money(void) {
+    icda_write("            *            \n");
+    icda_write("           * *           \n");
+    icda_write("          *   *          \n");
+    icda_write("         *     *         \n");
+    icda_write("*********       *********\n");
+    icda_write(" *                     * \n");
+    icda_write("  *                   *  \n");
+    icda_write("   *                 *   \n");
+    icda_write("    ***************    \n");
+    icda_write("   *                 *   \n");
+    icda_write("  *                   *  \n");
+    icda_write(" *                     * \n");
+    icda_write("*********       *********\n");
+    icda_write("         *     *         \n");
+    icda_write("          *   *          \n");
+    icda_write("           * *           \n");
+    icda_write("            *            \n");
+    shell_play_wav_path("/usr/share/audio/hava.wav");
 }
 
 static void shell_pwd(void) {
@@ -1229,6 +1407,8 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "stat")) { shell_stat(arg); return; }
     if (str_eq(line, "sync")) { shell_sync(); return; }
     if (str_eq(line, "storage")) { shell_storage(); return; }
+    if (str_eq(line, "money")) { shell_money(); return; }
+    if (str_eq(line, "play")) { shell_play_wav_path(arg); return; }
     if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }

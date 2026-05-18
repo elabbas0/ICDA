@@ -15,6 +15,8 @@ extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
 extern const char usershell_start[];
 extern const char usershell_end[];
+extern const char asset_hava_wav_start[];
+extern const char asset_hava_wav_end[];
 
 static const char motd_txt[] =
     "welcome to icda\n"
@@ -60,7 +62,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/ticker.app", 0, 0 },
     { "/apps/shell.app", 0, 0 },
     { "/bin/hello.elf", 0, 0 },
-    { "/bin/pid.elf", 0, 0 }
+    { "/bin/pid.elf", 0, 0 },
+    { "/usr/share/audio/hava.wav", 0, 0 }
 };
 
 int initramfs_init(void) {
@@ -76,6 +79,8 @@ int initramfs_init(void) {
     initramfs_files[8].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
     initramfs_files[9].data = userprog_pid_elf_start;
     initramfs_files[9].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
+    initramfs_files[10].data = asset_hava_wav_start;
+    initramfs_files[10].size = (uint64_t)(asset_hava_wav_end - asset_hava_wav_start);
     return 0;
 }
 

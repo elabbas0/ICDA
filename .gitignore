@@ -73,3 +73,8 @@ stage-test.log
 usb-boot-test.log
 usb-gpt-test.log
 icda-disk-*-test.img
+qemu-money-*.log
+qemu-money-*.wav
+qemu-money-*.img
+money-smoke.log
+audio-src/

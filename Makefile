@@ -21,6 +21,14 @@ kernel.o: kernel/kernel.c
 device.o: kernel/drivers/device.c kernel/drivers/device.h
 	$(CC) $(CFLAGS) -c kernel/drivers/device.c -o device.o
 
+speaker.o: kernel/drivers/audio/speaker.c kernel/drivers/audio/speaker.h \
+           kernel/proc/sched.h
+	$(CC) $(CFLAGS) -c kernel/drivers/audio/speaker.c -o speaker.o
+
+sb16.o: kernel/drivers/audio/sb16.c kernel/drivers/audio/sb16.h \
+         kernel/memory/pmm.h kernel/memory/vmm.h kernel/proc/sched.h
+	$(CC) $(CFLAGS) -c kernel/drivers/audio/sb16.c -o sb16.o
+
 vga.o: kernel/drivers/display/vga.c
 	$(CC) $(CFLAGS) -c kernel/drivers/display/vga.c -o vga.o
 
@@ -190,10 +198,10 @@ shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel.bin: kernel.o device.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel.bin: kernel.o device.o speaker.o sb16.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o sb16.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
 

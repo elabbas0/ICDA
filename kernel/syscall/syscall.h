@@ -34,7 +34,9 @@ typedef enum {
     SYS_INPUT_READLINE = 24,
     SYS_SYNC          = 25,
     SYS_CONSOLE_SETCURSOR = 26,
-    SYS_STORAGE_INFO  = 27
+    SYS_STORAGE_INFO  = 27,
+    SYS_SOUND_PLAY    = 28,
+    SYS_AUDIO_PCM_PLAY = 29
 } syscall_number_t;
 
 typedef struct {

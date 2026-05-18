@@ -31,7 +31,9 @@ enum {
     SYS_INPUT_READLINE = 24,
     SYS_SYNC          = 25,
     SYS_CONSOLE_SETCURSOR = 26,
-    SYS_STORAGE_INFO  = 27
+    SYS_STORAGE_INFO  = 27,
+    SYS_SOUND_PLAY    = 28,
+    SYS_AUDIO_PCM_PLAY = 29
 };
 
 typedef struct {
@@ -104,6 +106,8 @@ static inline uint64_t icda_read_line(char *buf, uint64_t cap) { return sys_call
 static inline uint64_t icda_sync(void) { return sys_call0(SYS_SYNC); }
 static inline void icda_set_cursor(uint64_t x, uint64_t y) { (void)sys_call2(SYS_CONSOLE_SETCURSOR, x, y); }
 static inline uint64_t icda_storage_info(char *buf, uint64_t cap) { return sys_call2(SYS_STORAGE_INFO, (uint64_t)(uintptr_t)buf, cap); }
+static inline uint64_t icda_play_tone(uint64_t frequency_hz, uint64_t ticks) { return sys_call2(SYS_SOUND_PLAY, frequency_hz, ticks); }
+static inline uint64_t icda_play_pcm_u8(const uint8_t *buf, uint64_t size, uint64_t sample_rate) { return sys_call3(SYS_AUDIO_PCM_PLAY, (uint64_t)(uintptr_t)buf, size, sample_rate); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

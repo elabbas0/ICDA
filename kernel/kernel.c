@@ -1,6 +1,8 @@
 #include <stdint.h>
 
 #include "drivers/console/console.h"
+#include "drivers/audio/speaker.h"
+#include "drivers/audio/sb16.h"
 #include "drivers/display/framebuffer.h"
 #include "drivers/display/vga.h"
 #include "drivers/input/input.h"
@@ -148,6 +150,13 @@ void kernel_main(void *multiboot_info) {
 
     irq_register(0, timer_handler);
     boot_line("timer", "irq0 handler registered");
+
+    speaker_init();
+    if (sb16_init() == 0) {
+        boot_line("audio", "sb16 online");
+    } else {
+        boot_line("audio", "sb16 unavailable");
+    }
 
     keyboard_init();
     bootstage_set(11, "kbd");
