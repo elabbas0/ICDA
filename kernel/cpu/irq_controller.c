@@ -13,6 +13,31 @@ typedef struct {
     const char *name;
 } irq_controller_ops_t;
 
+static int pic_controller_init(void *multiboot_info) {
+    (void)multiboot_info;
+    return pic_init();
+}
+
+static void pic_controller_eoi(int irq) {
+    pic_eoi(irq);
+}
+
+static void pic_controller_mask(int irq) {
+    pic_mask_irq(irq);
+}
+
+static void pic_controller_unmask(int irq) {
+    pic_unmask_irq(irq);
+}
+
+static irq_controller_ops_t pic_ops = {
+    .init = pic_controller_init,
+    .eoi = pic_controller_eoi,
+    .mask = pic_controller_mask,
+    .unmask = pic_controller_unmask,
+    .name = "8259 PIC"
+};
+
 static int apic_controller_init(void *multiboot_info) {
     const struct acpi_madt *madt;
     const uint8_t *ptr;
@@ -87,6 +112,11 @@ static irq_controller_ops_t apic_ops = {
 static irq_controller_ops_t *active_controller = 0;
 
 int irq_controller_init(void *multiboot_info) {
+    if (pic_ops.init(multiboot_info) == 0) {
+        active_controller = &pic_ops;
+        return 0;
+    }
+
     if (apic_ops.init(multiboot_info) == 0) {
         active_controller = &apic_ops;
         return 0;

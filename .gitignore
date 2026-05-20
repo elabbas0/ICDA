@@ -78,3 +78,8 @@ qemu-money-*.wav
 qemu-money-*.img
 money-smoke.log
 audio-src/
+kernel/fs/audio_assets_gen.c
+kernel/proc/audio_assets.asm
+qemu-audio-selftest.wav
+qemu-hda-*.log
+qemu-hda-*.wav

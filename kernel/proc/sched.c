@@ -17,7 +17,7 @@ static process_t *process_list = NULL;
 static uint64_t next_pid = 0;
 static uint64_t next_tid = 0;
 
-#define SCHED_TICKS 2
+#define SCHED_TICKS 1
 static uint64_t tick_count = 0;
 static uint64_t uptime_ticks = 0;
 
@@ -65,7 +65,10 @@ static uint64_t thread_entry_stack_top(const thread_t *thread) {
     if (!thread) {
         return 0;
     }
-    return thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top;
+    if (thread->owner && thread->owner->kind == PROCESS_USER && thread->user_entry_stack_top) {
+        return thread->user_entry_stack_top;
+    }
+    return thread->kernel_stack_top;
 }
 
 static int sched_can_control(process_t *actor, process_t *target) {
@@ -100,7 +103,8 @@ static void wake_blocked_threads(void) {
         thread_t *thread = proc->main_thread;
         if (thread &&
             thread->state == THREAD_BLOCKED &&
-            thread->block_reason == THREAD_BLOCK_SLEEP &&
+            (thread->block_reason == THREAD_BLOCK_SLEEP ||
+             (thread->block_reason == THREAD_BLOCK_INPUT && thread->wake_tick != 0)) &&
             thread->wake_tick <= uptime_ticks) {
             thread->state = THREAD_READY;
             thread->block_reason = THREAD_BLOCK_NONE;
@@ -282,6 +286,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
     }
 
     proc->main_thread = thread;
+    proc->state = PROCESS_READY;
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
@@ -316,6 +321,7 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
     }
 
     proc->main_thread = thread;
+    proc->state = PROCESS_READY;
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
@@ -395,6 +401,27 @@ void sched_yield(void) {
     schedule_inner(1);
 }
 
+void sched_wake_thread(thread_t *thread) {
+    process_t *proc;
+
+    if (!thread) {
+        return;
+    }
+
+    proc = thread->owner;
+    if (thread->state == THREAD_BLOCKED) {
+        thread->state = THREAD_READY;
+        thread->block_reason = THREAD_BLOCK_NONE;
+        thread->wake_tick = 0;
+    }
+
+    if (proc && proc->state != PROCESS_EXITED && proc->state != PROCESS_REAPED && proc->state != PROCESS_STOPPED) {
+        if (proc->state == PROCESS_BLOCKED || proc->state == PROCESS_NEW) {
+            proc->state = PROCESS_READY;
+        }
+    }
+}
+
 uint64_t sched_ticks(void) {
     return uptime_ticks;
 }
@@ -430,6 +457,28 @@ void sched_wait_input(void) {
     }
 
     thread->wake_tick = 0;
+    thread->block_reason = THREAD_BLOCK_INPUT;
+    thread->state = THREAD_BLOCKED;
+    if (proc && proc->state != PROCESS_EXITED && proc->state != PROCESS_REAPED && proc->state != PROCESS_STOPPED) {
+        proc->state = PROCESS_BLOCKED;
+    }
+    schedule_inner(1);
+}
+
+void sched_wait_input_timeout(uint64_t ticks) {
+    thread_t *thread = sched_current_thread();
+    process_t *proc = sched_current_process();
+
+    if (!thread) {
+        return;
+    }
+
+    if (ticks == 0) {
+        sched_wait_input();
+        return;
+    }
+
+    thread->wake_tick = uptime_ticks + ticks;
     thread->block_reason = THREAD_BLOCK_INPUT;
     thread->state = THREAD_BLOCKED;
     if (proc && proc->state != PROCESS_EXITED && proc->state != PROCESS_REAPED && proc->state != PROCESS_STOPPED) {

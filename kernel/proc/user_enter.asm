@@ -23,7 +23,7 @@ user_enter:
     mov [rax + THREAD_USER_RETURN_R14], r14
     mov [rax + THREAD_USER_RETURN_R15], r15
     cli
-    mov ax, GDT_USER_DATA | 3
+    xor eax, eax
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -32,6 +32,7 @@ user_enter:
     push qword (GDT_USER_DATA | 3)
     push rsi
     pushfq
+    or qword [rsp], 0x200
     push qword (GDT_USER_CODE | 3)
     push rdi
     iretq

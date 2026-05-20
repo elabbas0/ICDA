@@ -3,10 +3,13 @@
 #include "../drivers/console/console.h"
 #include "../drivers/input/input.h"
 #include "../drivers/audio/speaker.h"
-#include "../drivers/audio/sb16.h"
+#include "../drivers/audio/hda.h"
+#include "../drivers/audio/playback.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
 #include "../fs/fat32.h"
+#include "../fs/exfat.h"
+#include "../fs/ntfs.h"
 #include "../fs/vfs.h"
 #include "../fs/persistfs.h"
 #include "../proc/sched.h"
@@ -145,49 +148,68 @@ static uint64_t sys_exit(uint64_t code) {
     return code;
 }
 
-static uint64_t sys_input_read(void) {
-    int c;
+static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, uint64_t cap) {
+    process_t *proc = sched_current_process();
+    uint64_t size = 0;
+    const char *data;
+    uint64_t chunk;
 
-    while ((c = input_read_char()) < 0) {
-        sched_yield();
+    if (!proc || !path || !buf || cap == 0) {
+        return (uint64_t)-1;
+    }
+
+    data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), path, &size);
+    if (!data || offset >= size) {
+        return 0;
+    }
+
+    chunk = size - offset;
+    if (chunk > cap) {
+        chunk = cap;
+    }
+
+    copy_bytes(buf, data + offset, chunk);
+    return chunk;
+}
+
+static uint64_t sys_input_read(void) {
+    int c = input_read_char();
+    if (c < 0) {
+        return (uint64_t)-1;
     }
     return (uint64_t)(uint8_t)c;
 }
 
-static void sys_line_show_cursor(int *visible) {
-    if (!*visible) {
-        console_write("_", CONSOLE_STYLE_INFO);
-        *visible = 1;
+static uint64_t sys_input_read_timeout(uint64_t ticks) {
+    int c = input_read_char();
+    if (c >= 0) {
+        return (uint64_t)(uint8_t)c;
     }
-}
 
-static void sys_line_hide_cursor(int *visible) {
-    if (*visible) {
-        console_backspace();
-        *visible = 0;
+    sched_wait_input_timeout(ticks);
+    c = input_read_char();
+    if (c < 0) {
+        return (uint64_t)-1;
     }
+    return (uint64_t)(uint8_t)c;
 }
 
 static uint64_t sys_input_readline(char *buf, uint64_t cap) {
     uint64_t len = 0;
-    int visible = 0;
 
     if (!buf || cap == 0) {
         return (uint64_t)-1;
     }
 
     buf[0] = '\0';
-    sys_line_show_cursor(&visible);
 
     for (;;) {
         int c;
         char out[2];
 
         while ((c = input_read_char()) < 0) {
-            sched_yield();
+            sched_sleep(1);
         }
-
-        sys_line_hide_cursor(&visible);
 
         if (c == '\r' || c == '\n') {
             console_write("\n", CONSOLE_STYLE_INFO);
@@ -200,11 +222,6 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
                 len--;
                 buf[len] = '\0';
                 console_backspace();
-                if (len == 0) {
-                    sys_line_show_cursor(&visible);
-                }
-            } else {
-                sys_line_show_cursor(&visible);
             }
             continue;
         }
@@ -213,11 +230,9 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
             c = ' ';
         }
         if (c < 32 || c > 126) {
-            sys_line_show_cursor(&visible);
             continue;
         }
         if (len + 1 >= cap) {
-            sys_line_show_cursor(&visible);
             continue;
         }
 
@@ -487,13 +502,23 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
     }
 
     out = append_text(buf, out, cap, "mounts:\n");
-    if (fat32_mount_count() == 0) {
+    if (fat32_mount_count() == 0 && exfat_mount_count() == 0 && ntfs_mount_count() == 0) {
         out = append_text(buf, out, cap, "  (none)\n");
     } else {
         for (uint32_t i = 0; i < fat32_mount_count(); i++) {
             out = append_text(buf, out, cap, "  /volumes/fat32-");
             out = append_uint(buf, out, cap, i);
             out = append_text(buf, out, cap, "\n");
+        }
+        for (uint32_t i = 0; i < exfat_mount_count(); i++) {
+            out = append_text(buf, out, cap, "  /volumes/exfat-");
+            out = append_uint(buf, out, cap, i);
+            out = append_text(buf, out, cap, " (ro)\n");
+        }
+        for (uint32_t i = 0; i < ntfs_mount_count(); i++) {
+            out = append_text(buf, out, cap, "  /volumes/ntfs-");
+            out = append_uint(buf, out, cap, i);
+            out = append_text(buf, out, cap, " (ro)\n");
         }
     }
     return out;
@@ -505,10 +530,74 @@ static uint64_t sys_sound_play(uint64_t frequency_hz, uint64_t ticks) {
 }
 
 static uint64_t sys_audio_pcm_play(const uint8_t *buf, uint64_t size, uint64_t sample_rate) {
-    if (!buf || size == 0 || size > 0xFFFFFFFFULL || sample_rate > 0xFFFFULL) {
+    (void)buf;
+    (void)size;
+    (void)sample_rate;
+    return (uint64_t)-1;
+}
+
+static uint64_t sys_audio_play_file(const char *path) {
+    process_t *proc = sched_current_process();
+    if (!proc || !path || !*path) {
         return (uint64_t)-1;
     }
-    return sb16_play_pcm_u8_mono(buf, (uint32_t)size, (uint16_t)sample_rate) == 0 ? 0 : (uint64_t)-1;
+    return audio_playback_play_wav(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_audio_stop(void) {
+    audio_playback_stop();
+    return 0;
+}
+
+static uint64_t sys_audio_status(syscall_audio_info_t *out) {
+    audio_playback_status_t info;
+    uint64_t i;
+
+    if (!out) {
+        return (uint64_t)-1;
+    }
+    if (audio_playback_status(&info) != 0) {
+        return (uint64_t)-1;
+    }
+    out->active = info.active;
+    out->seconds_left = info.seconds_left;
+    out->total_seconds = info.total_seconds;
+    for (i = 0; i < sizeof(out->name); i++) {
+        out->name[i] = info.name[i];
+        if (info.name[i] == '\0') break;
+    }
+    if (i == sizeof(out->name)) {
+        out->name[sizeof(out->name) - 1] = '\0';
+    }
+    return 0;
+}
+
+static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) {
+    process_t *proc = sched_current_process();
+    uint32_t rate = 0;
+    uint64_t token = 0;
+
+    if (!proc || !token_out || !sample_rate_out) {
+        return (uint64_t)-1;
+    }
+    if (audio_playback_claim(proc->pid, &token, &rate) != 0) {
+        return (uint64_t)-1;
+    }
+    *token_out = token;
+    *sample_rate_out = rate;
+    return 0;
+}
+
+static uint64_t sys_audio_read_chunk(uint64_t token, uint8_t *buf, uint64_t cap) {
+    if (!buf || cap == 0 || cap > 0xFFFFFFFFULL) {
+        return (uint64_t)-1;
+    }
+    return audio_playback_read_chunk(token, buf, (uint32_t)cap);
+}
+
+static uint64_t sys_audio_finish(uint64_t token) {
+    audio_playback_finish(token);
+    return 0;
 }
 
 void syscall_init(void) {
@@ -524,6 +613,11 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_vfs_read((const char *)(uintptr_t)regs->rdi,
                                 (char *)(uintptr_t)regs->rsi,
                                 regs->rdx);
+        case SYS_VFS_READ_AT:
+            return sys_vfs_read_at((const char *)(uintptr_t)regs->rdi,
+                                   regs->rsi,
+                                   (char *)(uintptr_t)regs->rdx,
+                                   regs->r10);
         case SYS_VFS_WRITE:
             return sys_vfs_write((const char *)(uintptr_t)regs->rdi,
                                  (const char *)(uintptr_t)regs->rsi,
@@ -583,6 +677,25 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_sound_play(regs->rdi, regs->rsi);
         case SYS_AUDIO_PCM_PLAY:
             return sys_audio_pcm_play((const uint8_t *)(uintptr_t)regs->rdi, regs->rsi, regs->rdx);
+        case SYS_AUDIO_PLAY_FILE:
+            return sys_audio_play_file((const char *)(uintptr_t)regs->rdi);
+        case SYS_AUDIO_STOP:
+            return sys_audio_stop();
+        case SYS_AUDIO_STATUS:
+            return sys_audio_status((syscall_audio_info_t *)(uintptr_t)regs->rdi);
+        case SYS_AUDIO_CLAIM:
+            return sys_audio_claim((uint64_t *)(uintptr_t)regs->rdi,
+                                   (uint64_t *)(uintptr_t)regs->rsi);
+        case SYS_AUDIO_READ_CHUNK:
+            return sys_audio_read_chunk(regs->rdi,
+                                        (uint8_t *)(uintptr_t)regs->rsi,
+                                        regs->rdx);
+        case SYS_AUDIO_FINISH:
+            return sys_audio_finish(regs->rdi);
+        case SYS_TICKS:
+            return sched_ticks();
+        case SYS_INPUT_READ_TIMEOUT:
+            return sys_input_read_timeout(regs->rdi);
         default:
             return (uint64_t)-1;
     }

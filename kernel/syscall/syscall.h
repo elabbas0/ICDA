@@ -36,7 +36,16 @@ typedef enum {
     SYS_CONSOLE_SETCURSOR = 26,
     SYS_STORAGE_INFO  = 27,
     SYS_SOUND_PLAY    = 28,
-    SYS_AUDIO_PCM_PLAY = 29
+    SYS_AUDIO_PCM_PLAY = 29,
+    SYS_AUDIO_PLAY_FILE = 30,
+    SYS_AUDIO_STOP = 31,
+    SYS_AUDIO_STATUS = 32,
+    SYS_AUDIO_CLAIM = 33,
+    SYS_AUDIO_READ_CHUNK = 34,
+    SYS_AUDIO_FINISH = 35,
+    SYS_TICKS = 36,
+    SYS_INPUT_READ_TIMEOUT = 37,
+    SYS_VFS_READ_AT = 38
 } syscall_number_t;
 
 typedef struct {
@@ -48,6 +57,13 @@ typedef struct {
     uint64_t state;
     uint64_t exit_code;
 } syscall_proc_info_t;
+
+typedef struct {
+    uint64_t active;
+    uint64_t seconds_left;
+    uint64_t total_seconds;
+    char name[64];
+} syscall_audio_info_t;
 
 void syscall_init(void);
 uint64_t syscall_dispatch(struct registers *regs);

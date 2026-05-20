@@ -10,8 +10,6 @@
 #define SHELL_EDIT_BUF_CAP 4096
 #define SHELL_EDIT_VIEW_ROWS 18
 #define SHELL_EDIT_VIEW_COLS 68
-#define SHELL_AUDIO_BUF_CAP 320000
-#define SHELL_AUDIO_PLAY_CHUNK 65535
 #ifndef SHELL_AUTOTEST
 #define SHELL_AUTOTEST 0
 #endif
@@ -30,9 +28,6 @@ typedef struct {
 static shell_job_t shell_job_table[SHELL_JOB_CAP];
 static char shell_history[SHELL_HISTORY_CAP][SHELL_LINE_CAP];
 static uint64_t shell_history_count = 0;
-static uint8_t shell_audio_buf[SHELL_AUDIO_BUF_CAP];
-static uint8_t shell_audio_out_buf[SHELL_AUDIO_BUF_CAP];
-
 enum {
     KEY_SPECIAL_BASE = 256,
     KEY_UP,
@@ -86,17 +81,6 @@ static int str_prefix(const char *text, const char *prefix) {
         i++;
     }
     return 1;
-}
-
-static uint16_t read_le16(const uint8_t *p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t read_le32(const uint8_t *p) {
-    return (uint32_t)p[0] |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
 }
 
 static void write_uint(uint64_t v) {
@@ -163,146 +147,51 @@ static int parse_uint64(const char *text, uint64_t *out) {
     return 1;
 }
 
-static int shell_parse_wav(const uint8_t *buf, uint64_t size,
-                           uint16_t *channels_out, uint32_t *rate_out,
-                           uint16_t *bits_out, const uint8_t **data_out,
-                           uint32_t *data_size_out) {
-    uint64_t off = 12;
-    uint16_t fmt_tag = 0;
-    uint16_t channels = 0;
-    uint32_t rate = 0;
-    uint16_t bits = 0;
-    const uint8_t *data = 0;
-    uint32_t data_size = 0;
-    int have_fmt = 0;
-
-    if (!buf || size < 44) return -1;
-    if (!(buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F')) return -1;
-    if (!(buf[8] == 'W' && buf[9] == 'A' && buf[10] == 'V' && buf[11] == 'E')) return -1;
-
-    while (off + 8 <= size) {
-        const uint8_t *chunk = &buf[off];
-        uint32_t chunk_size = read_le32(chunk + 4);
-        uint64_t next = off + 8ULL + chunk_size + (chunk_size & 1U);
-        if (next > size) break;
-
-        if (chunk[0] == 'f' && chunk[1] == 'm' && chunk[2] == 't' && chunk[3] == ' ') {
-            if (chunk_size < 16) return -1;
-            fmt_tag = read_le16(chunk + 8);
-            channels = read_le16(chunk + 10);
-            rate = read_le32(chunk + 12);
-            bits = read_le16(chunk + 22);
-            have_fmt = 1;
-        } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
-            data = chunk + 8;
-            data_size = chunk_size;
-        }
-        off = next;
-    }
-
-    if (!have_fmt || !data || fmt_tag != 1 || channels == 0 || rate == 0) return -1;
-    if (!(bits == 8 || bits == 16)) return -1;
-
-    *channels_out = channels;
-    *rate_out = rate;
-    *bits_out = bits;
-    *data_out = data;
-    *data_size_out = data_size;
-    return 0;
-}
-
-static int32_t shell_sample_at(const uint8_t *data, uint32_t frame_index, uint16_t channels, uint16_t bits) {
-    uint32_t sample_index = frame_index * channels;
-    if (bits == 8) {
-        int32_t sum = 0;
-        for (uint16_t ch = 0; ch < channels; ch++) {
-            sum += ((int32_t)data[sample_index + ch] - 128) << 8;
-        }
-        return sum / channels;
-    } else {
-        int32_t sum = 0;
-        const uint8_t *p = data + (sample_index * 2U);
-        for (uint16_t ch = 0; ch < channels; ch++) {
-            int16_t s = (int16_t)read_le16(p + (ch * 2U));
-            sum += s;
-        }
-        return sum / channels;
-    }
-}
-
-static uint32_t shell_convert_wav_to_u8_mono(const uint8_t *data, uint32_t frames,
-                                             uint16_t channels, uint16_t bits,
-                                             uint32_t input_rate, uint32_t output_rate,
-                                             uint8_t *out, uint32_t out_cap) {
-    uint64_t out_frames = ((uint64_t)frames * (uint64_t)output_rate + (uint64_t)input_rate - 1ULL) / (uint64_t)input_rate;
-
-    if (out_frames > out_cap) {
-        out_frames = out_cap;
-    }
-
-    for (uint32_t i = 0; i < (uint32_t)out_frames; i++) {
-        uint32_t source_index = (uint32_t)(((uint64_t)i * (uint64_t)input_rate) / (uint64_t)output_rate);
-        if (source_index >= frames) {
-            source_index = frames - 1;
-        }
-        int32_t sample = shell_sample_at(data, source_index, channels, bits);
-        sample += 32768;
-        if (sample < 0) sample = 0;
-        if (sample > 65535) sample = 65535;
-        out[i] = (uint8_t)(sample >> 8);
-    }
-
-    return (uint32_t)out_frames;
-}
-
 static void shell_play_wav_path(const char *path) {
-    uint16_t channels = 0;
-    uint16_t bits = 0;
-    uint32_t sample_rate = 0;
-    const uint8_t *pcm = 0;
-    uint32_t pcm_size = 0;
-    uint32_t total_frames;
-    uint32_t pcm_u8_size;
-    uint32_t output_rate;
-    long size;
+    char fallback[SHELL_LINE_CAP];
+    char cwd[80];
+    const char *resolved = path;
 
     if (!path || !*path) {
         icda_write("usage: play <path>\n");
         return;
     }
 
-    size = (long)icda_read_file(path, (char *)shell_audio_buf, sizeof(shell_audio_buf));
-    if (size < 0) {
+    if (!str_has_slash(path)) {
+        copy_text(fallback, "/usr/share/audio/", sizeof(fallback));
+        append_text(fallback, path, sizeof(fallback));
+        resolved = fallback;
+    } else if (path[0] != '/') {
+        if ((long)icda_getcwd(cwd, sizeof(cwd)) < 0) {
+            icda_write("play failed: ");
+            icda_write(path);
+            icda_write("\n");
+            return;
+        }
+        copy_text(fallback, cwd, sizeof(fallback));
+        if (!str_eq(fallback, "/") && fallback[str_len(fallback) - 1] != '/') {
+            append_text(fallback, "/", sizeof(fallback));
+        }
+        append_text(fallback, path, sizeof(fallback));
+        resolved = fallback;
+    }
+
+    if (str_len(resolved) == 0 || str_len(resolved) + 1 >= SHELL_LINE_CAP) {
         icda_write("play failed: ");
         icda_write(path);
         icda_write("\n");
         return;
     }
 
-    if (shell_parse_wav(shell_audio_buf, (uint64_t)size, &channels, &sample_rate, &bits, &pcm, &pcm_size) != 0) {
-        icda_write("unsupported wav format\n");
-        return;
+    if ((long)icda_play_audio_file(resolved) < 0) {
+        icda_write("play failed: ");
+        icda_write(resolved);
+        icda_write("\n");
     }
+}
 
-    total_frames = pcm_size / (channels * (bits / 8U));
-    output_rate = sample_rate;
-    if (total_frames > SHELL_AUDIO_PLAY_CHUNK) {
-        output_rate = (uint32_t)(((uint64_t)sample_rate * (uint64_t)SHELL_AUDIO_PLAY_CHUNK) / (uint64_t)total_frames);
-        if (output_rate < 2000U) {
-            output_rate = 2000U;
-        }
-    }
-
-    pcm_u8_size = shell_convert_wav_to_u8_mono(pcm, total_frames, channels, bits,
-                                               sample_rate, output_rate,
-                                               shell_audio_out_buf, sizeof(shell_audio_out_buf));
-    if (pcm_u8_size == 0) {
-        icda_write("audio conversion failed\n");
-        return;
-    }
-    if ((long)icda_play_pcm_u8(shell_audio_out_buf, pcm_u8_size, output_rate) < 0) {
-        icda_write("pcm playback unavailable\n");
-    }
+static void shell_stop_audio(void) {
+    (void)icda_stop_audio();
 }
 
 static const char *proc_state_name(uint64_t state) {
@@ -404,25 +293,43 @@ static void shell_rewrite_line(const char *line, uint64_t *shown_len) {
     *shown_len = str_len(line);
 }
 
+static void shell_cursor_show(int *visible) {
+    if (!*visible) {
+        icda_write("_");
+        *visible = 1;
+    }
+}
+
+static void shell_cursor_hide(int *visible) {
+    if (*visible) {
+        icda_backspace();
+        *visible = 0;
+    }
+}
+
+static long shell_wait_key_byte(uint64_t timeout_ticks) {
+    return icda_read_char_timeout(timeout_ticks);
+}
+
 static long shell_read_key(void) {
-    long c = (long)icda_read_char();
+    long c = shell_wait_key_byte(0);
     if (c != 27) {
         return c;
     }
 
     {
-        long c1 = (long)icda_read_char();
+        long c1 = shell_wait_key_byte(2);
         if (c1 != '[') {
             return c;
         }
 
-        switch ((long)icda_read_char()) {
+        switch (shell_wait_key_byte(2)) {
             case 'A': return KEY_UP;
             case 'B': return KEY_DOWN;
             case 'C': return KEY_RIGHT;
             case 'D': return KEY_LEFT;
             case '3':
-                if ((long)icda_read_char() == '~') return KEY_DELETE;
+                if (shell_wait_key_byte(2) == '~') return KEY_DELETE;
                 return c;
             default: return c;
         }
@@ -470,8 +377,8 @@ static int shell_autocomplete(char *line, uint64_t cap) {
 
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
-            "help","clear","pid","ps","jobs","pwd","cd","ls","cat","mkdir","touch","write","stat","sync","storage","money","play",
-            "run","spawn","bg","fg","wait","waitall","stop","resume","kill","sleep","yield","edit","exit"
+            "help","clear","pwd","cd","ls","cat","mkdir","touch","write","stat","sync","storage","play","stop",
+            "edit","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
             if (str_prefix(builtins[i], token)) {
@@ -519,13 +426,50 @@ static int shell_read_line(char *line, uint64_t cap) {
     uint64_t len = 0;
     uint64_t shown_len = 0;
     uint64_t history_cursor = shell_history_count;
+    uint64_t last_blink = icda_ticks();
+    uint64_t idle_since = last_blink;
+    int cursor_visible = 0;
 
     if (!line || cap == 0) return -1;
     line[0] = 0;
+    shell_cursor_show(&cursor_visible);
 
     for (;;) {
-        long c = shell_read_key();
-        if (c < 0) continue;
+        long c = shell_wait_key_byte(1);
+        if (c < 0) {
+            uint64_t now = icda_ticks();
+            if (now - idle_since < 40) {
+                shell_cursor_show(&cursor_visible);
+            } else if (now - last_blink >= 50) {
+                if (cursor_visible) {
+                    shell_cursor_hide(&cursor_visible);
+                } else {
+                    shell_cursor_show(&cursor_visible);
+                }
+                last_blink = now;
+            }
+            continue;
+        }
+
+        if (c == 27) {
+            long c1 = shell_wait_key_byte(2);
+            if (c1 == '[') {
+                switch (shell_wait_key_byte(2)) {
+                    case 'A': c = KEY_UP; break;
+                    case 'B': c = KEY_DOWN; break;
+                    case 'C': c = KEY_RIGHT; break;
+                    case 'D': c = KEY_LEFT; break;
+                    case '3':
+                        if (shell_wait_key_byte(2) == '~') c = KEY_DELETE;
+                        break;
+                    default: break;
+                }
+            }
+        }
+
+        shell_cursor_hide(&cursor_visible);
+        idle_since = icda_ticks();
+        last_blink = idle_since;
 
         if (c == '\r' || c == '\n') {
             icda_write("\n");
@@ -539,6 +483,7 @@ static int shell_read_line(char *line, uint64_t cap) {
                 len = str_len(line);
                 shell_rewrite_line(line, &shown_len);
             }
+            shell_cursor_show(&cursor_visible);
             continue;
         }
 
@@ -548,6 +493,7 @@ static int shell_read_line(char *line, uint64_t cap) {
                 line[len] = 0;
                 shell_rewrite_line(line, &shown_len);
             }
+            shell_cursor_show(&cursor_visible);
             continue;
         }
 
@@ -558,6 +504,7 @@ static int shell_read_line(char *line, uint64_t cap) {
                 len = str_len(line);
                 shell_rewrite_line(line, &shown_len);
             }
+            shell_cursor_show(&cursor_visible);
             continue;
         }
 
@@ -570,6 +517,7 @@ static int shell_read_line(char *line, uint64_t cap) {
             }
             len = str_len(line);
             shell_rewrite_line(line, &shown_len);
+            shell_cursor_show(&cursor_visible);
             continue;
         }
 
@@ -581,6 +529,7 @@ static int shell_read_line(char *line, uint64_t cap) {
                 icda_write(out);
                 shown_len++;
             }
+            shell_cursor_show(&cursor_visible);
         }
     }
 }
@@ -804,7 +753,9 @@ static void shell_edit(const char *path) {
     editor_redraw(path, buf, len, cursor, modified);
     for (;;) {
         long c = shell_read_key();
-        if (c < 0) continue;
+        if (c < 0) {
+            continue;
+        }
 
         if (c == 24) {
             icda_clear();
@@ -877,7 +828,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("user commands: help clear pid ps jobs pwd cd ls cat mkdir touch write stat sync storage money play edit run spawn bg fg wait waitall stop resume kill sleep yield exit\n");
+    icda_write("commands: help clear pwd cd ls cat mkdir touch write stat sync storage play stop edit run exit\n");
 }
 
 static void shell_money(void) {
@@ -898,7 +849,7 @@ static void shell_money(void) {
     icda_write("          *   *          \n");
     icda_write("           * *           \n");
     icda_write("            *            \n");
-    shell_play_wav_path("/usr/share/audio/hava.wav");
+    shell_play_wav_path("/usr/share/audio/hava_clip.wav");
 }
 
 static void shell_pwd(void) {
@@ -1258,66 +1209,6 @@ static void shell_kill_pid(const char *arg) {
     icda_write("\n");
 }
 
-#if SHELL_AUTOTEST
-static void shell_autotest(void) {
-    uint64_t pid1;
-    uint64_t pid2;
-    uint64_t pid3;
-    uint64_t code;
-
-    icda_write("[selftest] spawn ticker x2\n");
-    pid1 = icda_spawn("/apps/ticker.app");
-    pid2 = icda_spawn("/apps/ticker.app");
-    if ((long)pid1 < 0 || (long)pid2 < 0) {
-        icda_write("[selftest] spawn failed\n");
-        return;
-    }
-    icda_write("[selftest] pid1=");
-    write_uint(pid1);
-    icda_write(" pid2=");
-    write_uint(pid2);
-    icda_write("\n");
-    shell_add_job(pid1, "/apps/ticker.app");
-    shell_add_job(pid2, "/apps/ticker.app");
-    icda_sleep(3);
-    if ((long)icda_suspend(pid2) < 0) {
-        icda_write("[selftest] suspend failed\n");
-        return;
-    }
-    icda_write("[selftest] stopped pid2\n");
-    icda_sleep(6);
-    if ((long)icda_resume(pid2) < 0) {
-        icda_write("[selftest] resume failed\n");
-        return;
-    }
-    icda_write("[selftest] resumed pid2\n");
-    pid3 = icda_spawn("/apps/ticker.app");
-    if ((long)pid3 < 0) {
-        icda_write("[selftest] spawn pid3 failed\n");
-        return;
-    }
-    shell_add_job(pid3, "/apps/ticker.app");
-    icda_sleep(1);
-    if ((long)icda_kill(pid3, 143) < 0) {
-        icda_write("[selftest] kill failed\n");
-        return;
-    }
-    code = icda_waitpid(pid3);
-    if ((long)code < 0) {
-        icda_write("[selftest] wait pid3 failed\n");
-        return;
-    }
-    icda_write("[selftest] pid3 exit=");
-    write_uint(code);
-    icda_write("\n");
-    shell_remove_job(pid3);
-    icda_sleep(10);
-    shell_poll_jobs(1);
-    shell_wait_all();
-    icda_write("[selftest] done\n");
-}
-#endif
-
 static int shell_try_exec_command(const char *cmd) {
     char path[160];
     uint64_t pid = icda_spawn(cmd);
@@ -1394,9 +1285,6 @@ static void shell_dispatch(char *line) {
     if (*line == 0) return;
     if (str_eq(line, "help")) { shell_help(); return; }
     if (str_eq(line, "clear")) { icda_clear(); return; }
-    if (str_eq(line, "pid")) { icda_write("pid="); write_uint(icda_get_pid()); icda_write("\n"); return; }
-    if (str_eq(line, "ps")) { shell_ps(); return; }
-    if (str_eq(line, "jobs")) { shell_jobs(); return; }
     if (str_eq(line, "pwd")) { shell_pwd(); return; }
     if (str_eq(line, "cd")) { if ((long)icda_chdir((arg && *arg) ? arg : "/") < 0) icda_write("cd failed\n"); return; }
     if (str_eq(line, "ls")) { shell_ls(arg); return; }
@@ -1407,20 +1295,10 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "stat")) { shell_stat(arg); return; }
     if (str_eq(line, "sync")) { shell_sync(); return; }
     if (str_eq(line, "storage")) { shell_storage(); return; }
-    if (str_eq(line, "money")) { shell_money(); return; }
     if (str_eq(line, "play")) { shell_play_wav_path(arg); return; }
+    if (str_eq(line, "stop")) { shell_stop_audio(); return; }
     if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
-    if (str_eq(line, "spawn")) { shell_spawn_path(arg); return; }
-    if (str_eq(line, "bg")) { shell_spawn_path(arg); return; }
-    if (str_eq(line, "fg")) { shell_fg(arg); return; }
-    if (str_eq(line, "wait")) { shell_wait_pid(arg); return; }
-    if (str_eq(line, "waitall")) { shell_wait_all(); return; }
-    if (str_eq(line, "stop")) { shell_stop_pid(arg); return; }
-    if (str_eq(line, "resume")) { shell_resume_pid(arg); return; }
-    if (str_eq(line, "kill")) { shell_kill_pid(arg); return; }
-    if (str_eq(line, "sleep")) { shell_sleep_ticks(arg); return; }
-    if (str_eq(line, "yield")) { shell_yield_once(); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line)) {
         icda_write("unknown command: ");
@@ -1431,13 +1309,10 @@ static void shell_dispatch(char *line) {
 
 uint64_t shell_main(void) {
     char line[SHELL_LINE_CAP];
+    (void)icda_chdir("/home");
     icda_clear();
     icda_write("icda user shell\n\n");
-#if SHELL_AUTOTEST
-    shell_autotest();
-#endif
     for (;;) {
-        shell_poll_jobs(1);
         print_prompt();
         if (shell_read_line(line, sizeof(line)) < 0) {
             continue;

@@ -272,6 +272,33 @@ void fb_set_cursor(int x, int y) {
     cursor_y = y;
 }
 
+void fb_write_at_cells(int col, int row, const char* str, uint32_t fg, uint32_t bg) {
+    int x;
+    int y;
+    int max_cols;
+
+    if (!fb_ready || !str) return;
+    max_cols = fb_width / FONT_CELL_WIDTH;
+    if (col < 0) col = 0;
+    if (row < 0) row = 0;
+    if (col >= max_cols) return;
+
+    x = col * FONT_CELL_WIDTH;
+    y = row * FONT_CELL_HEIGHT;
+
+    for (int i = 0; str[i] != '\0' && col + i < max_cols; i++) {
+        fb_draw_char(x + i * FONT_CELL_WIDTH, y, str[i], fg, bg);
+    }
+}
+
+int fb_columns(void) {
+    return fb_ready ? (fb_width / FONT_CELL_WIDTH) : 0;
+}
+
+int fb_rows(void) {
+    return fb_ready ? (fb_height / FONT_CELL_HEIGHT) : 0;
+}
+
 void fb_print_at(int x, int y, const char* str, uint32_t fg, uint32_t bg) {
     cursor_x = x;
     cursor_y = y;

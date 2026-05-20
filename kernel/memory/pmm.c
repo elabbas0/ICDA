@@ -220,6 +220,92 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
     return 0;
 }
 
+uint64_t pmm_alloc_contiguous_below(uint64_t count, uint64_t max_addr) {
+    uint64_t run_start = 0, run_len = 0;
+    uint64_t max_frame;
+
+    if (count == 0) return 0;
+    if (max_addr == 0) return 0;
+
+    max_frame = ADDR_TO_FRAME(max_addr);
+    if (max_frame > total_frames) {
+        max_frame = total_frames;
+    }
+
+    for (uint64_t f = 0; f < max_frame; f++) {
+        if (!frame_used(f)) {
+            if (run_len == 0) run_start = f;
+
+            if (++run_len == count) {
+                uint64_t start_addr = FRAME_TO_ADDR(run_start);
+                uint64_t end_addr = FRAME_TO_ADDR(run_start + count);
+                if (end_addr <= max_addr) {
+                    for (uint64_t i = run_start; i < run_start + count; i++) {
+                        frame_set(i);
+                        used_frames++;
+                    }
+                    return start_addr;
+                }
+                run_len = 0;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+
+    return 0;
+}
+
+uint64_t pmm_alloc_contiguous_aligned_below(uint64_t count, uint64_t align, uint64_t max_addr) {
+    uint64_t align_frames;
+    uint64_t run_start = 0, run_len = 0;
+    uint64_t max_frame;
+
+    if (count == 0 || max_addr == 0) return 0;
+    if (align < PAGE_SIZE) align = PAGE_SIZE;
+    if ((align & (align - 1ULL)) != 0) return 0;
+
+    align_frames = align / PAGE_SIZE;
+    if (align_frames == 0) align_frames = 1;
+
+    max_frame = ADDR_TO_FRAME(max_addr);
+    if (max_frame > total_frames) {
+        max_frame = total_frames;
+    }
+
+    for (uint64_t f = 0; f < max_frame; f++) {
+        if ((f % align_frames) == 0) {
+            run_start = f;
+            run_len = 0;
+        }
+
+        if (!frame_used(f) && f >= run_start) {
+            run_len++;
+            if (run_len == count) {
+                uint64_t start_addr = FRAME_TO_ADDR(run_start);
+                uint64_t end_addr = FRAME_TO_ADDR(run_start + count);
+                if (end_addr <= max_addr) {
+                    for (uint64_t i = run_start; i < run_start + count; i++) {
+                        frame_set(i);
+                        used_frames++;
+                    }
+                    return start_addr;
+                }
+            }
+        } else {
+            run_len = 0;
+            if (align_frames > 1) {
+                uint64_t next = ((f / align_frames) + 1ULL) * align_frames;
+                if (next > f) {
+                    f = next - 1ULL;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 void pmm_free(uint64_t addr) {
     if (!addr) return;
 

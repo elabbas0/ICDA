@@ -35,7 +35,7 @@ void gdt_init() {
     // kernel data segment - ring 0, writable
     gdt_set_entry(2, 0, 0xFFFFF,
         GDT_PRESENT | GDT_RING0 | GDT_CODE_DATA | GDT_RW,
-        GDT_GRAN_4K);
+        GDT_GRAN_4K | GDT_32BIT);
 
     // user code segment - ring 3, executable, 64-bit
     gdt_set_entry(3, 0, 0xFFFFF,
@@ -45,7 +45,7 @@ void gdt_init() {
     // user data segment - ring 3, writable
     gdt_set_entry(4, 0, 0xFFFFF,
         GDT_PRESENT | GDT_RING3 | GDT_CODE_DATA | GDT_RW,
-        GDT_GRAN_4K);
+        GDT_GRAN_4K | GDT_32BIT);
 
     // TSS descriptor — 64-bit TSS takes two 8-byte GDT slots (16 bytes total)
     // Format: base[31:0] split across the standard fields, type=0x89 (available TSS)
