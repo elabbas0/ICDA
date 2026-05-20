@@ -33,7 +33,16 @@ enum {
     SYS_CONSOLE_SETCURSOR = 26,
     SYS_STORAGE_INFO  = 27,
     SYS_SOUND_PLAY    = 28,
-    SYS_AUDIO_PCM_PLAY = 29
+    SYS_AUDIO_PCM_PLAY = 29,
+    SYS_AUDIO_PLAY_FILE = 30,
+    SYS_AUDIO_STOP = 31,
+    SYS_AUDIO_STATUS = 32,
+    SYS_AUDIO_CLAIM = 33,
+    SYS_AUDIO_READ_CHUNK = 34,
+    SYS_AUDIO_FINISH = 35,
+    SYS_TICKS = 36,
+    SYS_INPUT_READ_TIMEOUT = 37,
+    SYS_VFS_READ_AT = 38
 };
 
 typedef struct {
@@ -54,6 +63,13 @@ typedef struct {
     uint64_t state;
     uint64_t exit_code;
 } icda_proc_info_t;
+
+typedef struct {
+    uint64_t active;
+    uint64_t seconds_left;
+    uint64_t total_seconds;
+    char name[64];
+} icda_audio_info_t;
 
 static inline uint64_t sys_call0(uint64_t n) {
     uint64_t ret;
@@ -79,9 +95,17 @@ static inline uint64_t sys_call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t 
     return ret;
 }
 
+static inline uint64_t sys_call4(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    uint64_t ret;
+    register uint64_t r10 __asm__("r10") = a3;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10) : "rcx", "r11", "memory");
+    return ret;
+}
+
 static inline uint64_t icda_write(const char *text) { return sys_call1(SYS_CONSOLE_WRITE, (uint64_t)(uintptr_t)text); }
 static inline uint64_t icda_get_pid(void) { return sys_call0(SYS_GET_PID); }
 static inline uint64_t icda_read_file(const char *path, char *buf, uint64_t cap) { return sys_call3(SYS_VFS_READ, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)buf, cap); }
+static inline uint64_t icda_read_file_at(const char *path, uint64_t offset, char *buf, uint64_t cap) { return sys_call4(SYS_VFS_READ_AT, (uint64_t)(uintptr_t)path, offset, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_write_file(const char *path, const char *buf, uint64_t size) { return sys_call3(SYS_VFS_WRITE, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)buf, size); }
 static inline long icda_read_char(void) { return (long)sys_call0(SYS_INPUT_READ); }
 static inline uint64_t icda_getcwd(char *buf, uint64_t cap) { return sys_call2(SYS_GETCWD, (uint64_t)(uintptr_t)buf, cap); }
@@ -108,6 +132,14 @@ static inline void icda_set_cursor(uint64_t x, uint64_t y) { (void)sys_call2(SYS
 static inline uint64_t icda_storage_info(char *buf, uint64_t cap) { return sys_call2(SYS_STORAGE_INFO, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_play_tone(uint64_t frequency_hz, uint64_t ticks) { return sys_call2(SYS_SOUND_PLAY, frequency_hz, ticks); }
 static inline uint64_t icda_play_pcm_u8(const uint8_t *buf, uint64_t size, uint64_t sample_rate) { return sys_call3(SYS_AUDIO_PCM_PLAY, (uint64_t)(uintptr_t)buf, size, sample_rate); }
+static inline uint64_t icda_play_audio_file(const char *path) { return sys_call1(SYS_AUDIO_PLAY_FILE, (uint64_t)(uintptr_t)path); }
+static inline uint64_t icda_stop_audio(void) { return sys_call0(SYS_AUDIO_STOP); }
+static inline uint64_t icda_audio_info(icda_audio_info_t *out) { return sys_call1(SYS_AUDIO_STATUS, (uint64_t)(uintptr_t)out); }
+static inline uint64_t icda_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) { return sys_call2(SYS_AUDIO_CLAIM, (uint64_t)(uintptr_t)token_out, (uint64_t)(uintptr_t)sample_rate_out); }
+static inline uint64_t icda_audio_read_chunk(uint64_t token, uint8_t *buf, uint64_t cap) { return sys_call3(SYS_AUDIO_READ_CHUNK, token, (uint64_t)(uintptr_t)buf, cap); }
+static inline uint64_t icda_audio_finish(uint64_t token) { return sys_call1(SYS_AUDIO_FINISH, token); }
+static inline uint64_t icda_ticks(void) { return sys_call0(SYS_TICKS); }
+static inline long icda_read_char_timeout(uint64_t ticks) { return (long)sys_call1(SYS_INPUT_READ_TIMEOUT, ticks); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

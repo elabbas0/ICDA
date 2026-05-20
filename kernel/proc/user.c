@@ -290,7 +290,7 @@ __attribute__((noreturn)) void user_thread_finish(void) {
     process_t *proc = sched_current_process();
     thread_t *thread = sched_current_thread();
 
-    if (thread && thread->kernel_stack_top) {
+    if (thread) {
         tss_set_rsp0(thread->kernel_stack_top);
     }
 

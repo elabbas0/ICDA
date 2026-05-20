@@ -2,6 +2,7 @@
 
 #include "../device.h"
 #include "../display/framebuffer.h"
+#include "../display/font.h"
 #include "../display/vga.h"
 
 static kernel_device_t *display_device = 0;
@@ -10,6 +11,27 @@ static int console_display_is_framebuffer = 0;
 static int console_serial_mirror_enabled = 1;
 
 static int console_has_framebuffer = 0;
+static int console_overlay_active = 0;
+static console_style_t console_overlay_style = CONSOLE_STYLE_ACCENT;
+static char console_overlay_text[80];
+static int console_overlay_last_col = -1;
+static int console_overlay_last_width = 0;
+
+static uint64_t console_str_len(const char *s) {
+    uint64_t n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+static void console_copy_text(char *dst, const char *src, uint64_t cap) {
+    uint64_t i = 0;
+    if (!dst || cap == 0) return;
+    while (src && src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
 
 static uint32_t fb_color_for(console_style_t style) {
     switch (style) {
@@ -64,6 +86,91 @@ void console_init(int has_framebuffer) {
     console_display_is_framebuffer = (display_device && framebuffer && display_device == framebuffer);
 }
 
+void console_refresh_overlay(void) {
+    char line[160];
+    char blank[160];
+    int cols;
+    int start_col;
+    uint64_t overlay_len;
+    console_style_t style = console_overlay_style;
+
+    if (!console_overlay_active || !console_overlay_text[0]) {
+        return;
+    }
+
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        cols = fb_columns();
+    } else {
+        cols = VGA_WIDTH;
+    }
+    if (cols <= 0) {
+        return;
+    }
+
+    overlay_len = console_str_len(console_overlay_text);
+    if (overlay_len > sizeof(line) - 1) {
+        overlay_len = sizeof(line) - 1;
+    }
+    if ((int)overlay_len >= cols) {
+        console_copy_text(line, &console_overlay_text[overlay_len - (uint64_t)(cols - 1)], sizeof(line));
+        overlay_len = console_str_len(line);
+        start_col = 0;
+    } else {
+        console_copy_text(line, console_overlay_text, sizeof(line));
+        start_col = cols - (int)overlay_len - 1;
+        if (start_col < 0) start_col = 0;
+    }
+    if (console_overlay_last_width > 0 && console_overlay_last_col >= 0) {
+        for (int i = 0; i < console_overlay_last_width && i < (int)sizeof(blank) - 1; i++) blank[i] = ' ';
+        blank[console_overlay_last_width < (int)sizeof(blank) - 1 ? console_overlay_last_width : (int)sizeof(blank) - 1] = 0;
+        if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+            fb_write_at_cells(console_overlay_last_col, 0, blank, fb_color_for(CONSOLE_STYLE_INFO), FB_BLACK);
+        } else {
+            vga_write_at(0, console_overlay_last_col, blank, vga_color_for(CONSOLE_STYLE_INFO));
+        }
+    }
+
+    console_overlay_last_col = start_col;
+    console_overlay_last_width = (int)overlay_len;
+
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_write_at_cells(start_col, 0, line, fb_color_for(style), FB_BLACK);
+    } else {
+        vga_write_at(0, start_col, line, vga_color_for(style));
+    }
+}
+
+void console_set_overlay_top_right(const char *text, console_style_t style) {
+    console_overlay_active = (text && text[0]) ? 1 : 0;
+    console_overlay_style = style;
+    console_copy_text(console_overlay_text, text ? text : "", sizeof(console_overlay_text));
+    if (!console_overlay_active) {
+        console_clear_overlay_top_right();
+        return;
+    }
+    console_refresh_overlay();
+}
+
+void console_clear_overlay_top_right(void) {
+    char blank[160];
+
+    console_overlay_active = 0;
+    console_overlay_text[0] = 0;
+    if (console_overlay_last_width <= 0 || console_overlay_last_col < 0) {
+        return;
+    }
+    for (int i = 0; i < console_overlay_last_width && i < (int)sizeof(blank) - 1; i++) blank[i] = ' ';
+    blank[console_overlay_last_width < (int)sizeof(blank) - 1 ? console_overlay_last_width : (int)sizeof(blank) - 1] = 0;
+
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_write_at_cells(console_overlay_last_col, 0, blank, fb_color_for(CONSOLE_STYLE_INFO), FB_BLACK);
+    } else {
+        vga_write_at(0, console_overlay_last_col, blank, vga_color_for(CONSOLE_STYLE_INFO));
+    }
+    console_overlay_last_col = -1;
+    console_overlay_last_width = 0;
+}
+
 void console_set_serial_mirror(int enabled) {
     console_serial_mirror_enabled = enabled ? 1 : 0;
 }
@@ -71,19 +178,23 @@ void console_set_serial_mirror(int enabled) {
 void console_clear(void) {
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
         fb_clear(FB_BLACK);
+        console_refresh_overlay();
         return;
     }
     if (display_device) {
         vga_clear();
     }
+    console_refresh_overlay();
 }
 
 void console_set_cursor(int x, int y) {
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
         fb_set_cursor(x, y);
+        console_refresh_overlay();
         return;
     }
     vga_set_cursor_pos(x, y);
+    console_refresh_overlay();
 }
 
 void console_write_char(char c, console_style_t style) {
@@ -116,14 +227,17 @@ void console_write(const char *str, console_style_t style) {
         vga_set_color(vga_color_for(style));
         vga_print(str, vga_color_for(style));
     }
+    console_refresh_overlay();
 }
 
 void console_backspace(void) {
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
         fb_backspace(FB_BLACK);
+        console_refresh_overlay();
         return;
     }
     vga_backspace();
+    console_refresh_overlay();
 }
 
 void console_write_status(const char *label, const char *status, console_style_t style) {

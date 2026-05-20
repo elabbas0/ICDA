@@ -127,13 +127,11 @@ void isr_handler(struct registers* regs) {
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
 
-    // send EOI *before* the handler so context switches inside the handler
-    // (e.g. schedule()) don't prevent the PIC from firing further interrupts
-    irq_controller_eoi(irq);
-
     if (irq >= 0 && irq < 16 && irq_handlers[irq]) {
         irq_handlers[irq](regs);
     }
+
+    irq_controller_eoi(irq);
 }
 
 void syscall_handler(struct registers* regs) {

@@ -91,6 +91,11 @@ int ioapic_init(const struct acpi_madt *madt) {
             }
             uint32_t version = ioapic_read(ioapic, IOAPIC_REG_VER);
             ioapic->gsi_max = ioapic->gsi_base + ((version >> 16) & 0xFF);
+            for (uint32_t gsi = ioapic->gsi_base; gsi <= ioapic->gsi_max; gsi++) {
+                uint32_t index = gsi - ioapic->gsi_base;
+                ioapic_write(ioapic, (uint8_t)(IOAPIC_REDIR_BASE + index * 2 + 1), 0);
+                ioapic_write(ioapic, (uint8_t)(IOAPIC_REDIR_BASE + index * 2), 1U << 16);
+            }
         } else if (hdr->type == MADT_TYPE_INTERRUPT_SRC) {
             const struct acpi_madt_iso *entry = (const struct acpi_madt_iso *)ptr;
             if (entry->source_irq < 16) {

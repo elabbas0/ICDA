@@ -11,6 +11,8 @@
 void     pmm_init(void *multiboot_info);
 uint64_t pmm_alloc();
 uint64_t pmm_alloc_contiguous(uint64_t count);
+uint64_t pmm_alloc_contiguous_below(uint64_t count, uint64_t max_addr);
+uint64_t pmm_alloc_contiguous_aligned_below(uint64_t count, uint64_t align, uint64_t max_addr);
 void     pmm_free(uint64_t addr);
 void     pmm_free_range(uint64_t addr, uint64_t count);
 uint64_t pmm_free_frames();

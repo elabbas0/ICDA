@@ -9,6 +9,10 @@ SECTIONS {
         *(.text)
     }
 
+    .dma_low BLOCK(4K) : ALIGN(4K) {
+        *(.dma_low)
+    }
+
     .rodata BLOCK(4K) : ALIGN(4K) {
         *(.rodata)
     }

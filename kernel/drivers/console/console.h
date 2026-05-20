@@ -22,5 +22,8 @@ void console_backspace(void);
 void console_write_status(const char *label, const char *status, console_style_t style);
 void console_write_hex64(uint64_t value, console_style_t style);
 void console_write_dec64(uint64_t value, console_style_t style);
+void console_set_overlay_top_right(const char *text, console_style_t style);
+void console_clear_overlay_top_right(void);
+void console_refresh_overlay(void);
 
 #endif

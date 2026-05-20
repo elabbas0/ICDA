@@ -2,7 +2,8 @@
 
 #include "drivers/console/console.h"
 #include "drivers/audio/speaker.h"
-#include "drivers/audio/sb16.h"
+#include "drivers/audio/hda.h"
+#include "drivers/audio/playback.h"
 #include "drivers/display/framebuffer.h"
 #include "drivers/display/vga.h"
 #include "drivers/input/input.h"
@@ -16,7 +17,9 @@
 #include "drivers/storage/partition.h"
 #include "diag/bootstage.h"
 #include "fs/fat32.h"
+#include "fs/exfat.h"
 #include "fs/initramfs.h"
+#include "fs/ntfs.h"
 #include "fs/persistfs.h"
 #include "fs/vfs.h"
 #include "syscall/syscall.h"
@@ -39,7 +42,37 @@
 #define SERIAL_SHELL_MIRROR 0
 #endif
 
+#define PIT_BASE_FREQUENCY 1193182U
+#define PIT_COMMAND_PORT   0x43
+#define PIT_CHANNEL0_PORT  0x40
+
+static inline void outb(uint16_t port, uint8_t value) {
+    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static void pit_set_frequency(uint32_t hz) {
+    uint32_t divisor;
+
+    if (hz == 0) {
+        hz = 100;
+    }
+
+    divisor = PIT_BASE_FREQUENCY / hz;
+    if (divisor == 0) {
+        divisor = 1;
+    }
+    if (divisor > 0xFFFFU) {
+        divisor = 0xFFFFU;
+    }
+
+    outb(PIT_COMMAND_PORT, 0x36);
+    outb(PIT_CHANNEL0_PORT, (uint8_t)(divisor & 0xFFU));
+    outb(PIT_CHANNEL0_PORT, (uint8_t)((divisor >> 8) & 0xFFU));
+}
+
 static void timer_handler(struct registers *regs) {
+    keyboard_pump();
+    audio_playback_tick();
     schedule(regs);
 }
 
@@ -139,7 +172,6 @@ void kernel_main(void *multiboot_info) {
     boot_prefix("interrupts");
     console_write(irq_controller_name(), CONSOLE_STYLE_INFO);
     console_write(" active\n", CONSOLE_STYLE_INFO);
-
     pf_init();
     bootstage_set(9, "pf");
     boot_line("interrupts", "page fault handler armed");
@@ -150,17 +182,14 @@ void kernel_main(void *multiboot_info) {
 
     irq_register(0, timer_handler);
     boot_line("timer", "irq0 handler registered");
-
-    speaker_init();
-    if (sb16_init() == 0) {
-        boot_line("audio", "sb16 online");
-    } else {
-        boot_line("audio", "sb16 unavailable");
-    }
+    pit_set_frequency(100);
+    irq_controller_unmask(0);
 
     keyboard_init();
     bootstage_set(11, "kbd");
     boot_line("input", "ps2 keyboard attached");
+    irq_register(1, keyboard_irq);
+    irq_controller_unmask(1);
 
     if (pci_init() == 0) {
         bootstage_set(12, "pci");
@@ -170,6 +199,22 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_INFO);
     } else {
         boot_line("pci", "no pci devices discovered");
+    }
+
+    if (hda_init() == 0) {
+        boot_line("audio", "intel hda online");
+    } else {
+        boot_prefix("audio");
+        console_write("intel hda unavailable err=", CONSOLE_STYLE_WARN);
+        console_write_dec64((uint64_t)hda_last_error(), CONSOLE_STYLE_WARN);
+        console_write("\n", CONSOLE_STYLE_WARN);
+    }
+
+    speaker_init();
+    if (audio_playback_init() == 0) {
+        boot_line("audio", "background playback ready");
+    } else {
+        boot_line("audio", "background playback unavailable");
     }
 
     {
@@ -245,11 +290,17 @@ void kernel_main(void *multiboot_info) {
     console_write("\n", CONSOLE_STYLE_INFO);
 
     (void)fat32_mount_detected();
+    (void)exfat_mount_detected();
+    (void)ntfs_mount_detected();
     bootstage_set(20, "fat32");
-    if (fat32_mount_count() > 0) {
+    if (fat32_mount_count() > 0 || exfat_mount_count() > 0 || ntfs_mount_count() > 0) {
         boot_prefix("storage");
-        console_write("fat32 volumes mounted=", CONSOLE_STYLE_INFO);
+        console_write("volumes mounted fat32=", CONSOLE_STYLE_INFO);
         console_write_dec64(fat32_mount_count(), CONSOLE_STYLE_INFO);
+        console_write(" exfat=", CONSOLE_STYLE_MUTED);
+        console_write_dec64(exfat_mount_count(), CONSOLE_STYLE_INFO);
+        console_write(" ntfs=", CONSOLE_STYLE_MUTED);
+        console_write_dec64(ntfs_mount_count(), CONSOLE_STYLE_INFO);
         console_write(" at /volumes\n", CONSOLE_STYLE_INFO);
     }
 
@@ -267,22 +318,26 @@ void kernel_main(void *multiboot_info) {
             console_clear();
         }
         bootstage_set(22, "shell");
-        int shell_rc = user_run_path("/apps/shell.app");
-        if (shell_rc < 0) {
-            boot_line("shell", "userspace shell failed to start, entering recovery console");
-            if (tty_init() != 0) {
-                console_write("\n", CONSOLE_STYLE_INFO);
-                boot_halt("tty", "recovery console failed to start");
+        int shell_failures = 0;
+        for (;;) {
+            int shell_rc = user_run_path("/apps/shell.app");
+            if (shell_rc < 0) {
+                shell_failures++;
+                if (shell_failures < 3) {
+                    boot_line("shell", "userspace shell failed to start, retrying");
+                    continue;
+                }
+                boot_line("shell", "userspace shell failed repeatedly, entering recovery console");
+                if (tty_init() != 0) {
+                    console_write("\n", CONSOLE_STYLE_INFO);
+                    boot_halt("tty", "recovery console failed to start");
+                }
+                break;
             }
-        } else {
             boot_prefix("shell");
             console_write("userspace shell exited rc=", CONSOLE_STYLE_INFO);
             console_write_dec64((uint64_t)shell_rc, CONSOLE_STYLE_INFO);
-            console_write(", entering recovery console\n", CONSOLE_STYLE_INFO);
-            if (tty_init() != 0) {
-                console_write("\n", CONSOLE_STYLE_INFO);
-                boot_halt("tty", "recovery console failed to start");
-            }
+            console_write(", restarting\n", CONSOLE_STYLE_INFO);
         }
     }
     while (1) {

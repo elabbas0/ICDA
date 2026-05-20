@@ -66,7 +66,7 @@ int pci_enable_memory_busmaster(const pci_device_t *device) {
     uint16_t cmd;
     if (!device) return -1;
     cmd = pci_read_config16(device, 0x04);
-    cmd |= (1U << 1) | (1U << 2);
+    cmd |= (1U << 0) | (1U << 1) | (1U << 2);
     pci_write_config16(device, 0x04, cmd);
     return 0;
 }
@@ -141,6 +141,42 @@ static void pci_enumerate_entry(const struct acpi_mcfg_entry *entry) {
     pci_enumerate_bus(entry, entry->start_bus);
 }
 
+static void pci_legacy_enumerate(void) {
+    for (uint16_t bus = 0; bus < 256 && pci_count < PCI_MAX_DEVICES; bus++) {
+        for (uint8_t dev = 0; dev < 32 && pci_count < PCI_MAX_DEVICES; dev++) {
+            pci_device_t probe = {0};
+            uint16_t vendor;
+            uint8_t function_limit = 1;
+
+            probe.bus = (uint8_t)bus;
+            probe.device = dev;
+            probe.function = 0;
+
+            vendor = pci_read_config16(&probe, 0x00);
+            if (vendor == 0xFFFF) {
+                continue;
+            }
+
+            if (pci_read_config8(&probe, 0x0E) & 0x80U) {
+                function_limit = 8;
+            }
+
+            for (uint8_t fn = 0; fn < function_limit && pci_count < PCI_MAX_DEVICES; fn++) {
+                pci_device_t fn_probe = {0};
+                fn_probe.bus = (uint8_t)bus;
+                fn_probe.device = dev;
+                fn_probe.function = fn;
+                if (pci_read_config16(&fn_probe, 0x00) == 0xFFFF) {
+                    continue;
+                }
+                if (pci_record_device(0, (uint8_t)bus, dev, fn, 0) != 0) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 int pci_init(void) {
     const struct acpi_mcfg *mcfg = acpi_mcfg();
     const uint8_t *ptr;
@@ -150,7 +186,8 @@ int pci_init(void) {
     pci_msi_count = 0;
 
     if (!mcfg) {
-        return -1;
+        pci_legacy_enumerate();
+        return pci_count > 0 ? 0 : -1;
     }
 
     ptr = mcfg->entries;
@@ -160,6 +197,10 @@ int pci_init(void) {
         const struct acpi_mcfg_entry *entry = (const struct acpi_mcfg_entry *)ptr;
         pci_enumerate_entry(entry);
         ptr += sizeof(struct acpi_mcfg_entry);
+    }
+
+    if (pci_count == 0) {
+        pci_legacy_enumerate();
     }
 
     return pci_count > 0 ? 0 : -1;

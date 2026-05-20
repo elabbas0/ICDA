@@ -7,6 +7,7 @@ DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IM
 SGDISK ?= /usr/sbin/sgdisk
 SHELL_AUTOTEST ?= 0
 SERIAL_SHELL_MIRROR ?= 0
+AUDIO_WAVS := $(wildcard userspace/*.wav)
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector \
@@ -15,7 +16,7 @@ CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
 
 all: kernel.iso kernel-usb.img
 
-kernel.o: kernel/kernel.c
+kernel.o: kernel/kernel.c Makefile
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel.o
 
 device.o: kernel/drivers/device.c kernel/drivers/device.h
@@ -24,6 +25,15 @@ device.o: kernel/drivers/device.c kernel/drivers/device.h
 speaker.o: kernel/drivers/audio/speaker.c kernel/drivers/audio/speaker.h \
            kernel/proc/sched.h
 	$(CC) $(CFLAGS) -c kernel/drivers/audio/speaker.c -o speaker.o
+
+playback.o: kernel/drivers/audio/playback.c kernel/drivers/audio/playback.h Makefile \
+            kernel/drivers/audio/hda.h kernel/drivers/console/console.h \
+            kernel/fs/vfs.h kernel/memory/heap.h kernel/proc/sched.h
+	$(CC) $(CFLAGS) -c kernel/drivers/audio/playback.c -o playback.o
+
+hda.o: kernel/drivers/audio/hda.c kernel/drivers/audio/hda.h Makefile \
+        kernel/drivers/pci/pci.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/drivers/audio/hda.c -o hda.o
 
 sb16.o: kernel/drivers/audio/sb16.c kernel/drivers/audio/sb16.h \
          kernel/memory/pmm.h kernel/memory/vmm.h kernel/proc/sched.h
@@ -63,8 +73,11 @@ pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h 
        kernel/cpu/lapic.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/drivers/pci/pci.c -o pci.o
 
-initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h
+initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c Makefile
 	$(CC) $(CFLAGS) -c kernel/fs/initramfs.c -o initramfs.o
+
+audio_assets_gen.o: kernel/fs/audio_assets_gen.c kernel/fs/audio_assets_gen.h
+	$(CC) $(CFLAGS) -c kernel/fs/audio_assets_gen.c -o audio_assets_gen.o
 
 vfs.o: kernel/fs/vfs.c kernel/fs/vfs.h kernel/memory/heap.h
 	$(CC) $(CFLAGS) -c kernel/fs/vfs.c -o vfs.o
@@ -74,6 +87,12 @@ persistfs.o: kernel/fs/persistfs.c kernel/fs/persistfs.h kernel/fs/vfs.h kernel/
 
 fat32.o: kernel/fs/fat32.c kernel/fs/fat32.h kernel/fs/vfs.h kernel/drivers/storage/partition.h
 	$(CC) $(CFLAGS) -c kernel/fs/fat32.c -o fat32.o
+
+exfat.o: kernel/fs/exfat.c kernel/fs/exfat.h kernel/fs/vfs.h kernel/drivers/storage/partition.h
+	$(CC) $(CFLAGS) -c kernel/fs/exfat.c -o exfat.o
+
+ntfs.o: kernel/fs/ntfs.c kernel/fs/ntfs.h kernel/fs/vfs.h kernel/drivers/storage/partition.h
+	$(CC) $(CFLAGS) -c kernel/fs/ntfs.c -o ntfs.o
 
 tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
        kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
@@ -184,26 +203,72 @@ shell_start.o: userspace/shell_start.asm
 	$(ASM) -f elf64 userspace/shell_start.asm -o /tmp/icda-shell_start.o
 	cp -f /tmp/icda-shell_start.o shell_start.o
 
-shell.o: userspace/shell.c userspace/icda_sys.h
+audioplay_start.o: userspace/audioplay_start.asm
+	$(ASM) -f elf64 userspace/audioplay_start.asm -o /tmp/icda-audioplay_start.o
+	cp -f /tmp/icda-audioplay_start.o audioplay_start.o
+
+shell.o: userspace/shell.c userspace/icda_sys.h Makefile
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
+
+audioplay.o: userspace/audioplay.c userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/audioplay.c -o /tmp/icda-audioplay.o
+	cp -f /tmp/icda-audioplay.o audioplay.o
 
 userspace/shell.app: shell_start.o shell.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-shell.app shell_start.o shell.o
 	cp -f /tmp/icda-shell.app userspace/shell.app
 
+userspace/audioplay.app: audioplay_start.o audioplay.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-audioplay.app audioplay_start.o audioplay.o
+	cp -f /tmp/icda-audioplay.app userspace/audioplay.app
+
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 	$(ASM) -f elf64 kernel/proc/shell_blob.asm -o shell_blob.o
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf
+kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS)
+	@mkdir -p kernel/fs kernel/proc
+	@printf '#include <stdint.h>\n#include "audio_assets_gen.h"\n\n' > kernel/fs/audio_assets_gen.c
+	@rm -f kernel/fs/.audio_assets.externs.tmp kernel/fs/.audio_assets.entries.tmp
+	@touch kernel/fs/.audio_assets.externs.tmp kernel/fs/.audio_assets.entries.tmp
+	@printf 'bits 64\n\nsection .rodata\n' > kernel/proc/audio_assets.asm
+	@count=0; \
+	for f in userspace/*.wav; do \
+		if [ ! -f "$$f" ]; then continue; fi; \
+		base=$$(basename "$$f"); \
+		sym=$$(printf '%s' "$$base" | sed 's/[^A-Za-z0-9]/_/g'); \
+		printf 'extern const char asset_%s_start[];\n' "$$sym" >> kernel/fs/.audio_assets.externs.tmp; \
+		printf 'extern const char asset_%s_end[];\n' "$$sym" >> kernel/fs/.audio_assets.externs.tmp; \
+		printf 'global asset_%s_start\n' "$$sym" >> kernel/proc/audio_assets.asm; \
+		printf 'global asset_%s_end\n' "$$sym" >> kernel/proc/audio_assets.asm; \
+		printf 'asset_%s_start:\n    incbin "%s"\nasset_%s_end:\n\n' "$$sym" "$$f" "$$sym" >> kernel/proc/audio_assets.asm; \
+		printf '    { "/usr/share/audio/%s", asset_%s_start, asset_%s_end },\n' "$$base" "$$sym" "$$sym" >> kernel/fs/.audio_assets.entries.tmp; \
+		count=$$((count + 1)); \
+	done; \
+	cat kernel/fs/.audio_assets.externs.tmp >> kernel/fs/audio_assets_gen.c; \
+	printf '\nconst generated_audio_asset_t generated_audio_assets[] = {\n' >> kernel/fs/audio_assets_gen.c; \
+	if [ "$$count" -eq 0 ]; then \
+		printf '    { 0, 0, 0 }\n};\n' >> kernel/fs/audio_assets_gen.c; \
+		printf 'const uint64_t generated_audio_asset_count = 0;\n' >> kernel/fs/audio_assets_gen.c; \
+	else \
+		cat kernel/fs/.audio_assets.entries.tmp >> kernel/fs/audio_assets_gen.c; \
+		printf '};\nconst uint64_t generated_audio_asset_count = %s;\n' "$$count" >> kernel/fs/audio_assets_gen.c; \
+	fi; \
+	rm -f kernel/fs/.audio_assets.externs.tmp kernel/fs/.audio_assets.entries.tmp; \
+	printf '\nsection .note.GNU-stack noalloc noexec nowrite progbits\n' >> kernel/proc/audio_assets.asm
+
+audio_assets.o: kernel/proc/audio_assets.asm kernel/fs/audio_assets_gen.c
+	$(ASM) -f elf64 kernel/proc/audio_assets.asm -o audio_assets.o
+
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel.bin: kernel.o device.o speaker.o sb16.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
-            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o sb16.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o vfs.o persistfs.o fat32.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
+	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
@@ -233,7 +298,7 @@ kernel-usb.img: kernel.bin
 	mcopy -i kernel-usb.img@@1048576 usbroot/boot/kernel.bin ::/boot/kernel.bin
 clean:
 ifeq ($(OS),Windows_NT)
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, kernel-usb.img, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir, usbroot"
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.o, kernel.bin, kernel.iso, kernel-usb.img, qemu-smoke.log; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue isodir, usbroot; exit 0"
 else
 	rm -f *.o kernel.bin kernel.iso kernel-usb.img qemu-smoke.log
 	rm -rf isodir usbroot

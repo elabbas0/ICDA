@@ -87,6 +87,9 @@ IRQ 14, 46    ; primary ATA
 IRQ 15, 47    ; secondary ATA
 SYSCALL syscall128, 128
 
+%define GDT_KERNEL_DATA 0x10
+%define GDT_USER_RPL    0x3
+
 ; common exception handler
 extern isr_handler
 isr_common:
@@ -106,7 +109,7 @@ isr_common:
     push r14
     push r15
 
-    mov ax, 0x10
+    mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -132,6 +135,21 @@ isr_common:
     pop rax
 
     add rsp, 16         ; skip int_no and err_code
+    test byte [rsp + 8], GDT_USER_RPL
+    jz .isr_return_kernel
+    xor ecx, ecx
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+    jmp .isr_return_done
+.isr_return_kernel:
+    mov cx, GDT_KERNEL_DATA
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+.isr_return_done:
     iretq
 
 ; common irq handler
@@ -153,7 +171,7 @@ irq_common:
     push r14
     push r15
 
-    mov ax, 0x10
+    mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -179,6 +197,21 @@ irq_common:
     pop rax
 
     add rsp, 16         ; skip int_no and err_code
+    test byte [rsp + 8], GDT_USER_RPL
+    jz .irq_return_kernel
+    xor ecx, ecx
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+    jmp .irq_return_done
+.irq_return_kernel:
+    mov cx, GDT_KERNEL_DATA
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+.irq_return_done:
     iretq
 
 extern syscall_handler
@@ -211,7 +244,7 @@ syscall_common:
     push r14
     push r15
 
-    mov ax, 0x10
+    mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -219,6 +252,8 @@ syscall_common:
 
     mov rdi, rsp
     call syscall_handler
+
+    mov rax, [rsp + 14*8]
 
     pop r15
     pop r14
@@ -234,7 +269,7 @@ syscall_common:
     pop rbx
     pop rdx
     pop rcx
-    pop rax
+    add rsp, 8
 
     add rsp, 16
     mov rdx, [rel current_thread_ptr]
@@ -244,7 +279,7 @@ syscall_common:
     mov rsp, [rdx + THREAD_KERNEL_STACK_TOP]
     sub rsp, 8
     mov qword [rsp], 0
-    mov ax, 0x10
+    mov ax, GDT_KERNEL_DATA
     mov ss, ax
     mov ds, ax
     mov es, ax
@@ -252,6 +287,11 @@ syscall_common:
     mov gs, ax
     jmp user_thread_finish
 .sysret_user:
+    xor ecx, ecx
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
     iretq
 
 ; idt flush

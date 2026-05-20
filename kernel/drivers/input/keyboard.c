@@ -212,6 +212,10 @@ static void keyboard_poll_hardware(void) {
     }
 }
 
+void keyboard_pump(void) {
+    keyboard_poll_hardware();
+}
+
 void keyboard_init(void) {
     queue_head = 0;
     queue_tail = 0;
@@ -236,6 +240,11 @@ void keyboard_init(void) {
     device_register(&keyboard_device);
 
     outb(KEYBOARD_STATUS_PORT, 0xAE);
+}
+
+void keyboard_irq(struct registers *regs) {
+    (void)regs;
+    keyboard_poll_hardware();
 }
 
 int keyboard_has_char(void) {

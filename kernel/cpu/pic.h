@@ -12,6 +12,10 @@
 // end of interrupt command
 #define PIC_EOI      0x20
 
+int pic_init(void);
+void pic_eoi(int irq);
+void pic_mask_irq(int irq);
+void pic_unmask_irq(int irq);
 void pic_disable(void);
 
 #endif
