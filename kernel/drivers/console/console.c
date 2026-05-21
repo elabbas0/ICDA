@@ -17,6 +17,10 @@ static char console_overlay_text[80];
 static int console_overlay_last_col = -1;
 static int console_overlay_last_width = 0;
 
+static uint32_t fb_overlay_bg_for(console_style_t style);
+static uint32_t fb_overlay_fg_for(console_style_t style);
+static unsigned char vga_overlay_color_for(console_style_t style);
+
 static uint64_t console_str_len(const char *s) {
     uint64_t n = 0;
     while (s && s[n]) n++;
@@ -92,6 +96,7 @@ void console_refresh_overlay(void) {
     int cols;
     int start_col;
     uint64_t overlay_len;
+    uint64_t panel_len;
     console_style_t style = console_overlay_style;
 
     if (!console_overlay_active || !console_overlay_text[0]) {
@@ -108,35 +113,70 @@ void console_refresh_overlay(void) {
     }
 
     overlay_len = console_str_len(console_overlay_text);
-    if (overlay_len > sizeof(line) - 1) {
-        overlay_len = sizeof(line) - 1;
+    if (overlay_len > sizeof(line) - 5) {
+        overlay_len = sizeof(line) - 5;
     }
-    if ((int)overlay_len >= cols) {
-        console_copy_text(line, &console_overlay_text[overlay_len - (uint64_t)(cols - 1)], sizeof(line));
+    if ((int)(overlay_len + 2) >= cols) {
+        console_copy_text(line, &console_overlay_text[overlay_len - (uint64_t)(cols - 3)], sizeof(line));
         overlay_len = console_str_len(line);
         start_col = 0;
+        panel_len = overlay_len;
     } else {
-        console_copy_text(line, console_overlay_text, sizeof(line));
-        start_col = cols - (int)overlay_len - 1;
+        line[0] = ' ';
+        console_copy_text(&line[1], console_overlay_text, sizeof(line) - 1);
+        overlay_len = console_str_len(&line[1]);
+        line[overlay_len + 1] = ' ';
+        line[overlay_len + 2] = 0;
+        panel_len = overlay_len + 2;
+        start_col = cols - (int)panel_len - 1;
         if (start_col < 0) start_col = 0;
     }
     if (console_overlay_last_width > 0 && console_overlay_last_col >= 0) {
         for (int i = 0; i < console_overlay_last_width && i < (int)sizeof(blank) - 1; i++) blank[i] = ' ';
         blank[console_overlay_last_width < (int)sizeof(blank) - 1 ? console_overlay_last_width : (int)sizeof(blank) - 1] = 0;
         if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
-            fb_write_at_cells(console_overlay_last_col, 0, blank, fb_color_for(CONSOLE_STYLE_INFO), FB_BLACK);
+            fb_write_at_cells(console_overlay_last_col, 0, blank, fb_overlay_fg_for(CONSOLE_STYLE_INFO), FB_BLACK);
         } else {
             vga_write_at(0, console_overlay_last_col, blank, vga_color_for(CONSOLE_STYLE_INFO));
         }
     }
 
     console_overlay_last_col = start_col;
-    console_overlay_last_width = (int)overlay_len;
+    console_overlay_last_width = (int)panel_len;
 
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
-        fb_write_at_cells(start_col, 0, line, fb_color_for(style), FB_BLACK);
+        fb_write_at_cells(start_col, 0, line, fb_overlay_fg_for(style), fb_overlay_bg_for(style));
     } else {
-        vga_write_at(0, start_col, line, vga_color_for(style));
+        vga_write_at(0, start_col, line, vga_overlay_color_for(style));
+    }
+}
+
+static uint32_t fb_overlay_bg_for(console_style_t style) {
+    switch (style) {
+        case CONSOLE_STYLE_OK: return FB_GREEN;
+        case CONSOLE_STYLE_WARN: return FB_YELLOW;
+        case CONSOLE_STYLE_ERROR: return FB_RED;
+        case CONSOLE_STYLE_MUTED: return FB_DARK_GRAY;
+        case CONSOLE_STYLE_ACCENT:
+        case CONSOLE_STYLE_INFO:
+        default: return FB_CYAN;
+    }
+}
+
+static uint32_t fb_overlay_fg_for(console_style_t style) {
+    (void)style;
+    return FB_BLACK;
+}
+
+static unsigned char vga_overlay_color_for(console_style_t style) {
+    switch (style) {
+        case CONSOLE_STYLE_OK: return VGA_COLOR(VGA_BLACK, VGA_GREEN);
+        case CONSOLE_STYLE_WARN: return VGA_COLOR(VGA_BLACK, VGA_YELLOW);
+        case CONSOLE_STYLE_ERROR: return VGA_COLOR(VGA_WHITE, VGA_RED);
+        case CONSOLE_STYLE_MUTED: return VGA_COLOR(VGA_WHITE, VGA_DARK_GRAY);
+        case CONSOLE_STYLE_ACCENT:
+        case CONSOLE_STYLE_INFO:
+        default: return VGA_COLOR(VGA_BLACK, VGA_CYAN);
     }
 }
 

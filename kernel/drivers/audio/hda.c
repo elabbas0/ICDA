@@ -367,6 +367,34 @@ static int hda_pin_priority(uint32_t cfg_default) {
     }
 }
 
+static int hda_find_first_widget(uint8_t wanted_type, uint8_t *nid_out) {
+    uint32_t parm;
+    uint8_t start = 0;
+    uint8_t count = 0;
+
+    if (!nid_out) {
+        return -1;
+    }
+    if (hda_afg == 0) {
+        return -1;
+    }
+    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) {
+        return -1;
+    }
+
+    start = (uint8_t)((parm >> 16) & 0x7FU);
+    count = (uint8_t)(parm & 0x7FU);
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t nid = (uint8_t)(start + i);
+        uint8_t type = 0;
+        if (hda_widget_type(nid, &type) == 0 && type == wanted_type) {
+            *nid_out = nid;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int hda_find_output_path(hda_path_t *out_path) {
     uint32_t parm;
     uint8_t start = 0;
@@ -431,7 +459,30 @@ static int hda_find_output_path(hda_path_t *out_path) {
     }
 
     if (best_score < 0) {
-        return -1;
+        /*
+         * Some VBox HDA codec graphs do not expose a clean pin->DAC path
+         * through the connection-list walk we use for QEMU. Fall back to a
+         * coarse first-pin/first-output choice so the rest of the codec setup
+         * can still attempt broad enablement.
+         */
+        uint8_t fallback_pin = 0;
+        uint8_t fallback_dac = 0;
+
+        if (hda_find_first_widget(HDA_WIDGET_PIN, &fallback_pin) != 0) {
+            return -1;
+        }
+        if (hda_find_first_widget(HDA_WIDGET_OUTPUT, &fallback_dac) != 0) {
+            return -1;
+        }
+
+        for (uint8_t i = 0; i < (uint8_t)sizeof(best_path.nodes); i++) {
+            best_path.nodes[i] = 0;
+            best_path.select_index[i] = 0;
+        }
+        best_path.nodes[0] = fallback_pin;
+        best_path.nodes[1] = fallback_dac;
+        best_path.length = 2;
+        best_score = 0;
     }
 
     *out_path = best_path;

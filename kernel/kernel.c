@@ -19,11 +19,13 @@
 #include "fs/fat32.h"
 #include "fs/exfat.h"
 #include "fs/initramfs.h"
+#include "fs/install.h"
 #include "fs/ntfs.h"
 #include "fs/persistfs.h"
 #include "fs/vfs.h"
 #include "syscall/syscall.h"
 #include "tty/tty.h"
+#include "cpu/multiboot2.h"
 
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
@@ -107,7 +109,44 @@ static void boot_halt(const char *topic, const char *message) {
     }
 }
 
+static int boot_cmdline_has_flag(void *multiboot_info, const char *flag) {
+    struct multiboot_info *info = (struct multiboot_info *)multiboot_info;
+    uint8_t *tag_ptr;
+    uint8_t *end_ptr;
+    uint64_t flag_len = 0;
+
+    if (!multiboot_info || !flag || !*flag) return 0;
+    while (flag[flag_len]) flag_len++;
+
+    tag_ptr = (uint8_t *)multiboot_info + 8;
+    end_ptr = (uint8_t *)multiboot_info + info->total_size;
+    while (tag_ptr < end_ptr) {
+        struct multiboot_tag *tag = (struct multiboot_tag *)tag_ptr;
+        if (tag->type == MULTIBOOT_TAG_TYPE_END) break;
+        if (tag->type == MULTIBOOT_TAG_TYPE_CMDLINE) {
+            struct multiboot_tag_string *cmd = (struct multiboot_tag_string *)tag;
+            char *s = cmd->string;
+            uint64_t i = 0;
+            while (s[i]) {
+                uint64_t j = 0;
+                while (flag[j] && s[i + j] == flag[j]) j++;
+                if (j == flag_len) {
+                    char prev = (i == 0) ? ' ' : s[i - 1];
+                    char next = s[i + j];
+                    int prev_ok = (prev == ' ' || prev == '\t' || prev == '\n');
+                    int next_ok = (next == 0 || next == ' ' || next == '\t' || next == '\n');
+                    if (prev_ok && next_ok) return 1;
+                }
+                i++;
+            }
+        }
+        tag_ptr += (tag->size + (MULTIBOOT_TAG_ALIGN - 1)) & ~(MULTIBOOT_TAG_ALIGN - 1);
+    }
+    return 0;
+}
+
 void kernel_main(void *multiboot_info) {
+    int live_installer = boot_cmdline_has_flag(multiboot_info, "icda.live=1");
     serial_init();
     bootstage_set(1, "serial");
 
@@ -119,6 +158,9 @@ void kernel_main(void *multiboot_info) {
     console_init(has_fb);
 
     console_write("ICDA Boot Sequence\n\n", CONSOLE_STYLE_INFO);
+    if (live_installer) {
+        boot_line("mode", "live installer mode");
+    }
     if (has_fb) {
         boot_prefix("display");
         console_write("framebuffer attached ", CONSOLE_STYLE_INFO);
@@ -246,7 +288,9 @@ void kernel_main(void *multiboot_info) {
     } else if (ata_init() == 0) {
         bootstage_set(15, "ata");
         boot_prefix("storage");
-        console_write("legacy ata online, devices=1\n", CONSOLE_STYLE_INFO);
+        console_write("legacy ata online, devices=", CONSOLE_STYLE_INFO);
+        console_write_dec64(ata_device_count(), CONSOLE_STYLE_INFO);
+        console_write("\n", CONSOLE_STYLE_INFO);
     } else {
         boot_line("storage", "no ata/ahci disk detected");
     }
@@ -270,14 +314,22 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
 
+    persistfs_set_live_mode(live_installer);
     if (persistfs_init() == 0 && persistfs_present()) {
         bootstage_set(18, "persist");
         boot_prefix("storage");
         console_write("persistent disk online, loaded entries=", CONSOLE_STYLE_INFO);
         console_write_dec64(persistfs_loaded_entries(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
+        if (system_install_present()) {
+            boot_line("system", "installed writable overlay active");
+        }
     } else {
-        boot_line("storage", "persistent disk unavailable, continuing with ramfs only");
+        if (live_installer) {
+            boot_line("storage", "live mode: disk persistence disabled, continuing with ramfs only");
+        } else {
+            boot_line("storage", "persistent disk unavailable, continuing with ramfs only");
+        }
     }
 
     (void)partition_scan_all();
@@ -289,20 +341,8 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(partition_count(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
 
-    (void)fat32_mount_detected();
-    (void)exfat_mount_detected();
-    (void)ntfs_mount_detected();
-    bootstage_set(20, "fat32");
-    if (fat32_mount_count() > 0 || exfat_mount_count() > 0 || ntfs_mount_count() > 0) {
-        boot_prefix("storage");
-        console_write("volumes mounted fat32=", CONSOLE_STYLE_INFO);
-        console_write_dec64(fat32_mount_count(), CONSOLE_STYLE_INFO);
-        console_write(" exfat=", CONSOLE_STYLE_MUTED);
-        console_write_dec64(exfat_mount_count(), CONSOLE_STYLE_INFO);
-        console_write(" ntfs=", CONSOLE_STYLE_MUTED);
-        console_write_dec64(ntfs_mount_count(), CONSOLE_STYLE_INFO);
-        console_write(" at /volumes\n", CONSOLE_STYLE_INFO);
-    }
+    bootstage_set(20, "mounts");
+    boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");
 
     syscall_init();
     bootstage_set(21, "syscall");

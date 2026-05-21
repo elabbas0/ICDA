@@ -31,11 +31,18 @@ struct multiboot_info {
 };
 
 // tag types
+#define MULTIBOOT_TAG_TYPE_CMDLINE      1
 #define MULTIBOOT_TAG_TYPE_END          0
 #define MULTIBOOT_TAG_TYPE_ACPI_OLD     14
 #define MULTIBOOT_TAG_TYPE_ACPI_NEW     15
 #define MULTIBOOT_TAG_TYPE_MMAP         6
 #define MULTIBOOT_TAG_TYPE_FRAMEBUFFER  8
+
+struct multiboot_tag_string {
+    uint32_t type;
+    uint32_t size;
+    char string[0];
+} __attribute__((packed));
 
 // alignment between tags
 #define MULTIBOOT_TAG_ALIGN             8

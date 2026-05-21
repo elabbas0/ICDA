@@ -42,7 +42,13 @@ enum {
     SYS_AUDIO_FINISH = 35,
     SYS_TICKS = 36,
     SYS_INPUT_READ_TIMEOUT = 37,
-    SYS_VFS_READ_AT = 38
+    SYS_VFS_READ_AT = 38,
+    SYS_INSTALL_SYSTEM = 39,
+    SYS_MOUNT = 40,
+    SYS_FORMAT_DEVICE = 41,
+    SYS_CONSOLE_SIZE = 42,
+    SYS_INSTALL_DEVICE = 43,
+    SYS_RUNTIME_DEVICE = 44
 };
 
 typedef struct {
@@ -140,6 +146,12 @@ static inline uint64_t icda_audio_read_chunk(uint64_t token, uint8_t *buf, uint6
 static inline uint64_t icda_audio_finish(uint64_t token) { return sys_call1(SYS_AUDIO_FINISH, token); }
 static inline uint64_t icda_ticks(void) { return sys_call0(SYS_TICKS); }
 static inline long icda_read_char_timeout(uint64_t ticks) { return (long)sys_call1(SYS_INPUT_READ_TIMEOUT, ticks); }
+static inline uint64_t icda_install_system(uint64_t *files_out, uint64_t *bytes_out) { return sys_call2(SYS_INSTALL_SYSTEM, (uint64_t)(uintptr_t)files_out, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_install_device(uint64_t device_index, uint64_t *files_out, uint64_t *bytes_out) { return sys_call3(SYS_INSTALL_DEVICE, device_index, (uint64_t)(uintptr_t)files_out, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_mount(uint64_t partition_index, const char *path) { return sys_call2(SYS_MOUNT, partition_index, (uint64_t)(uintptr_t)path); }
+static inline uint64_t icda_format_device(uint64_t device_index, uint64_t fs_type) { return sys_call2(SYS_FORMAT_DEVICE, device_index, fs_type); }
+static inline uint64_t icda_console_size(uint64_t *cols_out, uint64_t *rows_out) { return sys_call2(SYS_CONSOLE_SIZE, (uint64_t)(uintptr_t)cols_out, (uint64_t)(uintptr_t)rows_out); }
+static inline uint64_t icda_runtime_device(void) { return sys_call0(SYS_RUNTIME_DEVICE); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

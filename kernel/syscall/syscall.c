@@ -1,14 +1,18 @@
 #include "syscall.h"
 
 #include "../drivers/console/console.h"
+#include "../drivers/display/framebuffer.h"
+#include "../drivers/display/vga.h"
 #include "../drivers/input/input.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/audio/hda.h"
 #include "../drivers/audio/playback.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
+#include "../fs/diskfmt.h"
 #include "../fs/fat32.h"
 #include "../fs/exfat.h"
+#include "../fs/install.h"
 #include "../fs/ntfs.h"
 #include "../fs/vfs.h"
 #include "../fs/persistfs.h"
@@ -456,9 +460,97 @@ static uint64_t sys_sync(void) {
     return vfs_sync() == 0 ? 0 : (uint64_t)-1;
 }
 
+static uint64_t sys_mount(uint64_t partition_index, const char *path) {
+    const partition_info_t *part;
+
+    if (!path || !*path) {
+        return (uint64_t)-1;
+    }
+    part = partition_get((uint32_t)partition_index);
+    if (!part) {
+        return (uint64_t)-1;
+    }
+
+    switch (part->fs_hint) {
+        case PARTITION_FS_FAT32:
+            return fat32_mount_partition((uint32_t)partition_index, path) == 0 ? 0 : (uint64_t)-1;
+        case PARTITION_FS_EXFAT:
+            return exfat_mount_partition((uint32_t)partition_index, path) == 0 ? 0 : (uint64_t)-1;
+        case PARTITION_FS_NTFS:
+            return ntfs_mount_partition((uint32_t)partition_index, path) == 0 ? 0 : (uint64_t)-1;
+        default:
+            return (uint64_t)-1;
+    }
+}
+
+static uint64_t sys_format_device(uint64_t device_index, uint64_t fs_type) {
+    int rc = diskfmt_format_device((uint32_t)device_index, (diskfmt_fs_t)fs_type);
+    return rc == 0 ? 0 : (uint64_t)(int64_t)rc;
+}
+
+static uint64_t sys_install_system(uint64_t *files_out, uint64_t *bytes_out) {
+    uint64_t files = 0;
+    uint64_t bytes = 0;
+
+    if (system_install_run(&files, &bytes) != 0) {
+        return (uint64_t)-1;
+    }
+    if (files_out) {
+        *files_out = files;
+    }
+    if (bytes_out) {
+        *bytes_out = bytes;
+    }
+    return 0;
+}
+
+static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, uint64_t *bytes_out) {
+    uint64_t files = 0;
+    uint64_t bytes = 0;
+    int rc;
+
+    rc = system_install_device((uint32_t)device_index, &files, &bytes);
+    if (rc != 0) {
+        if (rc < 0) {
+            return (uint64_t)(1000 + (uint64_t)(-rc));
+        }
+        return (uint64_t)(2000 + (uint64_t)rc);
+    }
+    if (files_out) {
+        *files_out = files;
+    }
+    if (bytes_out) {
+        *bytes_out = bytes;
+    }
+    return 0;
+}
+
 static uint64_t sys_console_set_cursor(uint64_t x, uint64_t y) {
     console_set_cursor((int)x, (int)y);
     return 0;
+}
+
+static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
+    uint64_t cols = VGA_WIDTH;
+    uint64_t rows = VGA_HEIGHT;
+
+    if (!cols_out || !rows_out) {
+        return (uint64_t)-1;
+    }
+    if (fb_available()) {
+        int fb_cols = fb_columns();
+        int fb_rows_count = fb_rows();
+        if (fb_cols > 0) cols = (uint64_t)fb_cols;
+        if (fb_rows_count > 0) rows = (uint64_t)fb_rows_count;
+    }
+    *cols_out = cols;
+    *rows_out = rows;
+    return 0;
+}
+
+static uint64_t sys_runtime_device(void) {
+    int device = persistfs_active_device();
+    return device >= 0 ? (uint64_t)device : (uint64_t)-1;
 }
 
 static uint64_t sys_storage_info(char *buf, uint64_t cap) {
@@ -474,7 +566,11 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
         block_device_t *dev = block_get(i);
         if (!dev) continue;
         out = append_text(buf, out, cap, "  ");
+        out = append_uint(buf, out, cap, i);
+        out = append_text(buf, out, cap, ": ");
         out = append_text(buf, out, cap, dev->name ? dev->name : "disk");
+        out = append_text(buf, out, cap, " table=");
+        out = append_text(buf, out, cap, partition_kind_name(partition_device_kind(i)));
         out = append_text(buf, out, cap, " sectors=");
         out = append_uint(buf, out, cap, dev->sector_count);
         out = append_text(buf, out, cap, " sector_size=");
@@ -696,6 +792,22 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sched_ticks();
         case SYS_INPUT_READ_TIMEOUT:
             return sys_input_read_timeout(regs->rdi);
+        case SYS_INSTALL_SYSTEM:
+            return sys_install_system((uint64_t *)(uintptr_t)regs->rdi,
+                                      (uint64_t *)(uintptr_t)regs->rsi);
+        case SYS_MOUNT:
+            return sys_mount(regs->rdi, (const char *)(uintptr_t)regs->rsi);
+        case SYS_FORMAT_DEVICE:
+            return sys_format_device(regs->rdi, regs->rsi);
+        case SYS_CONSOLE_SIZE:
+            return sys_console_size((uint64_t *)(uintptr_t)regs->rdi,
+                                    (uint64_t *)(uintptr_t)regs->rsi);
+        case SYS_INSTALL_DEVICE:
+            return sys_install_device(regs->rdi,
+                                      (uint64_t *)(uintptr_t)regs->rsi,
+                                      (uint64_t *)(uintptr_t)regs->rdx);
+        case SYS_RUNTIME_DEVICE:
+            return sys_runtime_device();
         default:
             return (uint64_t)-1;
     }

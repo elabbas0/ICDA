@@ -76,6 +76,17 @@ pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h 
 initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c Makefile
 	$(CC) $(CFLAGS) -c kernel/fs/initramfs.c -o initramfs.o
 
+initramfs_install.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c Makefile
+	$(CC) $(CFLAGS) -DINITRAMFS_INCLUDE_AUDIO_ASSETS=0 -c kernel/fs/initramfs.c -o initramfs_install.o
+
+install.o: kernel/fs/install.c kernel/fs/install.h kernel/fs/initramfs.h kernel/fs/vfs.h \
+           kernel/fs/boot_assets.h kernel/fs/persistfs.h kernel/drivers/storage/partition.h
+	$(CC) $(CFLAGS) -c kernel/fs/install.c -o install.o
+
+diskfmt.o: kernel/fs/diskfmt.c kernel/fs/diskfmt.h kernel/drivers/storage/block.h \
+           kernel/drivers/storage/partition.h kernel/fs/fat32.h kernel/fs/exfat.h kernel/fs/ntfs.h
+	$(CC) $(CFLAGS) -c kernel/fs/diskfmt.c -o diskfmt.o
+
 audio_assets_gen.o: kernel/fs/audio_assets_gen.c kernel/fs/audio_assets_gen.h
 	$(CC) $(CFLAGS) -c kernel/fs/audio_assets_gen.c -o audio_assets_gen.o
 
@@ -98,7 +109,7 @@ tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
        kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/tty/tty.c -o tty.o
 
-syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h
+syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h kernel/fs/install.h kernel/fs/diskfmt.h
 	$(CC) $(CFLAGS) -c kernel/syscall/syscall.c -o syscall.o
 
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
@@ -207,6 +218,14 @@ audioplay_start.o: userspace/audioplay_start.asm
 	$(ASM) -f elf64 userspace/audioplay_start.asm -o /tmp/icda-audioplay_start.o
 	cp -f /tmp/icda-audioplay_start.o audioplay_start.o
 
+editor_start.o: userspace/editor_start.asm
+	$(ASM) -f elf64 userspace/editor_start.asm -o /tmp/icda-editor_start.o
+	cp -f /tmp/icda-editor_start.o editor_start.o
+
+diskman_start.o: userspace/diskman_start.asm
+	$(ASM) -f elf64 userspace/diskman_start.asm -o /tmp/icda-diskman_start.o
+	cp -f /tmp/icda-diskman_start.o diskman_start.o
+
 shell.o: userspace/shell.c userspace/icda_sys.h Makefile
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
@@ -214,6 +233,14 @@ shell.o: userspace/shell.c userspace/icda_sys.h Makefile
 audioplay.o: userspace/audioplay.c userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/audioplay.c -o /tmp/icda-audioplay.o
 	cp -f /tmp/icda-audioplay.o audioplay.o
+
+editor.o: userspace/editor.c userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/editor.c -o /tmp/icda-editor.o
+	cp -f /tmp/icda-editor.o editor.o
+
+diskman.o: userspace/diskman.c userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/diskman.c -o /tmp/icda-diskman.o
+	cp -f /tmp/icda-diskman.o diskman.o
 
 userspace/shell.app: shell_start.o shell.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-shell.app shell_start.o shell.o
@@ -223,8 +250,22 @@ userspace/audioplay.app: audioplay_start.o audioplay.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-audioplay.app audioplay_start.o audioplay.o
 	cp -f /tmp/icda-audioplay.app userspace/audioplay.app
 
+userspace/editor.app: editor_start.o editor.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-editor.app editor_start.o editor.o
+	cp -f /tmp/icda-editor.app userspace/editor.app
+
+userspace/diskman.app: diskman_start.o diskman.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-diskman.app diskman_start.o diskman.o
+	cp -f /tmp/icda-diskman.app userspace/diskman.app
+
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 	$(ASM) -f elf64 kernel/proc/shell_blob.asm -o shell_blob.o
+
+kernel/fs/bootx64-install.efi: boot/grub/grub-install.cfg
+	grub-mkstandalone -O x86_64-efi -o kernel/fs/bootx64-install.efi "boot/grub/grub.cfg=boot/grub/grub-install.cfg"
+
+boot_assets.o: kernel/proc/boot_assets.asm kernel/fs/bootx64-install.efi kernel/install-kernel.bin
+	$(ASM) -f elf64 kernel/proc/boot_assets.asm -o boot_assets.o
 
 kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS)
 	@mkdir -p kernel/fs kernel/proc
@@ -260,15 +301,22 @@ kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS
 audio_assets.o: kernel/proc/audio_assets.asm kernel/fs/audio_assets_gen.c
 	$(ASM) -f elf64 kernel/proc/audio_assets.asm -o audio_assets.o
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
-            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot.o gdt_flush.o isr_asm.o
-	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o
+	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
+	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
+
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o
+	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
+	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
@@ -285,7 +333,7 @@ kernel-usb.img: kernel.bin
 	cp boot/grub/grub-usb.cfg usbroot/boot/grub/grub.cfg
 	grub-mkstandalone -O x86_64-efi -o usbroot/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub-usb.cfg"
 	rm -f kernel-usb.img
-	dd if=/dev/zero of=kernel-usb.img bs=1M count=128
+	dd if=/dev/zero of=kernel-usb.img bs=1M count=256
 	$(SGDISK) -og kernel-usb.img
 	$(SGDISK) -n 1:2048:0 -t 1:ef00 -c 1:"ICDA EFI" kernel-usb.img
 	mformat -i kernel-usb.img@@1048576 -F ::

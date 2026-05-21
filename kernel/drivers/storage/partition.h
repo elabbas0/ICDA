@@ -31,5 +31,7 @@ int partition_scan_all(void);
 uint32_t partition_count(void);
 const partition_info_t *partition_get(uint32_t index);
 const char *partition_fs_name(partition_fs_hint_t hint);
+partition_kind_t partition_device_kind(uint32_t device_index);
+const char *partition_kind_name(partition_kind_t kind);
 
 #endif
