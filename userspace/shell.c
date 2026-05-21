@@ -1038,6 +1038,7 @@ static void shell_install_target(const char *arg) {
     uint64_t files = 0;
     uint64_t bytes = 0;
     uint64_t device = 0;
+    long rc;
 
     if (!arg || !*arg) {
         shell_install();
@@ -1047,8 +1048,14 @@ static void shell_install_target(const char *arg) {
         icda_write("usage: install [device-index]\n");
         return;
     }
-    if ((long)icda_install_device(device, &files, &bytes) < 0) {
+    icda_clear();
+    rc = (long)icda_install_device(device, &files, &bytes);
+    icda_clear();
+    if (rc < 0) {
         icda_write("install failed\n");
+        icda_write("error: ");
+        write_uint((uint64_t)(-rc));
+        icda_write("\n");
         return;
     }
     icda_write("installed bootable system to device ");

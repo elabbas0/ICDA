@@ -511,10 +511,7 @@ static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, u
 
     rc = system_install_device((uint32_t)device_index, &files, &bytes);
     if (rc != 0) {
-        if (rc < 0) {
-            return (uint64_t)(1000 + (uint64_t)(-rc));
-        }
-        return (uint64_t)(2000 + (uint64_t)rc);
+        return (uint64_t)(int64_t)rc;
     }
     if (files_out) {
         *files_out = files;
