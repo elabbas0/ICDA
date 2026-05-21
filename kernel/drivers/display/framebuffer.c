@@ -202,8 +202,35 @@ void fb_clear(uint32_t color) {
 // ============================================================
 // render font
 void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
+    unsigned char uc = (unsigned char)c;
     if (!fb_ready) return;
-    if (c < FONT_FIRST || c > FONT_LAST) c = '?';
+    if (uc == 0xDB) {
+        for (int row = 0; row < FONT_HEIGHT; row++) {
+            for (int col = 0; col < FONT_WIDTH; col++) {
+                fb_put_pixel(x + col, y + row, fg);
+            }
+        }
+        return;
+    }
+    if (uc == 0xB2) {
+        for (int row = 0; row < FONT_HEIGHT; row++) {
+            for (int col = 0; col < FONT_WIDTH; col++) {
+                uint32_t color = (((row + col) & 1) == 0) ? fg : bg;
+                fb_put_pixel(x + col, y + row, color);
+            }
+        }
+        return;
+    }
+    if (uc == 0xC4) {
+        for (int row = 0; row < FONT_HEIGHT; row++) {
+            for (int col = 0; col < FONT_WIDTH; col++) {
+                uint32_t color = (row >= 7 && row <= 8) ? fg : bg;
+                fb_put_pixel(x + col, y + row, color);
+            }
+        }
+        return;
+    }
+    if (uc < FONT_FIRST || uc > FONT_LAST) c = '?';
 
     const unsigned char* glyph = font_data[c - FONT_FIRST];
 

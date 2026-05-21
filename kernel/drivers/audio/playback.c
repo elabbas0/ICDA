@@ -310,6 +310,7 @@ static void audio_update_hud(int force_clear) {
         char num[24];
         uint64_t value = seconds_left;
         uint64_t pos = sizeof(num) - 1;
+        uint64_t digits;
         num[pos] = 0;
         if (value == 0) {
             num[--pos] = '0';
@@ -318,6 +319,11 @@ static void audio_update_hud(int force_clear) {
                 num[--pos] = (char)('0' + (value % 10U));
                 value /= 10U;
             }
+        }
+        digits = str_len(&num[pos]);
+        while (digits < 3) {
+            append_text(text, " ", sizeof(text));
+            digits++;
         }
         append_text(text, &num[pos], sizeof(text));
     }

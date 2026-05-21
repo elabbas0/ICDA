@@ -13,6 +13,10 @@ global userprog_ticker_start
 global userprog_ticker_end
 global userprog_audioplay_start
 global userprog_audioplay_end
+global userprog_editor_start
+global userprog_editor_end
+global userprog_diskman_start
+global userprog_diskman_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -37,5 +41,13 @@ userprog_ticker_end:
 userprog_audioplay_start:
     incbin "userspace/audioplay.app"
 userprog_audioplay_end:
+
+userprog_editor_start:
+    incbin "userspace/editor.app"
+userprog_editor_end:
+
+userprog_diskman_start:
+    incbin "userspace/diskman.app"
+userprog_diskman_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

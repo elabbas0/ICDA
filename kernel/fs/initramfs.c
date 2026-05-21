@@ -4,6 +4,10 @@
 
 #include <stdint.h>
 
+#ifndef INITRAMFS_INCLUDE_AUDIO_ASSETS
+#define INITRAMFS_INCLUDE_AUDIO_ASSETS 1
+#endif
+
 extern const char userprog_hello_start[];
 extern const char userprog_hello_end[];
 extern const char userprog_pid_start[];
@@ -16,6 +20,10 @@ extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
 extern const char userprog_audioplay_start[];
 extern const char userprog_audioplay_end[];
+extern const char userprog_editor_start[];
+extern const char userprog_editor_end[];
+extern const char userprog_diskman_start[];
+extern const char userprog_diskman_end[];
 extern const char usershell_start[];
 extern const char usershell_end[];
 static const char motd_txt[] =
@@ -36,8 +44,11 @@ static const char commands_txt[] =
     "  touch <path>   create an empty file\n"
     "  write <path> <text>  replace file contents\n"
     "  stat <path>    show file metadata\n"
+    "  install        persist the seeded system into writable disk state\n"
     "  run <path>     launch a user program (.app, .elf, or other supported format)\n"
     "  storage        list block devices, partitions, and mounts\n"
+    "  mount <n> <path>  mount a detected fat32/exfat partition at a directory\n"
+    "  diskman        open the disk manager / formatter\n"
     "  sync           flush the writable filesystem to disk\n"
     "  play <path>    play a wav file in the background\n"
     "  stop           stop the current song\n"
@@ -70,6 +81,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/ticker.app", 0, 0 },
     { "/apps/shell.app", 0, 0 },
     { "/apps/audioplay.app", 0, 0 },
+    { "/apps/editor.app", 0, 0 },
+    { "/apps/diskman.app", 0, 0 },
     { "/bin/hello.elf", 0, 0 },
     { "/bin/pid.elf", 0, 0 }
 };
@@ -85,10 +98,14 @@ int initramfs_init(void) {
     initramfs_files[7].size = (uint64_t)(usershell_end - usershell_start);
     initramfs_files[8].data = userprog_audioplay_start;
     initramfs_files[8].size = (uint64_t)(userprog_audioplay_end - userprog_audioplay_start);
-    initramfs_files[9].data = userprog_hello_elf_start;
-    initramfs_files[9].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
-    initramfs_files[10].data = userprog_pid_elf_start;
-    initramfs_files[10].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
+    initramfs_files[9].data = userprog_editor_start;
+    initramfs_files[9].size = (uint64_t)(userprog_editor_end - userprog_editor_start);
+    initramfs_files[10].data = userprog_diskman_start;
+    initramfs_files[10].size = (uint64_t)(userprog_diskman_end - userprog_diskman_start);
+    initramfs_files[11].data = userprog_hello_elf_start;
+    initramfs_files[11].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
+    initramfs_files[12].data = userprog_pid_elf_start;
+    initramfs_files[12].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
     return 0;
 }
 
@@ -98,12 +115,14 @@ int initramfs_populate(void) {
             return -1;
         }
     }
+#if INITRAMFS_INCLUDE_AUDIO_ASSETS
     for (uint64_t i = 0; i < generated_audio_asset_count; i++) {
         uint64_t size = (uint64_t)(generated_audio_assets[i].data_end - generated_audio_assets[i].data);
         if (vfs_seed_readonly(generated_audio_assets[i].path, generated_audio_assets[i].data, size) != 0) {
             return -1;
         }
     }
+#endif
     return 0;
 }
 
@@ -126,6 +145,7 @@ const initramfs_file_t *initramfs_find(const char *path) {
         }
     }
 
+#if INITRAMFS_INCLUDE_AUDIO_ASSETS
     for (uint64_t i = 0; i < generated_audio_asset_count; i++) {
         const char *a = generated_audio_assets[i].path;
         const char *b = path;
@@ -143,6 +163,7 @@ const initramfs_file_t *initramfs_find(const char *path) {
             return &temp;
         }
     }
+#endif
 
     return 0;
 }
@@ -152,6 +173,7 @@ const initramfs_file_t *initramfs_file_at(uint64_t index) {
         return &initramfs_files[index];
     }
     index -= sizeof(initramfs_files) / sizeof(initramfs_files[0]);
+#if INITRAMFS_INCLUDE_AUDIO_ASSETS
     if (index < generated_audio_asset_count) {
         static initramfs_file_t temp;
         temp.path = generated_audio_assets[index].path;
@@ -159,11 +181,16 @@ const initramfs_file_t *initramfs_file_at(uint64_t index) {
         temp.size = (uint64_t)(generated_audio_assets[index].data_end - generated_audio_assets[index].data);
         return &temp;
     }
+#endif
     return 0;
 }
 
 uint64_t initramfs_file_count(void) {
+#if INITRAMFS_INCLUDE_AUDIO_ASSETS
     return (sizeof(initramfs_files) / sizeof(initramfs_files[0])) + generated_audio_asset_count;
+#else
+    return (sizeof(initramfs_files) / sizeof(initramfs_files[0]));
+#endif
 }
 
 uint64_t initramfs_total_bytes(void) {
@@ -172,9 +199,11 @@ uint64_t initramfs_total_bytes(void) {
     for (uint64_t i = 0; i < sizeof(initramfs_files) / sizeof(initramfs_files[0]); i++) {
         total += initramfs_files[i].size;
     }
+ #if INITRAMFS_INCLUDE_AUDIO_ASSETS
     for (uint64_t i = 0; i < generated_audio_asset_count; i++) {
         total += (uint64_t)(generated_audio_assets[i].data_end - generated_audio_assets[i].data);
     }
+ #endif
 
     return total;
 }

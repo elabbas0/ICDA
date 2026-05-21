@@ -89,3 +89,9 @@ int ntfs_mount_detected(void) {
 uint32_t ntfs_mount_count(void) {
     return mounted_ntfs;
 }
+
+int ntfs_mount_partition(uint32_t partition_index, const char *mount_path) {
+    (void)partition_index;
+    (void)mount_path;
+    return -1;
+}

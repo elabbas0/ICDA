@@ -1,13 +1,13 @@
 #include "persistfs.h"
 #include "vfs.h"
 #include "../drivers/storage/ata.h"
+#include "../drivers/storage/block.h"
 #include "../memory/heap.h"
 
 #define PERSISTFS_MAGIC   0x31534641444349ULL
 #define PERSISTFS_VERSION 1U
 #define PERSISTFS_SECTOR_SIZE 512U
 #define PERSISTFS_PATH_CAP 256U
-
 typedef struct {
     uint64_t magic;
     uint32_t version;
@@ -28,6 +28,8 @@ typedef struct {
 
 static int persistfs_available = 0;
 static uint64_t persistfs_entries_loaded = 0;
+static int persistfs_live_boot = 0;
+static int persistfs_active_device_index = -1;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -51,6 +53,45 @@ static void zero_bytes(uint8_t *dst, uint64_t size) {
 
 static uint64_t align_up(uint64_t value, uint64_t align) {
     return (value + align - 1) & ~(align - 1);
+}
+
+static uint32_t persistfs_start_lba_for_device(block_device_t *dev) {
+    if (!dev || dev->sector_count <= PERSISTFS_RESERVED_SECTORS) {
+        return 0;
+    }
+    return (uint32_t)(dev->sector_count - PERSISTFS_RESERVED_SECTORS);
+}
+
+static int persistfs_read_range(block_device_t *dev, uint32_t lba, uint64_t count, void *buffer) {
+    uint64_t done = 0;
+
+    if (!dev || !dev->read) {
+        return -1;
+    }
+    while (done < count) {
+        uint32_t chunk = (uint32_t)((count - done) > 255 ? 255 : (count - done));
+        if (dev->read(dev->context, lba + (uint32_t)done, chunk, (uint8_t *)buffer + (done * PERSISTFS_SECTOR_SIZE)) != 0) {
+            return -1;
+        }
+        done += chunk;
+    }
+    return 0;
+}
+
+static int persistfs_write_range(block_device_t *dev, uint32_t lba, uint64_t count, const void *buffer) {
+    uint64_t done = 0;
+
+    if (!dev || !dev->write) {
+        return -1;
+    }
+    while (done < count) {
+        uint32_t chunk = (uint32_t)((count - done) > 255 ? 255 : (count - done));
+        if (dev->write(dev->context, lba + (uint32_t)done, chunk, (const uint8_t *)buffer + (done * PERSISTFS_SECTOR_SIZE)) != 0) {
+            return -1;
+        }
+        done += chunk;
+    }
+    return 0;
 }
 
 static int path_push(char *path, uint64_t cap, const char *name) {
@@ -157,7 +198,7 @@ static uint8_t *persistfs_write_node(uint8_t *cursor, vfs_node_t *node, char *pa
     return cursor;
 }
 
-int persistfs_sync(void) {
+static int persistfs_sync_to_device(block_device_t *dev) {
     uint32_t entry_count = 0;
     uint64_t payload_bytes;
     uint64_t total_bytes;
@@ -167,8 +208,11 @@ int persistfs_sync(void) {
     char path[PERSISTFS_PATH_CAP];
     persistfs_header_t *header;
 
-    if (!persistfs_available) {
-        return -1;
+    if (!dev) {
+        return -101;
+    }
+    if (persistfs_start_lba_for_device(dev) == 0) {
+        return -106;
     }
 
     path[0] = '\0';
@@ -185,13 +229,13 @@ int persistfs_sync(void) {
     if (sectors == 0) {
         sectors = 1;
     }
-    if (sectors > ata_sector_count()) {
-        return -1;
+    if (sectors > PERSISTFS_RESERVED_SECTORS) {
+        return -102;
     }
 
     buffer = (uint8_t *)kmalloc((size_t)(sectors * PERSISTFS_SECTOR_SIZE));
     if (!buffer) {
-        return -1;
+        return -103;
     }
     zero_bytes(buffer, sectors * PERSISTFS_SECTOR_SIZE);
 
@@ -210,18 +254,38 @@ int persistfs_sync(void) {
             cursor = persistfs_write_node(cursor, vfs_child_at(vfs_root(), i), path, sizeof(path));
             if (!cursor) {
                 kfree(buffer);
-                return -1;
+                return -104;
             }
         }
     }
 
-    if (ata_write_sectors(0, (uint8_t)sectors, buffer) != 0) {
+    if (persistfs_write_range(dev, persistfs_start_lba_for_device(dev), sectors, buffer) != 0) {
         kfree(buffer);
-        return -1;
+        return -105;
     }
 
     kfree(buffer);
     return 0;
+}
+
+int persistfs_sync(void) {
+    block_device_t *dev;
+    if (persistfs_active_device_index < 0) {
+        return -1;
+    }
+    dev = block_get((uint32_t)persistfs_active_device_index);
+    if (!dev) {
+        return -1;
+    }
+    return persistfs_sync_to_device(dev);
+}
+
+int persistfs_sync_device(uint32_t device_index) {
+    block_device_t *dev = block_get(device_index);
+    if (!dev || !dev->write) {
+        return -1;
+    }
+    return persistfs_sync_to_device(dev);
 }
 
 int persistfs_init(void) {
@@ -230,16 +294,30 @@ int persistfs_init(void) {
     uint8_t *buffer = 0;
     uint64_t sectors;
     uint8_t *cursor;
+    block_device_t *dev = 0;
 
     persistfs_available = 0;
     persistfs_entries_loaded = 0;
+    persistfs_active_device_index = -1;
 
-    if (ata_init() != 0 || !ata_present()) {
+    if (persistfs_live_boot) {
+        return -1;
+    }
+
+    if (block_count() == 0) {
+        return -1;
+    }
+    dev = block_get(0);
+    if (!dev) {
         return -1;
     }
     persistfs_available = 1;
+    persistfs_active_device_index = 0;
 
-    if (ata_read_sectors(0, 1, sector) != 0) {
+    if (persistfs_start_lba_for_device(dev) == 0) {
+        return -1;
+    }
+    if (persistfs_read_range(dev, persistfs_start_lba_for_device(dev), 1, sector) != 0) {
         return -1;
     }
 
@@ -251,7 +329,7 @@ int persistfs_init(void) {
     }
 
     sectors = align_up(header->bytes_used, PERSISTFS_SECTOR_SIZE) / PERSISTFS_SECTOR_SIZE;
-    if (sectors == 0 || sectors > ata_sector_count()) {
+    if (sectors == 0 || sectors > PERSISTFS_RESERVED_SECTORS) {
         return -1;
     }
 
@@ -259,7 +337,7 @@ int persistfs_init(void) {
     if (!buffer) {
         return -1;
     }
-    if (ata_read_sectors(0, (uint8_t)sectors, buffer) != 0) {
+    if (persistfs_read_range(dev, persistfs_start_lba_for_device(dev), sectors, buffer) != 0) {
         kfree(buffer);
         return -1;
     }
@@ -312,4 +390,21 @@ int persistfs_present(void) {
 
 uint64_t persistfs_loaded_entries(void) {
     return persistfs_entries_loaded;
+}
+
+void persistfs_set_live_mode(int enabled) {
+    persistfs_live_boot = enabled ? 1 : 0;
+    if (persistfs_live_boot) {
+        persistfs_available = 0;
+        persistfs_entries_loaded = 0;
+        persistfs_active_device_index = -1;
+    }
+}
+
+int persistfs_live_mode(void) {
+    return persistfs_live_boot;
+}
+
+int persistfs_active_device(void) {
+    return persistfs_active_device_index;
 }

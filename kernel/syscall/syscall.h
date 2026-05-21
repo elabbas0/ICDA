@@ -45,7 +45,13 @@ typedef enum {
     SYS_AUDIO_FINISH = 35,
     SYS_TICKS = 36,
     SYS_INPUT_READ_TIMEOUT = 37,
-    SYS_VFS_READ_AT = 38
+    SYS_VFS_READ_AT = 38,
+    SYS_INSTALL_SYSTEM = 39,
+    SYS_MOUNT = 40,
+    SYS_FORMAT_DEVICE = 41,
+    SYS_CONSOLE_SIZE = 42,
+    SYS_INSTALL_DEVICE = 43,
+    SYS_RUNTIME_DEVICE = 44
 } syscall_number_t;
 
 typedef struct {

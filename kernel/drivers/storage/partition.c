@@ -212,3 +212,22 @@ const char *partition_fs_name(partition_fs_hint_t hint) {
         default: return "unknown";
     }
 }
+
+partition_kind_t partition_device_kind(uint32_t device_index) {
+    block_device_t *device = block_get(device_index);
+    if (!device) return PARTITION_KIND_UNKNOWN;
+    for (uint32_t i = 0; i < partitions_found; i++) {
+        if (partitions[i].device == device) {
+            return partitions[i].kind;
+        }
+    }
+    return PARTITION_KIND_UNKNOWN;
+}
+
+const char *partition_kind_name(partition_kind_t kind) {
+    switch (kind) {
+        case PARTITION_KIND_MBR: return "mbr";
+        case PARTITION_KIND_GPT: return "gpt";
+        default: return "unknown";
+    }
+}

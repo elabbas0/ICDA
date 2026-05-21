@@ -270,23 +270,35 @@ static int fat32_import_dir(const fat32_volume_t *vol, uint32_t cluster, const c
     return 0;
 }
 
+static int fat32_mount_partition_info(const partition_info_t *part, const char *mount_path) {
+    fat32_volume_t vol;
+
+    if (!part || !mount_path || !*mount_path || part->fs_hint != PARTITION_FS_FAT32) {
+        return -1;
+    }
+    if (fat32_load_volume(part, &vol) != 0) {
+        return -1;
+    }
+    if (vfs_import_node(mount_path, VFS_NODE_DIR, 1, 0, 0, 0, 0, 0) != 0) {
+        return -1;
+    }
+    if (fat32_import_dir(&vol, vol.root_cluster, mount_path, 0) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int fat32_mount_detected(void) {
     mounted_fat32 = 0;
     (void)vfs_mkdir(vfs_root(), "/volumes");
     for (uint32_t i = 0; i < partition_count(); i++) {
         const partition_info_t *part = partition_get(i);
-        fat32_volume_t vol;
         char mount_path[64];
 
         if (!part || part->fs_hint != PARTITION_FS_FAT32) continue;
-        if (fat32_load_volume(part, &vol) != 0) continue;
-
         copy_text(mount_path, "/volumes/fat32-", sizeof(mount_path));
         append_u32(mount_path, sizeof(mount_path), mounted_fat32);
-        if (vfs_import_node(mount_path, VFS_NODE_DIR, 1, 0, 0, 0, 0, 0) != 0) {
-            continue;
-        }
-        if (fat32_import_dir(&vol, vol.root_cluster, mount_path, 0) == 0) {
+        if (fat32_mount_partition_info(part, mount_path) == 0) {
             mounted_fat32++;
         }
     }
@@ -295,4 +307,9 @@ int fat32_mount_detected(void) {
 
 uint32_t fat32_mount_count(void) {
     return mounted_fat32;
+}
+
+int fat32_mount_partition(uint32_t partition_index, const char *mount_path) {
+    const partition_info_t *part = partition_get(partition_index);
+    return fat32_mount_partition_info(part, mount_path);
 }
