@@ -299,6 +299,11 @@ void fb_set_cursor(int x, int y) {
     cursor_y = y;
 }
 
+void fb_get_cursor(int *x_out, int *y_out) {
+    if (x_out) *x_out = cursor_x;
+    if (y_out) *y_out = cursor_y;
+}
+
 void fb_write_at_cells(int col, int row, const char* str, uint32_t fg, uint32_t bg) {
     int x;
     int y;

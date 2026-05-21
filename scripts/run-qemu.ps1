@@ -70,6 +70,8 @@ $qemuArgs = @(
     "-machine", $machineArg
     "-smp", "4"
     "-m", "4G"
+    "-netdev", "user,id=net0"
+    "-device", "e1000,netdev=net0"
     "-cdrom", $isoPath
     "-drive", "file=$diskPath,format=raw,if=ide,index=0,media=disk"
     "-boot", "d"
@@ -78,7 +80,11 @@ $qemuArgs = @(
 )
 
 if ($Headless) {
-    $qemuArgs += @("-display", "none", "-monitor", "none")
+    $pcapPath = Join-Path $repoRoot "qemu-netdump.pcap"
+    if (Test-Path -LiteralPath $pcapPath) {
+        Remove-Item -LiteralPath $pcapPath -Force -ErrorAction SilentlyContinue
+    }
+    $qemuArgs += @("-display", "none", "-monitor", "none", "-object", "filter-dump,id=netdump,netdev=net0,file=$pcapPath")
 } else {
     $qemuArgs += @("-audiodev", "dsound,id=audio0", "-device", "ich9-intel-hda", "-device", "hda-output,audiodev=audio0")
 }

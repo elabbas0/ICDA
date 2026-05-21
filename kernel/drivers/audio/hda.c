@@ -101,6 +101,9 @@ static uint8_t hda_pin = 0;
 static uint8_t hda_dac = 0;
 static int hda_present = 0;
 static int hda_error = 0;
+static int hda_generic_fallback = 0;
+
+static uint16_t hda_format_for_rate(uint16_t sample_rate);
 
 static hda_bdl_entry_t hda_bdl[HDA_BDL_COUNT]
     __attribute__((aligned(HDA_BDL_ALIGN), section(".dma_low")));
@@ -395,6 +398,20 @@ static int hda_find_first_widget(uint8_t wanted_type, uint8_t *nid_out) {
     return -1;
 }
 
+static int hda_find_first_widget_global(uint8_t wanted_type, uint8_t *nid_out) {
+    if (!nid_out) {
+        return -1;
+    }
+    for (uint8_t nid = 1; nid < 0x40; nid++) {
+        uint8_t type = 0;
+        if (hda_widget_type(nid, &type) == 0 && type == wanted_type) {
+            *nid_out = nid;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int hda_find_output_path(hda_path_t *out_path) {
     uint32_t parm;
     uint8_t start = 0;
@@ -402,19 +419,29 @@ static int hda_find_output_path(hda_path_t *out_path) {
     int best_score = -1;
     hda_path_t best_path = {0};
 
-    if (hda_get_param(0, HDA_PARAM_NODE_COUNT, &parm) != 0) {
-        return -1;
-    }
-
-    start = (uint8_t)((parm >> 16) & 0x7FU);
-    count = (uint8_t)(parm & 0x7FU);
-    for (uint8_t i = 0; i < count; i++) {
-        uint8_t nid = (uint8_t)(start + i);
-        uint32_t fg_type = 0;
-        if (hda_get_param(nid, HDA_PARAM_FUNC_TYPE, &fg_type) == 0 && (fg_type & 0xFFU) == 0x01U) {
-            hda_afg = nid;
-            break;
+    if (hda_get_param(0, HDA_PARAM_NODE_COUNT, &parm) == 0) {
+        start = (uint8_t)((parm >> 16) & 0x7FU);
+        count = (uint8_t)(parm & 0x7FU);
+        for (uint8_t i = 0; i < count; i++) {
+            uint8_t nid = (uint8_t)(start + i);
+            uint32_t fg_type = 0;
+            if (hda_get_param(nid, HDA_PARAM_FUNC_TYPE, &fg_type) == 0 && (fg_type & 0xFFU) == 0x01U) {
+                hda_afg = nid;
+                break;
+            }
         }
+    }
+    if (!hda_afg) {
+        for (uint8_t nid = 1; nid < 0x20; nid++) {
+            uint32_t fg_type = 0;
+            if (hda_get_param(nid, HDA_PARAM_FUNC_TYPE, &fg_type) == 0 && (fg_type & 0xFFU) == 0x01U) {
+                hda_afg = nid;
+                break;
+            }
+        }
+    }
+    if (!hda_afg) {
+        hda_afg = 1;
     }
     if (!hda_afg) {
         return -1;
@@ -468,10 +495,12 @@ static int hda_find_output_path(hda_path_t *out_path) {
         uint8_t fallback_pin = 0;
         uint8_t fallback_dac = 0;
 
-        if (hda_find_first_widget(HDA_WIDGET_PIN, &fallback_pin) != 0) {
+        if (hda_find_first_widget(HDA_WIDGET_PIN, &fallback_pin) != 0 &&
+            hda_find_first_widget_global(HDA_WIDGET_PIN, &fallback_pin) != 0) {
             return -1;
         }
-        if (hda_find_first_widget(HDA_WIDGET_OUTPUT, &fallback_dac) != 0) {
+        if (hda_find_first_widget(HDA_WIDGET_OUTPUT, &fallback_dac) != 0 &&
+            hda_find_first_widget_global(HDA_WIDGET_OUTPUT, &fallback_dac) != 0) {
             return -1;
         }
 
@@ -488,6 +517,43 @@ static int hda_find_output_path(hda_path_t *out_path) {
     *out_path = best_path;
     hda_pin = best_path.nodes[0];
     hda_dac = best_path.nodes[best_path.length - 1U];
+    return 0;
+}
+
+static int hda_configure_codec_generic(uint16_t sample_rate) {
+    static const uint8_t candidate_dacs[] = { 0x02, 0x03, 0x04, 0x05, 0x06 };
+    static const uint8_t candidate_pins[] = { 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15 };
+    uint8_t stream_id = HDA_STREAM_TAG;
+    uint32_t pin_caps = 0;
+    uint8_t pin_ctl = HDA_PINCTL_OUT_ENABLE;
+
+    hda_format = hda_format_for_rate(sample_rate);
+
+    for (uint32_t i = 0; i < sizeof(candidate_dacs); i++) {
+        uint8_t nid = candidate_dacs[i];
+        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0);
+        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_FORMAT, hda_format, 0);
+        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CHANNELS, 1, 0);
+        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CONV_STREAM, (uint16_t)(stream_id << 4), 0);
+    }
+
+    for (uint32_t i = 0; i < sizeof(candidate_pins); i++) {
+        uint8_t nid = candidate_pins[i];
+        pin_ctl = HDA_PINCTL_OUT_ENABLE;
+        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0);
+        if (hda_get_param(nid, HDA_PARAM_PIN_CAP, &pin_caps) == 0) {
+            if (pin_caps & HDA_PINCAP_HP_DRV) {
+                pin_ctl |= HDA_PINCTL_HP_ENABLE;
+            }
+            if (pin_caps & HDA_PINCAP_EAPD) {
+                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_EAPD, HDA_EAPD_ENABLE, 0);
+            }
+            (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_PIN_CONTROL, pin_ctl, 0);
+        }
+    }
+
+    hda_dac = candidate_dacs[0];
+    hda_pin = candidate_pins[0];
     return 0;
 }
 
@@ -522,7 +588,7 @@ static int hda_configure_codec_path(uint16_t sample_rate) {
     uint8_t count = 0;
 
     if (hda_find_output_path(&path) != 0) {
-        return -1;
+        return hda_configure_codec_generic(sample_rate);
     }
 
     for (uint8_t i = 0; i < path.length; i++) {
@@ -595,6 +661,19 @@ static uint32_t hda_output_stream_base(void) {
     return 0x80U + (0x20U * iss);
 }
 
+static int hda_wait_for_codec_graph(void) {
+    hda_path_t dummy = {0};
+    for (uint32_t attempt = 0; attempt < 128U; attempt++) {
+        if (hda_find_output_path(&dummy) == 0) {
+            return 0;
+        }
+        for (uint32_t spin = 0; spin < 50000U; spin++) {
+            cpu_relax();
+        }
+    }
+    return -1;
+}
+
 static int hda_reset_stream(void) {
     uint32_t base = hda_stream_base;
     uint8_t ctl0;
@@ -645,7 +724,6 @@ int hda_init(void) {
     uint32_t bar0;
     uint32_t gctl;
     uint16_t statests;
-    hda_path_t dummy = {0};
 
     hda_present = 0;
     hda_error = 0;
@@ -656,6 +734,7 @@ int hda_init(void) {
     hda_afg = 0;
     hda_pin = 0;
     hda_dac = 0;
+    hda_generic_fallback = 0;
     hda_pci = pci_find_class(HDA_CLASS_CODE, HDA_SUBCLASS);
     if (!hda_pci) {
         hda_error = 1;
@@ -693,7 +772,16 @@ int hda_init(void) {
 
     mmio_write32(HDA_REG_INTCTL, 0);
     mmio_write32(HDA_REG_INTSTS, 0xFFFFFFFFU);
-    statests = mmio_read16(HDA_REG_STATESTS);
+    statests = 0;
+    for (uint32_t attempt = 0; attempt < 128U; attempt++) {
+        statests = mmio_read16(HDA_REG_STATESTS);
+        if ((statests & 0x7FFFU) != 0) {
+            break;
+        }
+        for (uint32_t spin = 0; spin < 50000U; spin++) {
+            cpu_relax();
+        }
+    }
     if ((statests & 0x7FFFU) == 0) {
         hda_error = 7;
         return -1;
@@ -712,9 +800,8 @@ int hda_init(void) {
         return -1;
     }
 
-    if (hda_find_output_path(&dummy) != 0) {
-        hda_error = 9;
-        return -1;
+    if (hda_wait_for_codec_graph() != 0) {
+        hda_generic_fallback = 1;
     }
 
     hda_stream_base = hda_output_stream_base();
@@ -733,7 +820,6 @@ int hda_last_error(void) {
 
 int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
     uint64_t bdl_phys = kernel_buffer_phys(hda_bdl);
-    uint64_t ring_phys = kernel_buffer_phys(hda_ring);
     uint8_t ctl2;
 
     if (!hda_present) {
@@ -768,7 +854,13 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
     ctl2 &= 0x0FU;
     ctl2 |= (uint8_t)(HDA_STREAM_TAG << 4);
     mmio_write8(hda_stream_base + 0x02U, ctl2);
+    return 0;
+}
 
+int hda_stream_run(void) {
+    if (!hda_present || !hda_stream_base) {
+        return -1;
+    }
     mmio_write8(hda_stream_base + 0x00U, (uint8_t)(mmio_read8(hda_stream_base + 0x00U) | HDA_SD_CTL_RUN));
     return 0;
 }

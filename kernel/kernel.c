@@ -9,6 +9,7 @@
 #include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/pci/pci.h"
+#include "drivers/net/e1000.h"
 #include "drivers/serial/serial.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
@@ -39,6 +40,7 @@
 
 #include "proc/sched.h"
 #include "proc/user.h"
+#include "net/net.h"
 
 #ifndef SERIAL_SHELL_MIRROR
 #define SERIAL_SHELL_MIRROR 0
@@ -243,6 +245,15 @@ void kernel_main(void *multiboot_info) {
         boot_line("pci", "no pci devices discovered");
     }
 
+    if (net_init() == 0) {
+        boot_line("network", "intel e1000 online");
+    } else {
+        boot_prefix("network");
+        console_write("intel e1000 unavailable err=", CONSOLE_STYLE_WARN);
+        console_write_dec64((uint64_t)net_last_error(), CONSOLE_STYLE_WARN);
+        console_write("\n", CONSOLE_STYLE_WARN);
+    }
+
     if (hda_init() == 0) {
         boot_line("audio", "intel hda online");
     } else {
@@ -314,12 +325,26 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
 
+    (void)partition_scan_all();
+    bootstage_set(18, "partitions");
+    boot_prefix("storage");
+    console_write("block devices=", CONSOLE_STYLE_INFO);
+    console_write_dec64(block_count(), CONSOLE_STYLE_INFO);
+    console_write(" partitions=", CONSOLE_STYLE_MUTED);
+    console_write_dec64(partition_count(), CONSOLE_STYLE_INFO);
+    console_write("\n", CONSOLE_STYLE_INFO);
+
     persistfs_set_live_mode(live_installer);
     if (persistfs_init() == 0 && persistfs_present()) {
-        bootstage_set(18, "persist");
+        bootstage_set(19, "persist");
         boot_prefix("storage");
-        console_write("persistent disk online, loaded entries=", CONSOLE_STYLE_INFO);
+        console_write("persistent state online, loaded entries=", CONSOLE_STYLE_INFO);
         console_write_dec64(persistfs_loaded_entries(), CONSOLE_STYLE_INFO);
+        if (persistfs_active_partition() >= 0) {
+            console_write(" backend=partition", CONSOLE_STYLE_MUTED);
+        } else {
+            console_write(" backend=device", CONSOLE_STYLE_MUTED);
+        }
         console_write("\n", CONSOLE_STYLE_INFO);
         if (system_install_present()) {
             boot_line("system", "installed writable overlay active");
@@ -328,18 +353,9 @@ void kernel_main(void *multiboot_info) {
         if (live_installer) {
             boot_line("storage", "live mode: disk persistence disabled, continuing with ramfs only");
         } else {
-            boot_line("storage", "persistent disk unavailable, continuing with ramfs only");
+            boot_line("storage", "persistent state unavailable, continuing with ramfs only");
         }
     }
-
-    (void)partition_scan_all();
-    bootstage_set(19, "partitions");
-    boot_prefix("storage");
-    console_write("block devices=", CONSOLE_STYLE_INFO);
-    console_write_dec64(block_count(), CONSOLE_STYLE_INFO);
-    console_write(" partitions=", CONSOLE_STYLE_MUTED);
-    console_write_dec64(partition_count(), CONSOLE_STYLE_INFO);
-    console_write("\n", CONSOLE_STYLE_INFO);
 
     bootstage_set(20, "mounts");
     boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");

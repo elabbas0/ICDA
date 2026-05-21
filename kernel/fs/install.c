@@ -1,6 +1,7 @@
 #include "install.h"
 
 #include "boot_assets.h"
+#include "diskfmt.h"
 #include "initramfs.h"
 #include "persistfs.h"
 #include "vfs.h"
@@ -16,6 +17,8 @@
 #define FAT32_ATTR_DIR    0x10U
 #define FAT32_ATTR_FILE   0x20U
 #define FAT32_EOC         0x0FFFFFFFU
+#define ICDA_ROOT_BUNDLE_NAME "ICDAROOT.BIN"
+#define ICDA_ROOT_CFG_NAME    "ICDACFG.TXT"
 
 typedef struct {
     const partition_info_t *part;
@@ -230,6 +233,19 @@ static uint64_t append_uint(char *buf, uint64_t out, uint64_t cap, uint64_t valu
     return out;
 }
 
+static int parse_uint64(const char *text, uint64_t *out) {
+    uint64_t value = 0;
+    uint64_t i = 0;
+    if (!text || !*text || !out) return 0;
+    while (text[i] >= '0' && text[i] <= '9') {
+        value = value * 10 + (uint64_t)(text[i] - '0');
+        i++;
+    }
+    if (i == 0) return 0;
+    *out = value;
+    return 1;
+}
+
 static int str_prefix(const char *text, const char *prefix) {
     uint64_t i = 0;
     while (prefix[i]) {
@@ -353,63 +369,86 @@ static int fat32_set_contiguous_chain(const fat32_install_volume_t *vol, uint32_
 static int fat32_alloc_chain(const fat32_install_volume_t *vol, uint32_t clusters_needed, uint32_t *first_cluster_out) {
     uint32_t run_start = 0;
     uint32_t run_len = 0;
+    uint8_t sector[FAT32_SECTOR_SIZE];
+    uint32_t entries_per_sector = FAT32_SECTOR_SIZE / 4U;
 
     if (!first_cluster_out || clusters_needed == 0) return -1;
-    for (uint32_t cluster = 3; cluster <= vol->max_cluster; cluster++) {
-        if (fat32_get_fat_entry(vol, cluster) != 0) {
-            run_start = 0;
-            run_len = 0;
-            continue;
+    for (uint32_t sector_index = 0; sector_index < vol->fat_size_sectors; sector_index++) {
+        if (fat32_read_sectors(vol, vol->fat_lba + sector_index, 1, sector) != 0) {
+            return -1;
         }
-        if (run_start == 0) {
-            run_start = cluster;
-        }
-        run_len++;
-        if (run_len == clusters_needed) {
-            if (fat32_set_contiguous_chain(vol, run_start, clusters_needed) != 0) {
-                return -1;
+        for (uint32_t entry_index = 0; entry_index < entries_per_sector; entry_index++) {
+            uint32_t cluster = sector_index * entries_per_sector + entry_index;
+            uint32_t value;
+
+            if (cluster < 3 || cluster > vol->max_cluster) {
+                continue;
             }
-            *first_cluster_out = run_start;
-            return 0;
+
+            value = (*(uint32_t *)(sector + entry_index * 4U)) & 0x0FFFFFFFU;
+            if (value != 0) {
+                run_start = 0;
+                run_len = 0;
+                continue;
+            }
+            if (run_start == 0) {
+                run_start = cluster;
+            }
+            run_len++;
+            if (run_len == clusters_needed) {
+                if (fat32_set_contiguous_chain(vol, run_start, clusters_needed) != 0) {
+                    return -1;
+                }
+                *first_cluster_out = run_start;
+                return 0;
+            }
         }
     }
     return -1;
 }
 
 static int fat32_write_chain(const fat32_install_volume_t *vol, uint32_t first_cluster, const char *data, uint64_t size, const char *label) {
-    uint32_t cluster = first_cluster;
     uint32_t cluster_bytes = vol->sectors_per_cluster * FAT32_SECTOR_SIZE;
+    uint32_t max_batch_sectors = 128U;
+    uint32_t max_batch_bytes;
     uint8_t *buffer;
     uint64_t remaining = size;
     uint64_t written = 0;
     uint64_t next_report = 0;
+    uint64_t lba;
 
-    if (cluster < 2) return -1;
-    buffer = (uint8_t *)kmalloc(cluster_bytes);
+    if (first_cluster < 2) return -1;
+    max_batch_bytes = max_batch_sectors * FAT32_SECTOR_SIZE;
+    if (max_batch_bytes < cluster_bytes) {
+        max_batch_bytes = cluster_bytes;
+    }
+    buffer = (uint8_t *)kmalloc(max_batch_bytes);
     if (!buffer) return -1;
 
-    while (cluster >= 2 && cluster < FAT32_EOC && remaining > 0) {
-        uint32_t take = remaining > cluster_bytes ? cluster_bytes : (uint32_t)remaining;
-        zero_bytes(buffer, cluster_bytes);
-        if (take) {
-            copy_bytes((char *)buffer, data, take);
-            data += take;
-            remaining -= take;
-            written += take;
-        }
-        if (fat32_write_sectors(vol, fat32_cluster_lba(vol, cluster), vol->sectors_per_cluster, buffer) != 0) {
+    lba = fat32_cluster_lba(vol, first_cluster);
+    while (remaining > 0) {
+        uint32_t take = remaining > max_batch_bytes ? (uint32_t)max_batch_bytes : (uint32_t)remaining;
+        uint32_t sectors = (take + FAT32_SECTOR_SIZE - 1U) / FAT32_SECTOR_SIZE;
+        uint32_t write_bytes = sectors * FAT32_SECTOR_SIZE;
+
+        zero_bytes(buffer, write_bytes);
+        copy_bytes((char *)buffer, data, take);
+        if (fat32_write_sectors(vol, lba, sectors, buffer) != 0) {
             kfree(buffer);
             return -1;
         }
+        data += take;
+        remaining -= take;
+        written += take;
+        lba += sectors;
         if (label && (written >= next_report || remaining == 0)) {
             install_progress("Writing boot files", label, written, size);
-            next_report = written + (128U * 1024U);
+            next_report = written + (256U * 1024U);
         }
-        cluster = fat32_get_fat_entry(vol, cluster);
     }
 
     kfree(buffer);
-    return remaining == 0 ? 0 : -1;
+    return 0;
 }
 
 static void fat32_short_name(const char *name, char out[11]) {
@@ -482,6 +521,62 @@ static int fat32_write_dirent(const fat32_install_volume_t *vol, uint32_t dir_cl
     return 0;
 }
 
+static int fat32_find_dirent_named(const fat32_install_volume_t *vol, uint32_t dir_cluster, const char *name,
+                                   uint32_t *slot_cluster_out, uint32_t *slot_index_out, fat32_dirent_t *entry_out) {
+    uint32_t cluster = dir_cluster;
+    uint32_t cluster_bytes = vol->sectors_per_cluster * FAT32_SECTOR_SIZE;
+    uint8_t *buffer;
+    char short_name[11];
+
+    fat32_short_name(name, short_name);
+    buffer = (uint8_t *)kmalloc(cluster_bytes);
+    if (!buffer) return -1;
+    while (cluster >= 2 && cluster < FAT32_EOC) {
+        if (fat32_read_sectors(vol, fat32_cluster_lba(vol, cluster), vol->sectors_per_cluster, buffer) != 0) {
+            kfree(buffer);
+            return -1;
+        }
+        for (uint32_t i = 0; i < cluster_bytes / sizeof(fat32_dirent_t); i++) {
+            fat32_dirent_t *entry = (fat32_dirent_t *)(buffer + i * sizeof(fat32_dirent_t));
+            int match = 1;
+            if ((uint8_t)entry->name[0] == 0x00) break;
+            if ((uint8_t)entry->name[0] == 0xE5 || entry->attr == 0x0F) continue;
+            for (uint32_t j = 0; j < 11; j++) {
+                if (entry->name[j] != short_name[j]) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (!match) continue;
+            if (slot_cluster_out) *slot_cluster_out = cluster;
+            if (slot_index_out) *slot_index_out = i;
+            if (entry_out) copy_bytes((char *)entry_out, (const char *)entry, sizeof(*entry_out));
+            kfree(buffer);
+            return 0;
+        }
+        cluster = fat32_get_fat_entry(vol, cluster);
+    }
+    kfree(buffer);
+    return -1;
+}
+
+static int fat32_write_dirent_at(const fat32_install_volume_t *vol, uint32_t slot_cluster, uint32_t slot_index, const fat32_dirent_t *entry_in) {
+    uint32_t cluster_bytes = vol->sectors_per_cluster * FAT32_SECTOR_SIZE;
+    uint8_t *buffer = (uint8_t *)kmalloc(cluster_bytes);
+    if (!buffer) return -1;
+    if (fat32_read_sectors(vol, fat32_cluster_lba(vol, slot_cluster), vol->sectors_per_cluster, buffer) != 0) {
+        kfree(buffer);
+        return -1;
+    }
+    copy_bytes((char *)(buffer + slot_index * sizeof(fat32_dirent_t)), (const char *)entry_in, sizeof(*entry_in));
+    if (fat32_write_sectors(vol, fat32_cluster_lba(vol, slot_cluster), vol->sectors_per_cluster, buffer) != 0) {
+        kfree(buffer);
+        return -1;
+    }
+    kfree(buffer);
+    return 0;
+}
+
 static int fat32_make_dirent(const char *name, uint8_t attr, uint32_t first_cluster, uint32_t size, fat32_dirent_t *out) {
     if (!name || !out) return -1;
     zero_bytes((uint8_t *)out, sizeof(*out));
@@ -535,6 +630,27 @@ static int fat32_create_file(const fat32_install_volume_t *vol, uint32_t parent_
     return fat32_write_dirent(vol, parent_cluster, &dirent);
 }
 
+static int fat32_upsert_file(const fat32_install_volume_t *vol, uint32_t parent_cluster, const char *name,
+                             const char *data, uint64_t size, const char *progress_label) {
+    uint32_t cluster_bytes = vol->sectors_per_cluster * FAT32_SECTOR_SIZE;
+    uint32_t clusters_needed = 0;
+    uint32_t first_cluster = 0;
+    fat32_dirent_t dirent;
+    uint32_t slot_cluster = 0;
+    uint32_t slot_index = 0;
+
+    if (size > 0) {
+        clusters_needed = (uint32_t)((size + cluster_bytes - 1U) / cluster_bytes);
+        if (fat32_alloc_chain(vol, clusters_needed, &first_cluster) != 0) return -1;
+        if (fat32_write_chain(vol, first_cluster, data, size, progress_label) != 0) return -1;
+    }
+    fat32_make_dirent(name, FAT32_ATTR_FILE, first_cluster, (uint32_t)size, &dirent);
+    if (fat32_find_dirent_named(vol, parent_cluster, name, &slot_cluster, &slot_index, 0) == 0) {
+        return fat32_write_dirent_at(vol, slot_cluster, slot_index, &dirent);
+    }
+    return fat32_write_dirent(vol, parent_cluster, &dirent);
+}
+
 static int fat32_install_boot_partition(const partition_info_t *part) {
     fat32_install_volume_t vol;
     uint32_t efi_cluster = 0;
@@ -567,6 +683,125 @@ static int fat32_install_boot_partition(const partition_info_t *part) {
     install_progress("Writing boot files", "KERNEL.BIN", 0, boot_asset_kernel_bin_size());
     if (fat32_create_file(&vol, boot_root_cluster, "KERNEL.BIN", boot_asset_kernel_bin_start, boot_asset_kernel_bin_size(), "KERNEL.BIN") != 0) return -39;
     install_progress("Preparing boot disk", "Boot partition complete", 7, 7);
+    return 0;
+}
+
+int system_install_write_root_bundle(const partition_info_t *part, const char *bundle, uint64_t size, int32_t swap_partition_index) {
+    fat32_install_volume_t vol;
+    char cfg[64];
+    uint64_t out = 0;
+
+    if (!part || part->fs_hint != PARTITION_FS_FAT32 || !bundle || size == 0) return -41;
+    if (fat32_install_load(part, &vol) != 0) return -42;
+    install_progress("Preparing root partition", "Writing ICDA bundle", 0, size);
+    if (fat32_upsert_file(&vol, vol.root_cluster, ICDA_ROOT_BUNDLE_NAME, bundle, size, ICDA_ROOT_BUNDLE_NAME) != 0) return -43;
+
+    cfg[0] = '\0';
+    out = append_text(cfg, out, sizeof(cfg), "swap=");
+    if (swap_partition_index >= 0) {
+        out = append_uint(cfg, out, sizeof(cfg), (uint64_t)swap_partition_index);
+    } else {
+        out = append_text(cfg, out, sizeof(cfg), "-1");
+    }
+    out = append_text(cfg, out, sizeof(cfg), "\n");
+    if (fat32_upsert_file(&vol, vol.root_cluster, ICDA_ROOT_CFG_NAME, cfg, out, 0) != 0) return -44;
+    return 0;
+}
+
+int system_install_read_root_bundle(const partition_info_t *part, char **bundle_out, uint64_t *size_out, int32_t *swap_partition_index_out) {
+    fat32_install_volume_t vol;
+    fat32_dirent_t entry;
+    char *bundle = 0;
+    char *cfg = 0;
+    uint64_t cfg_size = 0;
+    uint32_t cluster = 0;
+    uint32_t slot_cluster = 0;
+    uint32_t slot_index = 0;
+
+    if (!part || !bundle_out || !size_out || part->fs_hint != PARTITION_FS_FAT32) return -1;
+    *bundle_out = 0;
+    *size_out = 0;
+    if (swap_partition_index_out) *swap_partition_index_out = -1;
+    if (fat32_install_load(part, &vol) != 0) return -1;
+    if (fat32_find_dirent_named(&vol, vol.root_cluster, ICDA_ROOT_BUNDLE_NAME, &slot_cluster, &slot_index, &entry) != 0) return -1;
+
+    cluster = ((uint32_t)entry.first_cluster_hi << 16) | entry.first_cluster_lo;
+    if (entry.file_size == 0 || cluster < 2) return -1;
+    bundle = (char *)kmalloc(entry.file_size);
+    if (!bundle) return -1;
+    {
+        uint32_t current = cluster;
+        uint32_t cluster_bytes = vol.sectors_per_cluster * FAT32_SECTOR_SIZE;
+        uint8_t *temp = (uint8_t *)kmalloc(cluster_bytes);
+        uint64_t remaining = entry.file_size;
+        uint64_t written = 0;
+        if (!temp) {
+            kfree(bundle);
+            return -1;
+        }
+        while (current >= 2 && current < FAT32_EOC && remaining > 0) {
+            uint32_t take = remaining > cluster_bytes ? cluster_bytes : (uint32_t)remaining;
+            if (fat32_read_sectors(&vol, fat32_cluster_lba(&vol, current), vol.sectors_per_cluster, temp) != 0) {
+                kfree(temp);
+                kfree(bundle);
+                return -1;
+            }
+            copy_bytes(bundle + written, (const char *)temp, take);
+            written += take;
+            remaining -= take;
+            current = fat32_get_fat_entry(&vol, current);
+        }
+        kfree(temp);
+        if (remaining != 0) {
+            kfree(bundle);
+            return -1;
+        }
+    }
+    *bundle_out = bundle;
+    *size_out = entry.file_size;
+
+    if (swap_partition_index_out && fat32_find_dirent_named(&vol, vol.root_cluster, ICDA_ROOT_CFG_NAME, 0, 0, &entry) == 0) {
+        cluster = ((uint32_t)entry.first_cluster_hi << 16) | entry.first_cluster_lo;
+        if (entry.file_size > 0 && cluster >= 2) {
+            cfg = (char *)kmalloc(entry.file_size + 1);
+            if (!cfg) return 0;
+            {
+                uint32_t current = cluster;
+                uint32_t cluster_bytes = vol.sectors_per_cluster * FAT32_SECTOR_SIZE;
+                uint8_t *temp = (uint8_t *)kmalloc(cluster_bytes);
+                uint64_t remaining = entry.file_size;
+                uint64_t written = 0;
+                if (!temp) {
+                    kfree(cfg);
+                    return 0;
+                }
+                while (current >= 2 && current < FAT32_EOC && remaining > 0) {
+                    uint32_t take = remaining > cluster_bytes ? cluster_bytes : (uint32_t)remaining;
+                    if (fat32_read_sectors(&vol, fat32_cluster_lba(&vol, current), vol.sectors_per_cluster, temp) != 0) {
+                        break;
+                    }
+                    copy_bytes(cfg + written, (const char *)temp, take);
+                    written += take;
+                    remaining -= take;
+                    current = fat32_get_fat_entry(&vol, current);
+                }
+                kfree(temp);
+                cfg_size = written;
+            }
+            cfg[cfg_size] = '\0';
+            if (cfg_size >= 6 && cfg[0] == 's' && cfg[1] == 'w' && cfg[2] == 'a' && cfg[3] == 'p' && cfg[4] == '=') {
+                int32_t value = -1;
+                uint64_t parsed = 0;
+                if (cfg[5] == '-' && cfg[6] == '1') {
+                    value = -1;
+                } else if (parse_uint64(cfg + 5, &parsed)) {
+                    value = (int32_t)parsed;
+                }
+                *swap_partition_index_out = value;
+            }
+            kfree(cfg);
+        }
+    }
     return 0;
 }
 
@@ -683,55 +918,98 @@ int system_install_run(uint64_t *files_installed, uint64_t *bytes_installed) {
     return system_install_core(files_installed, bytes_installed);
 }
 
-int system_install_device(uint32_t device_index, uint64_t *files_installed, uint64_t *bytes_installed) {
-    block_device_t *dev = block_get(device_index);
-    const partition_info_t *boot_part = 0;
-    const partition_info_t *system_part = 0;
+int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partition_index, int32_t swap_partition_index,
+                              uint64_t *files_installed, uint64_t *bytes_installed) {
+    const partition_info_t *boot_part = partition_get(efi_partition_index);
+    const partition_info_t *root_part = partition_get(root_partition_index);
+    const partition_info_t *swap_part = swap_partition_index >= 0 ? partition_get((uint32_t)swap_partition_index) : 0;
     uint64_t files = 0;
     uint64_t bytes = 0;
+    char *bundle = 0;
+    uint64_t bundle_size = 0;
+    uint64_t entry_count = 0;
+    uint64_t total_bytes_written = 0;
+    uint64_t total_files_written = 0;
+
+    if (!boot_part || !root_part) {
+        return -10;
+    }
+    if (boot_part->fs_hint != PARTITION_FS_FAT32 || root_part->fs_hint != PARTITION_FS_FAT32) {
+        return -11;
+    }
+    if (efi_partition_index == root_partition_index ||
+        (swap_partition_index >= 0 && ((uint32_t)swap_partition_index == efi_partition_index || (uint32_t)swap_partition_index == root_partition_index))) {
+        return -12;
+    }
+    if (swap_partition_index >= 0 && !swap_part) {
+        return -13;
+    }
+    (void)diskfmt_set_partition_role(efi_partition_index, PARTITION_ROLE_EFI);
+    (void)diskfmt_set_partition_role(root_partition_index, PARTITION_ROLE_SYSTEM);
+    if (swap_partition_index >= 0) {
+        (void)diskfmt_set_partition_role((uint32_t)swap_partition_index, PARTITION_ROLE_SWAP);
+    }
+    install_progress("Preparing system", "Seeding installed files", 0, 1);
+    if (system_install_core(&files, &bytes) != 0) {
+        return -14;
+    }
+    total_files_written += files;
+    total_bytes_written += bytes;
+    install_progress("Preparing root partition", "Packing ICDA system bundle", 0, 1);
+    if (persistfs_export_image(&bundle, &bundle_size, &entry_count) != 0) {
+        return -15;
+    }
+    if (system_install_write_root_bundle(root_part, bundle, bundle_size, swap_partition_index) != 0) {
+        kfree(bundle);
+        return -16;
+    }
+    total_files_written += 2;
+    total_bytes_written += bundle_size;
+    total_bytes_written += 16;
+    kfree(bundle);
+    install_progress("Preparing boot disk", "Writing EFI boot files", 0, 1);
+    if (fat32_install_boot_partition(boot_part) != 0) {
+        return -17;
+    }
+    total_files_written += 4;
+    total_bytes_written += (uint64_t)boot_asset_efi_size();
+    total_bytes_written += (uint64_t)boot_asset_grub_cfg_size();
+    total_bytes_written += (uint64_t)boot_asset_kernel_bin_size();
+    total_bytes_written += 23;
+    install_progress("Finalizing install", "Syncing installed state", 0, 1);
+    install_progress("Finalizing install", "Done", 1, 1);
+    install_progress_done();
+    if (files_installed) {
+        *files_installed = total_files_written;
+    }
+    if (bytes_installed) {
+        *bytes_installed = total_bytes_written;
+    }
+    return 0;
+}
+
+int system_install_device(uint32_t device_index, uint64_t *files_installed, uint64_t *bytes_installed) {
+    block_device_t *dev = block_get(device_index);
+    uint32_t efi_partition = UINT32_MAX;
+    uint32_t root_partition = UINT32_MAX;
+    int32_t swap_partition = -1;
 
     if (!dev) {
         return -10;
     }
-
     for (uint32_t i = 0; i < partition_count(); i++) {
         const partition_info_t *part = partition_get(i);
-        if (!part || part->device != dev || part->fs_hint != PARTITION_FS_FAT32) {
-            continue;
-        }
-        if (!boot_part) {
-            boot_part = part;
-        } else if (!system_part) {
-            system_part = part;
-            break;
+        if (!part || part->device != dev) continue;
+        if (part->role == PARTITION_ROLE_EFI && efi_partition == UINT32_MAX) {
+            efi_partition = i;
+        } else if (part->role == PARTITION_ROLE_SYSTEM && root_partition == UINT32_MAX) {
+            root_partition = i;
+        } else if (part->role == PARTITION_ROLE_SWAP && swap_partition < 0) {
+            swap_partition = (int32_t)i;
         }
     }
-
-    if (!boot_part || !system_part) {
+    if (efi_partition == UINT32_MAX || root_partition == UINT32_MAX) {
         return -11;
     }
-    install_progress("Preparing system", "Seeding installed files", 0, 1);
-    if (system_install_core(&files, &bytes) != 0) {
-        return -12;
-    }
-    install_progress("Preparing boot disk", "Writing EFI boot files", 0, 1);
-    if (fat32_install_boot_partition(boot_part) != 0) {
-        return -13;
-    }
-    install_progress("Finalizing install", "Syncing installed state", 0, 1);
-    {
-        int sync_rc = persistfs_sync_device(device_index);
-        if (sync_rc != 0) {
-            return sync_rc;
-        }
-    }
-    install_progress("Finalizing install", "Done", 1, 1);
-    install_progress_done();
-    if (files_installed) {
-        *files_installed = files;
-    }
-    if (bytes_installed) {
-        *bytes_installed = bytes;
-    }
-    return 0;
+    return system_install_partitions(efi_partition, root_partition, swap_partition, files_installed, bytes_installed);
 }

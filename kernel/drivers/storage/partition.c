@@ -41,10 +41,27 @@ typedef struct {
 static partition_info_t partitions[PARTITION_MAX];
 static uint32_t partitions_found = 0;
 
+static const uint8_t gpt_type_efi[16] = {
+    0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B
+};
+static const uint8_t gpt_type_basic[16] = {
+    0xA2,0xA0,0xD0,0xEB,0xE5,0xB9,0x33,0x44,0x87,0xC0,0x68,0xB6,0xB7,0x26,0x99,0xC7
+};
+static const uint8_t gpt_type_swap[16] = {
+    0x6D,0xFD,0x57,0x06,0xAB,0xA4,0xC4,0x43,0x84,0xE5,0x09,0x33,0xC8,0x4B,0x4F,0x4F
+};
+
 static int str_eq8(const char *a, const char *b) {
     for (uint32_t i = 0; i < 8; i++) {
         if (a[i] != b[i]) return 0;
         if (a[i] == 0 && b[i] == 0) return 1;
+    }
+    return 1;
+}
+
+static int guid_eq(const uint8_t *a, const uint8_t *b) {
+    for (uint32_t i = 0; i < 16; i++) {
+        if (a[i] != b[i]) return 0;
     }
     return 1;
 }
@@ -102,7 +119,22 @@ static partition_fs_hint_t detect_fs_hint(block_device_t *device, uint64_t start
     return PARTITION_FS_UNKNOWN;
 }
 
-static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t sector_count, partition_kind_t kind, uint8_t mbr_type, const char *name) {
+static partition_role_t detect_role(partition_kind_t kind, uint8_t mbr_type, const uint8_t *type_guid) {
+    if (kind == PARTITION_KIND_GPT && type_guid) {
+        if (guid_eq(type_guid, gpt_type_efi)) return PARTITION_ROLE_EFI;
+        if (guid_eq(type_guid, gpt_type_swap)) return PARTITION_ROLE_SWAP;
+        if (guid_eq(type_guid, gpt_type_basic)) return PARTITION_ROLE_SYSTEM;
+    }
+    if (kind == PARTITION_KIND_MBR) {
+        if (mbr_type == 0xEF) return PARTITION_ROLE_EFI;
+    }
+    return PARTITION_ROLE_UNKNOWN;
+}
+
+static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t sector_count,
+                          partition_kind_t kind, uint8_t mbr_type, const char *name,
+                          uint64_t gpt_entries_lba, uint32_t gpt_entry_size, uint32_t gpt_entry_index,
+                          const uint8_t *type_guid) {
     partition_info_t *part;
     if (partitions_found >= PARTITION_MAX || !device || sector_count == 0) return;
     part = &partitions[partitions_found++];
@@ -110,8 +142,15 @@ static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t s
     part->start_lba = start_lba;
     part->sector_count = sector_count;
     part->kind = kind;
+    part->role = detect_role(kind, mbr_type, type_guid);
     part->mbr_type = mbr_type;
     part->fs_hint = detect_fs_hint(device, start_lba);
+    part->gpt_entries_lba = gpt_entries_lba;
+    part->gpt_entry_size = gpt_entry_size;
+    part->gpt_entry_index = gpt_entry_index;
+    for (uint32_t i = 0; i < 16; i++) {
+        part->gpt_type_guid[i] = type_guid ? type_guid[i] : 0;
+    }
     if (name && *name) {
         copy_text(part->name, name, sizeof(part->name));
     } else {
@@ -153,7 +192,9 @@ static void scan_gpt(block_device_t *device) {
             name[out++] = (ch >= 32 && ch <= 126) ? (char)ch : '_';
         }
         name[out] = 0;
-        add_partition(device, entry->first_lba, entry->last_lba - entry->first_lba + 1, PARTITION_KIND_GPT, 0, name);
+        add_partition(device, entry->first_lba, entry->last_lba - entry->first_lba + 1,
+                      PARTITION_KIND_GPT, 0, name, header->partition_entries_lba,
+                      entry_size, i, entry->type_guid);
     }
 }
 
@@ -181,7 +222,8 @@ static void scan_mbr(block_device_t *device) {
         if (entries[i].type == 0 || entries[i].sector_count == 0) continue;
         copy_text(name, "mbr", sizeof(name));
         append_u32(name, sizeof(name), i);
-        add_partition(device, entries[i].lba_start, entries[i].sector_count, PARTITION_KIND_MBR, entries[i].type, name);
+        add_partition(device, entries[i].lba_start, entries[i].sector_count,
+                      PARTITION_KIND_MBR, entries[i].type, name, 0, 0, 0, 0);
     }
 }
 
@@ -228,6 +270,15 @@ const char *partition_kind_name(partition_kind_t kind) {
     switch (kind) {
         case PARTITION_KIND_MBR: return "mbr";
         case PARTITION_KIND_GPT: return "gpt";
+        default: return "unknown";
+    }
+}
+
+const char *partition_role_name(partition_role_t role) {
+    switch (role) {
+        case PARTITION_ROLE_EFI: return "efi";
+        case PARTITION_ROLE_SYSTEM: return "system";
+        case PARTITION_ROLE_SWAP: return "swap";
         default: return "unknown";
     }
 }

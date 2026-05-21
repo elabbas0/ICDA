@@ -1,7 +1,9 @@
 #include "persistfs.h"
+#include "install.h"
 #include "vfs.h"
 #include "../drivers/storage/ata.h"
 #include "../drivers/storage/block.h"
+#include "../drivers/storage/partition.h"
 #include "../memory/heap.h"
 
 #define PERSISTFS_MAGIC   0x31534641444349ULL
@@ -30,6 +32,9 @@ static int persistfs_available = 0;
 static uint64_t persistfs_entries_loaded = 0;
 static int persistfs_live_boot = 0;
 static int persistfs_active_device_index = -1;
+static int persistfs_active_partition_index = -1;
+static int persistfs_file_backend = 0;
+static int persistfs_swap_partition_index = -1;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -198,22 +203,20 @@ static uint8_t *persistfs_write_node(uint8_t *cursor, vfs_node_t *node, char *pa
     return cursor;
 }
 
-static int persistfs_sync_to_device(block_device_t *dev) {
+int persistfs_export_image(char **buffer_out, uint64_t *size_out, uint64_t *entry_count_out) {
     uint32_t entry_count = 0;
     uint64_t payload_bytes;
     uint64_t total_bytes;
     uint64_t sectors;
     uint8_t *buffer;
-    uint8_t *cursor;
     char path[PERSISTFS_PATH_CAP];
     persistfs_header_t *header;
+    uint8_t *cursor;
 
-    if (!dev) {
-        return -101;
-    }
-    if (persistfs_start_lba_for_device(dev) == 0) {
-        return -106;
-    }
+    if (!buffer_out || !size_out) return -100;
+    *buffer_out = 0;
+    *size_out = 0;
+    if (entry_count_out) *entry_count_out = 0;
 
     path[0] = '\0';
     payload_bytes = 0;
@@ -229,10 +232,6 @@ static int persistfs_sync_to_device(block_device_t *dev) {
     if (sectors == 0) {
         sectors = 1;
     }
-    if (sectors > PERSISTFS_RESERVED_SECTORS) {
-        return -102;
-    }
-
     buffer = (uint8_t *)kmalloc((size_t)(sectors * PERSISTFS_SECTOR_SIZE));
     if (!buffer) {
         return -103;
@@ -258,26 +257,116 @@ static int persistfs_sync_to_device(block_device_t *dev) {
             }
         }
     }
+    *buffer_out = (char *)buffer;
+    *size_out = sectors * PERSISTFS_SECTOR_SIZE;
+    if (entry_count_out) {
+        *entry_count_out = entry_count;
+    }
+    return 0;
+}
 
-    if (persistfs_write_range(dev, persistfs_start_lba_for_device(dev), sectors, buffer) != 0) {
+int persistfs_import_image(const char *buffer_in, uint64_t size, uint64_t *entries_loaded_out) {
+    persistfs_header_t *header;
+    uint8_t *buffer = (uint8_t *)buffer_in;
+    uint8_t *cursor;
+    uint64_t loaded = 0;
+
+    if (!buffer || size < sizeof(persistfs_header_t)) return -1;
+    header = (persistfs_header_t *)buffer;
+    if (header->magic != PERSISTFS_MAGIC || header->version != PERSISTFS_VERSION ||
+        header->bytes_used < sizeof(persistfs_header_t) || header->bytes_used > size) {
+        return -1;
+    }
+
+    cursor = buffer + sizeof(persistfs_header_t);
+    for (uint32_t i = 0; i < header->entry_count; i++) {
+        persistfs_entry_t entry;
+        char path[PERSISTFS_PATH_CAP];
+        const char *data = 0;
+
+        if ((uint64_t)(cursor - buffer) + sizeof(entry) > header->bytes_used) {
+            return -1;
+        }
+        copy_bytes((char *)&entry, (const char *)cursor, sizeof(entry));
+        cursor += sizeof(entry);
+        if (entry.path_len == 0 || entry.path_len >= sizeof(path)) {
+            return -1;
+        }
+        if ((uint64_t)(cursor - buffer) + entry.path_len + entry.data_size > header->bytes_used) {
+            return -1;
+        }
+        copy_bytes(path, (const char *)cursor, entry.path_len);
+        path[entry.path_len] = '\0';
+        cursor += entry.path_len;
+        if (entry.type == VFS_NODE_FILE) {
+            data = (const char *)cursor;
+            cursor += entry.data_size;
+        }
+
+        if (vfs_import_node(path, entry.type, entry.readonly, data, entry.data_size,
+                            entry.inode, entry.created, entry.modified) != 0) {
+            return -1;
+        }
+        loaded++;
+    }
+    if (entries_loaded_out) {
+        *entries_loaded_out = loaded;
+    }
+    return 0;
+}
+
+static int persistfs_sync_to_device(block_device_t *dev) {
+    char *buffer = 0;
+    uint64_t size = 0;
+
+    if (!dev) {
+        return -101;
+    }
+    if (persistfs_start_lba_for_device(dev) == 0) {
+        return -106;
+    }
+    if (persistfs_export_image(&buffer, &size, 0) != 0) {
+        return -103;
+    }
+    if ((size / PERSISTFS_SECTOR_SIZE) > PERSISTFS_RESERVED_SECTORS) {
+        kfree(buffer);
+        return -102;
+    }
+    if (persistfs_write_range(dev, persistfs_start_lba_for_device(dev), size / PERSISTFS_SECTOR_SIZE, buffer) != 0) {
         kfree(buffer);
         return -105;
     }
-
     kfree(buffer);
     return 0;
 }
 
 int persistfs_sync(void) {
-    block_device_t *dev;
-    if (persistfs_active_device_index < 0) {
-        return -1;
+    if (persistfs_file_backend) {
+        const partition_info_t *part;
+        char *buffer = 0;
+        uint64_t size = 0;
+
+        if (persistfs_active_partition_index < 0) return -1;
+        part = partition_get((uint32_t)persistfs_active_partition_index);
+        if (!part) return -1;
+        if (persistfs_export_image(&buffer, &size, 0) != 0) return -1;
+        if (system_install_write_root_bundle(part, buffer, size, persistfs_swap_partition_index) != 0) {
+            kfree(buffer);
+            return -1;
+        }
+        kfree(buffer);
+        return 0;
+    } else {
+        block_device_t *dev;
+        if (persistfs_active_device_index < 0) {
+            return -1;
+        }
+        dev = block_get((uint32_t)persistfs_active_device_index);
+        if (!dev) {
+            return -1;
+        }
+        return persistfs_sync_to_device(dev);
     }
-    dev = block_get((uint32_t)persistfs_active_device_index);
-    if (!dev) {
-        return -1;
-    }
-    return persistfs_sync_to_device(dev);
 }
 
 int persistfs_sync_device(uint32_t device_index) {
@@ -299,9 +388,42 @@ int persistfs_init(void) {
     persistfs_available = 0;
     persistfs_entries_loaded = 0;
     persistfs_active_device_index = -1;
+    persistfs_active_partition_index = -1;
+    persistfs_file_backend = 0;
+    persistfs_swap_partition_index = -1;
 
     if (persistfs_live_boot) {
         return -1;
+    }
+
+    if (partition_count() > 0) {
+        for (uint32_t i = 0; i < partition_count(); i++) {
+            const partition_info_t *part = partition_get(i);
+            char *bundle = 0;
+            uint64_t size = 0;
+            int32_t swap_partition = -1;
+            uint64_t loaded = 0;
+
+            if (!part || part->fs_hint != PARTITION_FS_FAT32 || part->role != PARTITION_ROLE_SYSTEM) {
+                continue;
+            }
+            if (system_install_read_root_bundle(part, &bundle, &size, &swap_partition) != 0) {
+                continue;
+            }
+            if (persistfs_import_image(bundle, size, &loaded) != 0) {
+                kfree(bundle);
+                continue;
+            }
+            kfree(bundle);
+            persistfs_available = 1;
+            persistfs_entries_loaded = loaded;
+            persistfs_active_partition_index = (int)i;
+            persistfs_active_device_index = -1;
+            persistfs_file_backend = 1;
+            persistfs_swap_partition_index = swap_partition;
+            vfs_set_sync_hook(persistfs_sync);
+            return 0;
+        }
     }
 
     if (block_count() == 0) {
@@ -343,40 +465,9 @@ int persistfs_init(void) {
     }
 
     header = (persistfs_header_t *)buffer;
-    cursor = buffer + sizeof(persistfs_header_t);
-    for (uint32_t i = 0; i < header->entry_count; i++) {
-        persistfs_entry_t entry;
-        char path[PERSISTFS_PATH_CAP];
-        const char *data = 0;
-
-        if ((uint64_t)(cursor - buffer) + sizeof(entry) > header->bytes_used) {
-            kfree(buffer);
-            return -1;
-        }
-        copy_bytes((char *)&entry, (const char *)cursor, sizeof(entry));
-        cursor += sizeof(entry);
-        if (entry.path_len == 0 || entry.path_len >= sizeof(path)) {
-            kfree(buffer);
-            return -1;
-        }
-        if ((uint64_t)(cursor - buffer) + entry.path_len + entry.data_size > header->bytes_used) {
-            kfree(buffer);
-            return -1;
-        }
-        copy_bytes(path, (const char *)cursor, entry.path_len);
-        path[entry.path_len] = '\0';
-        cursor += entry.path_len;
-        if (entry.type == VFS_NODE_FILE) {
-            data = (const char *)cursor;
-            cursor += entry.data_size;
-        }
-
-        if (vfs_import_node(path, entry.type, entry.readonly, data, entry.data_size,
-                            entry.inode, entry.created, entry.modified) != 0) {
-            kfree(buffer);
-            return -1;
-        }
-        persistfs_entries_loaded++;
+    if (persistfs_import_image((const char *)buffer, sectors * PERSISTFS_SECTOR_SIZE, &persistfs_entries_loaded) != 0) {
+        kfree(buffer);
+        return -1;
     }
 
     kfree(buffer);
@@ -407,4 +498,8 @@ int persistfs_live_mode(void) {
 
 int persistfs_active_device(void) {
     return persistfs_active_device_index;
+}
+
+int persistfs_active_partition(void) {
+    return persistfs_active_partition_index;
 }

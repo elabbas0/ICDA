@@ -35,6 +35,14 @@ hda.o: kernel/drivers/audio/hda.c kernel/drivers/audio/hda.h Makefile \
         kernel/drivers/pci/pci.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/drivers/audio/hda.c -o hda.o
 
+e1000.o: kernel/drivers/net/e1000.c kernel/drivers/net/e1000.h Makefile \
+         kernel/drivers/pci/pci.h kernel/memory/pmm.h kernel/memory/vmm.h
+	$(CC) $(CFLAGS) -c kernel/drivers/net/e1000.c -o e1000.o
+
+net.o: kernel/net/net.c kernel/net/net.h Makefile \
+       kernel/drivers/net/e1000.h kernel/fs/vfs.h kernel/memory/heap.h kernel/proc/sched.h
+	$(CC) $(CFLAGS) -c kernel/net/net.c -o net.o
+
 sb16.o: kernel/drivers/audio/sb16.c kernel/drivers/audio/sb16.h \
          kernel/memory/pmm.h kernel/memory/vmm.h kernel/proc/sched.h
 	$(CC) $(CFLAGS) -c kernel/drivers/audio/sb16.c -o sb16.o
@@ -109,7 +117,7 @@ tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
        kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/tty/tty.c -o tty.o
 
-syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h kernel/fs/install.h kernel/fs/diskfmt.h
+syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h kernel/fs/install.h kernel/fs/diskfmt.h kernel/net/net.h
 	$(CC) $(CFLAGS) -c kernel/syscall/syscall.c -o syscall.o
 
 console.o: kernel/drivers/console/console.c kernel/drivers/console/console.h \
@@ -301,20 +309,32 @@ kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS
 audio_assets.o: kernel/proc/audio_assets.asm kernel/fs/audio_assets_gen.c
 	$(ASM) -f elf64 kernel/proc/audio_assets.asm -o audio_assets.o
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app
+curl_start.o: userspace/curl_start.asm
+	$(ASM) -f elf64 userspace/curl_start.asm -o /tmp/icda-curl_start.o
+	cp -f /tmp/icda-curl_start.o curl_start.o
+
+curl.o: userspace/curl.c userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/curl.c -o /tmp/icda-curl.o
+	cp -f /tmp/icda-curl.o curl.o
+
+userspace/curl.app: curl_start.o curl.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-curl.app curl_start.o curl.o
+	cp -f /tmp/icda-curl.app userspace/curl.app
+
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o -lgcc
 
