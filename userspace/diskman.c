@@ -36,6 +36,7 @@ typedef struct {
     char name[48];
     char dev[16];
     char fs[16];
+    char role[16];
     uint64_t start;
     uint64_t sectors;
 } diskman_part_t;
@@ -46,6 +47,8 @@ static diskman_part_t diskman_parts[DISKMAN_MAX_PARTS];
 static uint64_t diskman_device_count = 0;
 static uint64_t diskman_part_count = 0;
 static uint64_t diskman_selected = 0;
+static uint64_t diskman_selected_part = 0;
+static uint64_t diskman_focus_parts = 0;
 static char diskman_status[96];
 static uint64_t diskman_left = 0;
 static uint64_t diskman_top = 0;
@@ -284,6 +287,7 @@ static void diskman_parse_devices(void) {
                         diskman_parts[diskman_part_count].name[out] = 0;
                         diskman_parts[diskman_part_count].dev[0] = 0;
                         diskman_parts[diskman_part_count].fs[0] = 0;
+                        diskman_parts[diskman_part_count].role[0] = 0;
                         diskman_parts[diskman_part_count].start = 0;
                         diskman_parts[diskman_part_count].sectors = 0;
                         while (diskman_info[p] && diskman_info[p] != '\n') {
@@ -305,6 +309,17 @@ static void diskman_parse_devices(void) {
                                     diskman_parts[diskman_part_count].fs[j++] = diskman_info[p++];
                                 }
                                 diskman_parts[diskman_part_count].fs[j] = 0;
+                                continue;
+                            }
+                            if (diskman_info[p] == 'r' && diskman_info[p + 1] == 'o' && diskman_info[p + 2] == 'l' &&
+                                diskman_info[p + 3] == 'e' && diskman_info[p + 4] == '=') {
+                                uint64_t j = 0;
+                                p += 5;
+                                while (diskman_info[p] && diskman_info[p] != ' ' && diskman_info[p] != '\n' &&
+                                       j + 1 < sizeof(diskman_parts[diskman_part_count].role)) {
+                                    diskman_parts[diskman_part_count].role[j++] = diskman_info[p++];
+                                }
+                                diskman_parts[diskman_part_count].role[j] = 0;
                                 continue;
                             }
                             if (diskman_info[p] == 's' && diskman_info[p + 1] == 't' && diskman_info[p + 2] == 'a' &&
@@ -347,6 +362,21 @@ static void diskman_refresh(void) {
     {
         uint64_t runtime = icda_runtime_device();
         diskman_runtime_device = (runtime == (uint64_t)-1) ? -1 : (int64_t)runtime;
+    }
+    diskman_selected_part = 0;
+    if (diskman_device_count && diskman_selected < diskman_device_count) {
+        for (uint64_t i = 0; i < diskman_part_count; i++) {
+            if (str_len(diskman_parts[i].dev) == str_len(diskman_devices[diskman_selected].name)) {
+                int same = 1;
+                for (uint64_t j = 0; j < str_len(diskman_devices[diskman_selected].name); j++) {
+                    if (diskman_parts[i].dev[j] != diskman_devices[diskman_selected].name[j]) { same = 0; break; }
+                }
+                if (same) {
+                    diskman_selected_part = i;
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -418,7 +448,7 @@ static void diskman_draw(void) {
 
     line_fill(lines[partitions_title_row], diskman_width, CP437_BLOCK_MED);
     line_put_text(lines[partitions_title_row + 1], diskman_width, 0, " Partitions on selected device:");
-    line_put_text(lines[partitions_title_row + 2], diskman_width, 0, "  Id  Name         FS       Start        Sectors      Size");
+    line_put_text(lines[partitions_title_row + 2], diskman_width, 0, "  Id  Name         FS       Role     Start        Sectors      Size");
     line_fill(lines[partitions_title_row + 3], diskman_width, CP437_LINE_H);
 
     if (sel) {
@@ -434,13 +464,14 @@ static void diskman_draw(void) {
             } else {
                 continue;
             }
-            line_put_text(lines[row], diskman_width, 0, "  ");
+            line_put_text(lines[row], diskman_width, 0, (diskman_focus_parts && i == diskman_selected_part) ? " >" : "  ");
             line_put_uint(lines[row], diskman_width, 2, diskman_parts[i].index, 2);
             write_field(lines[row], diskman_width, 6, diskman_parts[i].name, 10);
             write_field(lines[row], diskman_width, 17, diskman_parts[i].fs[0] ? diskman_parts[i].fs : "unknown", 8);
-            line_put_uint(lines[row], diskman_width, 26, diskman_parts[i].start, 12);
-            line_put_uint(lines[row], diskman_width, 39, diskman_parts[i].sectors, 12);
-            write_size_brief_into(lines[row], diskman_width, 52, diskman_parts[i].sectors, 512);
+            write_field(lines[row], diskman_width, 26, diskman_parts[i].role[0] ? diskman_parts[i].role : "unknown", 8);
+            line_put_uint(lines[row], diskman_width, 35, diskman_parts[i].start, 12);
+            line_put_uint(lines[row], diskman_width, 48, diskman_parts[i].sectors, 12);
+            write_size_brief_into(lines[row], diskman_width, 61, diskman_parts[i].sectors, 512);
             shown_parts++;
         }
     }
@@ -451,7 +482,7 @@ static void diskman_draw(void) {
     line_fill(lines[footer_sep_row], diskman_width, CP437_BLOCK_MED);
     line_put_text(lines[footer_sep_row + 1], diskman_width, 0, " Status:");
     line_put_text(lines[footer_sep_row + 1], diskman_width, 8, diskman_status[0] ? diskman_status : "ready");
-    line_put_text(lines[footer_sep_row + 2], diskman_width, 0, " [M] MBR  [G] GPT  [F] FAT32  [X] exFAT  [I] ICDA  [C] clear  [R] refresh  [Q] quit");
+    line_put_text(lines[footer_sep_row + 2], diskman_width, 0, " [TAB] focus  [M] MBR  [G] GPT  [F] FAT32  [X] exFAT  [E] EFI  [N] Root  [W] Swap  [I] ICDA  [Q] quit");
 
     for (uint64_t row = 0; row < diskman_height; row++) {
         int changed = !diskman_prev_valid;
@@ -501,6 +532,50 @@ static void diskman_format_selected(uint64_t fs_type) {
     }
 }
 
+static void diskman_format_selected_partition(uint64_t fs_type) {
+    long rc;
+    const char *name = diskman_action_name(fs_type);
+    if (diskman_part_count == 0) {
+        copy_text(diskman_status, "no partition selected", sizeof(diskman_status));
+        return;
+    }
+    copy_text(diskman_status, "running ", sizeof(diskman_status));
+    copy_text(diskman_status + str_len(diskman_status), name, sizeof(diskman_status) - str_len(diskman_status));
+    copy_text(diskman_status + str_len(diskman_status), " on partition...", sizeof(diskman_status) - str_len(diskman_status));
+    diskman_draw();
+    rc = (long)icda_format_partition(diskman_parts[diskman_selected_part].index, fs_type);
+    if (rc < 0) {
+        copy_text(diskman_status, name, sizeof(diskman_status));
+        copy_text(diskman_status + str_len(diskman_status), " failed (err=", sizeof(diskman_status) - str_len(diskman_status));
+        append_uint_text(diskman_status, sizeof(diskman_status), (uint64_t)(-rc));
+        copy_text(diskman_status + str_len(diskman_status), ")", sizeof(diskman_status) - str_len(diskman_status));
+    } else {
+        copy_text(diskman_status, name, sizeof(diskman_status));
+        copy_text(diskman_status + str_len(diskman_status), " complete", sizeof(diskman_status) - str_len(diskman_status));
+        diskman_refresh();
+    }
+}
+
+static void diskman_set_selected_partition_role(uint64_t role, const char *label) {
+    long rc;
+    if (diskman_part_count == 0) {
+        copy_text(diskman_status, "no partition selected", sizeof(diskman_status));
+        return;
+    }
+    copy_text(diskman_status, "setting role ", sizeof(diskman_status));
+    copy_text(diskman_status + str_len(diskman_status), label, sizeof(diskman_status) - str_len(diskman_status));
+    diskman_draw();
+    rc = (long)icda_set_partition_role(diskman_parts[diskman_selected_part].index, role);
+    if (rc < 0) {
+        copy_text(diskman_status, "set role failed (err=", sizeof(diskman_status));
+        append_uint_text(diskman_status, sizeof(diskman_status), (uint64_t)(-rc));
+        copy_text(diskman_status + str_len(diskman_status), ")", sizeof(diskman_status) - str_len(diskman_status));
+    } else {
+        copy_text(diskman_status, "partition role updated", sizeof(diskman_status));
+        diskman_refresh();
+    }
+}
+
 uint64_t diskman_main(void) {
     copy_text(diskman_status, "ready", sizeof(diskman_status));
     diskman_refresh();
@@ -514,20 +589,41 @@ uint64_t diskman_main(void) {
             icda_clear();
             icda_exit(0);
         }
+        if (c == '\t') {
+            diskman_focus_parts = !diskman_focus_parts;
+            diskman_draw();
+            continue;
+        }
         if (c == KEY_UP) {
-            if (diskman_selected > 0) diskman_selected--;
+            if (diskman_focus_parts) {
+                if (diskman_selected_part > 0) diskman_selected_part--;
+            } else {
+                if (diskman_selected > 0) diskman_selected--;
+            }
         } else if (c == KEY_DOWN) {
-            if (diskman_selected + 1 < diskman_device_count) diskman_selected++;
+            if (diskman_focus_parts) {
+                if (diskman_selected_part + 1 < diskman_part_count) diskman_selected_part++;
+            } else {
+                if (diskman_selected + 1 < diskman_device_count) diskman_selected++;
+            }
         } else if (c == 'r' || c == 'R') {
             diskman_refresh();
         } else if (c == 'f' || c == 'F') {
-            diskman_format_selected(DISKMAN_FS_FAT32);
+            if (diskman_focus_parts) diskman_format_selected_partition(DISKMAN_FS_FAT32);
+            else diskman_format_selected(DISKMAN_FS_FAT32);
         } else if (c == 'x' || c == 'X') {
-            diskman_format_selected(DISKMAN_FS_EXFAT);
+            if (diskman_focus_parts) diskman_format_selected_partition(DISKMAN_FS_EXFAT);
+            else diskman_format_selected(DISKMAN_FS_EXFAT);
         } else if (c == 'm' || c == 'M') {
             diskman_format_selected(DISKMAN_LAYOUT_MBR);
         } else if (c == 'g' || c == 'G') {
             diskman_format_selected(DISKMAN_LAYOUT_GPT);
+        } else if (c == 'e' || c == 'E') {
+            diskman_set_selected_partition_role(1, "efi");
+        } else if (c == 'n' || c == 'N') {
+            diskman_set_selected_partition_role(2, "system");
+        } else if (c == 'w' || c == 'W') {
+            diskman_set_selected_partition_role(3, "swap");
         } else if (c == 'i' || c == 'I') {
             diskman_format_selected(DISKMAN_LAYOUT_ICDA);
         } else if (c == 'c' || c == 'C') {

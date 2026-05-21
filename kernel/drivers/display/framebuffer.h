@@ -39,6 +39,7 @@ void fb_print_hex(unsigned int n, uint32_t fg, uint32_t bg);
 void fb_newline();
 void fb_backspace(uint32_t bg);
 void fb_set_cursor(int x, int y);
+void fb_get_cursor(int *x_out, int *y_out);
 int  fb_available();
 
 // screen dimensions (set after fb_init)

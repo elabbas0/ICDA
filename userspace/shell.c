@@ -11,6 +11,7 @@
 #define SHELL_EDIT_VIEW_ROWS 18
 #define SHELL_EDIT_VIEW_COLS 68
 #define SHELL_EDIT_REQUEST_PATH "/home/.edit.request"
+#define SHELL_CURL_REQUEST_PATH "/home/.curl.request"
 
 #define PROC_STATE_STOPPED 4
 #define PROC_STATE_EXITED 5
@@ -34,6 +35,8 @@ enum {
     KEY_RIGHT,
     KEY_DELETE
 };
+
+static void shell_storage(void);
 
 static uint64_t str_len(const char *s) {
     uint64_t n = 0;
@@ -203,7 +206,7 @@ static int shell_resolve_path(const char *path, char *resolved, uint64_t cap) {
     return 0;
 }
 
-static void shell_launch_foreground_request(const char *request_path, const char *payload, const char *app_path, const char *usage_text) {
+static void shell_launch_foreground_request(const char *request_path, const char *payload, const char *app_path, const char *usage_text, int clear_screen) {
     uint64_t pid;
 
     if (!payload || !*payload) {
@@ -214,16 +217,64 @@ static void shell_launch_foreground_request(const char *request_path, const char
         icda_write("launch failed\n");
         return;
     }
+    if (clear_screen) {
+        icda_clear();
+    }
     pid = icda_spawn(app_path);
     if ((long)pid < 0) {
+        if (clear_screen) {
+            icda_clear();
+        }
         icda_write("launch failed\n");
         return;
     }
     (void)icda_waitpid(pid);
+    if (clear_screen) {
+        icda_clear();
+    }
 }
 
 static void shell_stop_audio(void) {
     (void)icda_stop_audio();
+}
+
+static void shell_curl(const char *arg) {
+    char url[256];
+    char out_path[160];
+    char request[384];
+    char resolved[160];
+    uint64_t i = 0;
+    uint64_t j = 0;
+
+    if (!arg || !*arg) {
+        icda_write("usage: curl <http://ipv4[:port]/path> <out-path>\n");
+        return;
+    }
+
+    while (arg[i] && arg[i] != ' ' && arg[i] != '\t' && i + 1 < sizeof(url)) {
+        url[i] = arg[i];
+        i++;
+    }
+    url[i] = 0;
+    while (arg[i] == ' ' || arg[i] == '\t') i++;
+    while (arg[i] && j + 1 < sizeof(out_path)) {
+        out_path[j++] = arg[i++];
+    }
+    out_path[j] = 0;
+
+    if (!url[0] || !out_path[0]) {
+        icda_write("usage: curl <http://ipv4[:port]/path> <out-path>\n");
+        return;
+    }
+    if (shell_resolve_path(out_path, resolved, sizeof(resolved)) != 0) {
+        icda_write("curl: bad output path\n");
+        return;
+    }
+    request[0] = 0;
+    append_text(request, url, sizeof(request));
+    append_text(request, "\n", sizeof(request));
+    append_text(request, resolved, sizeof(request));
+    shell_launch_foreground_request(SHELL_CURL_REQUEST_PATH, request, "/apps/curl.app", "usage: curl <http://ipv4[:port]/path> <out-path>\n", 0);
 }
 
 static const char *proc_state_name(uint64_t state) {
@@ -325,18 +376,28 @@ static void shell_rewrite_line(const char *line, uint64_t *shown_len) {
     *shown_len = str_len(line);
 }
 
-static void shell_cursor_show(int *visible) {
-    if (!*visible) {
-        icda_write("_");
-        *visible = 1;
+static void shell_render_line(const char *line, uint64_t len, uint64_t cursor, uint64_t prompt_x, uint64_t prompt_y, uint64_t *shown_len) {
+    uint64_t i;
+    uint64_t old_len = shown_len ? *shown_len : 0;
+    uint64_t pad = old_len > len ? old_len - len : 0;
+
+    icda_set_cursor(prompt_x, prompt_y);
+    if (len) {
+        icda_write(line);
     }
+    for (i = 0; i < pad; i++) {
+        icda_write(" ");
+    }
+    icda_set_cursor(prompt_x + cursor, prompt_y);
+    if (shown_len) *shown_len = len;
+}
+
+static void shell_cursor_show(int *visible) {
+    (void)visible;
 }
 
 static void shell_cursor_hide(int *visible) {
-    if (*visible) {
-        icda_backspace();
-        *visible = 0;
-    }
+    (void)visible;
 }
 
 static long shell_wait_key_byte(uint64_t timeout_ticks) {
@@ -410,7 +471,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
             "help","clear","pwd","cd","ls","cat","mkdir","touch","write","stat","install","sync","storage","mount","play","stop",
-            "edit","diskman","run","exit"
+            "edit","diskman","curl","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
             if (str_prefix(builtins[i], token)) {
@@ -456,14 +517,18 @@ static int shell_autocomplete(char *line, uint64_t cap) {
 
 static int shell_read_line(char *line, uint64_t cap) {
     uint64_t len = 0;
+    uint64_t cursor = 0;
     uint64_t shown_len = 0;
     uint64_t history_cursor = shell_history_count;
     uint64_t last_blink = icda_ticks();
     uint64_t idle_since = last_blink;
     int cursor_visible = 0;
+    uint64_t prompt_x = 0;
+    uint64_t prompt_y = 0;
 
     if (!line || cap == 0) return -1;
     line[0] = 0;
+    (void)icda_console_cursor(&prompt_x, &prompt_y);
     shell_cursor_show(&cursor_visible);
 
     for (;;) {
@@ -513,17 +578,22 @@ static int shell_read_line(char *line, uint64_t cap) {
         if (c == '\t') {
             if (shell_autocomplete(line, cap)) {
                 len = str_len(line);
-                shell_rewrite_line(line, &shown_len);
+                cursor = len;
+                shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
             }
             shell_cursor_show(&cursor_visible);
             continue;
         }
 
         if (c == '\b') {
-            if (len) {
+            if (cursor > 0) {
+                for (uint64_t i = cursor - 1; i < len; i++) {
+                    line[i] = line[i + 1];
+                }
+                cursor--;
                 len--;
                 line[len] = 0;
-                shell_rewrite_line(line, &shown_len);
+                shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
             }
             shell_cursor_show(&cursor_visible);
             continue;
@@ -534,7 +604,8 @@ static int shell_read_line(char *line, uint64_t cap) {
                 if (history_cursor > 0) history_cursor--;
                 copy_text(line, shell_history[history_cursor % SHELL_HISTORY_CAP], cap);
                 len = str_len(line);
-                shell_rewrite_line(line, &shown_len);
+                cursor = len;
+                shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
             }
             shell_cursor_show(&cursor_visible);
             continue;
@@ -548,19 +619,48 @@ static int shell_read_line(char *line, uint64_t cap) {
                 copy_text(line, shell_history[history_cursor % SHELL_HISTORY_CAP], cap);
             }
             len = str_len(line);
-            shell_rewrite_line(line, &shown_len);
+            cursor = len;
+            shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
+            shell_cursor_show(&cursor_visible);
+            continue;
+        }
+
+        if (c == KEY_LEFT) {
+            if (cursor > 0) cursor--;
+            shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
+            shell_cursor_show(&cursor_visible);
+            continue;
+        }
+
+        if (c == KEY_RIGHT) {
+            if (cursor < len) cursor++;
+            shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
+            shell_cursor_show(&cursor_visible);
+            continue;
+        }
+
+        if (c == KEY_DELETE) {
+            if (cursor < len) {
+                for (uint64_t i = cursor; i < len; i++) {
+                    line[i] = line[i + 1];
+                }
+                len--;
+                line[len] = 0;
+                shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
+            }
             shell_cursor_show(&cursor_visible);
             continue;
         }
 
         if (c >= 32 && c <= 126 && len + 1 < cap) {
-            line[len++] = (char)c;
-            line[len] = 0;
-            {
-                char out[2] = {(char)c, 0};
-                icda_write(out);
-                shown_len++;
+            for (uint64_t i = len; i > cursor; i--) {
+                line[i] = line[i - 1];
             }
+            line[cursor] = (char)c;
+            len++;
+            cursor++;
+            line[len] = 0;
+            shell_render_line(line, len, cursor, prompt_x, prompt_y, &shown_len);
             shell_cursor_show(&cursor_visible);
         }
     }
@@ -771,7 +871,7 @@ static void shell_edit(const char *path) {
         icda_write("edit failed\n");
         return;
     }
-    shell_launch_foreground_request(SHELL_EDIT_REQUEST_PATH, resolved, "/apps/editor.app", "usage: edit <path>\n");
+    shell_launch_foreground_request(SHELL_EDIT_REQUEST_PATH, resolved, "/apps/editor.app", "usage: edit <path>\n", 1);
 }
 
 static void print_prompt(void) {
@@ -786,7 +886,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("commands: help clear pwd cd ls cat mkdir touch write stat install sync storage mount play stop edit diskman run exit\n");
+    icda_write("commands: help clear pwd cd ls cat mkdir touch write stat install sync storage mount play stop edit diskman curl run exit\n");
 }
 
 static void shell_money(void) {
@@ -1039,9 +1139,50 @@ static void shell_install_target(const char *arg) {
     uint64_t bytes = 0;
     uint64_t device = 0;
     long rc;
+    icda_install_plan_t plan;
+    char buf[64];
 
     if (!arg || !*arg) {
-        shell_install();
+        shell_storage();
+        icda_write("efi partition index: ");
+        if ((long)icda_read_line(buf, sizeof(buf)) < 0 || !parse_uint64(buf, &plan.efi_partition)) {
+            icda_write("install cancelled\n");
+            return;
+        }
+        icda_write("root partition index: ");
+        if ((long)icda_read_line(buf, sizeof(buf)) < 0 || !parse_uint64(buf, &plan.root_partition)) {
+            icda_write("install cancelled\n");
+            return;
+        }
+        icda_write("swap partition index (-1 for none): ");
+        if ((long)icda_read_line(buf, sizeof(buf)) < 0) {
+            icda_write("install cancelled\n");
+            return;
+        }
+        if (buf[0] == '-' && buf[1] == '1' && buf[2] == 0) {
+            plan.swap_partition = -1;
+        } else if (!parse_uint64(buf, &device)) {
+            icda_write("install cancelled\n");
+            return;
+        } else {
+            plan.swap_partition = (int64_t)device;
+        }
+        icda_clear();
+        rc = (long)icda_install_partitions(&plan, &files, &bytes);
+        icda_clear();
+        if (rc < 0) {
+            icda_write("install failed\n");
+            icda_write("error: ");
+            write_uint((uint64_t)(-rc));
+            icda_write("\n");
+            return;
+        }
+        icda_write("installed bootable system to selected partitions: ");
+        write_uint(files);
+        icda_write(" files, ");
+        write_uint(bytes);
+        icda_write(" bytes bundled\n");
+        icda_write("you can now try booting from that disk without the iso/usb\n");
         return;
     }
     if (!parse_uint64(arg, &device)) {
@@ -1357,6 +1498,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "stop")) { shell_stop_audio(); return; }
     if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "diskman")) { shell_diskman(); return; }
+    if (str_eq(line, "curl")) { shell_curl(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line)) {

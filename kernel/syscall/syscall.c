@@ -18,6 +18,7 @@
 #include "../fs/persistfs.h"
 #include "../proc/sched.h"
 #include "../proc/user.h"
+#include "../net/net.h"
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -488,6 +489,16 @@ static uint64_t sys_format_device(uint64_t device_index, uint64_t fs_type) {
     return rc == 0 ? 0 : (uint64_t)(int64_t)rc;
 }
 
+static uint64_t sys_format_partition(uint64_t partition_index, uint64_t fs_type) {
+    int rc = diskfmt_format_partition((uint32_t)partition_index, (diskfmt_fs_t)fs_type);
+    return rc == 0 ? 0 : (uint64_t)(int64_t)rc;
+}
+
+static uint64_t sys_set_partition_role(uint64_t partition_index, uint64_t role) {
+    int rc = diskfmt_set_partition_role((uint32_t)partition_index, (partition_role_t)role);
+    return rc == 0 ? 0 : (uint64_t)(int64_t)rc;
+}
+
 static uint64_t sys_install_system(uint64_t *files_out, uint64_t *bytes_out) {
     uint64_t files = 0;
     uint64_t bytes = 0;
@@ -522,6 +533,27 @@ static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, u
     return 0;
 }
 
+static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint64_t *files_out, uint64_t *bytes_out) {
+    uint64_t files = 0;
+    uint64_t bytes = 0;
+    int rc;
+
+    if (!plan) {
+        return (uint64_t)-1;
+    }
+    rc = system_install_partitions((uint32_t)plan->efi_partition, (uint32_t)plan->root_partition, (int32_t)plan->swap_partition, &files, &bytes);
+    if (rc != 0) {
+        return (uint64_t)(int64_t)rc;
+    }
+    if (files_out) {
+        *files_out = files;
+    }
+    if (bytes_out) {
+        *bytes_out = bytes;
+    }
+    return 0;
+}
+
 static uint64_t sys_console_set_cursor(uint64_t x, uint64_t y) {
     console_set_cursor((int)x, (int)y);
     return 0;
@@ -542,6 +574,18 @@ static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
     }
     *cols_out = cols;
     *rows_out = rows;
+    return 0;
+}
+
+static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
+    int x = 0;
+    int y = 0;
+    if (!x_out || !y_out) {
+        return (uint64_t)-1;
+    }
+    console_get_cursor(&x, &y);
+    *x_out = x < 0 ? 0 : (uint64_t)x;
+    *y_out = y < 0 ? 0 : (uint64_t)y;
     return 0;
 }
 
@@ -587,6 +631,8 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
         out = append_text(buf, out, cap, (part->device && part->device->name) ? part->device->name : "disk");
         out = append_text(buf, out, cap, " fs=");
         out = append_text(buf, out, cap, partition_fs_name(part->fs_hint));
+        out = append_text(buf, out, cap, " role=");
+        out = append_text(buf, out, cap, partition_role_name(part->role));
         out = append_text(buf, out, cap, " start=");
         out = append_uint(buf, out, cap, part->start_lba);
         out = append_text(buf, out, cap, " sectors=");
@@ -693,6 +739,20 @@ static uint64_t sys_audio_finish(uint64_t token) {
     return 0;
 }
 
+static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+    uint64_t bytes = 0;
+    if (!path || !out_path) {
+        return (uint64_t)-1;
+    }
+    if (net_http_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, path, out_path, &bytes) != 0) {
+        return (uint64_t)(-(int64_t)net_last_error());
+    }
+    if (bytes_out) {
+        *bytes_out = bytes;
+    }
+    return 0;
+}
+
 void syscall_init(void) {
 }
 
@@ -796,15 +856,32 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_mount(regs->rdi, (const char *)(uintptr_t)regs->rsi);
         case SYS_FORMAT_DEVICE:
             return sys_format_device(regs->rdi, regs->rsi);
+        case SYS_FORMAT_PARTITION:
+            return sys_format_partition(regs->rdi, regs->rsi);
         case SYS_CONSOLE_SIZE:
             return sys_console_size((uint64_t *)(uintptr_t)regs->rdi,
                                     (uint64_t *)(uintptr_t)regs->rsi);
+        case SYS_CONSOLE_GETCURSOR:
+            return sys_console_get_cursor((uint64_t *)(uintptr_t)regs->rdi,
+                                          (uint64_t *)(uintptr_t)regs->rsi);
         case SYS_INSTALL_DEVICE:
             return sys_install_device(regs->rdi,
                                       (uint64_t *)(uintptr_t)regs->rsi,
                                       (uint64_t *)(uintptr_t)regs->rdx);
+        case SYS_INSTALL_PARTITIONS:
+            return sys_install_partitions((const syscall_install_plan_t *)(uintptr_t)regs->rdi,
+                                          (uint64_t *)(uintptr_t)regs->rsi,
+                                          (uint64_t *)(uintptr_t)regs->rdx);
+        case SYS_SET_PARTITION_ROLE:
+            return sys_set_partition_role(regs->rdi, regs->rsi);
         case SYS_RUNTIME_DEVICE:
             return sys_runtime_device();
+        case SYS_HTTP_GET_IPV4:
+            return sys_http_get_ipv4(regs->rdi,
+                                     regs->rsi,
+                                     (const char *)(uintptr_t)regs->rdx,
+                                     (const char *)(uintptr_t)regs->r10,
+                                     (uint64_t *)(uintptr_t)regs->r8);
         default:
             return (uint64_t)-1;
     }

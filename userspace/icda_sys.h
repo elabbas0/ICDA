@@ -48,7 +48,12 @@ enum {
     SYS_FORMAT_DEVICE = 41,
     SYS_CONSOLE_SIZE = 42,
     SYS_INSTALL_DEVICE = 43,
-    SYS_RUNTIME_DEVICE = 44
+    SYS_RUNTIME_DEVICE = 44,
+    SYS_INSTALL_PARTITIONS = 45,
+    SYS_FORMAT_PARTITION = 46,
+    SYS_SET_PARTITION_ROLE = 47,
+    SYS_HTTP_GET_IPV4 = 48,
+    SYS_CONSOLE_GETCURSOR = 49
 };
 
 typedef struct {
@@ -76,6 +81,12 @@ typedef struct {
     uint64_t total_seconds;
     char name[64];
 } icda_audio_info_t;
+
+typedef struct {
+    uint64_t efi_partition;
+    uint64_t root_partition;
+    int64_t swap_partition;
+} icda_install_plan_t;
 
 static inline uint64_t sys_call0(uint64_t n) {
     uint64_t ret;
@@ -105,6 +116,14 @@ static inline uint64_t sys_call4(uint64_t n, uint64_t a0, uint64_t a1, uint64_t 
     uint64_t ret;
     register uint64_t r10 __asm__("r10") = a3;
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline uint64_t sys_call5(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+    uint64_t ret;
+    register uint64_t r10 __asm__("r10") = a3;
+    register uint64_t r8 __asm__("r8") = a4;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
     return ret;
 }
 
@@ -148,10 +167,15 @@ static inline uint64_t icda_ticks(void) { return sys_call0(SYS_TICKS); }
 static inline long icda_read_char_timeout(uint64_t ticks) { return (long)sys_call1(SYS_INPUT_READ_TIMEOUT, ticks); }
 static inline uint64_t icda_install_system(uint64_t *files_out, uint64_t *bytes_out) { return sys_call2(SYS_INSTALL_SYSTEM, (uint64_t)(uintptr_t)files_out, (uint64_t)(uintptr_t)bytes_out); }
 static inline uint64_t icda_install_device(uint64_t device_index, uint64_t *files_out, uint64_t *bytes_out) { return sys_call3(SYS_INSTALL_DEVICE, device_index, (uint64_t)(uintptr_t)files_out, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_install_partitions(const icda_install_plan_t *plan, uint64_t *files_out, uint64_t *bytes_out) { return sys_call3(SYS_INSTALL_PARTITIONS, (uint64_t)(uintptr_t)plan, (uint64_t)(uintptr_t)files_out, (uint64_t)(uintptr_t)bytes_out); }
 static inline uint64_t icda_mount(uint64_t partition_index, const char *path) { return sys_call2(SYS_MOUNT, partition_index, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_format_device(uint64_t device_index, uint64_t fs_type) { return sys_call2(SYS_FORMAT_DEVICE, device_index, fs_type); }
+static inline uint64_t icda_format_partition(uint64_t partition_index, uint64_t fs_type) { return sys_call2(SYS_FORMAT_PARTITION, partition_index, fs_type); }
+static inline uint64_t icda_set_partition_role(uint64_t partition_index, uint64_t role) { return sys_call2(SYS_SET_PARTITION_ROLE, partition_index, role); }
 static inline uint64_t icda_console_size(uint64_t *cols_out, uint64_t *rows_out) { return sys_call2(SYS_CONSOLE_SIZE, (uint64_t)(uintptr_t)cols_out, (uint64_t)(uintptr_t)rows_out); }
+static inline uint64_t icda_console_cursor(uint64_t *x_out, uint64_t *y_out) { return sys_call2(SYS_CONSOLE_GETCURSOR, (uint64_t)(uintptr_t)x_out, (uint64_t)(uintptr_t)y_out); }
 static inline uint64_t icda_runtime_device(void) { return sys_call0(SYS_RUNTIME_DEVICE); }
+static inline uint64_t icda_http_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call5(SYS_HTTP_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif

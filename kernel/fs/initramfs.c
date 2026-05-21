@@ -24,6 +24,8 @@ extern const char userprog_editor_start[];
 extern const char userprog_editor_end[];
 extern const char userprog_diskman_start[];
 extern const char userprog_diskman_end[];
+extern const char userprog_curl_start[];
+extern const char userprog_curl_end[];
 extern const char usershell_start[];
 extern const char usershell_end[];
 static const char motd_txt[] =
@@ -49,6 +51,7 @@ static const char commands_txt[] =
     "  storage        list block devices, partitions, and mounts\n"
     "  mount <n> <path>  mount a detected fat32/exfat partition at a directory\n"
     "  diskman        open the disk manager / formatter\n"
+    "  curl <url> <path>  download over plain http into a file (IPv4 URLs only)\n"
     "  sync           flush the writable filesystem to disk\n"
     "  play <path>    play a wav file in the background\n"
     "  stop           stop the current song\n"
@@ -83,6 +86,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/audioplay.app", 0, 0 },
     { "/apps/editor.app", 0, 0 },
     { "/apps/diskman.app", 0, 0 },
+    { "/apps/curl.app", 0, 0 },
     { "/bin/hello.elf", 0, 0 },
     { "/bin/pid.elf", 0, 0 }
 };
@@ -102,10 +106,12 @@ int initramfs_init(void) {
     initramfs_files[9].size = (uint64_t)(userprog_editor_end - userprog_editor_start);
     initramfs_files[10].data = userprog_diskman_start;
     initramfs_files[10].size = (uint64_t)(userprog_diskman_end - userprog_diskman_start);
-    initramfs_files[11].data = userprog_hello_elf_start;
-    initramfs_files[11].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
-    initramfs_files[12].data = userprog_pid_elf_start;
-    initramfs_files[12].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
+    initramfs_files[11].data = userprog_curl_start;
+    initramfs_files[11].size = (uint64_t)(userprog_curl_end - userprog_curl_start);
+    initramfs_files[12].data = userprog_hello_elf_start;
+    initramfs_files[12].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
+    initramfs_files[13].data = userprog_pid_elf_start;
+    initramfs_files[13].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
     return 0;
 }
 

@@ -414,6 +414,10 @@ static int audio_start_pending_request(void) {
         audio_playback_stop();
         return -1;
     }
+    if (hda_stream_run() != 0) {
+        audio_playback_stop();
+        return -1;
+    }
     audio_update_hud(0);
     return 0;
 }

@@ -80,6 +80,26 @@ static void utf16_name(uint16_t out[36], const char *text) {
     }
 }
 
+static void partition_role_guid(partition_role_t role, uint8_t out[16], const char **name_out) {
+    static const uint8_t efi_type_guid[16] = { 0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B };
+    static const uint8_t basic_type_guid[16] = { 0xA2,0xA0,0xD0,0xEB,0xE5,0xB9,0x33,0x44,0x87,0xC0,0x68,0xB6,0xB7,0x26,0x99,0xC7 };
+    static const uint8_t swap_type_guid[16] = { 0x6D,0xFD,0x57,0x06,0xAB,0xA4,0xC4,0x43,0x84,0xE5,0x09,0x33,0xC8,0x4B,0x4F,0x4F };
+    const uint8_t *src = basic_type_guid;
+    const char *name = "ICDA System";
+
+    if (role == PARTITION_ROLE_EFI) {
+        src = efi_type_guid;
+        name = "ICDA EFI";
+    } else if (role == PARTITION_ROLE_SWAP) {
+        src = swap_type_guid;
+        name = "ICDA Swap";
+    }
+    copy_bytes((char *)out, (const char *)src, 16);
+    if (name_out) {
+        *name_out = name;
+    }
+}
+
 static void zero_region(block_device_t *dev, uint64_t start_lba, uint32_t sectors) {
     uint8_t zeros[DISK_SECTOR_SIZE * 8];
     zero_bytes(zeros, sizeof(zeros));
@@ -219,6 +239,40 @@ static int write_gpt_layout(block_device_t *dev, const gpt_entry_t *entries, uin
         return -36;
     }
     kfree(entry_bytes);
+    return 0;
+}
+
+static int rewrite_gpt_entries(block_device_t *dev, const gpt_header_t *primary_in, const uint8_t *entry_bytes) {
+    uint8_t sector[DISK_SECTOR_SIZE];
+    gpt_header_t primary;
+    gpt_header_t backup;
+    uint32_t entries_crc;
+    uint64_t backup_entries_lba;
+
+    if (!dev || !primary_in || !entry_bytes) return -30;
+    primary = *primary_in;
+    backup_entries_lba = primary.backup_lba - GPT_ENTRIES_SECTORS;
+    entries_crc = crc32_bytes(entry_bytes, primary.partition_entry_count * primary.partition_entry_size);
+
+    if (dev->write(dev->context, primary.partition_entries_lba, GPT_ENTRIES_SECTORS, entry_bytes) != 0) return -31;
+    if (dev->write(dev->context, backup_entries_lba, GPT_ENTRIES_SECTORS, entry_bytes) != 0) return -32;
+
+    primary.partition_entries_crc32 = entries_crc;
+    primary.header_crc32 = 0;
+    primary.header_crc32 = crc32_bytes((const uint8_t *)&primary, primary.header_size);
+    zero_bytes(sector, DISK_SECTOR_SIZE);
+    copy_bytes((char *)sector, (const char *)&primary, sizeof(primary));
+    if (dev->write(dev->context, primary.current_lba, 1, sector) != 0) return -33;
+
+    backup = primary;
+    backup.current_lba = primary.backup_lba;
+    backup.backup_lba = primary.current_lba;
+    backup.partition_entries_lba = backup_entries_lba;
+    backup.header_crc32 = 0;
+    backup.header_crc32 = crc32_bytes((const uint8_t *)&backup, backup.header_size);
+    zero_bytes(sector, DISK_SECTOR_SIZE);
+    copy_bytes((char *)sector, (const char *)&backup, sizeof(backup));
+    if (dev->write(dev->context, backup.current_lba, 1, sector) != 0) return -34;
     return 0;
 }
 
@@ -441,18 +495,23 @@ static int diskfmt_init_gpt(block_device_t *dev) {
 static int diskfmt_layout_icda(block_device_t *dev) {
     uint32_t efi_start;
     uint32_t efi_sectors = 524288U;
+    uint32_t swap_start;
+    uint32_t swap_sectors = 1048576U;
     uint32_t system_start;
     uint32_t system_sectors;
     gpt_entry_t *entries;
     int rc;
-    static const uint8_t efi_type_guid[16] = { 0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B };
-    static const uint8_t basic_type_guid[16] = { 0xA2,0xA0,0xD0,0xEB,0xE5,0xB9,0x33,0x44,0x87,0xC0,0x68,0xB6,0xB7,0x26,0x99,0xC7 };
+    uint8_t role_guid[16];
 
     if (!dev || !dev->write || dev->sector_size != DISK_SECTOR_SIZE) return -21;
-    if (dev->sector_count <= DISK_ALIGN_LBA + efi_sectors + 131072U + PERSISTFS_RESERVED_SECTORS) return -21;
+    if (dev->sector_count <= DISK_ALIGN_LBA + efi_sectors + swap_sectors + 131072U + PERSISTFS_RESERVED_SECTORS) return -21;
 
     efi_start = DISK_ALIGN_LBA;
-    system_start = efi_start + efi_sectors;
+    swap_start = efi_start + efi_sectors;
+    if (swap_start & 0x7U) {
+        swap_start = (swap_start + 7U) & ~7U;
+    }
+    system_start = swap_start + swap_sectors;
     if (system_start & 0x7U) {
         system_start = (system_start + 7U) & ~7U;
     }
@@ -463,18 +522,25 @@ static int diskfmt_layout_icda(block_device_t *dev) {
     entries = (gpt_entry_t *)kmalloc(sizeof(gpt_entry_t) * GPT_ENTRY_COUNT);
     if (!entries) return -25;
     zero_bytes((uint8_t *)entries, sizeof(gpt_entry_t) * GPT_ENTRY_COUNT);
-    copy_bytes((char *)entries[0].type_guid, (const char *)efi_type_guid, sizeof(efi_type_guid));
+    partition_role_guid(PARTITION_ROLE_EFI, role_guid, 0);
+    copy_bytes((char *)entries[0].type_guid, (const char *)role_guid, sizeof(role_guid));
     fill_guid(entries[0].unique_guid, 0x1000U);
     entries[0].first_lba = efi_start;
     entries[0].last_lba = (uint64_t)efi_start + efi_sectors - 1U;
     utf16_name(entries[0].name, "ICDA EFI");
-    copy_bytes((char *)entries[1].type_guid, (const char *)basic_type_guid, sizeof(basic_type_guid));
+    partition_role_guid(PARTITION_ROLE_SWAP, role_guid, 0);
+    copy_bytes((char *)entries[1].type_guid, (const char *)role_guid, sizeof(role_guid));
     fill_guid(entries[1].unique_guid, 0x2000U);
-    entries[1].first_lba = system_start;
-    entries[1].last_lba = (uint64_t)system_start + system_sectors - 1U;
-    utf16_name(entries[1].name, "ICDA System");
-
-    rc = write_gpt_layout(dev, entries, 2);
+    entries[1].first_lba = swap_start;
+    entries[1].last_lba = (uint64_t)swap_start + swap_sectors - 1U;
+    utf16_name(entries[1].name, "ICDA Swap");
+    partition_role_guid(PARTITION_ROLE_SYSTEM, role_guid, 0);
+    copy_bytes((char *)entries[2].type_guid, (const char *)role_guid, sizeof(role_guid));
+    fill_guid(entries[2].unique_guid, 0x3000U);
+    entries[2].first_lba = system_start;
+    entries[2].last_lba = (uint64_t)system_start + system_sectors - 1U;
+    utf16_name(entries[2].name, "ICDA System");
+    rc = write_gpt_layout(dev, entries, 3);
     if (rc == 0) rc = diskfmt_format_fat32_partition(dev, efi_start, efi_sectors) == 0 ? 0 : -23;
     if (rc == 0) rc = diskfmt_format_fat32_partition(dev, system_start, system_sectors) == 0 ? 0 : -24;
     if (rc == 0) rc = 0;
@@ -514,5 +580,72 @@ int diskfmt_format_device(uint32_t device_index, diskfmt_fs_t fs_type) {
     (void)fat32_mount_detected();
     (void)exfat_mount_detected();
     (void)ntfs_mount_detected();
+    return 0;
+}
+
+int diskfmt_format_partition(uint32_t partition_index, diskfmt_fs_t fs_type) {
+    const partition_info_t *part = partition_get(partition_index);
+    int runtime_device = persistfs_active_device();
+    int rc;
+
+    if (!part || !part->device || !part->device->write) return -10;
+    if (runtime_device >= 0 && part->device == block_get((uint32_t)runtime_device)) return -11;
+
+    if (fs_type == DISKFMT_FS_FAT32) {
+        rc = diskfmt_format_fat32_partition(part->device, (uint32_t)part->start_lba, (uint32_t)part->sector_count);
+    } else if (fs_type == DISKFMT_FS_EXFAT) {
+        rc = diskfmt_format_exfat_partition(part->device, (uint32_t)part->start_lba, (uint32_t)part->sector_count);
+    } else {
+        return -12;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    (void)partition_scan_all();
+    return 0;
+}
+
+int diskfmt_set_partition_role(uint32_t partition_index, partition_role_t role) {
+    const partition_info_t *part = partition_get(partition_index);
+    uint8_t sector[DISK_SECTOR_SIZE];
+    gpt_header_t primary;
+    uint8_t *entries;
+    uint32_t per_sector;
+    uint64_t lba;
+    uint32_t off;
+    gpt_entry_t *entry;
+    uint8_t guid[16];
+    const char *name = 0;
+    int rc;
+
+    if (!part || !part->device || !part->device->write) return -10;
+    if (part->kind != PARTITION_KIND_GPT || part->gpt_entry_size < sizeof(gpt_entry_t) || part->gpt_entries_lba == 0) return -12;
+    if (role == PARTITION_ROLE_UNKNOWN) role = PARTITION_ROLE_SYSTEM;
+
+    if (part->device->read(part->device->context, 1, 1, sector) != 0) return -13;
+    copy_bytes((char *)&primary, (const char *)sector, sizeof(primary));
+    if (primary.partition_entry_count != GPT_ENTRY_COUNT || primary.partition_entry_size != GPT_ENTRY_SIZE) return -14;
+    entries = (uint8_t *)kmalloc(primary.partition_entry_count * primary.partition_entry_size);
+    if (!entries) return -15;
+    if (part->device->read(part->device->context, primary.partition_entries_lba, GPT_ENTRIES_SECTORS, entries) != 0) {
+        kfree(entries);
+        return -16;
+    }
+    per_sector = DISK_SECTOR_SIZE / part->gpt_entry_size;
+    if (per_sector == 0) {
+        kfree(entries);
+        return -17;
+    }
+    lba = part->gpt_entries_lba + (part->gpt_entry_index / per_sector);
+    off = (part->gpt_entry_index % per_sector) * part->gpt_entry_size;
+    (void)lba;
+    entry = (gpt_entry_t *)(entries + off);
+    partition_role_guid(role, guid, &name);
+    copy_bytes((char *)entry->type_guid, (const char *)guid, 16);
+    utf16_name(entry->name, name);
+    rc = rewrite_gpt_entries(part->device, &primary, entries);
+    kfree(entries);
+    if (rc != 0) return -18;
+    (void)partition_scan_all();
     return 0;
 }

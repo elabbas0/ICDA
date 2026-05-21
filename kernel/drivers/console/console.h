@@ -16,6 +16,7 @@ void console_init(int has_framebuffer);
 void console_set_serial_mirror(int enabled);
 void console_clear(void);
 void console_set_cursor(int x, int y);
+void console_get_cursor(int *x_out, int *y_out);
 void console_write_char(char c, console_style_t style);
 void console_write(const char *str, console_style_t style);
 void console_backspace(void);

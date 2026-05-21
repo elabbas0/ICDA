@@ -237,6 +237,14 @@ void console_set_cursor(int x, int y) {
     console_refresh_overlay();
 }
 
+void console_get_cursor(int *x_out, int *y_out) {
+    if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
+        fb_get_cursor(x_out, y_out);
+        return;
+    }
+    vga_get_cursor_pos(x_out, y_out);
+}
+
 void console_write_char(char c, console_style_t style) {
     char buf[2];
 

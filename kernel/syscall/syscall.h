@@ -51,7 +51,12 @@ typedef enum {
     SYS_FORMAT_DEVICE = 41,
     SYS_CONSOLE_SIZE = 42,
     SYS_INSTALL_DEVICE = 43,
-    SYS_RUNTIME_DEVICE = 44
+    SYS_RUNTIME_DEVICE = 44,
+    SYS_INSTALL_PARTITIONS = 45,
+    SYS_FORMAT_PARTITION = 46,
+    SYS_SET_PARTITION_ROLE = 47,
+    SYS_HTTP_GET_IPV4 = 48,
+    SYS_CONSOLE_GETCURSOR = 49
 } syscall_number_t;
 
 typedef struct {
@@ -70,6 +75,12 @@ typedef struct {
     uint64_t total_seconds;
     char name[64];
 } syscall_audio_info_t;
+
+typedef struct {
+    uint64_t efi_partition;
+    uint64_t root_partition;
+    int64_t swap_partition;
+} syscall_install_plan_t;
 
 void syscall_init(void);
 uint64_t syscall_dispatch(struct registers *regs);
