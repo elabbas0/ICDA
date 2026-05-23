@@ -53,6 +53,9 @@ typedef struct process {
     struct thread   *main_thread;
     struct vfs_node *cwd;
     struct process  *next_all;
+    int linux_personality;
+    uint64_t linux_brk_pos;
+    uint64_t linux_mmap_next;
 } process_t;
 
 typedef struct thread {

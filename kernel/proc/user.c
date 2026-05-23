@@ -189,93 +189,113 @@ uint64_t user_last_exit_code(void) {
     return user_exit_code;
 }
 
-static int user_load_image(process_t *user_proc, const void *image, uint64_t image_size, uint64_t *entry_rip_out) {
-    uint64_t entry_rip;
+static int user_load_elf(process_t *user_proc, const void *image, uint64_t image_size,
+                          uint64_t *entry_rip_out, uint64_t *interp_vaddr,
+                          char *interp_path, uint64_t interp_cap) {
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
+    const elf64_phdr_t *ph;
+    uint64_t load_bias = 0;
+    int has_load = 0;
 
-    if (!user_proc || !image || !entry_rip_out) {
-        return -1;
+    if (image_size < sizeof(elf64_ehdr_t)) return -1;
+    if (eh->e_ident[0] != ELF_MAGIC0 || eh->e_ident[1] != ELF_MAGIC1 ||
+        eh->e_ident[2] != ELF_MAGIC2 || eh->e_ident[3] != ELF_MAGIC3) return -1;
+    if (eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB) return -1;
+    if (eh->e_ident[6] != EV_CURRENT ||
+        (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) ||
+        eh->e_machine != EM_X86_64) return -1;
+    if (eh->e_phentsize != sizeof(elf64_phdr_t) || eh->e_phnum == 0) return -1;
+    if (eh->e_phoff > image_size) return -1;
+    if ((uint64_t)eh->e_phnum > (image_size - eh->e_phoff) / sizeof(elf64_phdr_t)) return -1;
+
+    if (interp_path) interp_path[0] = 0;
+    if (interp_vaddr) *interp_vaddr = 0;
+
+    ph = (const elf64_phdr_t *)((const char *)image + eh->e_phoff);
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type == PT_INTERP && interp_path && interp_cap > 0) {
+            if (ph[i].p_offset + ph[i].p_filesz <= image_size) {
+                uint64_t copy = ph[i].p_filesz < interp_cap - 1 ? ph[i].p_filesz : interp_cap - 1;
+                copy_bytes(interp_path, (const char *)image + ph[i].p_offset, copy);
+                interp_path[copy] = 0;
+            }
+        }
     }
 
+    if (eh->e_type == ET_DYN) {
+        uint64_t min_vaddr = 0xFFFFFFFFFFFFFFFFULL;
+        uint64_t max_vaddr = 0;
+        for (uint16_t i = 0; i < eh->e_phnum; i++) {
+            if (ph[i].p_type != PT_LOAD) continue;
+            if (ph[i].p_vaddr < min_vaddr) min_vaddr = ph[i].p_vaddr;
+            if (ph[i].p_vaddr + ph[i].p_memsz > max_vaddr) max_vaddr = ph[i].p_vaddr + ph[i].p_memsz;
+        }
+        if (min_vaddr == 0) {
+            load_bias = USER_TEXT_BASE;
+        }
+        while (max_vaddr > 0 && (load_bias + max_vaddr) >= USER_STACK_LIMIT) {
+            return -1;
+        }
+    }
+
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_LOAD) continue;
+        if (ph[i].p_memsz == 0) continue;
+        uint64_t vaddr = ph[i].p_vaddr + load_bias;
+        if (vaddr + ph[i].p_memsz < vaddr) return -1;
+        if (eh->e_type == ET_EXEC) {
+            if (vaddr >= USER_STACK_LIMIT) return -1;
+        }
+        if (user_map_segment(user_proc, (const char *)image, image_size,
+                             vaddr, ph[i].p_offset, ph[i].p_filesz, ph[i].p_memsz, ph[i].p_flags) != 0) {
+            return -1;
+        }
+        has_load = 1;
+    }
+
+    if (!has_load) return -1;
+
+    *entry_rip_out = eh->e_entry + load_bias;
+    return 0;
+}
+
+static int user_load_icx(process_t *user_proc, const void *image, uint64_t image_size, uint64_t *entry_rip_out) {
+    const icx_header_t *hdr = (const icx_header_t *)image;
+    if (image_size < sizeof(icx_header_t)) return -1;
+    if (hdr->magic != ICX_MAGIC || hdr->version != ICX_VERSION) return -1;
+    if (hdr->header_size < sizeof(icx_header_t) || hdr->header_size > image_size) return -1;
+    if (hdr->entry_offset < hdr->header_size || hdr->entry_offset >= image_size) return -1;
+    if (user_map_blob(user_proc, image, image_size, USER_TEXT_BASE) != 0) return -1;
+    *entry_rip_out = USER_TEXT_BASE + hdr->entry_offset;
+    return 0;
+}
+
+static int user_load_image(process_t *user_proc, const void *image, uint64_t image_size, uint64_t *entry_rip_out) {
+    if (!user_proc || !image || !entry_rip_out) return -1;
     if (user_prepare_address_space(user_proc) != 0) {
         return -1;
     }
 
     if (image_size >= sizeof(icx_header_t)) {
         const icx_header_t *hdr = (const icx_header_t *)image;
-
         if (hdr->magic == ICX_MAGIC && hdr->version == ICX_VERSION) {
-            if (hdr->header_size < sizeof(icx_header_t) || hdr->header_size > image_size) {
-                return -1;
-            }
-            if (hdr->entry_offset < hdr->header_size || hdr->entry_offset >= image_size) {
-                return -1;
-            }
-            if (user_map_blob(user_proc, image, image_size, USER_TEXT_BASE) != 0) {
-                return -1;
-            }
-            entry_rip = USER_TEXT_BASE + hdr->entry_offset;
-            *entry_rip_out = entry_rip;
-            return 0;
+            return user_load_icx(user_proc, image, image_size, entry_rip_out);
         }
     }
 
     if (image_size >= sizeof(elf64_ehdr_t)) {
         const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
-        const elf64_phdr_t *ph;
-
-        if (eh->e_ident[0] != ELF_MAGIC0 || eh->e_ident[1] != ELF_MAGIC1 ||
-            eh->e_ident[2] != ELF_MAGIC2 || eh->e_ident[3] != ELF_MAGIC3) {
-            return -1;
-        }
-        if (eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB) {
-            return -1;
-        }
-        if (eh->e_ident[6] != EV_CURRENT || eh->e_type != ET_EXEC || eh->e_machine != EM_X86_64) {
-            return -1;
-        }
-        if (eh->e_phentsize != sizeof(elf64_phdr_t) || eh->e_phnum == 0) {
-            return -1;
-        }
-        if (eh->e_phoff > image_size) {
-            return -1;
-        }
-        if ((uint64_t)eh->e_phnum > (image_size - eh->e_phoff) / sizeof(elf64_phdr_t)) {
-            return -1;
-        }
-
-        ph = (const elf64_phdr_t *)((const char *)image + eh->e_phoff);
-        for (uint16_t i = 0; i < eh->e_phnum; i++) {
-            if (ph[i].p_type != PT_LOAD) {
-                continue;
-            }
-            if (ph[i].p_vaddr < USER_TEXT_BASE || ph[i].p_vaddr >= USER_STACK_LIMIT) {
+        if (eh->e_ident[0] == ELF_MAGIC0 && eh->e_ident[1] == ELF_MAGIC1 &&
+            eh->e_ident[2] == ELF_MAGIC2 && eh->e_ident[3] == ELF_MAGIC3) {
+            if (user_load_elf(user_proc, image, image_size, entry_rip_out,
+                              NULL, NULL, 0) != 0) {
                 return -1;
             }
-            if (ph[i].p_memsz == 0) {
-                continue;
-            }
-            if (ph[i].p_vaddr + ph[i].p_memsz < ph[i].p_vaddr) {
-                return -1;
-            }
-            if (ph[i].p_vaddr + ph[i].p_memsz >= USER_STACK_LIMIT) {
-                return -1;
-            }
-            if (user_map_segment(user_proc, (const char *)image, image_size, ph[i].p_vaddr,
-                                 ph[i].p_offset, ph[i].p_filesz, ph[i].p_memsz, ph[i].p_flags) != 0) {
-                return -1;
-            }
+            return 0;
         }
-
-        entry_rip = eh->e_entry;
-        if (entry_rip < USER_TEXT_BASE || entry_rip >= USER_STACK_LIMIT) {
-            return -1;
-        }
-    } else {
-        return -1;
     }
 
-    *entry_rip_out = entry_rip;
-    return 0;
+    return -1;
 }
 
 int user_run_path(const char *path) {
@@ -357,6 +377,11 @@ int user_spawn_path(const char *path, uint64_t *pid_out) {
     if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {
         return -1;
     }
+
+    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
+        user_proc->linux_personality = 1;
+    }
+
     thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
     if (!thread) {
         return -1;
