@@ -19,20 +19,9 @@
 #include "../proc/sched.h"
 #include "../proc/user.h"
 #include "../net/net.h"
+#include "../memory/pmm.h"
+#include "../memory/vmm.h"
 
-static uint64_t str_len(const char *text) {
-    uint64_t len = 0;
-    while (text && text[len]) {
-        len++;
-    }
-    return len;
-}
-
-static void copy_bytes(char *dst, const char *src, uint64_t size) {
-    for (uint64_t i = 0; i < size; i++) {
-        dst[i] = src[i];
-    }
-}
 
 static int str_eq(const char *a, const char *b) {
     uint64_t i = 0;
@@ -753,10 +742,186 @@ static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char 
     return 0;
 }
 
+static uint64_t sys_https_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+    uint64_t bytes = 0;
+    if (!path || !out_path) {
+        return (uint64_t)-1;
+    }
+    if (net_https_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, path, out_path, &bytes) != 0) {
+        return (uint64_t)(-(int64_t)net_last_error());
+    }
+    if (bytes_out) {
+        *bytes_out = bytes;
+    }
+    return 0;
+}
+
+static uint64_t sys_dns_resolve(const char *host, uint32_t *ipv4_out) {
+    uint32_t ipv4 = 0;
+    if (!host || !ipv4_out) {
+        return (uint64_t)-1;
+    }
+    if (net_dns_resolve_ipv4(host, &ipv4) != 0) {
+        return (uint64_t)(-(int64_t)net_last_error());
+    }
+    *ipv4_out = ipv4;
+    return 0;
+}
+
 void syscall_init(void) {
 }
 
+static uint64_t linux_syscall_dispatch(struct registers *regs) {
+    process_t *proc = sched_current_process();
+    uint64_t nr = regs->rax;
+    uint64_t a0 = regs->rdi, a1 = regs->rsi, a2 = regs->rdx;
+    uint64_t a3 = regs->r10, a4 = regs->r8, a5 = regs->r9;
+
+    switch (nr) {
+        case 0: { // read
+            char *buf = (char *)(uintptr_t)a1;
+            uint64_t count = a2;
+            if (!buf) return (uint64_t)-1;
+            if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
+            uint64_t size = 0;
+            const char *data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), "/dev/stdin", &size);
+            if (!data || count == 0) return 0;
+            uint64_t copy = count < size ? count : size;
+            for (uint64_t i = 0; i < copy; i++) buf[i] = data[i];
+            return copy;
+        }
+        case 1: { // write
+            const char *buf = (const char *)(uintptr_t)a1;
+            uint64_t count = a2;
+            if (!buf) return (uint64_t)-1;
+            console_write(buf, CONSOLE_STYLE_INFO);
+            return count;
+        }
+        case 2: { // open
+            const char *pathname = (const char *)(uintptr_t)a0;
+            if (!pathname) return (uint64_t)-1;
+            vfs_node_t *node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), pathname);
+            if (!node) return (uint64_t)-1;
+            static int next_fd = 3;
+            int fd = next_fd++;
+            return fd;
+        }
+        case 3: // close
+            return 0;
+        case 5: { // fstat
+            vfs_stat_t *st = (vfs_stat_t *)(uintptr_t)a1;
+            if (!st) return (uint64_t)-1;
+            st->size = 0;
+            st->type = VFS_NODE_FILE;
+            return 0;
+        }
+        case 9: { // mmap
+            uint64_t addr = a0;
+            uint64_t length = a1;
+            uint64_t prot = a2;
+            uint64_t flags = a3;
+            uint64_t fd = a4;
+            (void)flags;
+            (void)fd;
+            (void)a5;
+            if (length == 0) return (uint64_t)-1;
+            uint64_t pages = (length + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+            if (addr == 0) {
+                if (proc->linux_mmap_next == 0) proc->linux_mmap_next = 0x70000000;
+                addr = proc->linux_mmap_next;
+                proc->linux_mmap_next += pages * PAGE_SIZE_4K;
+            }
+            for (uint64_t i = 0; i < pages; i++) {
+                uint64_t phys = pmm_alloc();
+                if (!phys) return (uint64_t)-1;
+                uint64_t vmm_flags = VMM_FLAGS_USER_RW;
+                if (!(prot & 2)) vmm_flags = VMM_FLAGS_USER_RO;
+                if (vmm_map_page(proc->addr_space, addr + i * PAGE_SIZE_4K, phys, vmm_flags) != 0) {
+                    pmm_free(phys);
+                    return (uint64_t)-1;
+                }
+                char *dst = (char *)PHYS_TO_VIRT(phys);
+                for (int j = 0; j < (int)PAGE_SIZE_4K; j++) dst[j] = 0;
+            }
+            return addr;
+        }
+        case 11: // munmap
+            return 0;
+        case 12: { // brk
+            uint64_t new_brk = a0;
+            if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
+            if (new_brk == 0) return proc->linux_brk_pos;
+            if (new_brk > proc->linux_brk_pos) {
+                uint64_t old_end = (proc->linux_brk_pos + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+                uint64_t new_end = (new_brk + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+                for (uint64_t page = old_end; page < new_end; page += PAGE_SIZE_4K) {
+                    uint64_t phys = pmm_alloc();
+                    if (!phys) break;
+                    if (vmm_map_page(proc->addr_space, page, phys, VMM_FLAGS_USER_RW) != 0) {
+                        pmm_free(phys);
+                        break;
+                    }
+                    char *dst = (char *)PHYS_TO_VIRT(phys);
+                    for (int j = 0; j < (int)PAGE_SIZE_4K; j++) dst[j] = 0;
+                }
+            }
+            proc->linux_brk_pos = new_brk;
+            return new_brk;
+        }
+        case 60: // exit
+        case 231: // exit_group
+            user_request_exit_to_kernel(a0);
+            return a0;
+        case 78: { // getdents
+            char *buf = (char *)(uintptr_t)a1;
+            uint64_t count = a2;
+            if (!buf) return (uint64_t)-1;
+            if (count < 20) return 0;
+            char dirbuf[4096];
+            uint64_t len = sys_list_dir((const char *)0, dirbuf, sizeof(dirbuf));
+            uint64_t written = 0;
+            uint64_t pos = 0;
+            while (pos < len && written + 20 <= count) {
+                uint64_t name_start = pos;
+                while (pos < len && dirbuf[pos] != '\n') pos++;
+                uint64_t name_len = pos - name_start;
+                if (name_len > 255) name_len = 255;
+                uint8_t *dirent = (uint8_t *)(buf + written);
+                dirent[0] = 0;
+                dirent[1] = 0;
+                dirent[2] = 0;
+                dirent[3] = 0;
+                dirent[4] = 0;
+                dirent[5] = 0;
+                dirent[6] = 0;
+                dirent[7] = 0;
+                dirent[8] = 0;
+                dirent[9] = 0;
+                dirent[10] = 0;
+                dirent[11] = 0;
+                dirent[16] = (uint8_t)(name_len);
+                dirent[17] = (uint8_t)(name_len >> 8);
+                dirent[18] = 0; // DT_UNKNOWN
+                for (uint64_t i = 0; i < name_len && i < count - written - 19; i++) {
+                    dirent[19 + i] = (uint8_t)dirbuf[name_start + i];
+                }
+                written += 19 + name_len;
+                if (dirbuf[pos] == '\n') pos++;
+            }
+            return written;
+        }
+        case 158: // arch_prctl
+            return 0;
+        default:
+            return (uint64_t)-1;
+    }
+}
+
 uint64_t syscall_dispatch(struct registers *regs) {
+    process_t *proc = sched_current_process();
+    if (proc && proc->linux_personality) {
+        return linux_syscall_dispatch(regs);
+    }
     switch (regs->rax) {
         case SYS_CONSOLE_WRITE:
             return sys_console_write((const char *)(uintptr_t)regs->rdi);
@@ -882,6 +1047,15 @@ uint64_t syscall_dispatch(struct registers *regs) {
                                      (const char *)(uintptr_t)regs->rdx,
                                      (const char *)(uintptr_t)regs->r10,
                                      (uint64_t *)(uintptr_t)regs->r8);
+        case SYS_DNS_RESOLVE:
+            return sys_dns_resolve((const char *)(uintptr_t)regs->rdi,
+                                   (uint32_t *)(uintptr_t)regs->rsi);
+        case SYS_HTTPS_GET_IPV4:
+            return sys_https_get_ipv4(regs->rdi,
+                                      regs->rsi,
+                                      (const char *)(uintptr_t)regs->rdx,
+                                      (const char *)(uintptr_t)regs->r10,
+                                      (uint64_t *)(uintptr_t)regs->r8);
         default:
             return (uint64_t)-1;
     }

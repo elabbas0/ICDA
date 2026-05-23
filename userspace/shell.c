@@ -247,7 +247,7 @@ static void shell_curl(const char *arg) {
     uint64_t j = 0;
 
     if (!arg || !*arg) {
-        icda_write("usage: curl <http://ipv4[:port]/path> <out-path>\n");
+        icda_write("usage: curl <http://host[:port]/path> <out-path>\n");
         return;
     }
 
@@ -263,7 +263,7 @@ static void shell_curl(const char *arg) {
     out_path[j] = 0;
 
     if (!url[0] || !out_path[0]) {
-        icda_write("usage: curl <http://ipv4[:port]/path> <out-path>\n");
+        icda_write("usage: curl <http://host[:port]/path> <out-path>\n");
         return;
     }
     if (shell_resolve_path(out_path, resolved, sizeof(resolved)) != 0) {
@@ -274,7 +274,7 @@ static void shell_curl(const char *arg) {
     append_text(request, url, sizeof(request));
     append_text(request, "\n", sizeof(request));
     append_text(request, resolved, sizeof(request));
-    shell_launch_foreground_request(SHELL_CURL_REQUEST_PATH, request, "/apps/curl.app", "usage: curl <http://ipv4[:port]/path> <out-path>\n", 0);
+    shell_launch_foreground_request(SHELL_CURL_REQUEST_PATH, request, "/apps/curl.app", "usage: curl <http://host[:port]/path> <out-path>\n", 0);
 }
 
 static const char *proc_state_name(uint64_t state) {

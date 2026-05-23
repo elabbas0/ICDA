@@ -56,7 +56,9 @@ typedef enum {
     SYS_FORMAT_PARTITION = 46,
     SYS_SET_PARTITION_ROLE = 47,
     SYS_HTTP_GET_IPV4 = 48,
-    SYS_CONSOLE_GETCURSOR = 49
+    SYS_CONSOLE_GETCURSOR = 49,
+    SYS_DNS_RESOLVE = 50,
+    SYS_HTTPS_GET_IPV4 = 51
 } syscall_number_t;
 
 typedef struct {

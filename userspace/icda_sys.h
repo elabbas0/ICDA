@@ -53,7 +53,9 @@ enum {
     SYS_FORMAT_PARTITION = 46,
     SYS_SET_PARTITION_ROLE = 47,
     SYS_HTTP_GET_IPV4 = 48,
-    SYS_CONSOLE_GETCURSOR = 49
+    SYS_CONSOLE_GETCURSOR = 49,
+    SYS_DNS_RESOLVE = 50,
+    SYS_HTTPS_GET_IPV4 = 51
 };
 
 typedef struct {
@@ -176,6 +178,8 @@ static inline uint64_t icda_console_size(uint64_t *cols_out, uint64_t *rows_out)
 static inline uint64_t icda_console_cursor(uint64_t *x_out, uint64_t *y_out) { return sys_call2(SYS_CONSOLE_GETCURSOR, (uint64_t)(uintptr_t)x_out, (uint64_t)(uintptr_t)y_out); }
 static inline uint64_t icda_runtime_device(void) { return sys_call0(SYS_RUNTIME_DEVICE); }
 static inline uint64_t icda_http_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call5(SYS_HTTP_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_https_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call5(SYS_HTTPS_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_dns_resolve(const char *host, uint32_t *ipv4_out) { return sys_call2(SYS_DNS_RESOLVE, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)ipv4_out); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 
 #endif
