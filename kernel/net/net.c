@@ -367,7 +367,7 @@ int tcp_connect(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t dst_port,
         return -1;
     }
     net_log("tcp syn sent");
-    deadline = sched_ticks() + 200;
+    deadline = sched_ticks() + 500;
     while (sched_ticks() < deadline) {
         int rc = e1000_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
@@ -508,7 +508,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
         return -1;
     }
 
-    deadline = sched_ticks() + 400;
+    deadline = sched_ticks() + 800;
     while (sched_ticks() < deadline) {
         int rc = e1000_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) {
@@ -760,9 +760,12 @@ int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, cons
 
     net_log("https connect begin");
 
-    if (tls_connect(&conn, ipv4_addr, port) != 0) {
-        net_error = NET_ERR_TLS_HANDSHAKE;
-        return -1;
+    {
+        int tls_rc = tls_connect(&conn, ipv4_addr, port);
+        if (tls_rc == -2) { net_error = NET_ERR_ARP_TIMEOUT; return -1; }
+        if (tls_rc == -3) { net_error = NET_ERR_TCP_TIMEOUT; return -1; }
+        if (tls_rc == -4) { net_error = NET_ERR_TCP_REFUSED; return -1; }
+        if (tls_rc != 0)  { net_error = NET_ERR_TLS_HANDSHAKE; return -1; }
     }
 
     req_len = 4 + path_len + str_len(" HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");

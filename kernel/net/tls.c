@@ -400,7 +400,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
     if (net_arp_resolve(arp_target, conn->dst_mac) != 0) {
         tls_log("arp failed");
         kfree(conn);
-        return -1;
+        return -2;
     }
 
     conn->dst_ip = ip;
@@ -412,10 +412,15 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
     {
         int rc = tcp_connect(conn->dst_mac, conn->dst_ip, conn->dst_port, conn->src_port,
                              &conn->tcp_seq, &conn->tcp_ack);
-        if (rc != 0) {
-            tls_log("tcp connect failed");
+        if (rc == -2) {
+            tls_log("tcp refused");
             kfree(conn);
-            return -1;
+            return -4;
+        }
+        if (rc != 0) {
+            tls_log("tcp connect timeout");
+            kfree(conn);
+            return -3;
         }
     }
     tls_log("tcp connected, starting handshake");
