@@ -230,11 +230,17 @@ userspace/hello_elf.o: userspace/hello_elf.asm
 userspace/pid_elf.o: userspace/pid_elf.asm
 	$(ASM) -f elf64 userspace/pid_elf.asm -o userspace/pid_elf.o
 
+userspace/argc_elf.o: userspace/argc_elf.asm
+	$(ASM) -f elf64 userspace/argc_elf.asm -o userspace/argc_elf.o
+
 userspace/hello.elf: userspace/hello_elf.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o userspace/hello.elf userspace/hello_elf.o
 
 userspace/pid.elf: userspace/pid_elf.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o userspace/pid.elf userspace/pid_elf.o
+
+userspace/argc.elf: userspace/argc_elf.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o userspace/argc.elf userspace/argc_elf.o
 
 shell_start.o: userspace/shell_start.asm
 	$(ASM) -f elf64 userspace/shell_start.asm -o /tmp/icda-shell_start.o
@@ -339,7 +345,7 @@ userspace/curl.app: curl_start.o curl.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-curl.app curl_start.o curl.o
 	cp -f /tmp/icda-curl.app userspace/curl.app
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \

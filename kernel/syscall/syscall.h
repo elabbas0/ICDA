@@ -58,7 +58,9 @@ typedef enum {
     SYS_HTTP_GET_IPV4 = 48,
     SYS_CONSOLE_GETCURSOR = 49,
     SYS_DNS_RESOLVE = 50,
-    SYS_HTTPS_GET_IPV4 = 51
+    SYS_HTTPS_GET_IPV4 = 51,
+    SYS_EXEC_ARGS = 52,
+    SYS_SPAWN_ARGS = 53
 } syscall_number_t;
 
 typedef struct {

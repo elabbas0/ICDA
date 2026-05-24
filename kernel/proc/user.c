@@ -15,6 +15,10 @@ extern uint8_t user_demo_end[];
 
 static uint64_t user_exit_code = 0;
 
+#define USER_ARG_MAX         32
+#define USER_ARG_BYTES_MAX   2048
+#define USER_SHEBANG_MAX     256
+
 #define ICX_MAGIC    0x31584349U
 #define ICX_VERSION  1U
 
@@ -36,6 +40,155 @@ static void zero_bytes(char *dst, uint64_t size) {
     for (uint64_t i = 0; i < size; i++) {
         dst[i] = 0;
     }
+}
+
+static uint64_t cstr_len(const char *s) {
+    uint64_t n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+static void copy_cstr(char *dst, const char *src, uint64_t cap) {
+    uint64_t i = 0;
+    if (!dst || cap == 0) return;
+    while (src && src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static int cstr_eq(const char *a, const char *b) {
+    uint64_t i = 0;
+    while (a && b && a[i] && b[i]) {
+        if (a[i] != b[i]) return 0;
+        i++;
+    }
+    return a && b && a[i] == 0 && b[i] == 0;
+}
+
+static int cstr_has_slash(const char *s) {
+    for (uint64_t i = 0; s && s[i]; i++) {
+        if (s[i] == '/') return 1;
+    }
+    return 0;
+}
+
+static int basename_eq(const char *path, const char *name) {
+    uint64_t i = cstr_len(path);
+    while (i > 0 && path[i - 1] != '/') i--;
+    return cstr_eq(path + i, name);
+}
+
+static int split_words(const char *text, char *storage, uint64_t storage_cap,
+                       char **argv_out, uint64_t argv_cap, uint64_t *argc_out) {
+    uint64_t argc = 0;
+    uint64_t out = 0;
+    uint64_t i = 0;
+
+    if (argc_out) *argc_out = 0;
+    if (!text || !*text) return 0;
+
+    while (text[i]) {
+        char quote = 0;
+        uint64_t start;
+
+        while (text[i] == ' ' || text[i] == '\t') i++;
+        if (!text[i]) break;
+        if (argc >= argv_cap) return -1;
+        if (out >= storage_cap) return -1;
+
+        argv_out[argc++] = storage + out;
+        start = out;
+
+        if (text[i] == '"' || text[i] == '\'') {
+            quote = text[i++];
+        }
+
+        while (text[i]) {
+            if (quote) {
+                if (text[i] == quote) {
+                    i++;
+                    break;
+                }
+            } else if (text[i] == ' ' || text[i] == '\t') {
+                break;
+            }
+
+            if (text[i] == '\\' && text[i + 1]) {
+                i++;
+            }
+            if (out + 1 >= storage_cap) return -1;
+            storage[out++] = text[i++];
+        }
+
+        if (out + 1 >= storage_cap) return -1;
+        storage[out++] = 0;
+
+        while (text[i] == ' ' || text[i] == '\t') i++;
+        if (!quote && out == start + 1) {
+            argc--;
+            out = start;
+        }
+    }
+
+    if (argc_out) *argc_out = argc;
+    return 0;
+}
+
+static int write_stack_u64(char *stack_page, uint64_t base, uint64_t *sp_io, uint64_t value) {
+    if (!stack_page || !sp_io || *sp_io < base + sizeof(uint64_t)) return -1;
+    *sp_io -= sizeof(uint64_t);
+    *(uint64_t *)(stack_page + (*sp_io - base)) = value;
+    return 0;
+}
+
+static int user_build_initial_stack(process_t *proc, uint64_t *user_rsp_out,
+                                    const char *argv0, uint64_t extra_argc, char *const extra_argv[]) {
+    uint64_t total_argc;
+    uint64_t stack_base = USER_STACK_TOP - PAGE_SIZE_4K;
+    uint64_t sp = USER_STACK_TOP;
+    uint64_t phys;
+    char *stack_page;
+    uint64_t arg_ptrs[USER_ARG_MAX + 1];
+
+    if (!proc || !proc->addr_space || !user_rsp_out || !argv0) return -1;
+    total_argc = 1 + extra_argc;
+    if (total_argc > USER_ARG_MAX) return -1;
+
+    phys = vmm_virt_to_phys(proc->addr_space, stack_base);
+    if (!phys) return -1;
+    stack_page = (char *)PHYS_TO_VIRT(phys);
+
+    for (uint64_t i = total_argc; i > 0; i--) {
+        const char *src = (i == 1) ? argv0 : extra_argv[i - 2];
+        uint64_t len = cstr_len(src) + 1;
+        if (sp < stack_base + len) return -1;
+        sp -= len;
+        copy_bytes(stack_page + (sp - stack_base), src, len);
+        arg_ptrs[i - 1] = sp;
+    }
+
+    sp &= ~0xFULL;
+
+    if (proc->linux_personality) {
+        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* AT_NULL value */
+        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* AT_NULL key */
+        if (write_stack_u64(stack_page, stack_base, &sp, PAGE_SIZE_4K) != 0) return -1; /* AT_PAGESZ value */
+        if (write_stack_u64(stack_page, stack_base, &sp, 6) != 0) return -1; /* AT_PAGESZ key */
+    } else {
+        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1;
+        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1;
+    }
+    if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* envp NULL */
+    if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* argv NULL */
+    for (uint64_t i = total_argc; i > 0; i--) {
+        if (write_stack_u64(stack_page, stack_base, &sp, arg_ptrs[i - 1]) != 0) return -1;
+    }
+    if (write_stack_u64(stack_page, stack_base, &sp, total_argc) != 0) return -1;
+
+    *user_rsp_out = sp;
+    return 0;
 }
 
 int user_prepare_address_space(process_t *proc) {
@@ -298,6 +451,159 @@ static int user_load_image(process_t *user_proc, const void *image, uint64_t ima
     return -1;
 }
 
+static int resolve_interpreter_path(const char *token0, const char *token1,
+                                    char *out_path, uint64_t out_cap) {
+    if (!token0 || !*token0 || !out_path || out_cap == 0) return -1;
+
+    if ((basename_eq(token0, "env") || cstr_eq(token0, "/usr/bin/env")) && token1 && *token1) {
+        if (cstr_eq(token1, "bash") || cstr_eq(token1, "sh")) {
+            copy_cstr(out_path, "/apps/shell.app", out_cap);
+            return 0;
+        }
+        if (cstr_has_slash(token1)) {
+            copy_cstr(out_path, token1, out_cap);
+            return 0;
+        }
+        copy_cstr(out_path, "/bin/", out_cap);
+        copy_cstr(out_path + cstr_len(out_path), token1, out_cap - cstr_len(out_path));
+        return 0;
+    }
+
+    if (cstr_eq(token0, "bash") || cstr_eq(token0, "sh") ||
+        cstr_eq(token0, "/bin/bash") || cstr_eq(token0, "/bin/sh") ||
+        cstr_eq(token0, "/usr/bin/bash") || cstr_eq(token0, "/usr/bin/sh")) {
+        copy_cstr(out_path, "/apps/shell.app", out_cap);
+        return 0;
+    }
+
+    copy_cstr(out_path, token0, out_cap);
+    return 0;
+}
+
+static int build_shebang_argv(const char *script_path, const char *argline,
+                              char *interp_path, uint64_t interp_cap,
+                              char *arg_storage, uint64_t arg_storage_cap,
+                              char **argv_out, uint64_t *argc_out) {
+    char shebang[USER_SHEBANG_MAX];
+    char shebang_storage[USER_SHEBANG_MAX];
+    char parse_input[USER_SHEBANG_MAX];
+    char *tokens[4];
+    uint64_t token_count = 0;
+    uint64_t i = 2;
+    uint64_t line_len = 0;
+    uint64_t argc = 0;
+    uint64_t extra_argc = 0;
+    char *extra_argv[USER_ARG_MAX];
+
+    if (argc_out) *argc_out = 0;
+    if (!script_path || !interp_path || !arg_storage || !argv_out || !argc_out) return -1;
+
+    zero_bytes(shebang, sizeof(shebang));
+    {
+        process_t *current_proc = sched_current_process();
+        uint64_t size = 0;
+        const char *data = vfs_read(current_proc ? current_proc->cwd : vfs_root(), script_path, &size);
+        long read;
+        if (!data || size <= 3) return -1;
+        read = (long)(size < sizeof(shebang) - 1 ? size : (sizeof(shebang) - 1));
+        copy_bytes(shebang, data, (uint64_t)read);
+        shebang[read] = 0;
+        if (shebang[0] != '#' || shebang[1] != '!') return -1;
+        while (i < (uint64_t)read && (shebang[i] == ' ' || shebang[i] == '\t')) i++;
+        while (i + line_len < (uint64_t)read && shebang[i + line_len] &&
+               shebang[i + line_len] != '\n' && shebang[i + line_len] != '\r') {
+            line_len++;
+        }
+        if (line_len == 0 || line_len >= sizeof(shebang_storage)) return -1;
+        copy_bytes(shebang_storage, shebang + i, line_len);
+        shebang_storage[line_len] = 0;
+    }
+
+    copy_cstr(parse_input, shebang_storage, sizeof(parse_input));
+    if (split_words(parse_input, shebang_storage, sizeof(shebang_storage), tokens, 4, &token_count) != 0 || token_count == 0) {
+        return -1;
+    }
+    if (resolve_interpreter_path(tokens[0], token_count > 1 ? tokens[1] : 0, interp_path, interp_cap) != 0) {
+        return -1;
+    }
+
+    argv_out[argc++] = (char *)script_path;
+    if (argline && *argline) {
+        if (split_words(argline, arg_storage, arg_storage_cap, extra_argv, USER_ARG_MAX - 1, &extra_argc) != 0) {
+            return -1;
+        }
+        for (uint64_t n = 0; n < extra_argc; n++) {
+            argv_out[argc++] = extra_argv[n];
+        }
+    }
+    *argc_out = argc;
+    return 0;
+}
+
+static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *const extra_argv[],
+                                  uint64_t *pid_out, uint64_t depth) {
+    process_t *user_proc;
+    process_t *current_proc = sched_current_process();
+    const char *image;
+    uint64_t image_size = 0;
+    uint64_t entry_rip = 0;
+    uint64_t user_rsp = 0;
+    thread_t *thread;
+    char interp_path[USER_SHEBANG_MAX];
+    char shebang_arg_storage[USER_ARG_BYTES_MAX];
+    char *shebang_argv[USER_ARG_MAX];
+    uint64_t shebang_argc = 0;
+
+    if (!path || !*path || depth > 4) {
+        return -1;
+    }
+
+    image = vfs_read(current_proc ? current_proc->cwd : vfs_root(), path, &image_size);
+    if (!image || image_size == 0) {
+        return -1;
+    }
+
+    if (image_size >= 2 && image[0] == '#' && image[1] == '!') {
+        if (build_shebang_argv(path, 0, interp_path, sizeof(interp_path),
+                               shebang_arg_storage, sizeof(shebang_arg_storage),
+                               shebang_argv, &shebang_argc) != 0) {
+            return -1;
+        }
+        if (shebang_argc + extra_argc > USER_ARG_MAX) {
+            return -1;
+        }
+        for (uint64_t i = 0; i < extra_argc; i++) {
+            shebang_argv[shebang_argc++] = extra_argv[i];
+        }
+        return user_spawn_pathv_depth(interp_path, shebang_argc, shebang_argv, pid_out, depth + 1);
+    }
+
+    user_proc = proc_create_empty(PROCESS_USER);
+    if (!user_proc) {
+        return -1;
+    }
+
+    user_proc->state = PROCESS_READY;
+    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
+        user_proc->linux_personality = 1;
+    }
+    if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {
+        return -1;
+    }
+    if (user_build_initial_stack(user_proc, &user_rsp, path, extra_argc, extra_argv) != 0) {
+        return -1;
+    }
+
+    thread = proc_create_user_thread(user_proc, entry_rip, user_rsp, user_thread_start);
+    if (!thread) {
+        return -1;
+    }
+    if (pid_out) {
+        *pid_out = user_proc->pid;
+    }
+    return 0;
+}
+
 int user_run_path(const char *path) {
     uint64_t pid;
     if (user_spawn_path(path, &pid) != 0) {
@@ -352,44 +658,31 @@ void user_thread_start(void) {
 }
 
 int user_spawn_path(const char *path, uint64_t *pid_out) {
-    process_t *user_proc;
-    process_t *current_proc = sched_current_process();
-    const char *image;
-    uint64_t image_size = 0;
-    uint64_t entry_rip = 0;
-    thread_t *thread;
+    return user_spawn_pathv_depth(path, 0, 0, pid_out, 0);
+}
+
+int user_spawn_path_args(const char *path, const char *argline, uint64_t *pid_out) {
+    char arg_storage[USER_ARG_BYTES_MAX];
+    char *argv[USER_ARG_MAX];
+    uint64_t argc = 0;
 
     if (!path || !*path) {
         return -1;
     }
+    if (argline && *argline) {
+        if (split_words(argline, arg_storage, sizeof(arg_storage), argv, USER_ARG_MAX, &argc) != 0) {
+            return -1;
+        }
+    }
+    return user_spawn_pathv_depth(path, argc, argv, pid_out, 0);
+}
 
-    image = vfs_read(current_proc ? current_proc->cwd : vfs_root(), path, &image_size);
-    if (!image || image_size == 0) {
+int user_run_path_args(const char *path, const char *argline) {
+    uint64_t pid;
+    if (user_spawn_path_args(path, argline, &pid) != 0) {
         return -1;
     }
-
-    user_proc = proc_create_empty(PROCESS_USER);
-    if (!user_proc) {
-        return -1;
-    }
-
-    user_proc->state = PROCESS_READY;
-    if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {
-        return -1;
-    }
-
-    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
-        user_proc->linux_personality = 1;
-    }
-
-    thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
-    if (!thread) {
-        return -1;
-    }
-    if (pid_out) {
-        *pid_out = user_proc->pid;
-    }
-    return 0;
+    return user_wait_pid(pid, &user_exit_code);
 }
 
 int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {

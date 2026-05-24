@@ -16,6 +16,8 @@ extern const char userprog_hello_elf_start[];
 extern const char userprog_hello_elf_end[];
 extern const char userprog_pid_elf_start[];
 extern const char userprog_pid_elf_end[];
+extern const char userprog_argc_elf_start[];
+extern const char userprog_argc_elf_end[];
 extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
 extern const char userprog_audioplay_start[];
@@ -42,12 +44,13 @@ static const char commands_txt[] =
     "  cd <path>      change current directory\n"
     "  ls [path]      list files and directories\n"
     "  cat <path>     print a file\n"
+    "  echo <text>    print a line of text\n"
     "  mkdir <path>   create a directory\n"
     "  touch <path>   create an empty file\n"
     "  write <path> <text>  replace file contents\n"
     "  stat <path>    show file metadata\n"
     "  install        persist the seeded system into writable disk state\n"
-    "  run <path>     launch a user program (.app, .elf, or other supported format)\n"
+    "  run <path> [args]  launch a user program (.app, .elf, or supported script)\n"
     "  storage        list block devices, partitions, and mounts\n"
     "  mount <n> <path>  mount a detected fat32/exfat partition at a directory\n"
     "  diskman        open the disk manager / formatter\n"
@@ -74,6 +77,12 @@ static const char files_txt[] =
     "  /home     default writable user area\n"
     "  /volumes  detected filesystem mounts\n";
 
+static const char demo_sh[] =
+    "#!/usr/bin/env bash\n"
+    "echo script mode online\n"
+    "pwd\n"
+    "write /home/script-ok done\n";
+
 static initramfs_file_t initramfs_files[] = {
     { "/etc/motd.txt", motd_txt, sizeof(motd_txt) - 1 },
     { "/usr/share/commands.txt", commands_txt, sizeof(commands_txt) - 1 },
@@ -88,7 +97,9 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/diskman.app", 0, 0 },
     { "/apps/curl.app", 0, 0 },
     { "/bin/hello.elf", 0, 0 },
-    { "/bin/pid.elf", 0, 0 }
+    { "/bin/pid.elf", 0, 0 },
+    { "/bin/argc.elf", 0, 0 },
+    { "/bin/demo.sh", demo_sh, sizeof(demo_sh) - 1 }
 };
 
 int initramfs_init(void) {
@@ -112,6 +123,8 @@ int initramfs_init(void) {
     initramfs_files[12].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
     initramfs_files[13].data = userprog_pid_elf_start;
     initramfs_files[13].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
+    initramfs_files[14].data = userprog_argc_elf_start;
+    initramfs_files[14].size = (uint64_t)(userprog_argc_elf_end - userprog_argc_elf_start);
     return 0;
 }
 
