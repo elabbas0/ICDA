@@ -55,7 +55,9 @@ enum {
     SYS_HTTP_GET_IPV4 = 48,
     SYS_CONSOLE_GETCURSOR = 49,
     SYS_DNS_RESOLVE = 50,
-    SYS_HTTPS_GET_IPV4 = 51
+    SYS_HTTPS_GET_IPV4 = 51,
+    SYS_EXEC_ARGS = 52,
+    SYS_SPAWN_ARGS = 53
 };
 
 typedef struct {
@@ -148,6 +150,7 @@ static inline uint64_t icda_getcwd(char *buf, uint64_t cap) { return sys_call2(S
 static inline uint64_t icda_chdir(const char *path) { return sys_call1(SYS_CHDIR, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_list_dir(const char *path, char *buf, uint64_t cap) { return sys_call3(SYS_LIST_DIR, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_exec(const char *path) { return sys_call1(SYS_EXEC, (uint64_t)(uintptr_t)path); }
+static inline uint64_t icda_exec_args(const char *path, const char *args) { return sys_call2(SYS_EXEC_ARGS, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)args); }
 static inline void icda_clear(void) { (void)sys_call0(SYS_CONSOLE_CLEAR); }
 static inline void icda_backspace(void) { (void)sys_call0(SYS_CONSOLE_BACKSPACE); }
 static inline uint64_t icda_mkdir(const char *path) { return sys_call1(SYS_MKDIR, (uint64_t)(uintptr_t)path); }
@@ -155,6 +158,7 @@ static inline uint64_t icda_create(const char *path) { return sys_call1(SYS_CREA
 static inline uint64_t icda_stat(const char *path, icda_stat_t *out) { return sys_call2(SYS_STAT, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out); }
 static inline uint64_t icda_list_procs(char *buf, uint64_t cap) { return sys_call2(SYS_LIST_PROCS, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_spawn(const char *path) { return sys_call1(SYS_SPAWN, (uint64_t)(uintptr_t)path); }
+static inline uint64_t icda_spawn_args(const char *path, const char *args) { return sys_call2(SYS_SPAWN_ARGS, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)args); }
 static inline uint64_t icda_waitpid(uint64_t pid) { return sys_call1(SYS_WAITPID, pid); }
 static inline void icda_yield(void) { (void)sys_call0(SYS_YIELD); }
 static inline void icda_sleep(uint64_t ticks) { (void)sys_call1(SYS_SLEEP, ticks); }

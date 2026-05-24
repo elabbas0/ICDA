@@ -318,6 +318,16 @@ static uint64_t sys_console_backspace(void) {
     return 0;
 }
 
+static uint64_t sys_exec_args(const char *path, const char *args) {
+    if (!path || !*path) {
+        return (uint64_t)-1;
+    }
+    if (user_run_path_args(path, args) != 0) {
+        return (uint64_t)-1;
+    }
+    return user_last_exit_code();
+}
+
 static uint64_t sys_mkdir(const char *path) {
     process_t *proc = sched_current_process();
 
@@ -448,6 +458,18 @@ static uint64_t sys_resume(uint64_t pid) {
 
 static uint64_t sys_sync(void) {
     return vfs_sync() == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_spawn_args(const char *path, const char *args) {
+    uint64_t pid = 0;
+
+    if (!path || !*path) {
+        return (uint64_t)-1;
+    }
+    if (user_spawn_path_args(path, args, &pid) != 0) {
+        return (uint64_t)-1;
+    }
+    return pid;
 }
 
 static uint64_t sys_mount(uint64_t partition_index, const char *path) {
@@ -954,6 +976,9 @@ uint64_t syscall_dispatch(struct registers *regs) {
                                 regs->rdx);
         case SYS_EXEC:
             return sys_exec((const char *)(uintptr_t)regs->rdi);
+        case SYS_EXEC_ARGS:
+            return sys_exec_args((const char *)(uintptr_t)regs->rdi,
+                                 (const char *)(uintptr_t)regs->rsi);
         case SYS_CONSOLE_CLEAR:
             return sys_console_clear();
         case SYS_CONSOLE_BACKSPACE:
@@ -969,6 +994,9 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return sys_list_procs((char *)(uintptr_t)regs->rdi, regs->rsi);
         case SYS_SPAWN:
             return sys_spawn((const char *)(uintptr_t)regs->rdi);
+        case SYS_SPAWN_ARGS:
+            return sys_spawn_args((const char *)(uintptr_t)regs->rdi,
+                                  (const char *)(uintptr_t)regs->rsi);
         case SYS_WAITPID:
             return sys_waitpid(regs->rdi);
         case SYS_YIELD:

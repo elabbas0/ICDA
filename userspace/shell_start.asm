@@ -6,6 +6,8 @@ extern shell_main
 
 section .text
 _start:
+    mov rdi, [rsp]
+    lea rsi, [rsp + 8]
     call shell_main
     mov rdi, rax
     mov eax, 4
