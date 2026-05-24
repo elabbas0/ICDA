@@ -3,11 +3,13 @@
 #include <stdint.h>
 
 #define CURL_REQUEST_PATH "/home/.curl.request"
+#define CURL_TEMP_PATH "/home/.curl.temp"
 #define CURL_REQ_CAP 384
 #define CURL_URL_CAP 256
 #define CURL_HOST_CAP 128
 #define CURL_OUT_CAP 128
 #define CURL_PATH_CAP 256
+#define CURL_CONSOLE_BUF 512
 
 static char curl_req[CURL_REQ_CAP];
 static char curl_url[CURL_URL_CAP];
@@ -181,7 +183,7 @@ uint64_t curl_main(void) {
     curl_req[req_len] = 0;
     split_request();
 
-    if (!curl_url[0] || !curl_out[0]) {
+    if (!curl_url[0]) {
         icda_write("curl: bad request\n");
         icda_exit(1);
     }
@@ -199,15 +201,16 @@ uint64_t curl_main(void) {
         icda_exit(1);
     }
     {
+        const char *target = curl_out[0] ? curl_out : CURL_TEMP_PATH;
         long rc;
         if (use_https) {
-            rc = (long)icda_https_get_ipv4(ip, port, curl_path, curl_out, &bytes);
+            rc = (long)icda_https_get_ipv4(ip, port, curl_host, curl_path, target, &bytes);
         } else {
-            rc = (long)icda_http_get_ipv4(ip, port, curl_path, curl_out, &bytes);
+            rc = (long)icda_http_get_ipv4(ip, port, curl_host, curl_path, target, &bytes);
         }
         if (rc < 0) {
             long err = -rc;
-            if (err >= 2400 && err < 2500) {
+            if (err >= 2000 && err < 3000) {
                 icda_write("curl: HTTP ");
                 write_uint((uint64_t)(err - 2000));
                 icda_write("\n");
@@ -242,11 +245,23 @@ uint64_t curl_main(void) {
         }
     }
 
-    icda_write("downloaded ");
-    write_uint(bytes);
-    icda_write(" bytes to ");
-    icda_write(curl_out);
-    icda_write("\n");
+    if (!curl_out[0]) {
+        char console_buf[CURL_CONSOLE_BUF + 1];
+        uint64_t offset = 0;
+        while (offset < bytes) {
+            uint64_t chunk = icda_read_file_at(CURL_TEMP_PATH, offset, console_buf, CURL_CONSOLE_BUF);
+            if (chunk <= 0) break;
+            console_buf[chunk] = 0;
+            icda_write(console_buf);
+            offset += chunk;
+        }
+    } else {
+        icda_write("downloaded ");
+        write_uint(bytes);
+        icda_write(" bytes to ");
+        icda_write(curl_out);
+        icda_write("\n");
+    }
     icda_exit(0);
     return 0;
 }

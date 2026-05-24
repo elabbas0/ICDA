@@ -5,18 +5,228 @@
 
 net_state_t net_state;
 static uint32_t net_error = 0;
+static uint16_t net_ephemeral_port = 40000;
+
+#define NET_DEBUG 0
 
 static void net_log(const char *text) {
+#if NET_DEBUG
     console_write("[net] ", CONSOLE_STYLE_MUTED);
     console_write(text, CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
+#else
+    (void)text;
+#endif
 }
 
 static void net_log_u64(const char *label, uint64_t value) {
+#if NET_DEBUG
     console_write("[net] ", CONSOLE_STYLE_MUTED);
     console_write(label, CONSOLE_STYLE_INFO);
     console_write_dec64(value, CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
+#else
+    (void)label;
+    (void)value;
+#endif
+}
+
+static uint16_t net_alloc_ephemeral_port(void) {
+    uint16_t port = net_ephemeral_port++;
+    if (net_ephemeral_port < 40000 || net_ephemeral_port >= 60000) {
+        net_ephemeral_port = 40000;
+    }
+    return port;
+}
+
+static int build_http_request(char *request, uint64_t request_cap,
+                              const char *host, const char *path) {
+    static const char prefix[] = "GET ";
+    static const char middle[] = " HTTP/1.0\r\nHost: ";
+    static const char suffix[] =
+        "\r\nUser-Agent: ICDA/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n";
+    uint64_t host_len;
+    uint64_t path_len;
+    uint64_t pos = 0;
+
+    if (!request || request_cap == 0 || !host || !host[0] || !path || path[0] != '/') {
+        return -1;
+    }
+    host_len = str_len(host);
+    path_len = str_len(path);
+    if (sizeof(prefix) - 1 + path_len + sizeof(middle) - 1 + host_len + sizeof(suffix) - 1 > request_cap) {
+        return -1;
+    }
+    copy_bytes(request + pos, prefix, sizeof(prefix) - 1);
+    pos += sizeof(prefix) - 1;
+    copy_bytes(request + pos, path, path_len);
+    pos += path_len;
+    copy_bytes(request + pos, middle, sizeof(middle) - 1);
+    pos += sizeof(middle) - 1;
+    copy_bytes(request + pos, host, host_len);
+    pos += host_len;
+    copy_bytes(request + pos, suffix, sizeof(suffix) - 1);
+    pos += sizeof(suffix) - 1;
+    request[pos] = 0;
+    return (int)pos;
+}
+
+static char ascii_lower(char ch) {
+    if (ch >= 'A' && ch <= 'Z') return (char)(ch - 'A' + 'a');
+    return ch;
+}
+
+static int ascii_ieq_n(const char *a, const char *b, uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        if (ascii_lower(a[i]) != ascii_lower(b[i])) return 0;
+    }
+    return 1;
+}
+
+static int try_parse_ipv4_text(const char *text, uint32_t *ip_out) {
+    uint32_t octets[4] = {0,0,0,0};
+    uint32_t octet = 0;
+    int part = 0;
+    int saw_digit = 0;
+
+    if (!text || !*text || !ip_out) return -1;
+    while (*text) {
+        char ch = *text++;
+        if (ch >= '0' && ch <= '9') {
+            saw_digit = 1;
+            octet = octet * 10U + (uint32_t)(ch - '0');
+            if (octet > 255U) return -1;
+        } else if (ch == '.') {
+            if (!saw_digit || part >= 3) return -1;
+            octets[part++] = octet;
+            octet = 0;
+            saw_digit = 0;
+        } else {
+            return -1;
+        }
+    }
+    if (!saw_digit || part != 3) return -1;
+    octets[3] = octet;
+    *ip_out = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
+    return 0;
+}
+
+static int http_header_value(const uint8_t *buf, uint64_t size, const char *name, char *out, uint64_t out_cap) {
+    uint64_t name_len = str_len(name);
+    uint64_t i = 0;
+
+    if (!buf || !name || !*name || !out || out_cap == 0) return -1;
+    out[0] = 0;
+
+    while (i + 2 < size) {
+        uint64_t line_start = i;
+        uint64_t line_end = i;
+        while (line_end + 1 < size && !(buf[line_end] == '\r' && buf[line_end + 1] == '\n')) line_end++;
+        if (line_end + 1 >= size) break;
+        if (line_end == line_start) return -1;
+        if ((line_end - line_start) > name_len &&
+            ascii_ieq_n((const char *)(buf + line_start), name, name_len) &&
+            buf[line_start + name_len] == ':') {
+            uint64_t value_start = line_start + name_len + 1;
+            uint64_t out_len = 0;
+            while (value_start < line_end && (buf[value_start] == ' ' || buf[value_start] == '\t')) value_start++;
+            while (value_start < line_end && out_len + 1 < out_cap) {
+                out[out_len++] = (char)buf[value_start++];
+            }
+            out[out_len] = 0;
+            return 0;
+        }
+        i = line_end + 2;
+    }
+    return -1;
+}
+
+static int parse_redirect_url(const char *location,
+                              int current_https,
+                              const char *current_host,
+                              uint16_t current_port,
+                              int *https_out,
+                              uint32_t *ip_out,
+                              uint16_t *port_out,
+                              char *host_out,
+                              uint64_t host_cap,
+                              char *path_out,
+                              uint64_t path_cap) {
+    const char *p = location;
+    uint64_t host_len = 0;
+    uint64_t path_len = 0;
+    int use_https = current_https;
+    uint16_t port = current_https ? 443 : 80;
+    uint32_t ip = 0;
+
+    if (!location || !*location || !https_out || !ip_out || !port_out || !host_out || !path_out || host_cap == 0 || path_cap == 0) {
+        return -1;
+    }
+
+    if (str_prefix(location, "https://")) {
+        use_https = 1;
+        port = 443;
+        p = location + 8;
+    } else if (str_prefix(location, "http://")) {
+        use_https = 0;
+        port = 80;
+        p = location + 7;
+    } else if (location[0] == '/') {
+        copy_bytes(host_out, current_host, str_len(current_host) + 1);
+        copy_bytes(path_out, location, str_len(location) + 1);
+        if (try_parse_ipv4_text(host_out, &ip) != 0) {
+            if (net_dns_resolve_ipv4(host_out, &ip) != 0) return -1;
+        }
+        *https_out = use_https;
+        *ip_out = ip;
+        *port_out = current_port;
+        return 0;
+    } else {
+        return -1;
+    }
+
+    while (p[host_len] && p[host_len] != ':' && p[host_len] != '/' && host_len + 1 < host_cap) {
+        host_out[host_len] = p[host_len];
+        host_len++;
+    }
+    if (host_len == 0 || host_len + 1 >= host_cap) return -1;
+    host_out[host_len] = 0;
+    p += host_len;
+
+    if (*p == ':') {
+        uint32_t port_value = 0;
+        p++;
+        if (*p < '0' || *p > '9') return -1;
+        while (*p >= '0' && *p <= '9') {
+            port_value = port_value * 10U + (uint32_t)(*p - '0');
+            if (port_value > 65535U) return -1;
+            p++;
+        }
+        port = (uint16_t)port_value;
+    }
+
+    if (*p == 0) {
+        if (path_cap < 2) return -1;
+        path_out[0] = '/';
+        path_out[1] = 0;
+    } else if (*p == '/') {
+        while (p[path_len] && path_len + 1 < path_cap) {
+            path_out[path_len] = p[path_len];
+            path_len++;
+        }
+        path_out[path_len] = 0;
+    } else {
+        return -1;
+    }
+
+    if (try_parse_ipv4_text(host_out, &ip) != 0) {
+        if (net_dns_resolve_ipv4(host_out, &ip) != 0) return -1;
+    }
+
+    *https_out = use_https;
+    *ip_out = ip;
+    *port_out = port;
+    return 0;
 }
 
 uint16_t bswap16(uint16_t value) {
@@ -329,6 +539,7 @@ int parse_udp_packet(const uint8_t *frame, uint16_t len, uint32_t expect_src_ip,
 }
 
 static void debug_dump_tcp_frame(const uint8_t *frame, uint16_t len) {
+#if NET_DEBUG
     const eth_hdr_t *eth;
     const ipv4_hdr_t *ip;
     const tcp_hdr_t *tcp;
@@ -354,6 +565,10 @@ static void debug_dump_tcp_frame(const uint8_t *frame, uint16_t len) {
     net_log_u64("rx any tcp sport=", ntohs16(tcp->src_port_be));
     net_log_u64("rx any tcp dport=", ntohs16(tcp->dst_port_be));
     net_log_u64("rx any tcp flags=", tcp->flags);
+#else
+    (void)frame;
+    (void)len;
+#endif
 }
 
 int tcp_connect(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t dst_port,
@@ -464,6 +679,11 @@ static int dns_skip_name(const uint8_t *buf, uint16_t size, uint16_t offset, uin
 }
 
 int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
+    static const uint32_t dns_servers[] = {
+        NET_DNS_IP,
+        NET_DNS_IP_ALT1,
+        NET_DNS_IP_ALT2,
+    };
     uint8_t dst_mac[6];
     uint8_t query[512];
     uint8_t frame[NET_FRAME_CAP];
@@ -498,82 +718,82 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
     query[query_len++] = 0x00;
     query[query_len++] = 0x01;
 
-    arp_target = ip_same_subnet(net_state.ip, NET_DNS_IP, net_state.netmask) ? NET_DNS_IP : net_state.gateway;
-    if (net_arp_resolve(arp_target, dst_mac) != 0) {
-        net_error = NET_ERR_DNS_TIMEOUT;
-        return -1;
-    }
-    if (send_udp_packet(dst_mac, NET_DNS_IP, 53000, 53, query, query_len) != 0) {
-        net_error = NET_ERR_DNS_TIMEOUT;
-        return -1;
-    }
-
-    deadline = sched_ticks() + 800;
-    while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame, sizeof(frame), &len);
-        if (rc < 0) {
-            net_error = NET_ERR_DNS_TIMEOUT;
-            return -1;
-        }
-        if (rc == 0) {
-            sched_sleep(1);
+    for (uint32_t srv_i = 0; srv_i < (uint32_t)(sizeof(dns_servers) / sizeof(dns_servers[0])); srv_i++) {
+        uint32_t dns_ip = dns_servers[srv_i];
+        arp_target = ip_same_subnet(net_state.ip, dns_ip, net_state.netmask) ? dns_ip : net_state.gateway;
+        if (net_arp_resolve(arp_target, dst_mac) != 0) {
             continue;
         }
-        if (!parse_udp_packet(frame, len, NET_DNS_IP, 53, 53000, &pkt)) continue;
-        if (pkt.payload_len < 12) continue;
-        if (pkt.payload[0] != (uint8_t)(txid >> 8) || pkt.payload[1] != (uint8_t)(txid & 0xFFU)) continue;
-        if ((pkt.payload[2] & 0x80U) == 0) continue;
-        if ((pkt.payload[3] & 0x0FU) != 0) {
+        if (send_udp_packet(dst_mac, dns_ip, 53000, 53, query, query_len) != 0) {
+            continue;
+        }
+
+        deadline = sched_ticks() + 800;
+        while (sched_ticks() < deadline) {
+            int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+            if (rc < 0) {
+                break;
+            }
+            if (rc == 0) {
+                sched_sleep(1);
+                continue;
+            }
+            if (!parse_udp_packet(frame, len, dns_ip, 53, 53000, &pkt)) continue;
+            if (pkt.payload_len < 12) continue;
+            if (pkt.payload[0] != (uint8_t)(txid >> 8) || pkt.payload[1] != (uint8_t)(txid & 0xFFU)) continue;
+            if ((pkt.payload[2] & 0x80U) == 0) continue;
+            if ((pkt.payload[3] & 0x0FU) != 0) {
+                net_error = NET_ERR_DNS_PARSE;
+                return -1;
+            }
+
+            qdcount = (uint16_t)(((uint16_t)pkt.payload[4] << 8) | pkt.payload[5]);
+            ancount = (uint16_t)(((uint16_t)pkt.payload[6] << 8) | pkt.payload[7]);
+            pos = 12;
+            for (uint16_t i = 0; i < qdcount; i++) {
+                if (dns_skip_name(pkt.payload, pkt.payload_len, pos, &pos) != 0) {
+                    net_error = NET_ERR_DNS_PARSE;
+                    return -1;
+                }
+                if ((uint16_t)(pos + 4) > pkt.payload_len) {
+                    net_error = NET_ERR_DNS_PARSE;
+                    return -1;
+                }
+                pos = (uint16_t)(pos + 4);
+            }
+            for (uint16_t i = 0; i < ancount; i++) {
+                uint16_t type;
+                uint16_t class_code;
+                uint16_t rdlen;
+                if (dns_skip_name(pkt.payload, pkt.payload_len, pos, &pos) != 0) {
+                    net_error = NET_ERR_DNS_PARSE;
+                    return -1;
+                }
+                if ((uint16_t)(pos + 10) > pkt.payload_len) {
+                    net_error = NET_ERR_DNS_PARSE;
+                    return -1;
+                }
+                type = (uint16_t)(((uint16_t)pkt.payload[pos] << 8) | pkt.payload[pos + 1]);
+                class_code = (uint16_t)(((uint16_t)pkt.payload[pos + 2] << 8) | pkt.payload[pos + 3]);
+                rdlen = (uint16_t)(((uint16_t)pkt.payload[pos + 8] << 8) | pkt.payload[pos + 9]);
+                pos = (uint16_t)(pos + 10);
+                if ((uint16_t)(pos + rdlen) > pkt.payload_len) {
+                    net_error = NET_ERR_DNS_PARSE;
+                    return -1;
+                }
+                if (type == 1 && class_code == 1 && rdlen == 4) {
+                    *ipv4_out = (uint32_t)pkt.payload[pos] |
+                                ((uint32_t)pkt.payload[pos + 1] << 8) |
+                                ((uint32_t)pkt.payload[pos + 2] << 16) |
+                                ((uint32_t)pkt.payload[pos + 3] << 24);
+                    net_error = 0;
+                    return 0;
+                }
+                pos = (uint16_t)(pos + rdlen);
+            }
             net_error = NET_ERR_DNS_PARSE;
             return -1;
         }
-
-        qdcount = (uint16_t)(((uint16_t)pkt.payload[4] << 8) | pkt.payload[5]);
-        ancount = (uint16_t)(((uint16_t)pkt.payload[6] << 8) | pkt.payload[7]);
-        pos = 12;
-        for (uint16_t i = 0; i < qdcount; i++) {
-            if (dns_skip_name(pkt.payload, pkt.payload_len, pos, &pos) != 0) {
-                net_error = NET_ERR_DNS_PARSE;
-                return -1;
-            }
-            if ((uint16_t)(pos + 4) > pkt.payload_len) {
-                net_error = NET_ERR_DNS_PARSE;
-                return -1;
-            }
-            pos = (uint16_t)(pos + 4);
-        }
-        for (uint16_t i = 0; i < ancount; i++) {
-            uint16_t type;
-            uint16_t class_code;
-            uint16_t rdlen;
-            if (dns_skip_name(pkt.payload, pkt.payload_len, pos, &pos) != 0) {
-                net_error = NET_ERR_DNS_PARSE;
-                return -1;
-            }
-            if ((uint16_t)(pos + 10) > pkt.payload_len) {
-                net_error = NET_ERR_DNS_PARSE;
-                return -1;
-            }
-            type = (uint16_t)(((uint16_t)pkt.payload[pos] << 8) | pkt.payload[pos + 1]);
-            class_code = (uint16_t)(((uint16_t)pkt.payload[pos + 2] << 8) | pkt.payload[pos + 3]);
-            rdlen = (uint16_t)(((uint16_t)pkt.payload[pos + 8] << 8) | pkt.payload[pos + 9]);
-            pos = (uint16_t)(pos + 10);
-            if ((uint16_t)(pos + rdlen) > pkt.payload_len) {
-                net_error = NET_ERR_DNS_PARSE;
-                return -1;
-            }
-            if (type == 1 && class_code == 1 && rdlen == 4) {
-                *ipv4_out = (uint32_t)pkt.payload[pos] |
-                            ((uint32_t)pkt.payload[pos + 1] << 8) |
-                            ((uint32_t)pkt.payload[pos + 2] << 16) |
-                            ((uint32_t)pkt.payload[pos + 3] << 24);
-                net_error = 0;
-                return 0;
-            }
-            pos = (uint16_t)(pos + rdlen);
-        }
-        net_error = NET_ERR_DNS_PARSE;
-        return -1;
     }
 
     net_error = NET_ERR_DNS_TIMEOUT;
@@ -606,16 +826,17 @@ uint32_t net_last_error(void) {
     return net_error;
 }
 
-int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out, int depth);
+static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out, int depth);
+
+static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out, int depth) {
     uint8_t *rx_body = 0;
     uint64_t rx_size = 0;
     uint8_t dst_mac[6];
     uint32_t arp_target;
     uint32_t seq = 0x12345678U;
     uint32_t ack = 0;
-    uint16_t src_port = 40000;
-    char *request = 0;
-    uint64_t path_len;
+    uint16_t src_port = net_alloc_ephemeral_port();
     uint64_t req_len;
     uint8_t frame[NET_FRAME_CAP];
     uint16_t len = 0;
@@ -625,7 +846,7 @@ int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const
     int header_end;
     int status;
 
-    if (!net_state.ready || !path || !out_path || path[0] != '/') {
+    if (!net_state.ready || !host || !host[0] || !path || !out_path || path[0] != '/') {
         net_error = NET_ERR_URL_PATH;
         return -1;
     }
@@ -649,22 +870,21 @@ int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const
         }
     }
 
-    path_len = str_len(path);
-    req_len = 4 + path_len + str_len(" HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");
-    request = (char *)kmalloc((size_t)(req_len + 1));
-    if (!request) return -1;
-    zero_bytes(request, req_len + 1);
-    copy_bytes(request, "GET ", 4);
-    copy_bytes(request + 4, path, path_len);
-    copy_bytes(request + 4 + path_len, " HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n", str_len(" HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n"));
+    char request[512];
+    {
+        int built = build_http_request(request, sizeof(request), host, path);
+        if (built < 0) {
+            net_error = NET_ERR_URL_PATH;
+            return -1;
+        }
+        req_len = (uint64_t)built;
+    }
 
     if (send_tcp_packet(dst_mac, ipv4_addr, src_port, port, seq, ack, TCP_FLAG_ACK | TCP_FLAG_PSH, (const uint8_t *)request, (uint16_t)req_len) != 0) {
-        kfree(request);
         return -1;
     }
     net_log("http request sent");
     seq += (uint32_t)req_len;
-    kfree(request);
 
     rx_body = (uint8_t *)kmalloc(NET_HTTP_CAP);
     if (!rx_body) return -1;
@@ -725,6 +945,22 @@ int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const
         return -1;
     }
     status = http_status_code(rx_body, rx_size);
+    if (status >= 300 && status < 400 && depth < 4) {
+        char location[512];
+        char next_host[256];
+        char next_path[512];
+        uint32_t next_ip = 0;
+        uint16_t next_port = 80;
+        int next_https = 0;
+        if (http_header_value(rx_body, rx_size, "Location", location, sizeof(location)) == 0 &&
+            parse_redirect_url(location, 0, host, port, &next_https, &next_ip, &next_port, next_host, sizeof(next_host), next_path, sizeof(next_path)) == 0) {
+            kfree(rx_body);
+            if (next_https) {
+                return net_https_get_ipv4_follow(next_ip, next_port, next_host, next_path, out_path, bytes_out, depth + 1);
+            }
+            return net_http_get_ipv4_follow(next_ip, next_port, next_host, next_path, out_path, bytes_out, depth + 1);
+        }
+    }
     if (status < 200 || status >= 300) {
         kfree(rx_body);
         net_error = (uint32_t)(2000 + (status < 0 ? 0 : status));
@@ -743,9 +979,8 @@ int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const
     return 0;
 }
 
-int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out, int depth) {
     tls_conn_t *conn = NULL;
-    uint64_t path_len = str_len(path);
     char request[512];
     uint8_t rx_buf[NET_HTTP_CAP];
     uint32_t rx_size = 0;
@@ -753,7 +988,7 @@ int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, cons
     int status;
     uint64_t req_len;
 
-    if (!net_state.ready || !path || !out_path || path[0] != '/') {
+    if (!net_state.ready || !host || !host[0] || !path || !out_path || path[0] != '/') {
         net_error = NET_ERR_URL_PATH;
         return -1;
     }
@@ -761,19 +996,22 @@ int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, cons
     net_log("https connect begin");
 
     {
-        int tls_rc = tls_connect(&conn, ipv4_addr, port);
+        int tls_rc = tls_connect(&conn, ipv4_addr, port, host);
         if (tls_rc == -2) { net_error = NET_ERR_ARP_TIMEOUT; return -1; }
         if (tls_rc == -3) { net_error = NET_ERR_TCP_TIMEOUT; return -1; }
         if (tls_rc == -4) { net_error = NET_ERR_TCP_REFUSED; return -1; }
         if (tls_rc != 0)  { net_error = NET_ERR_TLS_HANDSHAKE; return -1; }
     }
 
-    req_len = 4 + path_len + str_len(" HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");
-    copy_bytes(request, "GET ", 4);
-    copy_bytes(request + 4, path, path_len);
-    copy_bytes(request + 4 + path_len, " HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n",
-              str_len(" HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n"));
-    request[req_len] = 0;
+    {
+        int built = build_http_request(request, sizeof(request), host, path);
+        if (built < 0) {
+            tls_close(conn);
+            net_error = NET_ERR_URL_PATH;
+            return -1;
+        }
+        req_len = (uint64_t)built;
+    }
     net_log("https request sent");
 
     if (tls_write(conn, (const uint8_t *)request, (uint32_t)req_len) != 0) {
@@ -815,6 +1053,21 @@ int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, cons
     }
 
     status = http_status_code(rx_buf, rx_size);
+    if (status >= 300 && status < 400 && depth < 4) {
+        char location[512];
+        char next_host[256];
+        char next_path[512];
+        uint32_t next_ip = 0;
+        uint16_t next_port = 80;
+        int next_https = 0;
+        if (http_header_value(rx_buf, rx_size, "Location", location, sizeof(location)) == 0 &&
+            parse_redirect_url(location, 1, host, port, &next_https, &next_ip, &next_port, next_host, sizeof(next_host), next_path, sizeof(next_path)) == 0) {
+            if (next_https) {
+                return net_https_get_ipv4_follow(next_ip, next_port, next_host, next_path, out_path, bytes_out, depth + 1);
+            }
+            return net_http_get_ipv4_follow(next_ip, next_port, next_host, next_path, out_path, bytes_out, depth + 1);
+        }
+    }
     if (status < 200 || status >= 300) {
         net_error = (uint32_t)(2000 + (status < 0 ? 0 : status));
         return -1;
@@ -828,4 +1081,12 @@ int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, cons
     if (bytes_out) *bytes_out = rx_size - (uint64_t)header_end;
     net_error = 0;
     return 0;
+}
+
+int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
+    return net_http_get_ipv4_follow(ipv4_addr, port, host, path, out_path, bytes_out, 0);
+}
+
+int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
+    return net_https_get_ipv4_follow(ipv4_addr, port, host, path, out_path, bytes_out, 0);
 }

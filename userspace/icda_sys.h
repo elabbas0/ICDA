@@ -129,6 +129,15 @@ static inline uint64_t sys_call5(uint64_t n, uint64_t a0, uint64_t a1, uint64_t 
     return ret;
 }
 
+static inline uint64_t sys_call6(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    uint64_t ret;
+    register uint64_t r10 __asm__("r10") = a3;
+    register uint64_t r8 __asm__("r8") = a4;
+    register uint64_t r9 __asm__("r9") = a5;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
+    return ret;
+}
+
 static inline uint64_t icda_write(const char *text) { return sys_call1(SYS_CONSOLE_WRITE, (uint64_t)(uintptr_t)text); }
 static inline uint64_t icda_get_pid(void) { return sys_call0(SYS_GET_PID); }
 static inline uint64_t icda_read_file(const char *path, char *buf, uint64_t cap) { return sys_call3(SYS_VFS_READ, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)buf, cap); }
@@ -177,8 +186,8 @@ static inline uint64_t icda_set_partition_role(uint64_t partition_index, uint64_
 static inline uint64_t icda_console_size(uint64_t *cols_out, uint64_t *rows_out) { return sys_call2(SYS_CONSOLE_SIZE, (uint64_t)(uintptr_t)cols_out, (uint64_t)(uintptr_t)rows_out); }
 static inline uint64_t icda_console_cursor(uint64_t *x_out, uint64_t *y_out) { return sys_call2(SYS_CONSOLE_GETCURSOR, (uint64_t)(uintptr_t)x_out, (uint64_t)(uintptr_t)y_out); }
 static inline uint64_t icda_runtime_device(void) { return sys_call0(SYS_RUNTIME_DEVICE); }
-static inline uint64_t icda_http_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call5(SYS_HTTP_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
-static inline uint64_t icda_https_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call5(SYS_HTTPS_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_http_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call6(SYS_HTTP_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
+static inline uint64_t icda_https_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call6(SYS_HTTPS_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
 static inline uint64_t icda_dns_resolve(const char *host, uint32_t *ipv4_out) { return sys_call2(SYS_DNS_RESOLVE, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)ipv4_out); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
 

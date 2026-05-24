@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define BN_MAX_WORDS 64
+#define BN_MAX_WORDS 256
 #define BN_WORD_BITS 32
 
 typedef struct {

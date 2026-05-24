@@ -24,6 +24,7 @@
 #include "fs/ntfs.h"
 #include "fs/persistfs.h"
 #include "fs/vfs.h"
+#include "net/net.h"
 #include "syscall/syscall.h"
 #include "tty/tty.h"
 #include "cpu/multiboot2.h"

@@ -1,5 +1,4 @@
 #include "bn.h"
-
 void bn_zero(bn_t *a) {
     for (int i = 0; i < BN_MAX_WORDS; i++) a->d[i] = 0;
     a->len = 0;
@@ -93,65 +92,82 @@ void bn_mul(bn_t *r, const bn_t *a, const bn_t *b) {
     if (r->len == 0) r->len = 1;
 }
 
-static int bn_sub_mod_internal(uint64_t *a, const uint64_t *b, int words) {
-    uint64_t borrow = 0;
-    for (int i = 0; i < words; i++) {
-        uint64_t diff = a[i] - b[i] - borrow;
-        a[i] = diff & 0xFFFFFFFFULL;
-        borrow = (b[i] + borrow > a[i] + (borrow ? 0 : 0)) ? 1 : (diff >> 63);
-        if (i == 0) {
-            borrow = (b[0] > a[0]) ? 1 : 0;
-            a[0] = diff;
-        } else {
-            borrow = diff >> 63;
-        }
+static void bn_copy(bn_t *dst, const bn_t *src) {
+    bn_zero(dst);
+    for (int i = 0; i < src->len; i++) dst->d[i] = src->d[i];
+    dst->len = src->len;
+}
+
+static int bn_bit_length(const bn_t *a) {
+    uint32_t top;
+    int bits = 0;
+    if (!a || bn_is_zero(a)) return 0;
+    top = a->d[a->len - 1];
+    bits = (a->len - 1) * 32;
+    while (top) {
+        bits++;
+        top >>= 1;
     }
-    return (int)borrow;
+    return bits;
+}
+
+static void bn_shift_left_bits(bn_t *r, const bn_t *a, int bits) {
+    int word_shift;
+    int bit_shift;
+    uint32_t carry = 0;
+
+    bn_zero(r);
+    if (!a || bn_is_zero(a) || bits < 0) {
+        bn_from_uint32(r, 0);
+        return;
+    }
+
+    word_shift = bits / 32;
+    bit_shift = bits % 32;
+    if (word_shift >= BN_MAX_WORDS) {
+        bn_from_uint32(r, 0);
+        return;
+    }
+
+    for (int i = 0; i < a->len; i++) {
+        uint64_t value = ((uint64_t)a->d[i] << bit_shift) | carry;
+        int out_idx = i + word_shift;
+        if (out_idx < BN_MAX_WORDS) r->d[out_idx] = (uint32_t)(value & 0xFFFFFFFFULL);
+        carry = (uint32_t)(value >> 32);
+    }
+    r->len = a->len + word_shift;
+    if (carry && r->len < BN_MAX_WORDS) {
+        r->d[r->len++] = carry;
+    }
+    while (r->len > 1 && r->d[r->len - 1] == 0) r->len--;
 }
 
 void bn_mod(bn_t *r, const bn_t *a, const bn_t *m) {
-    bn_t tmp;
-    bn_zero(&tmp);
     if (bn_is_zero(m) || bn_cmp(a, m) < 0) {
         for (int i = 0; i < a->len; i++) r->d[i] = a->d[i];
         r->len = a->len;
         if (r->len == 0) { r->len = 1; r->d[0] = 0; }
         return;
     }
-    for (int i = 0; i < a->len; i++) tmp.d[i] = a->d[i];
-    tmp.len = a->len;
 
-    bn_t divisor;
-    bn_zero(&divisor);
-    for (int i = 0; i < m->len; i++) divisor.d[i] = m->d[i];
-    divisor.len = m->len;
+    bn_t tmp;
+    bn_copy(&tmp, a);
 
-    while (bn_cmp(&tmp, &divisor) >= 0) {
+    while (bn_cmp(&tmp, m) >= 0) {
         bn_t shifted;
-        bn_zero(&shifted);
-        int shift = tmp.len - divisor.len;
-        if (shift > 0) {
-            for (int i = 0; i < divisor.len; i++) shifted.d[i + shift] = divisor.d[i];
-            shifted.len = divisor.len + shift;
-            if (bn_cmp(&tmp, &shifted) < 0 && shift > 0) {
-                bn_zero(&shifted);
-                shift--;
-                for (int i = 0; i < divisor.len; i++) shifted.d[i + shift] = divisor.d[i];
-                shifted.len = divisor.len + shift;
-            }
-        } else {
-            for (int i = 0; i < divisor.len; i++) shifted.d[i] = divisor.d[i];
-            shifted.len = divisor.len;
+        int shift = bn_bit_length(&tmp) - bn_bit_length(m);
+        bn_shift_left_bits(&shifted, m, shift);
+        if (bn_cmp(&tmp, &shifted) < 0 && shift > 0) {
+            bn_shift_left_bits(&shifted, m, shift - 1);
         }
-        bn_t result;
-        bn_zero(&result);
-        bn_sub(&result, &tmp, &shifted);
-        for (int i = 0; i < result.len; i++) tmp.d[i] = result.d[i];
-        tmp.len = result.len;
+        {
+            bn_t result;
+            bn_sub(&result, &tmp, &shifted);
+            bn_copy(&tmp, &result);
+        }
     }
 
-    for (int i = 0; i < tmp.len; i++) r->d[i] = tmp.d[i];
-    r->len = tmp.len;
+    bn_copy(r, &tmp);
     if (r->len == 0) { r->len = 1; r->d[0] = 0; }
 }
 
@@ -174,13 +190,11 @@ void bn_mod_exp(bn_t *r, const bn_t *a, const bn_t *e, const bn_t *m) {
         bn_t sq;
         bn_mul(&sq, &base, &base);
         bn_mod(&base, &sq, m);
-        uint64_t borrow = 1;
-        uint32_t *ed = exp.d;
-        int ewords = exp.len;
-        for (int i = 0; i < ewords && borrow; i++) {
-            uint64_t v = (uint64_t)ed[i] - borrow;
-            ed[i] = (uint32_t)(v & 0xFFFFFFFFULL);
-            borrow = v >> 63;
+        uint32_t carry = 0;
+        for (int i = exp.len - 1; i >= 0; i--) {
+            uint64_t v = ((uint64_t)carry << 32) | exp.d[i];
+            exp.d[i] = (uint32_t)(v >> 1);
+            carry = (uint32_t)(v & 1);
         }
         while (exp.len > 0 && exp.d[exp.len - 1] == 0) exp.len--;
         if (exp.len == 0) exp.len = 1;
