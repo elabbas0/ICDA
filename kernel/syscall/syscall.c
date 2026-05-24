@@ -728,12 +728,12 @@ static uint64_t sys_audio_finish(uint64_t token) {
     return 0;
 }
 
-static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
     uint64_t bytes = 0;
-    if (!path || !out_path) {
+    if (!host || !path || !out_path) {
         return (uint64_t)-1;
     }
-    if (net_http_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, path, out_path, &bytes) != 0) {
+    if (net_http_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, host, path, out_path, &bytes) != 0) {
         return (uint64_t)(-(int64_t)net_last_error());
     }
     if (bytes_out) {
@@ -742,12 +742,12 @@ static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char 
     return 0;
 }
 
-static uint64_t sys_https_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *path, const char *out_path, uint64_t *bytes_out) {
+static uint64_t sys_https_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
     uint64_t bytes = 0;
-    if (!path || !out_path) {
+    if (!host || !path || !out_path) {
         return (uint64_t)-1;
     }
-    if (net_https_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, path, out_path, &bytes) != 0) {
+    if (net_https_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, host, path, out_path, &bytes) != 0) {
         return (uint64_t)(-(int64_t)net_last_error());
     }
     if (bytes_out) {
@@ -1046,7 +1046,8 @@ uint64_t syscall_dispatch(struct registers *regs) {
                                      regs->rsi,
                                      (const char *)(uintptr_t)regs->rdx,
                                      (const char *)(uintptr_t)regs->r10,
-                                     (uint64_t *)(uintptr_t)regs->r8);
+                                     (const char *)(uintptr_t)regs->r8,
+                                     (uint64_t *)(uintptr_t)regs->r9);
         case SYS_DNS_RESOLVE:
             return sys_dns_resolve((const char *)(uintptr_t)regs->rdi,
                                    (uint32_t *)(uintptr_t)regs->rsi);
@@ -1055,7 +1056,8 @@ uint64_t syscall_dispatch(struct registers *regs) {
                                       regs->rsi,
                                       (const char *)(uintptr_t)regs->rdx,
                                       (const char *)(uintptr_t)regs->r10,
-                                      (uint64_t *)(uintptr_t)regs->r8);
+                                      (const char *)(uintptr_t)regs->r8,
+                                      (uint64_t *)(uintptr_t)regs->r9);
         default:
             return (uint64_t)-1;
     }

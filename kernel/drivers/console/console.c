@@ -235,6 +235,31 @@ void console_set_cursor(int x, int y) {
     }
     vga_set_cursor_pos(x, y);
     console_refresh_overlay();
+    if (serial_device && console_serial_mirror_enabled) {
+        char buf[32];
+        int n = 0;
+        buf[n++] = 27;
+        buf[n++] = '[';
+        if (y > 0) {
+            int yy = y + 1;
+            char ys[8];
+            int yi = 0;
+            while (yy) { ys[yi++] = (char)('0' + (yy % 10)); yy /= 10; }
+            while (yi) buf[n++] = ys[--yi];
+        }
+        buf[n++] = ';';
+        if (x > 0) {
+            int xx = x + 1;
+            char xs[8];
+            int xi = 0;
+            while (xx) { xs[xi++] = (char)('0' + (xx % 10)); xx /= 10; }
+            while (xi) buf[n++] = xs[--xi];
+        }
+        buf[n++] = 'H';
+        buf[n] = 0;
+        const serial_device_ops_t *serial_ops = (const serial_device_ops_t *)serial_device->ops;
+        serial_ops->write(serial_device->context, buf);
+    }
 }
 
 void console_get_cursor(int *x_out, int *y_out) {

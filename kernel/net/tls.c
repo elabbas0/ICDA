@@ -23,12 +23,28 @@
 #define TLS_HANDSHAKE_CLIENT_KEY_EXCHANGE 16
 #define TLS_HANDSHAKE_FINISHED          20
 
+#define TLS_CIPHER_RSA_AES128_CBC_SHA    0x002F
 #define TLS_CIPHER_RSA_AES128_CBC_SHA256 0x003C
 
 #define TLS_ALERT_LEVEL_FATAL 2
 #define TLS_ALERT_DESC_HANDSHAKE_FAILURE 40
+#define TLS_ALERT_DESC_INSUFFICIENT_SECURITY 71
+#define TLS_ALERT_DESC_ILLEGAL_PARAMETER 47
+#define TLS_ALERT_DESC_DECODE_ERROR 50
+#define TLS_ALERT_DESC_PROTOCOL_VERSION 70
+#define TLS_ALERT_DESC_INTERNAL_ERROR 80
+#define TLS_ALERT_DESC_UNRECOGNIZED_NAME 112
+#define TLS_ALERT_DESC_BAD_CERTIFICATE 42
+#define TLS_ALERT_DESC_UNSUPPORTED_CERTIFICATE 43
+#define TLS_ALERT_DESC_CERTIFICATE_UNKNOWN 46
+#define TLS_ALERT_DESC_DECRYPT_ERROR 51
+#define TLS_ALERT_DESC_UNEXPECTED_MESSAGE 10
+#define TLS_ALERT_DESC_RECORD_OVERFLOW 22
 
-static uint8_t tls_mac_key_len = 32;
+typedef enum {
+    TLS_MAC_SHA1 = 1,
+    TLS_MAC_SHA256 = 2,
+} tls_mac_alg_t;
 
 typedef struct {
     uint8_t type;
@@ -66,6 +82,10 @@ struct tls_conn {
     uint8_t server_enc_key[16];
     uint8_t client_enc_expanded[176];
     uint8_t server_enc_expanded[176];
+    uint16_t cipher_suite;
+    uint8_t mac_key_len;
+    uint8_t mac_len;
+    tls_mac_alg_t mac_alg;
 
     sha256_ctx_t handshake_hash;
     int handshake_done;
@@ -76,7 +96,7 @@ struct tls_conn {
     uint8_t enc_client;
     uint8_t enc_server;
 
-    uint8_t rx_buf[TLS_CAP];
+    uint8_t rx_buf[TLS_RECORD_CAP];
     uint32_t rx_len;
     uint32_t rx_offset;
 
@@ -84,10 +104,29 @@ struct tls_conn {
     uint32_t tx_len;
 };
 
+static uint16_t tls_next_src_port = 45000;
+
 static void tls_log(const char *msg) {
-    console_write("[tls] ", CONSOLE_STYLE_MUTED);
-    console_write(msg, CONSOLE_STYLE_INFO);
-    console_write("\n", CONSOLE_STYLE_INFO);
+    (void)msg;
+}
+
+static uint16_t tls_alloc_src_port(void) {
+    uint16_t port = tls_next_src_port++;
+    if (tls_next_src_port < 45000 || tls_next_src_port >= 60000) {
+        tls_next_src_port = 45000;
+    }
+    return port;
+}
+
+static void tls_hmac(const uint8_t *key, uint32_t key_len,
+                     tls_mac_alg_t alg,
+                     const uint8_t *data, uint32_t data_len,
+                     uint8_t *out) {
+    if (alg == TLS_MAC_SHA1) {
+        hmac_sha1(key, key_len, data, data_len, out);
+    } else {
+        hmac_sha256(key, key_len, data, data_len, out);
+    }
 }
 
 static uint16_t r16(const uint8_t *p) {
@@ -170,13 +209,15 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
         hmac_in[hi++] = (uint8_t)(len >> 8);
         hmac_in[hi++] = (uint8_t)(len & 0xFF);
         for (int i = 0; i < len; i++) hmac_in[hi++] = data[i];
-        hmac_sha256(conn->client_write_mac_key, tls_mac_key_len, hmac_in, hi, mac_buf);
+        tls_hmac(conn->client_write_mac_key, conn->mac_key_len, conn->mac_alg, hmac_in, hi, mac_buf);
 
         for (int i = 0; i < len; i++) plaintext[i] = data[i];
-        for (int i = 0; i < 32; i++) plaintext[len + i] = mac_buf[i];
-        pt_len = len + 32;
+        for (int i = 0; i < conn->mac_len; i++) plaintext[len + i] = mac_buf[i];
+        pt_len = len + conn->mac_len;
 
-        int pad_len = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
+        int pad_plus_one = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
+        if (pad_plus_one == 0) pad_plus_one = AES_BLOCK_SIZE;
+        int pad_len = pad_plus_one - 1;
         for (int i = 0; i <= pad_len; i++) plaintext[pt_len + i] = (uint8_t)pad_len;
         pt_len += pad_len + 1;
 
@@ -272,7 +313,7 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
         if (pkt.flags & 0x04U) return -2;
         if (pkt.payload_len && pkt.seq == conn->tcp_ack) {
             uint32_t copy = pkt.payload_len;
-            if (conn->rx_len + copy > TLS_CAP) copy = (uint32_t)(TLS_CAP - conn->rx_len);
+            if (conn->rx_len + copy > TLS_RECORD_CAP) copy = (uint32_t)(TLS_RECORD_CAP - conn->rx_len);
             for (uint32_t i = 0; i < copy; i++) conn->rx_buf[conn->rx_len + i] = pkt.payload[i];
             conn->rx_len += copy;
             conn->tcp_ack += pkt.payload_len;
@@ -299,6 +340,7 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
             at->data_offset = (uint8_t)(sizeof(tcp_hdr_t) / 4U) << 4;
             at->flags = TCP_FLAG_ACK;
             at->window_be = htons16(4096);
+            at->checksum_be = htons16(tcp_checksum(ai, at, 0, 0));
             e1000_send_frame(ack_frame, sizeof(ack_frame));
             return 1;
         }
@@ -310,7 +352,7 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
     return 0;
 }
 
-static int tls_decrypt_record(tls_conn_t *conn, uint8_t *data, uint16_t len, uint8_t *out, uint16_t *out_len) {
+static int tls_decrypt_record(tls_conn_t *conn, uint8_t record_type, uint8_t *data, uint16_t len, uint8_t *out, uint16_t *out_len) {
     if (len < 16) return -1;
     uint8_t iv[AES_BLOCK_SIZE];
     for (int i = 0; i < 16; i++) iv[i] = data[i];
@@ -324,9 +366,15 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t *data, uint16_t len, uin
     aes128_cbc_decrypt(conn->server_enc_expanded, iv, ciphertext, ct_len, plaintext);
 
     int pad_len = plaintext[ct_len - 1];
-    if (pad_len > ct_len) { kfree(plaintext); return -1; }
+    if (pad_len < 0 || pad_len >= ct_len) { kfree(plaintext); return -1; }
+    for (int i = 0; i <= pad_len; i++) {
+        if (plaintext[ct_len - 1 - i] != (uint8_t)pad_len) {
+            kfree(plaintext);
+            return -1;
+        }
+    }
 
-    int content_len = ct_len - pad_len - 1 - 32;
+    int content_len = ct_len - pad_len - 1 - conn->mac_len;
     if (content_len < 0) { kfree(plaintext); return -1; }
 
     uint8_t seq_buf[8];
@@ -335,7 +383,7 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t *data, uint16_t len, uin
     uint8_t hmac_data[8 + 1 + 2 + 2 + TLS_CAP];
     int hi = 0;
     for (int i = 0; i < 8; i++) hmac_data[hi++] = seq_buf[i];
-    hmac_data[hi++] = TLS_CONTENT_APPLICATION_DATA;
+    hmac_data[hi++] = record_type;
     hmac_data[hi++] = TLS_VERSION_MAJOR;
     hmac_data[hi++] = TLS_VERSION_MINOR;
     hmac_data[hi++] = (uint8_t)(content_len >> 8);
@@ -343,11 +391,11 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t *data, uint16_t len, uin
     for (int i = 0; i < content_len; i++) hmac_data[hi++] = plaintext[i];
 
     uint8_t computed_mac[32];
-    hmac_sha256(conn->server_write_mac_key, 32, hmac_data, hi, computed_mac);
+    tls_hmac(conn->server_write_mac_key, conn->mac_key_len, conn->mac_alg, hmac_data, hi, computed_mac);
 
     uint8_t *received_mac = plaintext + content_len;
     int mac_ok = 1;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < conn->mac_len; i++) {
         if (computed_mac[i] != received_mac[i]) mac_ok = 0;
     }
 
@@ -372,7 +420,7 @@ static int tls_parse_record(tls_conn_t *conn, uint8_t *content_type, uint8_t *pa
         if (conn->enc_server && rtype != TLS_CONTENT_CHANGE_CIPHER_SPEC) {
             uint8_t decrypted[TLS_CAP];
             uint16_t dlen = 0;
-            if (tls_decrypt_record(conn, rdata, rlen, decrypted, &dlen) == 0) {
+            if (tls_decrypt_record(conn, rtype, rdata, rlen, decrypted, &dlen) == 0) {
                 *content_type = rtype;
                 for (int i = 0; i < dlen; i++) payload[i] = decrypted[i];
                 *payload_len = dlen;
@@ -391,7 +439,7 @@ static int tls_parse_record(tls_conn_t *conn, uint8_t *content_type, uint8_t *pa
     return 0;
 }
 
-int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
+int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *server_name) {
     tls_conn_t *conn = (tls_conn_t *)kmalloc(sizeof(tls_conn_t));
     if (!conn) return -1;
     for (uint64_t i = 0; i < sizeof(tls_conn_t); i++) ((uint8_t*)conn)[i] = 0;
@@ -405,7 +453,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
 
     conn->dst_ip = ip;
     conn->dst_port = port;
-    conn->src_port = 40001;
+    conn->src_port = tls_alloc_src_port();
     conn->tcp_seq = 0x12345679;
 
     tls_log("tcp connecting...");
@@ -426,6 +474,10 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
     tls_log("tcp connected, starting handshake");
 
     sha256_init(&conn->handshake_hash);
+    conn->cipher_suite = TLS_CIPHER_RSA_AES128_CBC_SHA256;
+    conn->mac_alg = TLS_MAC_SHA256;
+    conn->mac_key_len = 32;
+    conn->mac_len = 32;
 
     uint8_t ch[TLS_CAP];
     int ch_len = 0;
@@ -438,14 +490,75 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
         ch[ch_len++] = conn->client_random[i];
     }
     ch[ch_len++] = 0;
-    ch[ch_len++] = 2;
+    ch[ch_len++] = 0;
+    ch[ch_len++] = 6;
     ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA256 >> 8);
     ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA256 & 0xFF);
+    ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA >> 8);
+    ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA & 0xFF);
+    ch[ch_len++] = 0x00;
+    ch[ch_len++] = 0xFF; /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV */
     ch[ch_len++] = 1;
     ch[ch_len++] = 0;
 
+    {
+        uint16_t ext_len_off = (uint16_t)ch_len;
+        uint16_t ext_total = 0;
+        ch[ch_len++] = 0;
+        ch[ch_len++] = 0;
+
+        if (server_name && server_name[0]) {
+            uint16_t host_len = 0;
+            while (server_name[host_len] && host_len < 255) host_len++;
+            if (host_len > 0) {
+                ch[ch_len++] = 0x00;
+                ch[ch_len++] = 0x00;
+                ch[ch_len++] = (uint8_t)((5 + host_len) >> 8);
+                ch[ch_len++] = (uint8_t)((5 + host_len) & 0xFF);
+                ch[ch_len++] = (uint8_t)((3 + host_len) >> 8);
+                ch[ch_len++] = (uint8_t)((3 + host_len) & 0xFF);
+                ch[ch_len++] = 0x00;
+                ch[ch_len++] = (uint8_t)(host_len >> 8);
+                ch[ch_len++] = (uint8_t)(host_len & 0xFF);
+                for (uint16_t i = 0; i < host_len; i++) ch[ch_len++] = (uint8_t)server_name[i];
+            }
+        }
+
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x0d;
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x0a;
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x08;
+        ch[ch_len++] = 0x04; ch[ch_len++] = 0x01; // rsa_pkcs1_sha256
+        ch[ch_len++] = 0x05; ch[ch_len++] = 0x01; // rsa_pkcs1_sha384
+        ch[ch_len++] = 0x06; ch[ch_len++] = 0x01; // rsa_pkcs1_sha512
+        ch[ch_len++] = 0x02; ch[ch_len++] = 0x01; // rsa_pkcs1_sha1
+
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x0a;
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x08;
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x06;
+        ch[ch_len++] = 0x00; ch[ch_len++] = 0x17; // secp256r1
+        ch[ch_len++] = 0x00; ch[ch_len++] = 0x18; // secp384r1
+        ch[ch_len++] = 0x00; ch[ch_len++] = 0x19; // secp521r1
+
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x0b;
+        ch[ch_len++] = 0x00;
+        ch[ch_len++] = 0x02;
+        ch[ch_len++] = 0x01;
+        ch[ch_len++] = 0x00; // uncompressed EC point format
+
+        ext_total = (uint16_t)(ch_len - ext_len_off - 2);
+        ch[ext_len_off] = (uint8_t)(ext_total >> 8);
+        ch[ext_len_off + 1] = (uint8_t)(ext_total & 0xFF);
+    }
+
     tls_log("sending client hello...");
-    if (tls_send_handshake(conn, TLS_HANDSHAKE_CLIENT_HELLO, ch + 2, ch_len - 2) != 0) {
+    if (tls_send_handshake(conn, TLS_HANDSHAKE_CLIENT_HELLO, ch, ch_len) != 0) {
         kfree(conn);
         return -1;
     }
@@ -471,42 +584,81 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
             if (ret <= 0) break;
 
             if (ctype == TLS_CONTENT_HANDSHAKE) {
-                uint8_t ht = payload[0];
-                uint32_t hs_len = r24(payload + 1);
-                uint8_t *hs_data = payload + 4;
-
-                sha256_update(&conn->handshake_hash, payload, 4 + hs_len);
-
-                if (ht == TLS_HANDSHAKE_SERVER_HELLO) {
-                    conn->server_random[0] = TLS_VERSION_MAJOR;
-                    conn->server_random[1] = TLS_VERSION_MINOR;
-                    for (int i = 0; i < 32 && i + 2 < (int)hs_len; i++) conn->server_random[i] = hs_data[2 + i];
-                    tls_log("got server hello");
-                } else if (ht == TLS_HANDSHAKE_CERTIFICATE) {
-                    tls_log("got certificate");
-                    int cert_list_len = r24(hs_data);
-                    (void)cert_list_len;
-                    int offset = 3;
-                    if (offset + 3 <= (int)hs_len) {
-                        int cert_len = r24(hs_data + offset);
-                        offset += 3;
-                        if (offset + cert_len <= (int)hs_len) {
-                            if (rsa_pubkey_from_der(hs_data + offset, cert_len, &server_key) != 0) {
-                                tls_log("cert parse failed");
-                                kfree(conn);
-                                return -1;
-                            }
-                            tls_log("rsa key extracted from cert");
-                        }
+                uint32_t off = 0;
+                while (off + 4 <= plen) {
+                    uint8_t ht = payload[off];
+                    uint32_t hs_len = r24(payload + off + 1);
+                    uint8_t *hs_data = payload + off + 4;
+                    if (off + 4 + hs_len > plen) {
+                        tls_log("truncated handshake record");
+                        kfree(conn);
+                        return -1;
                     }
-                } else if (ht == TLS_HANDSHAKE_SERVER_HELLO_DONE) {
-                    tls_log("server hello done");
-                    server_done = 1;
+
+                    sha256_update(&conn->handshake_hash, payload + off, 4 + hs_len);
+
+                    if (ht == TLS_HANDSHAKE_SERVER_HELLO) {
+                        conn->server_random[0] = TLS_VERSION_MAJOR;
+                        conn->server_random[1] = TLS_VERSION_MINOR;
+                        for (int i = 0; i < 32 && i + 2 < (int)hs_len; i++) conn->server_random[i] = hs_data[2 + i];
+                        if (hs_len >= 38) {
+                            uint8_t sid_len = hs_data[34];
+                            if ((uint32_t)(35 + sid_len + 2) <= hs_len) {
+                                conn->cipher_suite = r16(hs_data + 35 + sid_len);
+                                if (conn->cipher_suite == TLS_CIPHER_RSA_AES128_CBC_SHA) {
+                                    conn->mac_alg = TLS_MAC_SHA1;
+                                    conn->mac_key_len = 20;
+                                    conn->mac_len = 20;
+                                } else {
+                                    conn->mac_alg = TLS_MAC_SHA256;
+                                    conn->mac_key_len = 32;
+                                    conn->mac_len = 32;
+                                }
+                            }
+                        }
+                        tls_log("got server hello");
+                    } else if (ht == TLS_HANDSHAKE_CERTIFICATE) {
+                        tls_log("got certificate");
+                        int cert_list_len = r24(hs_data);
+                        (void)cert_list_len;
+                        int offset = 3;
+                        if (offset + 3 <= (int)hs_len) {
+                            int cert_len = r24(hs_data + offset);
+                            offset += 3;
+                            if (offset + cert_len <= (int)hs_len) {
+                                if (rsa_pubkey_from_cert_der(hs_data + offset, cert_len, &server_key) != 0) {
+                                    tls_log("cert parse failed");
+                                    kfree(conn);
+                                    return -1;
+                                }
+                                tls_log("rsa key extracted from cert");
+                            }
+                        }
+                    } else if (ht == TLS_HANDSHAKE_SERVER_HELLO_DONE) {
+                        tls_log("server hello done");
+                        server_done = 1;
+                    } else {
+                        console_write("[tls] hs type=", CONSOLE_STYLE_MUTED);
+                        console_write_dec64(ht, CONSOLE_STYLE_INFO);
+                        console_write(" len=", CONSOLE_STYLE_MUTED);
+                        console_write_dec64(hs_len, CONSOLE_STYLE_INFO);
+                        console_write("\n", CONSOLE_STYLE_INFO);
+                    }
+
+                    off += 4 + hs_len;
                 }
             } else if (ctype == TLS_CONTENT_ALERT) {
-                tls_log("received alert");
-                kfree(conn);
-                return -1;
+                int alert_level = payload[0];
+                int alert_desc = payload[1];
+                console_write("[tls] alert level=", CONSOLE_STYLE_WARN);
+                console_write_dec64(alert_level, CONSOLE_STYLE_WARN);
+                console_write(" desc=", CONSOLE_STYLE_WARN);
+                console_write_dec64(alert_desc, CONSOLE_STYLE_WARN);
+                console_write("\n", CONSOLE_STYLE_WARN);
+                if (alert_level == TLS_ALERT_LEVEL_FATAL) {
+                    kfree(conn);
+                    return -1;
+                }
             }
         }
     }
@@ -555,16 +707,18 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
     for (int i = 0; i < 32; i++) key_seed[i] = conn->server_random[i];
     for (int i = 0; i < 32; i++) key_seed[32 + i] = conn->client_random[i];
 
-    uint8_t key_block[104];
-    tls_prf(conn->master_secret, 48, "key expansion", key_seed, 64, key_block, 104);
+    uint8_t key_block[128];
+    uint32_t key_block_len = (uint32_t)(conn->mac_key_len * 2 + 16 + 16 + 4 + 4);
+    uint32_t kb = 0;
+    tls_prf(conn->master_secret, 48, "key expansion", key_seed, 64, key_block, (int)key_block_len);
 
-    for (int i = 0; i < 32; i++) conn->client_write_mac_key[i] = key_block[i];
-    for (int i = 0; i < 32; i++) conn->server_write_mac_key[i] = key_block[32 + i];
-    for (int i = 0; i < 16; i++) conn->client_write_key[i] = key_block[64 + i];
-    for (int i = 0; i < 16; i++) conn->server_write_key[i] = key_block[80 + i];
+    for (uint32_t i = 0; i < conn->mac_key_len; i++) conn->client_write_mac_key[i] = key_block[kb++];
+    for (uint32_t i = 0; i < conn->mac_key_len; i++) conn->server_write_mac_key[i] = key_block[kb++];
+    for (int i = 0; i < 16; i++) conn->client_write_key[i] = key_block[kb++];
+    for (int i = 0; i < 16; i++) conn->server_write_key[i] = key_block[kb++];
     for (int i = 0; i < 4; i++) {
-        conn->client_write_iv[i] = key_block[96 + i];
-        conn->server_write_iv[i] = key_block[100 + i];
+        conn->client_write_iv[i] = key_block[kb++];
+        conn->server_write_iv[i] = key_block[kb++];
     }
     for (int i = 0; i < 16; i++) {
         conn->client_write_iv[i + 4] = 0;
@@ -605,11 +759,19 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port) {
                 tls_log("server ccs received");
                 conn->enc_server = 1;
             } else if (sct == TLS_CONTENT_HANDSHAKE) {
-                if (sp[0] == TLS_HANDSHAKE_FINISHED) {
-                    tls_log("handshake complete!");
-                    server_finished_ok = 1;
-                    break;
+                uint32_t off = 0;
+                while (off + 4 <= sp_len) {
+                    uint8_t ht = sp[off];
+                    uint32_t hs_len = r24(sp + off + 1);
+                    if (off + 4 + hs_len > sp_len) break;
+                    if (ht == TLS_HANDSHAKE_FINISHED) {
+                        tls_log("handshake complete!");
+                        server_finished_ok = 1;
+                        break;
+                    }
+                    off += 4 + hs_len;
                 }
+                if (server_finished_ok) break;
             }
         }
     }

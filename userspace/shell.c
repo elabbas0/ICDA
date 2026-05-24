@@ -262,18 +262,16 @@ static void shell_curl(const char *arg) {
     }
     out_path[j] = 0;
 
-    if (!url[0] || !out_path[0]) {
-        icda_write("usage: curl <http://host[:port]/path> <out-path>\n");
-        return;
-    }
-    if (shell_resolve_path(out_path, resolved, sizeof(resolved)) != 0) {
-        icda_write("curl: bad output path\n");
-        return;
-    }
     request[0] = 0;
     append_text(request, url, sizeof(request));
-    append_text(request, "\n", sizeof(request));
-    append_text(request, resolved, sizeof(request));
+    if (out_path[0]) {
+        if (shell_resolve_path(out_path, resolved, sizeof(resolved)) != 0) {
+            icda_write("curl: bad output path\n");
+            return;
+        }
+        append_text(request, "\n", sizeof(request));
+        append_text(request, resolved, sizeof(request));
+    }
     shell_launch_foreground_request(SHELL_CURL_REQUEST_PATH, request, "/apps/curl.app", "usage: curl <http://host[:port]/path> <out-path>\n", 0);
 }
 
@@ -393,11 +391,15 @@ static void shell_render_line(const char *line, uint64_t len, uint64_t cursor, u
 }
 
 static void shell_cursor_show(int *visible) {
-    (void)visible;
+    if (!*visible) {
+        *visible = 1;
+    }
 }
 
 static void shell_cursor_hide(int *visible) {
-    (void)visible;
+    if (*visible) {
+        *visible = 0;
+    }
 }
 
 static long shell_wait_key_byte(uint64_t timeout_ticks) {

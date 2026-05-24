@@ -49,7 +49,9 @@
 
 #define NET_LOCAL_IP               0x0F02000AU // 10.0.2.15 little-endian host order
 #define NET_GATEWAY_IP             0x0202000AU // 10.0.2.2
-#define NET_DNS_IP                 0x01010101U // 1.1.1.1
+#define NET_DNS_IP                 0x0302000AU // 10.0.2.3
+#define NET_DNS_IP_ALT1            0x08080808U // 8.8.8.8
+#define NET_DNS_IP_ALT2            0x01010101U // 1.1.1.1
 #define NET_NETMASK                0x00FFFFFFU // 255.255.255.0
 
 // packet structures
@@ -187,7 +189,7 @@ int net_init(void);
 int net_ready(void);
 uint32_t net_last_error(void);
 int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out);
-int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const char *out_path, uint64_t *bytes_out);
-int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *path, const char *out_path, uint64_t *bytes_out);
+int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out);
+int net_https_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out);
 
 #endif

@@ -1,5 +1,5 @@
 #include "rsa.h"
-
+#include "../proc/sched.h"
 static int der_read_tag(const uint8_t *der, int der_len, int *pos, uint8_t *tag, int *len) {
     if (*pos >= der_len) return -1;
     *tag = der[(*pos)++];
@@ -65,6 +65,65 @@ static int der_find_in_sequence(const uint8_t *der, int der_len, int *pos, uint8
     return -1;
 }
 
+int rsa_pubkey_from_cert_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
+    int pos = 0;
+    uint8_t tag;
+    int len;
+
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    int cert_end = pos + len;
+
+    if (pos >= cert_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    int tbs_end = pos + len;
+
+    if (pos < tbs_end && der[pos] == 0xA0) {
+        if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+        pos += len;
+    }
+
+    if (pos >= tbs_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x02) return -1;
+    pos += len;
+
+    if (pos >= tbs_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    pos += len;
+
+    if (pos >= tbs_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    pos += len;
+
+    if (pos >= tbs_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    pos += len;
+
+    if (pos >= tbs_end) return -1;
+    if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+    if (tag != 0x30) return -1;
+    pos += len;
+
+    while (pos < tbs_end) {
+        uint8_t next = der[pos];
+        if (next == 0xA1 || next == 0xA2 || next == 0xA3) {
+            if (der_read_tag(der, der_len, &pos, &tag, &len) != 0) return -1;
+            pos += len;
+        } else {
+            break;
+        }
+    }
+
+    if (pos > tbs_end) return -1;
+    if (pos >= tbs_end) return -1;
+    return rsa_pubkey_from_der(der + pos, tbs_end - pos, key);
+}
+
 int rsa_pubkey_from_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
     int pos = 0;
     uint8_t tag;
@@ -117,8 +176,17 @@ int rsa_pubkey_from_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
     int e_start = rpos;
     int e_len = rlen;
 
-    bn_from_bytes(&key->n, der + n_start, n_len);
-    bn_from_bytes(&key->e, der + e_start, e_len);
+    while (n_len > 1 && der[n_start] == 0x00) {
+        n_start++;
+        n_len--;
+    }
+    while (e_len > 1 && der[e_start] == 0x00) {
+        e_start++;
+        e_len--;
+    }
+
+    if (bn_from_bytes(&key->n, der + n_start, n_len) != 0) return -1;
+    if (bn_from_bytes(&key->e, der + e_start, e_len) != 0) return -1;
 
     return 0;
 }
@@ -132,7 +200,13 @@ static int pkcs1_v15_pad(const uint8_t *in, int in_len, uint8_t *out, int out_le
         if (type == 0x01) {
             out[2 + i] = 0xFF;
         } else {
-            out[2 + i] = 0;
+            uint8_t v = 0;
+            uint32_t seed = 0xA5A50000U ^ (uint32_t)(sched_ticks() + i * 73U);
+            while (v == 0) {
+                seed = seed * 1664525U + 1013904223U;
+                v = (uint8_t)((seed >> 16) & 0xFFU);
+            }
+            out[2 + i] = v;
         }
     }
     out[2 + pad_len] = 0x00;
@@ -146,6 +220,7 @@ int rsa_pkcs1_v15_encode(const uint8_t *in, int in_len, uint8_t *out, int out_le
 
 int rsa_encrypt(const rsa_pubkey_t *key, const uint8_t *in, int in_len, uint8_t *out, int *out_len) {
     uint8_t padded[512];
+    uint8_t tmp_out[512];
     int mod_bytes = 0;
     bn_to_bytes(&key->n, padded, &mod_bytes);
 
@@ -155,6 +230,10 @@ int rsa_encrypt(const rsa_pubkey_t *key, const uint8_t *in, int in_len, uint8_t 
     bn_t m, c;
     bn_from_bytes(&m, padded, mod_bytes);
     bn_mod_exp(&c, &m, &key->e, &key->n);
-    bn_to_bytes(&c, out, out_len);
+    bn_to_bytes(&c, tmp_out, out_len);
+    if (*out_len > mod_bytes) return -1;
+    for (int i = 0; i < mod_bytes - *out_len; i++) out[i] = 0;
+    for (int i = 0; i < *out_len; i++) out[mod_bytes - *out_len + i] = tmp_out[i];
+    *out_len = mod_bytes;
     return 0;
 }

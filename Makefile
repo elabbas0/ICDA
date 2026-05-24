@@ -46,6 +46,9 @@ net.o: kernel/net/net.c kernel/net/net.h kernel/net/tls.h Makefile \
 sha256.o: kernel/crypto/sha256.c kernel/crypto/sha256.h
 	$(CC) $(CFLAGS) -c kernel/crypto/sha256.c -o sha256.o
 
+sha1.o: kernel/crypto/sha1.c kernel/crypto/sha1.h
+	$(CC) $(CFLAGS) -c kernel/crypto/sha1.c -o sha1.o
+
 aes.o: kernel/crypto/aes.c kernel/crypto/aes.h
 	$(CC) $(CFLAGS) -c kernel/crypto/aes.c -o aes.o
 
@@ -55,7 +58,7 @@ bn.o: kernel/crypto/bn.c kernel/crypto/bn.h
 rsa.o: kernel/crypto/rsa.c kernel/crypto/rsa.h kernel/crypto/bn.h
 	$(CC) $(CFLAGS) -c kernel/crypto/rsa.c -o rsa.o
 
-tls.o: kernel/net/tls.c kernel/net/tls.h kernel/crypto/sha256.h kernel/crypto/hmac.h kernel/crypto/aes.h kernel/crypto/rsa.h kernel/net/net.h
+tls.o: kernel/net/tls.c kernel/net/tls.h kernel/crypto/sha256.h kernel/crypto/sha1.h kernel/crypto/hmac.h kernel/crypto/aes.h kernel/crypto/rsa.h kernel/net/net.h
 	$(CC) $(CFLAGS) -c kernel/net/tls.c -o tls.o
 
 sb16.o: kernel/drivers/audio/sb16.c kernel/drivers/audio/sb16.h \
@@ -341,21 +344,21 @@ user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o aes.o bn.o rsa.o tls.o
+            sha256.o sha1.o aes.o bn.o rsa.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
-	      sha256.o aes.o bn.o rsa.o tls.o -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc
 
 kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o aes.o bn.o rsa.o tls.o
+            sha256.o sha1.o aes.o bn.o rsa.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
-	      sha256.o aes.o bn.o rsa.o tls.o -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
@@ -363,7 +366,8 @@ kernel.iso: kernel.bin
 	cp kernel.bin isodir/boot/kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkstandalone -O x86_64-efi -o isodir/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub.cfg"
-	grub-mkrescue -o kernel.iso isodir
+	grub-mkrescue -o /tmp/kernel.iso isodir
+	cp /tmp/kernel.iso $@
 
 kernel-usb.img: kernel.bin
 	mkdir -p usbroot/EFI/BOOT
