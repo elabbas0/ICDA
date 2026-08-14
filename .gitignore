@@ -64,6 +64,11 @@ kernel-usb.img
 isodir/
 usbroot/
 qemu-smoke.log
+kernel/install-kernel.bin
+kernel/fs/bootx64-install.efi
+
+# Freebuff app state
+.freebuff/
 userspace/ticker.icx
 icda-disk.img
 qemu-serial.log

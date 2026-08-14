@@ -3,7 +3,7 @@
 // ============================================================
 #define VGA_WIDTH    80
 #define VGA_HEIGHT   25
-#define VGA_MEMORY ((volatile char*)(unsigned long long)0xB8000)
+#define VGA_MEMORY ((volatile char*)(0xFFFF800000000000ULL + 0xB8000))
 
 #define VGA_BLACK        0x0
 #define VGA_BLUE         0x1

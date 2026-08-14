@@ -8,6 +8,7 @@
 #include "drivers/display/vga.h"
 #include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/input/mouse.h"
 #include "drivers/pci/pci.h"
 #include "drivers/net/e1000.h"
 #include "drivers/serial/serial.h"
@@ -236,6 +237,10 @@ void kernel_main(void *multiboot_info) {
     irq_register(1, keyboard_irq);
     irq_controller_unmask(1);
 
+    mouse_init();
+    irq_register(12, mouse_irq);
+    irq_controller_unmask(12);
+
     if (pci_init() == 0) {
         bootstage_set(12, "pci");
         boot_prefix("pci");
@@ -377,7 +382,10 @@ void kernel_main(void *multiboot_info) {
         bootstage_set(22, "shell");
         int shell_failures = 0;
         for (;;) {
-            int shell_rc = user_run_path("/apps/shell.app");
+            int shell_rc = user_run_path("/apps/wm.app");
+            if (shell_rc < 0) {
+                shell_rc = user_run_path("/apps/shell.app");
+            }
             if (shell_rc < 0) {
                 shell_failures++;
                 if (shell_failures < 3) {

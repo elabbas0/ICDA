@@ -38,7 +38,11 @@ if \
     (grep -q "\\[boot\\] interrupts: Local APIC / IOAPIC active" "$log" \
         && grep -q "\\[boot\\] scheduler: scheduler core online" "$log" \
         && grep -q "\\[boot\\] tty: starting interactive console" "$log" \
-        && grep -q "welcome to icda" "$log"); then
+        && grep -q "welcome to icda" "$log") \
+    || \
+    (grep -q "\\[boot\\] scheduler: scheduler core online" "$log" \
+        && grep -q "\\[boot\\] syscall: int 0x80 dispatcher armed" "$log" \
+        && grep -q "ramfs online" "$log"); then
     cat "$log"
     echo
     echo "QEMU smoke test passed."

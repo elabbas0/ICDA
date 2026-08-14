@@ -60,7 +60,18 @@ typedef enum {
     SYS_DNS_RESOLVE = 50,
     SYS_HTTPS_GET_IPV4 = 51,
     SYS_EXEC_ARGS = 52,
-    SYS_SPAWN_ARGS = 53
+    SYS_SPAWN_ARGS = 53,
+    /* IPC / GUI — added for desktop environment */
+    SYS_SHM_CREATE        = 54,
+    SYS_SHM_MAP           = 55,
+    SYS_SHM_UNMAP         = 56,
+    SYS_SHM_CLOSE         = 57,
+    SYS_MSG_OPEN          = 58,
+    SYS_MSG_SEND          = 59,
+    SYS_MSG_RECV          = 60,
+    SYS_MSG_POLL          = 61,
+    SYS_MAP_FRAMEBUFFER   = 62,
+    SYS_INPUT_READ_MOUSE  = 63
 } syscall_number_t;
 
 typedef struct {
@@ -85,6 +96,22 @@ typedef struct {
     uint64_t root_partition;
     int64_t swap_partition;
 } syscall_install_plan_t;
+
+typedef struct {
+    uint64_t virt_addr;  /* userspace VA of mapped framebuffer */
+    int32_t  width;
+    int32_t  height;
+    uint32_t pitch;      /* bytes per row */
+    uint32_t bpp;
+} syscall_fb_info_t;
+
+typedef struct {
+    int32_t  abs_x;
+    int32_t  abs_y;
+    int32_t  dx;
+    int32_t  dy;
+    uint8_t  buttons;    /* bit0=left, bit1=right, bit2=middle */
+} syscall_mouse_event_t;
 
 void syscall_init(void);
 uint64_t syscall_dispatch(struct registers *regs);
