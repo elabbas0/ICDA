@@ -245,7 +245,8 @@ int user_map_blob(process_t *proc, const void *blob, uint64_t size, uint64_t vir
         if (chunk > PAGE_SIZE_4K) {
             chunk = PAGE_SIZE_4K;
         }
-        if (vmm_map_page(proc->addr_space, virt_base + i * PAGE_SIZE_4K, phys, VMM_FLAGS_USER_RO) != 0) {
+        // ICX blobs need writable pages for .data/.bss sections
+        if (vmm_map_page(proc->addr_space, virt_base + i * PAGE_SIZE_4K, phys, VMM_FLAGS_USER_RW) != 0) {
             pmm_free(phys);
             return -1;
         }
@@ -383,10 +384,10 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
             if (ph[i].p_vaddr < min_vaddr) min_vaddr = ph[i].p_vaddr;
             if (ph[i].p_vaddr + ph[i].p_memsz > max_vaddr) max_vaddr = ph[i].p_vaddr + ph[i].p_memsz;
         }
-        if (min_vaddr == 0) {
-            load_bias = USER_TEXT_BASE;
-        }
-        while (max_vaddr > 0 && (load_bias + max_vaddr) >= USER_STACK_LIMIT) {
+        /* For ET_DYN, always apply the load bias so the binary maps at
+         * USER_TEXT_BASE regardless of its link-time p_vaddr. */
+        load_bias = USER_TEXT_BASE - min_vaddr;
+        if (max_vaddr > 0 && (load_bias + max_vaddr) >= USER_STACK_LIMIT) {
             return -1;
         }
     }
@@ -407,6 +408,56 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
     }
 
     if (!has_load) return -1;
+
+    /* Apply relocations for ET_DYN (PIE) binaries. The user-space .app files
+     * link as ET_EXEC and need none of this, but PIE ELFs do: -mcmodel=large
+     * emits absolute data pointers that only resolve once the load bias is
+     * added. Handle both DT_REL (implicit addend) and DT_RELA (explicit). */
+    if (eh->e_type == ET_DYN) {
+        uint64_t rel_off = 0;
+        uint64_t rel_sz = 0;
+        uint64_t rel_ent = 0;
+        for (uint16_t i = 0; i < eh->e_phnum; i++) {
+            if (ph[i].p_type != PT_DYNAMIC) continue;
+            const elf64_dyn_t *dyn = (const elf64_dyn_t *)((const char *)image + ph[i].p_offset);
+            uint64_t dyn_size = ph[i].p_filesz;
+            for (uint64_t j = 0; j < dyn_size / sizeof(elf64_dyn_t); j++) {
+                if (dyn[j].d_tag == DT_REL) rel_off = dyn[j].d_val;
+                else if (dyn[j].d_tag == DT_RELSZ) rel_sz = dyn[j].d_val;
+                else if (dyn[j].d_tag == DT_RELENT) rel_ent = dyn[j].d_val;
+            }
+            break;
+        }
+
+        /* Helper: kernel virtual pointer for a relocated user virtual address. */
+        if (rel_off && rel_sz && rel_ent) {
+            if (rel_ent == sizeof(elf64_rel_t)) {
+                uint64_t count = rel_sz / rel_ent;
+                const elf64_rel_t *rels = (const elf64_rel_t *)((const char *)image + rel_off);
+                for (uint64_t i = 0; i < count; i++) {
+                    uint64_t virt = rels[i].r_offset + load_bias;
+                    uint64_t phys = vmm_virt_to_phys(user_proc->addr_space, virt);
+                    if (!phys) continue;
+                    uint64_t *where = (uint64_t *)PHYS_TO_VIRT(phys);
+                    if (ELF64_R_TYPE(rels[i].r_info) == R_X86_64_RELATIVE) {
+                        *where += load_bias;
+                    }
+                }
+            } else if (rel_ent == sizeof(elf64_rela_t)) {
+                uint64_t count = rel_sz / rel_ent;
+                const elf64_rela_t *rels = (const elf64_rela_t *)((const char *)image + rel_off);
+                for (uint64_t i = 0; i < count; i++) {
+                    uint64_t virt = rels[i].r_offset + load_bias;
+                    uint64_t phys = vmm_virt_to_phys(user_proc->addr_space, virt);
+                    if (!phys) continue;
+                    uint64_t *where = (uint64_t *)PHYS_TO_VIRT(phys);
+                    if (ELF64_R_TYPE(rels[i].r_info) == R_X86_64_RELATIVE) {
+                        *where = (uint64_t)rels[i].r_addend + load_bias;
+                    }
+                }
+            }
+        }
+    }
 
     *entry_rip_out = eh->e_entry + load_bias;
     return 0;
@@ -448,6 +499,7 @@ static int user_load_image(process_t *user_proc, const void *image, uint64_t ima
         }
     }
 
+    console_write("user_load_image: unknown format\n", CONSOLE_STYLE_ERROR);
     return -1;
 }
 

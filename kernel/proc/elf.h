@@ -38,6 +38,31 @@
 #define DT_INIT 12
 #define DT_FINI 13
 #define DT_PLTGOT 3
+#define DT_REL   17
+#define DT_RELSZ 18
+#define DT_RELENT 19
+#define DT_RELA  7
+#define DT_RELASZ 8
+#define DT_RELAENT 9
+
+// x86-64 relocation types
+#define R_X86_64_64       1
+#define R_X86_64_RELATIVE 8
+
+/* ELF64 Rel (implicit addend) entry: 16 bytes */
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+} __attribute__((packed)) elf64_rel_t;
+
+/* ELF64 Rela (explicit addend) entry: 24 bytes */
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} __attribute__((packed)) elf64_rela_t;
+
+#define ELF64_R_TYPE(info) ((uint32_t)((info) & 0xFFFFFFFFULL))
 
 typedef struct {
     uint8_t  e_ident[16];

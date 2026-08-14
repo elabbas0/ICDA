@@ -4,6 +4,7 @@
 #include "../drivers/display/framebuffer.h"
 #include "../drivers/display/vga.h"
 #include "../drivers/input/input.h"
+#include "../drivers/input/mouse.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/audio/hda.h"
 #include "../drivers/audio/playback.h"
@@ -16,11 +17,17 @@
 #include "../fs/ntfs.h"
 #include "../fs/vfs.h"
 #include "../fs/persistfs.h"
+#include "../ipc/shm.h"
+#include "../ipc/msgq.h"
 #include "../proc/sched.h"
 #include "../proc/user.h"
 #include "../net/net.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
+
+/* Set to 1 once SYS_MAP_FRAMEBUFFER has been claimed */
+static int fb_claimed = 0;
+
 
 
 static int str_eq(const char *a, const char *b) {
@@ -1086,6 +1093,69 @@ uint64_t syscall_dispatch(struct registers *regs) {
                                       (const char *)(uintptr_t)regs->r10,
                                       (const char *)(uintptr_t)regs->r8,
                                       (uint64_t *)(uintptr_t)regs->r9);
+
+        /* ---- IPC / GUI syscalls ---- */
+        case SYS_SHM_CREATE:
+            return shm_create(regs->rdi);
+        case SYS_SHM_MAP:
+            return shm_map(regs->rdi);
+        case SYS_SHM_UNMAP:
+            return (uint64_t)shm_unmap(regs->rdi);
+        case SYS_SHM_CLOSE:
+            return (uint64_t)shm_close(regs->rdi);
+        case SYS_MSG_OPEN:
+            return msgq_open((const char *)(uintptr_t)regs->rdi);
+        case SYS_MSG_SEND:
+            return (uint64_t)msgq_send(regs->rdi, (const void *)(uintptr_t)regs->rsi);
+        case SYS_MSG_RECV:
+            return (uint64_t)msgq_recv(regs->rdi, (void *)(uintptr_t)regs->rsi, (int)regs->rdx);
+        case SYS_MSG_POLL:
+            return (uint64_t)msgq_poll(regs->rdi);
+        case SYS_MAP_FRAMEBUFFER: {
+            syscall_fb_info_t *info = (syscall_fb_info_t *)(uintptr_t)regs->rdi;
+            if (fb_claimed) return (uint64_t)-1;
+            if (!fb_available()) return (uint64_t)-1;
+            process_t *fproc = sched_current_process();
+            if (!fproc || !fproc->addr_space) return (uint64_t)-1;
+            uint64_t fb_phys = fb_phys_addr();
+            uint64_t fb_size = fb_phys_size();
+            if (!fb_phys || !fb_size) return (uint64_t)-1;
+            uint64_t fb_virt = 0x500000000ULL;
+            uint64_t page_offset = fb_phys & 0xFFFULL;
+            uint64_t fb_phys_aligned = fb_phys & ~0xFFFULL;
+            uint64_t pages = (fb_size + page_offset + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+            for (uint64_t pi = 0; pi < pages; pi++) {
+                if (vmm_map_page(fproc->addr_space,
+                                 fb_virt + pi * PAGE_SIZE_4K,
+                                 fb_phys_aligned + pi * PAGE_SIZE_4K,
+                                 VMM_FLAGS_USER_RW) != 0) {
+                    return (uint64_t)-1;
+                }
+            }
+            if (info) {
+                info->virt_addr = fb_virt + page_offset;
+                info->width     = fb_width;
+                info->height    = fb_height;
+                info->pitch     = (fb_height > 0) ? (uint32_t)(fb_size / (uint64_t)fb_height) : 0;
+                info->bpp       = 32;
+            }
+            /* Keep the PS/2 cursor position clamped to the real screen size */
+            mouse_set_screen(fb_width, fb_height);
+            fb_claimed = 1;
+            return fb_virt + page_offset;
+        }
+        case SYS_INPUT_READ_MOUSE: {
+            syscall_mouse_event_t *out = (syscall_mouse_event_t *)(uintptr_t)regs->rdi;
+            if (!out) return (uint64_t)-1;
+            mouse_event_t ev;
+            if (mouse_read_event(&ev) != 0) return (uint64_t)-1;
+            out->abs_x   = ev.abs_x;
+            out->abs_y   = ev.abs_y;
+            out->dx      = ev.dx;
+            out->dy      = ev.dy;
+            out->buttons = ev.buttons;
+            return 0;
+        }
         default:
             return (uint64_t)-1;
     }

@@ -21,6 +21,12 @@ global userprog_diskman_start
 global userprog_diskman_end
 global userprog_curl_start
 global userprog_curl_end
+global userprog_wm_start
+global userprog_wm_end
+global userprog_desktop_start
+global userprog_desktop_end
+global userprog_terminal_start
+global userprog_terminal_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -61,5 +67,17 @@ userprog_diskman_end:
 userprog_curl_start:
     incbin "userspace/curl.app"
 userprog_curl_end:
+
+userprog_wm_start:
+    incbin "userspace/wm.app"
+userprog_wm_end:
+
+userprog_desktop_start:
+    incbin "userspace/desktop.app"
+userprog_desktop_end:
+
+userprog_terminal_start:
+    incbin "userspace/terminal.app"
+userprog_terminal_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

@@ -57,7 +57,17 @@ enum {
     SYS_DNS_RESOLVE = 50,
     SYS_HTTPS_GET_IPV4 = 51,
     SYS_EXEC_ARGS = 52,
-    SYS_SPAWN_ARGS = 53
+    SYS_SPAWN_ARGS = 53,
+    SYS_SHM_CREATE        = 54,
+    SYS_SHM_MAP           = 55,
+    SYS_SHM_UNMAP         = 56,
+    SYS_SHM_CLOSE         = 57,
+    SYS_MSG_OPEN          = 58,
+    SYS_MSG_SEND          = 59,
+    SYS_MSG_RECV          = 60,
+    SYS_MSG_POLL          = 61,
+    SYS_MAP_FRAMEBUFFER   = 62,
+    SYS_INPUT_READ_MOUSE  = 63
 };
 
 typedef struct {
@@ -194,5 +204,34 @@ static inline uint64_t icda_http_get_ipv4(uint32_t ipv4_addr, uint64_t port, con
 static inline uint64_t icda_https_get_ipv4(uint32_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) { return sys_call6(SYS_HTTPS_GET_IPV4, ipv4_addr, port, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)out_path, (uint64_t)(uintptr_t)bytes_out); }
 static inline uint64_t icda_dns_resolve(const char *host, uint32_t *ipv4_out) { return sys_call2(SYS_DNS_RESOLVE, (uint64_t)(uintptr_t)host, (uint64_t)(uintptr_t)ipv4_out); }
 static inline void icda_exit(uint64_t code) { (void)sys_call1(SYS_EXIT, code); for (;;) {} }
+
+typedef struct {
+    uint64_t virt_addr;
+    int32_t  width;
+    int32_t  height;
+    uint32_t pitch;
+    uint32_t bpp;
+} icda_fb_info_t;
+
+typedef struct {
+    int32_t  abs_x;
+    int32_t  abs_y;
+    int32_t  dx;
+    int32_t  dy;
+    uint8_t  buttons;
+} icda_mouse_event_t;
+
+static inline uint64_t icda_shm_create(uint64_t size) { return sys_call1(SYS_SHM_CREATE, size); }
+static inline uint64_t icda_shm_map(uint64_t handle) { return sys_call1(SYS_SHM_MAP, handle); }
+static inline int icda_shm_unmap(uint64_t handle) { return (int)sys_call1(SYS_SHM_UNMAP, handle); }
+static inline int icda_shm_close(uint64_t handle) { return (int)sys_call1(SYS_SHM_CLOSE, handle); }
+
+static inline uint64_t icda_msg_open(const char *name) { return sys_call1(SYS_MSG_OPEN, (uint64_t)(uintptr_t)name); }
+static inline int icda_msg_send(uint64_t handle, const void *msg) { return (int)sys_call2(SYS_MSG_SEND, handle, (uint64_t)(uintptr_t)msg); }
+static inline int icda_msg_recv(uint64_t handle, void *out, int block) { return (int)sys_call3(SYS_MSG_RECV, handle, (uint64_t)(uintptr_t)out, (uint64_t)block); }
+static inline int icda_msg_poll(uint64_t handle) { return (int)sys_call1(SYS_MSG_POLL, handle); }
+
+static inline uint64_t icda_map_framebuffer(icda_fb_info_t *info) { return sys_call1(SYS_MAP_FRAMEBUFFER, (uint64_t)(uintptr_t)info); }
+static inline int icda_input_read_mouse(icda_mouse_event_t *out) { return (int)sys_call1(SYS_INPUT_READ_MOUSE, (uint64_t)(uintptr_t)out); }
 
 #endif

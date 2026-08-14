@@ -1,5 +1,6 @@
 #include "vga.h"
 #include "../device.h"
+#include "../../memory/vmm.h"
 // internal state
 static int cursor_row = 0;
 static int cursor_col = 0;
@@ -57,7 +58,7 @@ static void vga_scroll() {
 // public API
 // initialize VGA 
 void vga_init() {
-    vga = (volatile char*)(unsigned long long)0xB8000;
+    vga = (volatile char*)PHYS_TO_VIRT(0xB8000);
     cursor_row = 0;
     cursor_col = 0;
     current_color = VGA_WHITE_ON_BLACK;
