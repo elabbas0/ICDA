@@ -69,7 +69,11 @@ void bootstage_set(uint32_t stage, const char *label) {
     }
 
     if (fb_available()) {
-        fb_print_at(8, 8, stamp, FB_YELLOW, FB_BLACK);
+        /* Draw the stamp in place without touching the console cursor:
+         * fb_print_at() would move the cursor to (8,8), so every boot
+         * line written after a stamp would overwrite the previous one
+         * on the same row and the real log would be invisible. */
+        fb_write_at_cells(8, 8, stamp, FB_YELLOW, FB_BLACK);
     } else {
         vga_write_at(0, 60, stamp, VGA_YELLOW_ON_BLACK);
     }

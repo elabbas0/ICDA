@@ -255,6 +255,7 @@ void kernel_main(void *multiboot_info) {
         boot_line("pci", "no pci devices discovered");
     }
 
+    bootstage_set(120, "net");
     if (net_init() == 0) {
         boot_line("network", "intel e1000 online");
     } else {
@@ -264,6 +265,7 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_WARN);
     }
 
+    bootstage_set(121, "hda");
     boot_prefix("audio");
     console_write("probing intel hda\n", CONSOLE_STYLE_MUTED);
     if (hda_init() == 0) {
@@ -275,6 +277,7 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_WARN);
     }
 
+    bootstage_set(122, "audio");
     speaker_init();
     if (audio_playback_init() == 0) {
         boot_line("audio", "background playback ready");
@@ -298,26 +301,33 @@ void kernel_main(void *multiboot_info) {
 
     boot_prefix("storage");
     console_write("probing nvme/ahci/ata\n", CONSOLE_STYLE_MUTED);
+    bootstage_set(123, "nvme");
     if (nvme_init() == 0) {
         bootstage_set(13, "nvme");
         boot_prefix("storage");
         console_write("nvme online, devices=", CONSOLE_STYLE_INFO);
         console_write_dec64(nvme_device_count(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
-    } else if (ahci_init() == 0) {
-        bootstage_set(14, "ahci");
-        boot_prefix("storage");
-        console_write("ahci online, devices=", CONSOLE_STYLE_INFO);
-        console_write_dec64(ahci_device_count(), CONSOLE_STYLE_INFO);
-        console_write("\n", CONSOLE_STYLE_INFO);
-    } else if (ata_init() == 0) {
-        bootstage_set(15, "ata");
-        boot_prefix("storage");
-        console_write("legacy ata online, devices=", CONSOLE_STYLE_INFO);
-        console_write_dec64(ata_device_count(), CONSOLE_STYLE_INFO);
-        console_write("\n", CONSOLE_STYLE_INFO);
     } else {
-        boot_line("storage", "no ata/ahci disk detected");
+        bootstage_set(124, "ahci");
+        if (ahci_init() == 0) {
+            bootstage_set(14, "ahci");
+            boot_prefix("storage");
+            console_write("ahci online, devices=", CONSOLE_STYLE_INFO);
+            console_write_dec64(ahci_device_count(), CONSOLE_STYLE_INFO);
+            console_write("\n", CONSOLE_STYLE_INFO);
+        } else {
+            bootstage_set(125, "ata");
+            if (ata_init() == 0) {
+                bootstage_set(15, "ata");
+                boot_prefix("storage");
+                console_write("legacy ata online, devices=", CONSOLE_STYLE_INFO);
+                console_write_dec64(ata_device_count(), CONSOLE_STYLE_INFO);
+                console_write("\n", CONSOLE_STYLE_INFO);
+            } else {
+                boot_line("storage", "no ata/ahci disk detected");
+            }
+        }
     }
 
     if (vfs_init() != 0) {
