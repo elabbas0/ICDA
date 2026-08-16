@@ -206,7 +206,12 @@ static void keyboard_handle_scancode(uint8_t scancode) {
 }
 
 static void keyboard_poll_hardware(void) {
-    while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
+    /* Only read when the pending byte is *keyboard* data. The 8042 status
+     * port sets OBF (bit 0) for both devices; bit 5 selects the mouse.
+     * Reading without checking it steals mouse packet bytes out from
+     * under the mouse driver, desyncing its packet assembler. */
+    uint8_t status;
+    while (((status = inb(KEYBOARD_STATUS_PORT)) & 0x01) && !(status & 0x20)) {
         uint8_t scancode = inb(KEYBOARD_DATA_PORT);
         keyboard_handle_scancode(scancode);
     }
@@ -224,7 +229,7 @@ void keyboard_init(void) {
     caps_lock = 0;
     extended_prefix = 0;
 
-    while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
+    while ((inb(KEYBOARD_STATUS_PORT) & 0x01) && !(inb(KEYBOARD_STATUS_PORT) & 0x20)) {
         (void)inb(KEYBOARD_DATA_PORT);
     }
 
