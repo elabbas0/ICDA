@@ -77,6 +77,12 @@ int lapic_init(uint64_t madt_lapic_phys) {
     return 0;
 }
 
+void lapic_disable(void) {
+    uint64_t apic_base = rdmsr(IA32_APIC_BASE_MSR);
+    apic_base &= ~IA32_APIC_BASE_EN;
+    wrmsr(IA32_APIC_BASE_MSR, apic_base);
+}
+
 void lapic_eoi(void) {
     if (!lapic_base) {
         return;

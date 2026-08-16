@@ -15,6 +15,14 @@ typedef struct {
 
 static int pic_controller_init(void *multiboot_info) {
     (void)multiboot_info;
+    /* The 8259 PIC path is only usable with the local APIC off.  UEFI
+     * firmware leaves the LAPIC enabled with LINT0 masked, which swallows
+     * every PIC interrupt (PIT IRQ0, keyboard IRQ1, mouse IRQ12); with no
+     * timer tick the scheduler stalls and the first process that sleeps
+     * (the window manager) hangs forever.  Legacy BIOS (QEMU/VirtualBox)
+     * leaves the LAPIC disabled, which is why this only bites on real
+     * UEFI hardware. */
+    lapic_disable();
     return pic_init();
 }
 
