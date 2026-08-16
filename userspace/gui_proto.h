@@ -58,6 +58,12 @@ typedef struct {
             uint8_t  _pad[31];
         } mouse;          /* 40 bytes */
 
+        /* GUI_MSG_FOCUS: WM -> app */
+        struct {
+            uint8_t  focused;     /* 1 = gained focus, 0 = lost */
+            uint8_t  _pad[39];
+        } focus;          /* 40 bytes */
+
         /* GUI_MSG_FLUSH: app -> WM (no extra payload) */
         /* GUI_MSG_CLOSE_WINDOW: no extra payload */
 
