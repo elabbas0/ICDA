@@ -68,6 +68,18 @@ static void mouse_send(uint8_t cmd) {
     ps2_data_write(cmd);
 }
 
+/* Discard any bytes still queued after init (e.g. a late ACK on real
+ * hardware). Otherwise a stray byte gets consumed as the first byte of
+ * the next real packet (0xFA passes the bit-3 sync check), shifting
+ * every packet by one byte. */
+static void mouse_drain_output(void) {
+    uint32_t timeout = 2000000;
+    while ((inb(PS2_STATUS) & PS2_STATUS_OUTPUT_FULL) && timeout--) {
+        inb(PS2_DATA);
+    }
+    mouse_packet_idx = 0;
+}
+
 void mouse_init(void) {
     uint8_t config;
 
@@ -88,70 +100,97 @@ void mouse_init(void) {
 
     /* Reset mouse */
     mouse_send(MOUSE_CMD_RESET);
-    ps2_read(); /* ACK 0xFA */
-    ps2_read(); /* self-test 0xAA */
-    ps2_read(); /* mouse ID 0x00 */
+    (void)ps2_read();   /* ACK 0xFA */
+    (void)ps2_read();   /* self-test 0xAA */
+    (void)ps2_read();   /* device id 0x00 */
 
     /* Set defaults */
     mouse_send(MOUSE_CMD_SET_DEFAULTS);
-    ps2_read(); /* ACK */
+    (void)ps2_read();
 
     /* Enable data reporting (stream mode) */
     mouse_send(MOUSE_CMD_ENABLE_STREAM);
-    ps2_read(); /* ACK */
+    (void)ps2_read();
 
-    mouse_packet_idx = 0;
+    /* Discard any bytes that arrived late (see mouse_drain_output). */
+    mouse_drain_output();
 }
 
 void mouse_set_screen(int w, int h) {
-    screen_w = w;
-    screen_h = h;
+    if (w <= 0 || h <= 0) return;
+    if (w != screen_w || h != screen_h) {
+        /* Resolution change: recenter so the pointer lands where the
+         * window manager initialized it instead of teleporting on the
+         * first event. */
+        screen_w = w;
+        screen_h = h;
+        mouse_x = w / 2;
+        mouse_y = h / 2;
+        return;
+    }
     if (mouse_x >= screen_w) mouse_x = screen_w - 1;
     if (mouse_y >= screen_h) mouse_y = screen_h - 1;
 }
 
 void mouse_irq(struct registers *regs) {
     (void)regs;
-    uint8_t byte = inb(PS2_DATA);
+    /* Drain every byte currently in the output buffer. One IRQ12 can
+     * cover several bytes (the PIC may coalesce edges under load), and
+     * some IRQs are spurious (e.g. an edge latched during init while the
+     * interrupt was still masked). Reading the data port when nothing is
+     * waiting returns stale data on real hardware and the last byte on
+     * QEMU, so always check the status port first. */
+    for (int guard = 0; guard < 64; guard++) {
+        uint8_t status = inb(PS2_STATUS);
+        /* Consume only mouse data: OBF is set for both devices, and bit
+         * 5 (MOUSE_OBF) selects the aux channel. Reading keyboard bytes
+         * here would steal them from the keyboard driver. */
+        if (!(status & PS2_STATUS_OUTPUT_FULL) || !(status & 0x20)) {
+            break;
+        }
+        uint8_t byte = inb(PS2_DATA);
 
-    /* First byte must have bit 3 set; resync if not */
-    if (mouse_packet_idx == 0 && !(byte & 0x08)) {
-        return;
-    }
+        /* First byte must have bit 3 set; resync if not */
+        if (mouse_packet_idx == 0 && !(byte & 0x08)) {
+            mouse_packet_idx = 0;
+            continue;
+        }
 
-    mouse_packet[mouse_packet_idx++] = byte;
+        mouse_packet[mouse_packet_idx++] = byte;
 
-    if (mouse_packet_idx == 3) {
-        mouse_packet_idx = 0;
+        if (mouse_packet_idx == 3) {
+            mouse_packet_idx = 0;
 
-        uint8_t flags = mouse_packet[0];
-        int32_t dx = (int32_t)(int8_t)mouse_packet[1];
-        int32_t dy = (int32_t)(int8_t)mouse_packet[2];
+            uint8_t flags = mouse_packet[0];
+            int32_t dx = (int32_t)(int8_t)mouse_packet[1];
+            int32_t dy = (int32_t)(int8_t)mouse_packet[2];
 
-        /* Y axis is inverted for screen coords */
-        dy = -dy;
 
-        /* Ignore if overflow bits set */
-        if (flags & 0x40) dx = 0;
-        if (flags & 0x80) dy = 0;
+            /* Y axis is inverted for screen coords */
+            dy = -dy;
 
-        mouse_x += dx;
-        mouse_y += dy;
-        if (mouse_x < 0) mouse_x = 0;
-        if (mouse_y < 0) mouse_y = 0;
-        if (screen_w > 0 && mouse_x >= screen_w) mouse_x = screen_w - 1;
-        if (screen_h > 0 && mouse_y >= screen_h) mouse_y = screen_h - 1;
+            /* Ignore if overflow bits set */
+            if (flags & 0x40) dx = 0;
+            if (flags & 0x80) dy = 0;
 
-        mouse_btn = flags & 0x07;
+            mouse_x += dx;
+            mouse_y += dy;
+            if (mouse_x < 0) mouse_x = 0;
+            if (mouse_y < 0) mouse_y = 0;
+            if (screen_w > 0 && mouse_x >= screen_w) mouse_x = screen_w - 1;
+            if (screen_h > 0 && mouse_y >= screen_h) mouse_y = screen_h - 1;
 
-        uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
-        if (next != mouse_buf_tail) {
-            mouse_buf[mouse_buf_head].abs_x   = mouse_x;
-            mouse_buf[mouse_buf_head].abs_y   = mouse_y;
-            mouse_buf[mouse_buf_head].dx      = dx;
-            mouse_buf[mouse_buf_head].dy      = dy;
-            mouse_buf[mouse_buf_head].buttons = mouse_btn;
-            mouse_buf_head = next;
+            mouse_btn = flags & 0x07;
+
+            uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
+            if (next != mouse_buf_tail) {
+                mouse_buf[mouse_buf_head].abs_x   = mouse_x;
+                mouse_buf[mouse_buf_head].abs_y   = mouse_y;
+                mouse_buf[mouse_buf_head].dx      = dx;
+                mouse_buf[mouse_buf_head].dy      = dy;
+                mouse_buf[mouse_buf_head].buttons = mouse_btn;
+                mouse_buf_head = next;
+            }
         }
     }
 }

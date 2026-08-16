@@ -45,7 +45,10 @@ static void pic_remap(uint8_t master_offset, uint8_t slave_offset) {
 
 int pic_init(void) {
     pic_remap(0x20, 0x28);
-    outb(PIC1_DATA, 0xFF);
+    /* Mask everything except the slave cascade line: the slave PIC is
+     * wired into master IRQ2, so if that line is masked no IRQ from
+     * the slave (8-15, e.g. PS/2 mouse IRQ12) can ever reach the CPU. */
+    outb(PIC1_DATA, 0xFF & ~(1U << 2));
     outb(PIC2_DATA, 0xFF);
     return 0;
 }
