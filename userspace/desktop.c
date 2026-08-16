@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "icda_sys.h"
+#include "libicda.h"
 #include "font.h"
 
 #include <stdint.h>
@@ -364,47 +365,27 @@ static void navigate_back(void) {
     browser_refresh();
 }
 
-static void draw_folder_icon(int x, int y, int selected) {
-    uint32_t tab = selected ? 0x00FFE184 : 0x00FFD262;
-    uint32_t body = selected ? 0x00FFC83D : 0x00F6B840;
-    gui_fill_rect(x + 13, y + 12, 24, 10, tab);
-    gui_fill_rect(x + 8, y + 20, 54, 34, body);
-    gui_draw_rect_outline(x + 8, y + 20, 54, 34, 0x009C6A13);
-    gui_fill_rect(x + 10, y + 24, 50, 6, 0x00FFE9A3);
-}
-
-static void draw_file_icon(int x, int y, int wav, int app, int selected) {
-    uint32_t body = selected ? 0x00F3FAFF : 0x00FFFFFF;
-    uint32_t edge = app ? 0x002F8F5B : (wav ? 0x007C3AED : 0x006B8CB8);
-    gui_fill_rect(x + 18, y + 9, 38, 48, body);
-    gui_draw_rect_outline(x + 18, y + 9, 38, 48, edge);
-    gui_fill_rect(x + 45, y + 10, 10, 10, 0x00D5E7FF);
-    gui_draw_hline(x + 25, y + 26, 21, wav ? 0x009D4EDD : 0x006B8CB8);
-    gui_draw_hline(x + 25, y + 34, 24, 0x0091A5C4);
-    gui_draw_hline(x + 25, y + 42, 18, 0x0091A5C4);
-    if (wav) {
-        gui_fill_rect(x + 35, y + 24, 4, 20, 0x007C3AED);
-        gui_fill_rect(x + 31, y + 42, 10, 7, 0x007C3AED);
-    }
-    if (app) {
-        gui_fill_rect(x + 25, y + 24, 24, 18, 0x0034D399);
-        gui_draw_rect_outline(x + 25, y + 24, 24, 18, 0x000F5132);
-    }
-}
-
 static void draw_item(desktop_item_t *item, int idx, uint64_t tick) {
     int selected = idx == selected_item;
     int hover = idx == hover_item;
     int lift = hover ? 2 : 0;
     uint32_t bg = selected ? 0x00CFE6FF : (hover ? 0x00EEF7FF : 0x00FFFFFF);
     uint32_t edge = selected ? 0x003D8BFF : (hover ? 0x0092C5F8 : 0x00D7E2F1);
+    const char *icon_name;
+    const ic_icon_t *icon;
+    ic_canvas_t c;
 
     if (selected && ((tick / 8) & 1)) bg = 0x00DDF0FF;
     draw_panel(item->x, item->y - lift, item->w, item->h, bg, edge);
-    if (item->is_dir) {
-        draw_folder_icon(item->x + 10, item->y + 2 - lift, selected);
-    } else {
-        draw_file_icon(item->x + 10, item->y + 2 - lift, item->is_wav, item->is_app, selected);
+
+    /* Real icons from the engine's builtin set instead of hand-drawn pixels */
+    icon_name = item->is_dir ? "folder" : (item->is_wav ? "wav" : (item->is_app ? "app" : "file"));
+    icon = ic_icon_builtin(icon_name);
+    if (icon) {
+        c.px = gui_pixel_buffer();
+        c.w = gui_window_width();
+        c.h = gui_window_height();
+        ic_icon_draw(&c, item->x + 10, item->y + 4 - lift, 54, 48, icon);
     }
     draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, 0x001F2937, bg, item->w - 12);
 }
@@ -1039,10 +1020,15 @@ static void draw_all(void) {
     gui_flush();
 }
 
-int desktop_main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
     if (gui_open_window("ICDA Explorer", DESKTOP_W, DESKTOP_H) != 0) {
         return -1;
     }
+
+    /* File/folder icons come from /usr/share/icons when present. */
+    ic_icon_load_folder("/usr/share/icons");
 
     browser_refresh();
     draw_all();

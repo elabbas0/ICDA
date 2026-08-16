@@ -158,7 +158,9 @@ static void term_execute(const char *cmd) {
     }
 }
 
-int terminal_main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
     if (gui_open_window("Terminal", 500, 300) != 0) {
         return -1;
     }
