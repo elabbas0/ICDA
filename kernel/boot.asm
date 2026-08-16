@@ -18,12 +18,17 @@ multiboot_start:
     dd 0
 
     ; framebuffer request tag
+    ; width=0/height=0 asks the bootloader to keep its current mode: a
+    ; fixed 1024x768 request makes GRUB switch the GOP to a mode some
+    ; monitors/GPUs reject over HDMI (e.g. an RTX 3060 Ti), leaving the
+    ; screen black.  GRUB (gfxmode=auto + gfxpayload=keep) hands us the
+    ; mode it already established, which the display demonstrably shows.
     align 8
     dw 5
     dw 0
     dd 20
-    dd 1024
-    dd 768
+    dd 0
+    dd 0
     dd 32
 
     ; end tag

@@ -110,8 +110,18 @@ static uint64_t pci_cfg_phys(const struct acpi_mcfg_entry *entry, uint8_t bus,
 
 static void pci_enumerate_bus(const struct acpi_mcfg_entry *entry, uint8_t bus) {
     for (uint8_t dev = 0; dev < 32; dev++) {
-        uint64_t func0_phys = pci_cfg_phys(entry, bus, dev, 0);
-        pci_device_t probe = { .cfg_phys = func0_phys };
+        /* Every probe must carry the bus/device/function it intends to
+         * read: pci_read_config* builds the CONFIG1 address from those
+         * fields (cfg_phys is recorded for MMIO use but reads go through
+         * CONFIG1).  Leaving them zero probed device 0:0:0 for every
+         * slot, which both invented phantom devices with vendor 0xFFFF
+         * and mis-read the multi-function flag of every device. */
+        pci_device_t probe = {
+            .bus = bus,
+            .device = dev,
+            .function = 0,
+            .cfg_phys = pci_cfg_phys(entry, bus, dev, 0)
+        };
         uint16_t vendor = pci_read_config16(&probe, 0x00);
         uint8_t function_limit = 1;
 
@@ -124,13 +134,17 @@ static void pci_enumerate_bus(const struct acpi_mcfg_entry *entry, uint8_t bus) 
         }
 
         for (uint8_t fn = 0; fn < function_limit; fn++) {
-            uint64_t cfg_phys = pci_cfg_phys(entry, bus, dev, fn);
-            pci_device_t fn_probe = { .cfg_phys = cfg_phys };
+            pci_device_t fn_probe = {
+                .bus = bus,
+                .device = dev,
+                .function = fn,
+                .cfg_phys = pci_cfg_phys(entry, bus, dev, fn)
+            };
 
             if (pci_read_config16(&fn_probe, 0x00) == 0xFFFF) {
                 continue;
             }
-            if (pci_record_device(entry->segment_group, bus, dev, fn, cfg_phys) != 0) {
+            if (pci_record_device(entry->segment_group, bus, dev, fn, fn_probe.cfg_phys) != 0) {
                 return;
             }
         }

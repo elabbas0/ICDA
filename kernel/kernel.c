@@ -260,6 +260,8 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_WARN);
     }
 
+    boot_prefix("audio");
+    console_write("probing intel hda\n", CONSOLE_STYLE_MUTED);
     if (hda_init() == 0) {
         boot_line("audio", "intel hda online");
     } else {
@@ -290,6 +292,8 @@ void kernel_main(void *multiboot_info) {
         }
     }
 
+    boot_prefix("storage");
+    console_write("probing nvme/ahci/ata\n", CONSOLE_STYLE_MUTED);
     if (nvme_init() == 0) {
         bootstage_set(13, "nvme");
         boot_prefix("storage");

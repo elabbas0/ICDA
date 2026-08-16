@@ -192,7 +192,10 @@ static int hda_exec_verb(uint8_t codec, uint8_t nid, uint16_t verb, uint16_t par
     mmio_write32(HDA_REG_ICOI, hda_build_cmd(codec, nid, verb, parm));
     mmio_write16(HDA_REG_ICIS, HDA_ICIS_ICB);
 
-    for (uint32_t i = 0; i < 1000000U; i++) {
+    /* Bounded hard: a codec that is present but unresponsive must not
+     * hold the boot hostage for minutes.  A healthy codec answers the
+     * first poll, so the cap only bites on wedged hardware. */
+    for (uint32_t i = 0; i < 200000U; i++) {
         status = mmio_read16(HDA_REG_ICIS);
         if ((status & HDA_ICIS_ICB) == 0 && (status & HDA_ICIS_IRV) != 0) {
             if (resp_out) {
@@ -663,11 +666,15 @@ static uint32_t hda_output_stream_base(void) {
 
 static int hda_wait_for_codec_graph(void) {
     hda_path_t dummy = {0};
-    for (uint32_t attempt = 0; attempt < 128U; attempt++) {
+    /* Fewer retries: each attempt walks the whole widget graph through
+     * the verb port (bounded waits inside), so the worst case here is
+     * minutes if the codec never answers.  A real codec that missed its
+     * boot handshake usually comes up within a couple of attempts. */
+    for (uint32_t attempt = 0; attempt < 16U; attempt++) {
         if (hda_find_output_path(&dummy) == 0) {
             return 0;
         }
-        for (uint32_t spin = 0; spin < 50000U; spin++) {
+        for (uint32_t spin = 0; spin < 10000U; spin++) {
             cpu_relax();
         }
     }
