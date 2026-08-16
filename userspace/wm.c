@@ -39,7 +39,12 @@ static int num_windows = 0;
 static int focused_window_idx = -1;
 static int start_menu_open = 0;
 
+/* back_buffer holds the scene without the cursor; the cursor is blitted
+ * straight to the real framebuffer so a mouse move never forces a full
+ * frame rebuild.  desktop_layer is the static wallpaper (gradient + icon
+ * tiles), pre-rendered once and copied out as the base of every frame. */
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
+static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static icda_fb_info_t fb_info;
 static uint32_t *real_fb = NULL;
 static const ic_theme_t *theme;
@@ -78,7 +83,34 @@ static ic_canvas_t bb_canvas(int w, int h) {
     return c;
 }
 
-static void draw_cursor(int w, int h, int mx, int my) {
+static ic_canvas_t layer_canvas(int w, int h) {
+    ic_canvas_t c;
+    c.px = desktop_layer;
+    c.w = w;
+    c.h = h;
+    return c;
+}
+
+/* Tight 64-bit copy: the full-frame blit at 1920x1080 is the hot path
+ * on real hardware, and a plain per-pixel 32-bit loop at -O0 is slow. */
+static void copy_pixels(uint32_t *dst, const uint32_t *src, int count) {
+    uint64_t *d = (uint64_t *)dst;
+    const uint64_t *s = (const uint64_t *)src;
+    int n = count >> 1;
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        d[i] = s[i];
+        d[i + 1] = s[i + 1];
+        d[i + 2] = s[i + 2];
+        d[i + 3] = s[i + 3];
+    }
+    for (; i < n; i++) d[i] = s[i];
+    if (count & 1) dst[count - 1] = src[count - 1];
+}
+
+/* Cursor is blitted straight onto the real framebuffer, above the scene
+ * buffer, so a mouse move never rebuilds the frame underneath. */
+static void draw_cursor_at(uint32_t *dst, int pitch, int w, int h, int mx, int my) {
     /* White arrow body, black 1px outline so the pointer stays visible
      * on both the bright desktop and the dark taskbar/menu. */
     for (int cy = 0; cy < CURSOR_H; cy++) {
@@ -88,7 +120,7 @@ static void draw_cursor(int w, int h, int mx, int my) {
             int px = mx + cx;
             if (px < 0 || px >= w) continue;
             if (cursor_bitmap[cy][cx] == 'X') {
-                back_buffer[py * w + px] = 0x00FFFFFF;
+                dst[py * pitch + px] = 0x00FFFFFF;
             }
         }
     }
@@ -105,67 +137,49 @@ static void draw_cursor(int w, int h, int mx, int my) {
                         int px = mx + cxx;
                         int py = my + cyy;
                         if (px < 0 || px >= w || py < 0 || py >= h) continue;
-                        back_buffer[py * w + px] = 0x00000000;
+                        dst[py * pitch + px] = 0x00000000;
                     }
                 }
             }
         }
     }
-}/* blend: 0..255 selection highlight intensity for the icon tile.  A
- * smooth triangle wave from the WM loop drives this so the tile gently
- * breathes instead of hard-toggling (a fast (tick/N)&1 toggle flashed). */
-static void draw_desktop_icon(int w, int h, int x, int y, const char *label,
-                              const char *icon_name, int blend) {
-    ic_canvas_t c = bb_canvas(w, h);
+}
+
+#define WALL_TOP    0x00356CCB
+#define WALL_BOTTOM 0x00152A5E
+
+/* Modern flat wallpaper: a calm blue vertical gradient, rendered once
+ * into desktop_layer.  No per-pixel hills or per-row re-blends at
+ * runtime - this is the base every frame is copied from. */
+static void draw_desktop_icon_layer(int w, int h, int x, int y,
+                                    const char *label, const char *icon_name) {
+    ic_canvas_t c = layer_canvas(w, h);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    ic_rect_r(&c, x, y, 74, 74, 8, ic_blend(0x002D7FB8, 0x001F6EA6, blend, 255));
-    ic_outline_r(&c, x, y, 74, 74, 8, 0x0087C6FF);
+    uint32_t label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
     if (icon) {
         ic_icon_draw(&c, x + 13, y + 8, 48, 48, icon);
     }
-    ic_text_clip(&c, x + 4, y + 56, label, 0x00FFFFFF, 0x001F6EA6, 66);
-
-
+    ic_text_clip(&c, x + 4, y + 60, label, 0x00FFFFFF, label_bg, 66);
 }
 
-static void draw_background(int w, int h) {
-    ic_canvas_t c = bb_canvas(w, h);
-    int horizon = (h * 60) / 100;
-
-    /* sky */
-    for (int y = 0; y < horizon; y++) {
-        ic_rect(&c, 0, y, w, 1, ic_blend(0x0056B6F7, 0x00CBE9FF, y, horizon));
+static void build_desktop_layer(int w, int h) {
+    ic_canvas_t c = layer_canvas(w, h);
+    for (int y = 0; y < h; y++) {
+        ic_rect(&c, 0, y, w, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, h));
     }
-    /* ground */
-    for (int y = horizon; y < h; y++) {
-        ic_rect(&c, 0, y, w, 1, ic_blend(0x003FAF4B, 0x001D7D37, y - horizon, h - horizon));
-    }
-    /* hills */
-    for (int x = 0; x < w; x++) {
-        int64_t dx = x - (w / 3);
-        int hill = horizon + 28 - (int)((dx * dx) / (w > 0 ? w * 3 : 1));
-        if (hill < horizon - 38) hill = horizon - 38;
-        if (hill > h - TASKBAR_H) hill = h - TASKBAR_H;
-        for (int y = hill; y < h - TASKBAR_H; y++) {
-            ic_rect(&c, x, y, 1, 1, ic_blend(0x0078C850, 0x002E8B3C, y - hill, h - TASKBAR_H - hill + 1));
-        }
-    }
-
-    /* Desktop tiles sit static (blend 0); only the taskbar/selection
-     * highlights animate, and only briefly. */
-    draw_desktop_icon(w, h, 22, 64, "Explorer", "folder", 0);
-    draw_desktop_icon(w, h, 22, 154, "Terminal", "terminal", 0);
-    draw_desktop_icon(w, h, 22, 244, "Music", "music", 0);
+    draw_desktop_icon_layer(w, h, 22, 64, "Explorer", "folder");
+    draw_desktop_icon_layer(w, h, 22, 154, "Terminal", "terminal");
+    draw_desktop_icon_layer(w, h, 22, 244, "Music", "music");
 }
 
 static void draw_start_button(int w, int h, int active) {
     ic_canvas_t c = bb_canvas(w, h);
     int y = h - TASKBAR_H + 6;
-    uint32_t top = active ? 0x0058C758 : 0x0042B943;
-    uint32_t bottom = active ? 0x001B7B26 : 0x00229232;
-    ic_gradient_v(&c, 6, y, 94, 30, top, bottom);
-    ic_outline(&c, 6, y, 94, 30, 0x000D5A19);
-    ic_text(&c, 20, y + 7, "Start", 0x00FFFFFF, bottom);
+    uint32_t fill = active ? 0x00444448 : 0x00313135;
+    const ic_icon_t *icon = ic_icon_builtin("app");
+    ic_rect_r(&c, 6, y, 94, 30, 6, fill);
+    if (icon) ic_icon_draw(&c, 12, y + 4, 22, 22, icon);
+    ic_text(&c, 40, y + 7, "Start", 0x00FFFFFF, fill);
 }
 
 static const char *window_icon_name(const char *title) {
@@ -186,67 +200,73 @@ static void draw_taskbar(int w, int h) {
     int tx = 112;
     icda_audio_info_t audio;
 
-    ic_gradient_v(&c, 0, y, w, TASKBAR_H, theme->taskbar_top, theme->taskbar_bottom);
-    ic_hline(&c, 0, y, w, 0x0089C4FF);
+    /* Flat dark taskbar - no gradient, one thin top border. */
+    ic_rect(&c, 0, y, w, TASKBAR_H, theme->taskbar_top);
+    ic_hline(&c, 0, y, w, 0x003C4043);
     draw_start_button(w, h, start_menu_open);
 
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
         wm_window_t *win = &windows[idx];
-        uint32_t top;
-        uint32_t bottom;
         const ic_icon_t *icon;
 
         if (!win->valid) continue;
-        top = focused_window_idx == idx && !win->minimized ? 0x006EA6FF : 0x003A78CF;
-        bottom = focused_window_idx == idx && !win->minimized ? 0x002A60BD : 0x00214F9D;
-        ic_gradient_v(&c, tx, y + 7, 136, 28, top, bottom);
-        ic_outline(&c, tx, y + 7, 136, 28, 0x0089C4FF);
+        {
+            int focused = focused_window_idx == idx && !win->minimized;
+            uint32_t fill = focused ? 0x00444448 : 0x002A2D31;
+            ic_rect_r(&c, tx, y + 7, 136, 28, 6, fill);
 
-        icon = ic_icon_builtin(window_icon_name(win->title));
-        if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
-        ic_text_clip(&c, tx + 30, y + 13, win->title, 0x00FFFFFF, bottom, 100);
-        if (win->minimized) {
-            ic_rect(&c, tx + 122, y + 28, 8, 2, 0x00DDEBFF);
+            icon = ic_icon_builtin(window_icon_name(win->title));
+            if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
+            ic_text_clip(&c, tx + 30, y + 13, win->title, 0x00FFFFFF, fill, 100);
+            if (win->minimized) {
+                ic_rect(&c, tx + 122, y + 26, 8, 2, 0x00FFFFFF);
+            }
         }
         tx += 142;
     }
 
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x00DDEBFF, 0x0015449C, 56);
-        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00FFFFFF, 0x0015449C, 104);
+        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x00B4B8BC, theme->taskbar_top, 56);
+        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00FFFFFF, theme->taskbar_top, 104);
     } else {
-        ic_text_clip(&c, w - 106, y + 14, "ICDA OS", 0x00DDEBFF, 0x0015449C, 88);
+        ic_text_clip(&c, w - 106, y + 14, "ICDA OS", 0x00B4B8BC, theme->taskbar_top, 88);
     }
 }
 
 static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
-                           const char *icon_name, const char *label) {
+                           const char *icon_name, const char *label, int hover) {
     ic_canvas_t c = bb_canvas(sw, sh);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    ic_gradient_v(&c, x, y, w, h, 0x00FFFFFF, 0x00DDEBFF);
-    ic_outline(&c, x, y, w, h, 0x0092B7E8);
+    uint32_t fill = hover ? 0x003C4043 : 0x002A2D31;
+    ic_rect_r(&c, x, y, w, h, 6, fill);
     if (icon) ic_icon_draw(&c, x + 6, y + 4, 22, 22, icon);
-    ic_text(&c, x + 34, y + 7, label, 0x001F2937, 0x00DDEBFF);
+    ic_text(&c, x + 34, y + 7, label, 0x00FFFFFF, fill);
 }
 
-static void draw_start_menu(int w, int h) {
+static void draw_start_menu(int w, int h, int mx, int my) {
     ic_canvas_t c = bb_canvas(w, h);
     int x = 6;
     int y = h - TASKBAR_H - 250;
     if (!start_menu_open) return;
-    ic_rect(&c, x + 5, y + 6, 270, 250, 0x004B5563);
-    ic_rect(&c, x, y, 270, 250, 0x00F8FBFF);
-    ic_outline(&c, x, y, 270, 250, 0x0015449C);
-    ic_gradient_v(&c, x + 1, y + 1, 268, 42, 0x003D8BFF, 0x001D4FA8);
-    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00FFFFFF, 0x002762C4);
+    /* Flat dark rounded panel, hover-highlighted rows. */
+    ic_rect_r(&c, x, y, 270, 250, 12, 0x002A2D31);
+    ic_outline_r(&c, x, y, 270, 250, 12, 0x003C4043);
+    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00FFFFFF, 0x002A2D31);
+    ic_hline(&c, x + 12, y + 44, 246, 0x003C4043);
 
-    draw_start_row(w, h, x + 12, y + 56, 246, 30, "folder", "Explorer");
-    draw_start_row(w, h, x + 12, y + 88, 246, 30, "terminal", "Terminal");
-    draw_start_row(w, h, x + 12, y + 120, 246, 30, "disk", "Disk Manager");
-    draw_start_row(w, h, x + 12, y + 152, 246, 30, "app", "GUI Demo");
-    draw_start_row(w, h, x + 12, y + 184, 246, 30, "audio", "Audio Player");
-    draw_start_row(w, h, x + 12, y + 216, 246, 30, "gear", "Stop Audio");
+    draw_start_row(w, h, x + 12, y + 56, 246, 30, "folder", "Explorer",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 56, 246, 30}));
+    draw_start_row(w, h, x + 12, y + 88, 246, 30, "terminal", "Terminal",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 88, 246, 30}));
+    draw_start_row(w, h, x + 12, y + 120, 246, 30, "disk", "Disk Manager",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 120, 246, 30}));
+    draw_start_row(w, h, x + 12, y + 152, 246, 30, "app", "GUI Demo",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 152, 246, 30}));
+    draw_start_row(w, h, x + 12, y + 184, 246, 30, "audio", "Audio Player",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 184, 246, 30}));
+    draw_start_row(w, h, x + 12, y + 216, 246, 30, "gear", "Stop Audio",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 216, 246, 30}));
 }
 
 /* ---- focus notifications ------------------------------------------------- */
@@ -514,7 +534,7 @@ static int handle_desktop_icon_click(int mx, int my) {
     return 0;
 }
 
-static void composite_window(wm_window_t *win, int idx, int w, int h) {
+static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, int my) {
     ic_canvas_t c = bb_canvas(w, h);
     int active;
     int anim;
@@ -541,11 +561,10 @@ static void composite_window(wm_window_t *win, int idx, int w, int h) {
         iw.minimized = 0;
         iw.anim = win->anim;
         iw.title = win->title;
+        iw.hover_close = ic_hit_close(&iw, mx, my);
+        iw.hover_min = ic_hit_minimize(&iw, mx, my);
         /* One-shot focus glow: the chrome brightens briefly when the
-         * window gains focus, then settles fully static.  The old
-         * perpetual (tick/N)&1 toggles and even a slow triangle wave kept
-         * the whole chrome in motion, which read as flashing; a window
-         * should sit still until the user interacts with it. */
+         * window gains focus, then settles fully static. */
         if (active && win->focus_glow > 0) {
             int m = win->focus_glow;
             t.title_top_active = ic_blend(0x006BB1FF, 0x00499BFF, m, 255);
@@ -570,24 +589,53 @@ static void composite_window(wm_window_t *win, int idx, int w, int h) {
     if (win->focus_glow > 0) win->focus_glow -= 4;
 }
 
-static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
-    draw_background(w, h);
-    for (int i = 0; i < num_windows; i++) {
-        int idx = z_order[i];
-        composite_window(&windows[idx], idx, w, h);
-    }
-    draw_taskbar(w, h);
-    draw_start_menu(w, h);
-    draw_cursor(w, h, mouse_x, mouse_y);
+static uint32_t fb_pitch_pixels(void) {
+    return fb_info.pitch ? fb_info.pitch / 4 : (uint32_t)fb_info.width;
+}
 
-    {
-        uint32_t pitch_pixels = fb_info.pitch ? fb_info.pitch / 4 : (uint32_t)fb_info.width;
+static void blit_to_screen(int w, int h) {
+    uint32_t pitch = fb_pitch_pixels();
+    if (pitch == (uint32_t)w) {
+        copy_pixels(real_fb, back_buffer, w * h);
+    } else {
         for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                real_fb[y * pitch_pixels + x] = back_buffer[y * w + x];
-            }
+            copy_pixels(real_fb + y * pitch, back_buffer + y * w, w);
         }
     }
+}
+
+static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
+    copy_pixels(back_buffer, desktop_layer, w * h);
+    for (int i = 0; i < num_windows; i++) {
+        int idx = z_order[i];
+        composite_window(&windows[idx], idx, w, h, mouse_x, mouse_y);
+    }
+    draw_taskbar(w, h);
+    draw_start_menu(w, h, mouse_x, mouse_y);
+    blit_to_screen(w, h);
+    draw_cursor_at(real_fb, fb_pitch_pixels(), w, h, mouse_x, mouse_y);
+}
+
+/* Mouse moved and nothing else changed: erase the old pointer from the
+ * real framebuffer using the scene buffer and redraw it at the new spot,
+ * touching only the tiny cursor rectangle instead of the whole frame. */
+static void composite_cursor_only(int w, int h, int mx, int my, int pmx, int pmy) {
+    int x0 = pmx < mx ? pmx : mx;
+    int y0 = pmy < my ? pmy : my;
+    int x1 = (pmx > mx ? pmx : mx) + CURSOR_W + 2;
+    int y1 = (pmy > my ? pmy : my) + CURSOR_H + 2;
+    uint32_t pitch = fb_pitch_pixels();
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+    if (x1 <= x0 || y1 <= y0) return;
+
+    for (int y = y0; y < y1; y++) {
+        copy_pixels(real_fb + y * pitch + x0, back_buffer + y * w + x0, x1 - x0);
+    }
+    draw_cursor_at(real_fb, pitch, w, h, mx, my);
 }
 
 int main(int argc, char **argv) {
@@ -630,8 +678,18 @@ int main(int argc, char **argv) {
     mouse_x = w / 2;
     mouse_y = h / 2;
 
-    for (;;) {
+    /* Pre-render the static wallpaper + desktop icons once; every frame
+     * is copied out of this layer instead of recomputed. */
+    build_desktop_layer(w, h);
+
+    {
+        int prev_mouse_x = mouse_x;
+        int prev_mouse_y = mouse_y;
+        uint64_t last_composite_tick = 0;
+
+        for (;;) {
         int need_redraw = 0;
+        int mouse_moved = 0;
         while (icda_msg_poll(wm_queue) > 0) {
             gui_msg_t msg;
             if (icda_msg_recv(wm_queue, &msg, 0) != 0) continue;
@@ -663,7 +721,7 @@ int main(int argc, char **argv) {
                 int prev_mx = mouse_x;
                 int prev_my = mouse_y;
                 uint8_t prev_btn = mouse_buttons;
-                need_redraw = 1;
+                mouse_moved = 1;
                 mouse_x = mev.abs_x;
                 mouse_y = mev.abs_y;
                 mouse_buttons = mev.buttons;
@@ -676,6 +734,9 @@ int main(int argc, char **argv) {
                     int left_clicked = (mouse_buttons & 1) && !(prev_btn & 1);
                     int left_released = !(mouse_buttons & 1) && (prev_btn & 1);
 
+                    if (left_clicked || left_released) {
+                        need_redraw = 1;
+                    }
                     if (left_clicked) {
                         int handled = 0;
                         if (start_menu_open) handled = handle_start_menu_click(mouse_x, mouse_y, w, h);
@@ -744,6 +805,7 @@ int main(int argc, char **argv) {
                     } else if (left_released) {
                         dragging_win_idx = -1;
                     } else if (dragging_win_idx != -1) {
+                        need_redraw = 1;
                         wm_window_t *win = &windows[dragging_win_idx];
                         win->x = mouse_x - drag_off_x;
                         win->y = mouse_y - drag_off_y;
@@ -751,7 +813,17 @@ int main(int argc, char **argv) {
                     } else if (focused_window_idx != -1 && (mouse_x != prev_mx || mouse_y != prev_my)) {
                         wm_window_t *win = &windows[focused_window_idx];
                         if (win->valid && !win->minimized) {
-                            ic_window_t iw = { win->x, win->y, win->w, win->h, 0, 0, 0, win->title };
+                            ic_window_t iw;
+                            iw.x = win->x;
+                            iw.y = win->y;
+                            iw.w = win->w;
+                            iw.h = win->h;
+                            iw.focused = 0;
+                            iw.minimized = 0;
+                            iw.anim = 0;
+                            iw.title = win->title;
+                            iw.hover_close = 0;
+                            iw.hover_min = 0;
                             if (ic_hit_client(&iw, mouse_x, mouse_y)) {
                                 gui_msg_t motion_msg;
                                 clear_msg(&motion_msg);
@@ -787,12 +859,38 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Repaint on any event; otherwise keep ~16fps so desktop
-         * animations (icon pulse, focus pulse) stay smooth without
-         * burning a full 100Hz composite every tick. */
-        if (need_redraw || dragging_win_idx != -1 || (icda_ticks() % 6) == 0) {
-            composite_screen(w, h, mouse_x, mouse_y);
+        /* Start-menu hover needs frame updates while the pointer moves
+         * over it (the cursor-only path skips the menu). */
+        if (start_menu_open && mouse_moved) need_redraw = 1;
+
+        {
+            uint64_t now = icda_ticks();
+            int animating = 0;
+            for (int i = 0; i < num_windows; i++) {
+                if (windows[i].valid &&
+                    (windows[i].anim < IC_ANIM_MAX || windows[i].focus_glow > 0)) {
+                    animating = 1;
+                    break;
+                }
+            }
+            /* Composite at most once per tick.  Full rebuild on events or
+             * while a window animates; a pure mouse move takes the tiny
+             * cursor-only path; idle means no repaints at all. */
+            if (now != last_composite_tick) {
+                if (need_redraw || animating || dragging_win_idx != -1) {
+                    composite_screen(w, h, mouse_x, mouse_y);
+                    last_composite_tick = now;
+                } else if (mouse_moved &&
+                           (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    composite_cursor_only(w, h, mouse_x, mouse_y,
+                                          prev_mouse_x, prev_mouse_y);
+                    last_composite_tick = now;
+                }
+            }
+            prev_mouse_x = mouse_x;
+            prev_mouse_y = mouse_y;
         }
         icda_sleep(1);
+        }
     }
 }
