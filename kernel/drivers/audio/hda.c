@@ -67,6 +67,7 @@
 #define HDA_STREAM_TAG         1U
 #define HDA_RING_BYTES         65536U
 #define HDA_BDL_COUNT          16U
+#define HDA_MAX_CONNECTIONS    32U
 #define HDA_BDL_ALIGN          1024U
 #define HDA_SEG_BYTES          (HDA_RING_BYTES / HDA_BDL_COUNT)
 #define HDA_MMIO_MAP_BYTES     0x4000U
@@ -270,6 +271,7 @@ static int hda_get_connections(uint8_t nid, uint8_t *out, uint8_t *count_out) {
     uint8_t long_form;
     uint8_t conns = 0;
     uint8_t prev = 0;
+    int overflow = 0;
 
     if (hda_get_param(nid, HDA_PARAM_CONN_LEN, &parm) != 0) {
         return -1;
@@ -288,14 +290,21 @@ static int hda_get_connections(uint8_t nid, uint8_t *out, uint8_t *count_out) {
             return -1;
         }
 
+        /* Real codecs (e.g. Realtek ALC-series mixers) can report far
+         * more connections than the caller's buffer holds, and ranges
+         * expand on top of that.  Cap the output so a large connection
+         * list cannot overflow the stack and corrupt the graph walk. */
         if (long_form) {
-            for (uint8_t slot = 0; slot < 2 && idx < count; slot++, idx++) {
+            for (uint8_t slot = 0; slot < 2 && idx < count && conns < HDA_MAX_CONNECTIONS; slot++, idx++) {
                 uint16_t raw = (uint16_t)((resp >> (slot * 16U)) & 0xFFFFU);
                 uint8_t range = (raw & 0x8000U) ? 1U : 0U;
                 uint8_t val = (uint8_t)(raw & 0x00FFU);
                 if (range && conns > 0 && val >= prev) {
-                    for (uint8_t n = (uint8_t)(prev + 1U); n <= val; n++) {
+                    for (uint8_t n = (uint8_t)(prev + 1U); n <= val && conns < HDA_MAX_CONNECTIONS; n++) {
                         out[conns++] = n;
+                    }
+                    if (conns >= HDA_MAX_CONNECTIONS) {
+                        overflow = 1;
                     }
                 } else {
                     out[conns++] = val;
@@ -303,19 +312,25 @@ static int hda_get_connections(uint8_t nid, uint8_t *out, uint8_t *count_out) {
                 prev = val;
             }
         } else {
-            for (uint8_t slot = 0; slot < 4 && idx < count; slot++, idx++) {
+            for (uint8_t slot = 0; slot < 4 && idx < count && conns < HDA_MAX_CONNECTIONS; slot++, idx++) {
                 uint8_t raw = (uint8_t)((resp >> (slot * 8U)) & 0xFFU);
                 uint8_t range = (raw & 0x80U) ? 1U : 0U;
                 uint8_t val = (uint8_t)(raw & 0x7FU);
                 if (range && conns > 0 && val >= prev) {
-                    for (uint8_t n = (uint8_t)(prev + 1U); n <= val; n++) {
+                    for (uint8_t n = (uint8_t)(prev + 1U); n <= val && conns < HDA_MAX_CONNECTIONS; n++) {
                         out[conns++] = n;
+                    }
+                    if (conns >= HDA_MAX_CONNECTIONS) {
+                        overflow = 1;
                     }
                 } else {
                     out[conns++] = val;
                 }
                 prev = val;
             }
+        }
+        if (overflow) {
+            break;
         }
     }
 
@@ -666,11 +681,35 @@ static uint32_t hda_output_stream_base(void) {
 
 static int hda_wait_for_codec_graph(void) {
     hda_path_t dummy = {0};
-    /* Fewer retries: each attempt walks the whole widget graph through
-     * the verb port (bounded waits inside), so the worst case here is
-     * minutes if the codec never answers.  A real codec that missed its
-     * boot handshake usually comes up within a couple of attempts. */
-    for (uint32_t attempt = 0; attempt < 16U; attempt++) {
+    uint32_t probe_resp = 0;
+
+    /* Liveness check first.  Each failed verb costs up to 200k MMIO
+     * polls, and a full graph walk issues hundreds of verbs, so a codec
+     * that never answers would otherwise hold the boot silent for
+     * minutes.  If the codec cannot answer a single root-node read, it
+     * is wedged - skip the expensive walk entirely. */
+    {
+        int alive = 0;
+        for (uint32_t retry = 0; retry < 8U; retry++) {
+            if (hda_exec_verb(hda_codec, 0, HDA_VERB_GET_PARAM,
+                              HDA_PARAM_NODE_COUNT, &probe_resp) == 0 &&
+                probe_resp != 0xFFFFFFFFU) {
+                alive = 1;
+                break;
+            }
+            for (uint32_t spin = 0; spin < 10000U; spin++) {
+                cpu_relax();
+            }
+        }
+        if (!alive) {
+            return -1;
+        }
+    }
+
+    /* A live codec answers the graph walk quickly; a codec that misses
+     * the first attempts will not magically appear later, so a couple of
+     * retries are plenty. */
+    for (uint32_t attempt = 0; attempt < 4U; attempt++) {
         if (hda_find_output_path(&dummy) == 0) {
             return 0;
         }
