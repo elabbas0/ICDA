@@ -363,6 +363,13 @@ static int nvme_setup_device(const pci_device_t *pci, uint32_t index) {
     dev->pci = pci;
     dev->regs = (volatile uint8_t *)vmm_map_physical(mmio_phys, PAGE_SIZE_4K * 2, VMM_FLAGS_KERNEL_RW | PTE_NO_CACHE);
     cap = nvme_reg64(dev, NVME_REG_CAP);
+    if (cap == 0 || cap == 0xFFFFFFFFFFFFFFFFULL) {
+        /* BAR mapped but controller not responding (e.g. device asleep
+         * or decode not enabled): bail instead of spinning the full
+         * bounded wait. */
+        nvme_trace("controller not responding (cap invalid)");
+        return -1;
+    }
     dev->dstrd_bytes = 4U << (uint32_t)((cap >> 32) & 0xFU);
     if (dev->dstrd_bytes == 0) dev->dstrd_bytes = 4;
     dev->admin_phase = 1;
