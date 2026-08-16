@@ -781,8 +781,15 @@ static void editor_special_key(int special) {
     }
 }
 
+static void handle_dialog_key(uint32_t key);
+
 static void handle_special_key(int special) {
-    if (dialog != DIALOG_NONE) return;
+    if (dialog != DIALOG_NONE) {
+        /* The dialog's text field understands the same special keys
+         * (arrows, Delete); Up/Down are ignored there. */
+        handle_dialog_key((uint32_t)special);
+        return;
+    }
     if (mode == MODE_EDITOR) editor_special_key(special);
     else browser_special_key(special);
 }
@@ -817,7 +824,15 @@ static int feed_escape_sequence(uint32_t key) {
     return 0;
 }
 
+static void dialog_remove_at(int at) {
+    uint64_t len = d_strlen(dialog_input);
+    for (uint64_t i = (uint64_t)at; i + 1 < sizeof(dialog_input) && i < len; i++) {
+        dialog_input[i] = dialog_input[i + 1];
+    }
+}
+
 static void handle_dialog_key(uint32_t key) {
+    uint64_t len;
     if (key == 27) {
         dialog = DIALOG_NONE;
         return;
@@ -831,13 +846,32 @@ static void handle_dialog_key(uint32_t key) {
     if (key == '\b') {
         if (dialog_cursor > 0) {
             dialog_cursor--;
-            dialog_input[dialog_cursor] = 0;
+            dialog_remove_at(dialog_cursor);
         }
         return;
     }
+    if (key == SPECIAL_LEFT) {
+        if (dialog_cursor > 0) dialog_cursor--;
+        return;
+    }
+    if (key == SPECIAL_RIGHT) {
+        len = d_strlen(dialog_input);
+        if ((uint64_t)dialog_cursor < len) dialog_cursor++;
+        return;
+    }
+    if (key == SPECIAL_DELETE) {
+        len = d_strlen(dialog_input);
+        if ((uint64_t)dialog_cursor < len) dialog_remove_at(dialog_cursor);
+        return;
+    }
     if (key >= 32 && key <= 126 && dialog_cursor + 1 < (int)sizeof(dialog_input)) {
+        len = d_strlen(dialog_input);
+        if ((uint64_t)dialog_cursor > len) dialog_cursor = (int)len;
+        for (uint64_t i = len; i > (uint64_t)dialog_cursor; i--) {
+            if (i + 1 < sizeof(dialog_input)) dialog_input[i] = dialog_input[i - 1];
+        }
         dialog_input[dialog_cursor++] = (char)key;
-        dialog_input[dialog_cursor] = 0;
+        dialog_input[(uint64_t)dialog_cursor] = 0;
     }
 }
 
@@ -868,8 +902,8 @@ static void handle_browser_key(uint32_t key) {
     if (key == '\r' || key == '\n') open_selected();
     else if (key == '\b') navigate_up();
     else if (key == 'r' || key == 'R') browser_refresh();
-    else if (key == 'n' || key == 'N') open_dialog(DIALOG_NEW_FILE, "Create new file", "note.txt");
-    else if (key == 'f' || key == 'F') open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "NewFolder");
+    else if (key == 'n' || key == 'N') open_dialog(DIALOG_NEW_FILE, "Create new file", "");
+    else if (key == 'f' || key == 'F') open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "");
     else if (key == 'e' || key == 'E') {
         if (selected_item >= 0 && !items[selected_item].is_dir) open_editor_path(items[selected_item].path);
         else set_status("Select a file to edit");
@@ -879,6 +913,10 @@ static void handle_browser_key(uint32_t key) {
 
 static void handle_key(uint32_t key) {
     if (dialog != DIALOG_NONE) {
+        /* Parse arrow/delete escape sequences first so the dialog can
+         * edit like a real text field; without this the ESC of an arrow
+         * key closes the dialog and '[' 'A' get typed into the name. */
+        if (feed_escape_sequence(key)) return;
         handle_dialog_key(key);
         return;
     }
@@ -942,8 +980,8 @@ static void handle_browser_click(int mx, int my) {
     if (hit_rect(mx, my, 12, 50, 50, 25)) { navigate_back(); return; }
     if (hit_rect(mx, my, 68, 50, 42, 25)) { navigate_up(); return; }
     if (hit_rect(mx, my, 116, 50, 62, 25)) { browser_refresh(); return; }
-    if (hit_rect(mx, my, 190, 50, 72, 25)) { open_dialog(DIALOG_NEW_FILE, "Create new file", "note.txt"); return; }
-    if (hit_rect(mx, my, 268, 50, 86, 25)) { open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "NewFolder"); return; }
+    if (hit_rect(mx, my, 190, 50, 72, 25)) { open_dialog(DIALOG_NEW_FILE, "Create new file", ""); return; }
+    if (hit_rect(mx, my, 268, 50, 86, 25)) { open_dialog(DIALOG_NEW_FOLDER, "Create new folder", ""); return; }
     if (hit_rect(mx, my, 366, 50, 50, 25)) {
         if (selected_item >= 0 && !items[selected_item].is_dir) open_editor_path(items[selected_item].path);
         else set_status("Select a file to edit");

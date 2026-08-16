@@ -1,4 +1,7 @@
+#include "gui.h"
 #include "icda_sys.h"
+#include "libicda.h"
+#include "font.h"
 
 #include <stdint.h>
 
@@ -576,7 +579,7 @@ static void diskman_set_selected_partition_role(uint64_t role, const char *label
     }
 }
 
-uint64_t diskman_main(void) {
+static uint64_t diskman_console_main(void) {
     copy_text(diskman_status, "ready", sizeof(diskman_status));
     diskman_refresh();
     icda_clear();
@@ -631,4 +634,471 @@ uint64_t diskman_main(void) {
         }
         diskman_draw();
     }
+}
+
+/* ============================ GUI mode ============================ */
+
+#define DG_W 780
+#define DG_H 460
+#define DG_HEAD_H 64
+#define DG_PANEL_Y 76
+#define DG_LEFT_X 12
+#define DG_LEFT_W 280
+#define DG_RIGHT_X 300
+#define DG_BTN_H 28
+#define DG_ROW_A_Y (DG_H - 94)
+#define DG_ROW_B_Y (DG_H - 58)
+#define DG_STATUS_Y (DG_H - 30)
+#define DG_DEV_ROW_H 26
+#define DG_PART_ROW_H 18
+
+enum {
+    DG_KEY_UP = 1,
+    DG_KEY_DOWN = 2,
+    DG_KEY_LEFT = 3,
+    DG_KEY_RIGHT = 4
+};
+
+static int dg_hit(int mx, int my, int x, int y, int w, int h) {
+    return mx >= x && my >= y && mx < x + w && my < y + h;
+}
+
+static void dg_text(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
+    int cx = x;
+    if (max_px <= 0) return;
+    while (text && *text && cx + FONT_CELL_WIDTH <= x + max_px) {
+        gui_draw_char(cx, y, *text, fg, bg);
+        cx += FONT_CELL_WIDTH;
+        text++;
+    }
+}
+
+static void dg_button(int x, int y, int w, int h, const char *label, int active) {
+    uint32_t top = active ? 0x003D8BFF : 0x00FFFFFF;
+    uint32_t bottom = active ? 0x001F5EBE : 0x00DDEBFF;
+    uint32_t edge = active ? 0x000C3C88 : 0x006EA6E8;
+    for (int row = 0; row < h; row++) {
+        int r = (int)(((top >> 16) & 0xFF) + ((((bottom >> 16) & 0xFF) - ((top >> 16) & 0xFF)) * row) / (h - 1));
+        int g = (int)(((top >> 8) & 0xFF) + ((((bottom >> 8) & 0xFF) - ((top >> 8) & 0xFF)) * row) / (h - 1));
+        int b = (int)((top & 0xFF) + (((bottom & 0xFF) - (top & 0xFF)) * row) / (h - 1));
+        gui_fill_rect(x, y + row, w, 1, (uint32_t)((r << 16) | (g << 8) | b));
+    }
+    gui_draw_rect_outline(x, y, w, h, edge);
+    dg_text(x + 6, y + 6, label, active ? 0x00FFFFFF : 0x001D3F66, bottom, w - 12);
+}
+
+static void dg_status_set(const char *text) {
+    copy_text(diskman_status, text ? text : "", sizeof(diskman_status));
+}
+
+static void dg_status_append(const char *text) {
+    copy_text(diskman_status + str_len(diskman_status), text,
+              sizeof(diskman_status) - str_len(diskman_status));
+}
+
+static void dg_size_text(uint64_t sectors, uint64_t sector_size, char *out, uint64_t cap) {
+    uint64_t bytes = sectors * sector_size;
+    uint64_t gib = 1024ULL * 1024ULL * 1024ULL;
+    uint64_t tib = gib * 1024ULL;
+    out[0] = 0;
+    if (bytes >= tib) {
+        append_uint_text(out, cap, bytes / tib);
+        copy_text(out + str_len(out), " TiB", cap - str_len(out));
+    } else if (bytes >= gib) {
+        append_uint_text(out, cap, bytes / gib);
+        copy_text(out + str_len(out), " GiB", cap - str_len(out));
+    } else {
+        append_uint_text(out, cap, bytes / (1024ULL * 1024ULL));
+        copy_text(out + str_len(out), " MiB", cap - str_len(out));
+    }
+}
+
+static int dg_part_of_selected(uint64_t i) {
+    uint64_t n;
+    if (diskman_selected >= diskman_device_count) return 0;
+    if (str_len(diskman_parts[i].dev) == 0) return 0;
+    n = str_len(diskman_devices[diskman_selected].name);
+    if (n == 0 || str_len(diskman_parts[i].dev) != n) return 0;
+    for (uint64_t j = 0; j < n; j++) {
+        if (diskman_parts[i].dev[j] != diskman_devices[diskman_selected].name[j]) return 0;
+    }
+    return 1;
+}
+
+static uint64_t dg_selected_part_index(void) {
+    for (uint64_t i = 0; i < diskman_part_count; i++) {
+        if (dg_part_of_selected(i) && i == diskman_selected_part) return i;
+    }
+    for (uint64_t i = 0; i < diskman_part_count; i++) {
+        if (dg_part_of_selected(i)) return i;
+    }
+    return 0;
+}
+
+static void dg_format_device_action(uint64_t fs_type) {
+    long rc;
+    const char *name = diskman_action_name(fs_type);
+    if (diskman_device_count == 0) {
+        dg_status_set("no device selected");
+        return;
+    }
+    if (diskman_runtime_device >= 0 &&
+        diskman_devices[diskman_selected].index == (uint64_t)diskman_runtime_device) {
+        dg_status_set("runtime persistence disk protected");
+        return;
+    }
+    dg_status_set("running ");
+    dg_status_append(name);
+    dg_status_append("...");
+    rc = (long)icda_format_device(diskman_devices[diskman_selected].index, fs_type);
+    if (rc < 0) {
+        dg_status_set(name);
+        dg_status_append(" failed (err=");
+        append_uint_text(diskman_status, sizeof(diskman_status), (uint64_t)(-rc));
+        dg_status_append(")");
+    } else {
+        dg_status_set(name);
+        dg_status_append(" complete");
+        diskman_refresh();
+    }
+}
+
+static void dg_format_partition_action(uint64_t fs_type) {
+    long rc;
+    const char *name = diskman_action_name(fs_type);
+    uint64_t part = dg_selected_part_index();
+    if (diskman_part_count == 0) {
+        dg_status_set("no partition selected");
+        return;
+    }
+    dg_status_set("running ");
+    dg_status_append(name);
+    dg_status_append(" on partition...");
+    rc = (long)icda_format_partition(diskman_parts[part].index, fs_type);
+    if (rc < 0) {
+        dg_status_set(name);
+        dg_status_append(" failed (err=");
+        append_uint_text(diskman_status, sizeof(diskman_status), (uint64_t)(-rc));
+        dg_status_append(")");
+    } else {
+        dg_status_set(name);
+        dg_status_append(" complete");
+        diskman_refresh();
+    }
+}
+
+static void dg_set_role_action(uint64_t role, const char *label) {
+    long rc;
+    uint64_t part = dg_selected_part_index();
+    if (diskman_part_count == 0) {
+        dg_status_set("no partition selected");
+        return;
+    }
+    rc = (long)icda_set_partition_role(diskman_parts[part].index, role);
+    if (rc < 0) {
+        dg_status_set("set role failed (err=");
+        append_uint_text(diskman_status, sizeof(diskman_status), (uint64_t)(-rc));
+        dg_status_append(")");
+    } else {
+        dg_status_set("partition role updated (");
+        dg_status_append(label);
+        dg_status_append(")");
+        diskman_refresh();
+    }
+}
+
+static void dg_draw(void) {
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int max_dev_rows = (h - DG_PANEL_Y - 90) / DG_DEV_ROW_H;
+    int max_part_rows = (h - DG_PANEL_Y - 92) / DG_PART_ROW_H;
+    char buf[64];
+    int shown = 0;
+
+    if (max_dev_rows < 1) max_dev_rows = 1;
+    if (max_part_rows < 1) max_part_rows = 1;
+
+    gui_fill_rect(0, 0, w, h, 0x00E7F1FF);
+    for (int row = 0; row < DG_HEAD_H; row++) {
+        int r = (int)(0x3D + ((0x1F - 0x3D) * row) / (DG_HEAD_H - 1));
+        int g = (int)(0x8B + ((0x5E - 0x8B) * row) / (DG_HEAD_H - 1));
+        int b = (int)(0xFF + ((0xBE - 0xFF) * row) / (DG_HEAD_H - 1));
+        gui_fill_rect(0, row, w, 1, (uint32_t)((r << 16) | (g << 8) | b));
+    }
+    gui_fill_rect(0, DG_HEAD_H - 1, w, 1, 0x0015449C);
+    dg_text(16, 12, "ICDA Disk Manager", 0x00FFFFFF, 0x002C73D2, 220);
+    if (diskman_device_count && diskman_selected < diskman_device_count) {
+        dg_text(240, 12, "Disk: ", 0x00EAF2FF, 0x002C73D2, 60);
+        dg_text(288, 12, diskman_devices[diskman_selected].name, 0x00FFFFFF, 0x002C73D2, 100);
+        dg_size_text(diskman_devices[diskman_selected].sectors,
+                     diskman_devices[diskman_selected].sector_size, buf, sizeof(buf));
+        dg_text(390, 12, "Size: ", 0x00EAF2FF, 0x002C73D2, 60);
+        dg_text(438, 12, buf, 0x00FFFFFF, 0x002C73D2, 90);
+    }
+    dg_text(16, 36, "TAB focus  arrows move  M MBR  G GPT  F FAT32  X exFAT  I ICDA  C clear  R refresh  Q close",
+            0x00EAF2FF, 0x002C73D2, w - 32);
+
+    /* Devices panel */
+    gui_fill_rect(DG_LEFT_X, DG_PANEL_Y, DG_LEFT_W, h - DG_PANEL_Y - 92, 0x00FFFFFF);
+    gui_draw_rect_outline(DG_LEFT_X, DG_PANEL_Y, DG_LEFT_W, h - DG_PANEL_Y - 92, 0x0092B7E8);
+    dg_text(DG_LEFT_X + 8, DG_PANEL_Y + 4, "Devices", 0x001D3F66, 0x00FFFFFF, DG_LEFT_W - 16);
+    if (diskman_device_count == 0) {
+        dg_text(DG_LEFT_X + 8, DG_PANEL_Y + 26, "(none detected)", 0x0064758B, 0x00FFFFFF, DG_LEFT_W - 16);
+    } else {
+        for (uint64_t i = 0; i < diskman_device_count && (int)i < max_dev_rows; i++) {
+            int y = DG_PANEL_Y + 22 + (int)i * DG_DEV_ROW_H;
+            int selected = (uint64_t)diskman_selected == i;
+            if (selected) {
+                gui_fill_rect(DG_LEFT_X + 1, y, DG_LEFT_W - 2, DG_DEV_ROW_H - 1, 0x00CFE6FF);
+            }
+            buf[0] = 0;
+            append_uint_text(buf, sizeof(buf), diskman_devices[i].index);
+            copy_text(buf + str_len(buf), ": ", sizeof(buf) - str_len(buf));
+            copy_text(buf + str_len(buf), diskman_devices[i].name, sizeof(buf) - str_len(buf));
+            copy_text(buf + str_len(buf), "  ", sizeof(buf) - str_len(buf));
+            copy_text(buf + str_len(buf), diskman_devices[i].table, sizeof(buf) - str_len(buf));
+            if (diskman_runtime_device >= 0 && diskman_devices[i].index == (uint64_t)diskman_runtime_device) {
+                copy_text(buf + str_len(buf), "  protected", sizeof(buf) - str_len(buf));
+            }
+            dg_text(DG_LEFT_X + 8, y + 4, buf, selected ? 0x001F2937 : 0x0024334A,
+                    selected ? 0x00CFE6FF : 0x00FFFFFF, DG_LEFT_W - 16);
+        }
+    }
+
+    /* Partitions panel */
+    gui_fill_rect(DG_RIGHT_X, DG_PANEL_Y, w - DG_RIGHT_X - 14, h - DG_PANEL_Y - 92, 0x00FFFFFF);
+    gui_draw_rect_outline(DG_RIGHT_X, DG_PANEL_Y, w - DG_RIGHT_X - 14, h - DG_PANEL_Y - 92, 0x0092B7E8);
+    dg_text(DG_RIGHT_X + 8, DG_PANEL_Y + 4, "Partitions on selected device", 0x001D3F66, 0x00FFFFFF, w - DG_RIGHT_X - 40);
+    dg_text(DG_RIGHT_X + 8, DG_PANEL_Y + 22, "Id  Name      FS        Role      Start        Sectors", 0x00334455, 0x00FFFFFF, w - DG_RIGHT_X - 40);
+    {
+        uint64_t part = dg_selected_part_index();
+        for (uint64_t i = 0; i < diskman_part_count && shown < max_part_rows; i++) {
+            int y = DG_PANEL_Y + 40 + shown * DG_PART_ROW_H;
+            int selected = (i == part);
+            if (!dg_part_of_selected(i)) continue;
+            if (selected) {
+                gui_fill_rect(DG_RIGHT_X + 1, y, w - DG_RIGHT_X - 16, DG_PART_ROW_H - 1, 0x00DDF0FF);
+            }
+            buf[0] = 0;
+            append_uint_text(buf, sizeof(buf), diskman_parts[i].index);
+            copy_text(buf + str_len(buf), "  ", sizeof(buf) - str_len(buf));
+            copy_text(buf + str_len(buf), diskman_parts[i].name, sizeof(buf) - str_len(buf));
+            dg_text(DG_RIGHT_X + 8, y + 2, buf, 0x001F2937, selected ? 0x00DDF0FF : 0x00FFFFFF, 130);
+            dg_text(DG_RIGHT_X + 116, y + 2, diskman_parts[i].fs[0] ? diskman_parts[i].fs : "unknown",
+                    0x001F2937, selected ? 0x00DDF0FF : 0x00FFFFFF, 90);
+            dg_text(DG_RIGHT_X + 196, y + 2, diskman_parts[i].role[0] ? diskman_parts[i].role : "unknown",
+                    0x001F2937, selected ? 0x00DDF0FF : 0x00FFFFFF, 90);
+            buf[0] = 0;
+            append_uint_text(buf, sizeof(buf), diskman_parts[i].start);
+            dg_text(DG_RIGHT_X + 276, y + 2, buf, 0x001F2937, selected ? 0x00DDF0FF : 0x00FFFFFF, 110);
+            buf[0] = 0;
+            append_uint_text(buf, sizeof(buf), diskman_parts[i].sectors);
+            dg_text(DG_RIGHT_X + 336, y + 2, buf, 0x001F2937, selected ? 0x00DDF0FF : 0x00FFFFFF, 120);
+            shown++;
+        }
+        if (shown == 0) {
+            dg_text(DG_RIGHT_X + 8, DG_PANEL_Y + 40, "(no partitions on this device)", 0x0064758B, 0x00FFFFFF, w - DG_RIGHT_X - 40);
+        }
+    }
+
+    /* Buttons */
+    dg_button(12, DG_ROW_A_Y, 62, DG_BTN_H, "MBR", 1);
+    dg_button(82, DG_ROW_A_Y, 62, DG_BTN_H, "GPT", 1);
+    dg_button(152, DG_ROW_A_Y, 74, DG_BTN_H, "FAT32", 1);
+    dg_button(234, DG_ROW_A_Y, 74, DG_BTN_H, "exFAT", 1);
+    dg_button(316, DG_ROW_A_Y, 74, DG_BTN_H, "ICDA", 1);
+    dg_button(398, DG_ROW_A_Y, 74, DG_BTN_H, "Clear", 1);
+
+    dg_button(12, DG_ROW_B_Y, 62, DG_BTN_H, "EFI", diskman_focus_parts);
+    dg_button(82, DG_ROW_B_Y, 62, DG_BTN_H, "Root", diskman_focus_parts);
+    dg_button(152, DG_ROW_B_Y, 62, DG_BTN_H, "Swap", diskman_focus_parts);
+    dg_button(222, DG_ROW_B_Y, 82, DG_BTN_H, "Refresh", 1);
+    dg_button(312, DG_ROW_B_Y, 62, DG_BTN_H, "Quit", 1);
+
+    /* Status bar */
+    gui_fill_rect(0, DG_STATUS_Y, w, 30, 0x00EAF2FF);
+    gui_draw_hline(0, DG_STATUS_Y, w, 0x0092B7E8);
+    dg_text(12, DG_STATUS_Y + 8, diskman_status[0] ? diskman_status : "ready", 0x00334455, 0x00EAF2FF, w - 24);
+}
+
+static void dg_key_action(uint32_t key) {
+    if (key == 'q' || key == 'Q' || key == 24) {
+        gui_close_window();
+        icda_exit(0);
+        return;
+    }
+    if (key == '\t') {
+        diskman_focus_parts = !diskman_focus_parts;
+        return;
+    }
+    if (key == DG_KEY_UP) {
+        if (diskman_focus_parts) {
+            uint64_t part = dg_selected_part_index();
+            uint64_t prev = 0;
+            int found = 0;
+            for (uint64_t i = 0; i < diskman_part_count; i++) {
+                if (!dg_part_of_selected(i)) continue;
+                if (i < part) {
+                    prev = i;
+                    found = 1;
+                }
+            }
+            if (found) diskman_selected_part = prev;
+        } else if (diskman_selected > 0) {
+            diskman_selected--;
+            diskman_refresh();
+        }
+        return;
+    }
+    if (key == DG_KEY_DOWN) {
+        if (diskman_focus_parts) {
+            uint64_t part = dg_selected_part_index();
+            int found = 0;
+            for (uint64_t i = part + 1; i < diskman_part_count; i++) {
+                if (dg_part_of_selected(i)) {
+                    diskman_selected_part = i;
+                    found = 1;
+                    break;
+                }
+            }
+            (void)found;
+        } else if (diskman_selected + 1 < diskman_device_count) {
+            diskman_selected++;
+            diskman_refresh();
+        }
+        return;
+    }
+    if (key == 'r' || key == 'R') { diskman_refresh(); return; }
+    if (key == 'f' || key == 'F') {
+        if (diskman_focus_parts) dg_format_partition_action(DISKMAN_FS_FAT32);
+        else dg_format_device_action(DISKMAN_FS_FAT32);
+        return;
+    }
+    if (key == 'x' || key == 'X') {
+        if (diskman_focus_parts) dg_format_partition_action(DISKMAN_FS_EXFAT);
+        else dg_format_device_action(DISKMAN_FS_EXFAT);
+        return;
+    }
+    if (key == 'm' || key == 'M') { dg_format_device_action(DISKMAN_LAYOUT_MBR); return; }
+    if (key == 'g' || key == 'G') { dg_format_device_action(DISKMAN_LAYOUT_GPT); return; }
+    if (key == 'e' || key == 'E') { dg_set_role_action(1, "efi"); return; }
+    if (key == 'n' || key == 'N') { dg_set_role_action(2, "system"); return; }
+    if (key == 'w' || key == 'W') { dg_set_role_action(3, "swap"); return; }
+    if (key == 'i' || key == 'I') { dg_format_device_action(DISKMAN_LAYOUT_ICDA); return; }
+    if (key == 'c' || key == 'C') { dg_format_device_action(DISKMAN_LAYOUT_CLEAR); return; }
+}
+
+static void dg_mouse_click(int mx, int my) {
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int max_dev_rows = (h - DG_PANEL_Y - 90) / DG_DEV_ROW_H;
+    int max_part_rows = (h - DG_PANEL_Y - 92) / DG_PART_ROW_H;
+    int i;
+
+    if (max_dev_rows < 1) max_dev_rows = 1;
+    if (max_part_rows < 1) max_part_rows = 1;
+
+    if (dg_hit(mx, my, 12, DG_ROW_A_Y, 62, DG_BTN_H)) { dg_format_device_action(DISKMAN_LAYOUT_MBR); return; }
+    if (dg_hit(mx, my, 82, DG_ROW_A_Y, 62, DG_BTN_H)) { dg_format_device_action(DISKMAN_LAYOUT_GPT); return; }
+    if (dg_hit(mx, my, 152, DG_ROW_A_Y, 74, DG_BTN_H)) {
+        if (diskman_focus_parts) dg_format_partition_action(DISKMAN_FS_FAT32);
+        else dg_format_device_action(DISKMAN_FS_FAT32);
+        return;
+    }
+    if (dg_hit(mx, my, 234, DG_ROW_A_Y, 74, DG_BTN_H)) {
+        if (diskman_focus_parts) dg_format_partition_action(DISKMAN_FS_EXFAT);
+        else dg_format_device_action(DISKMAN_FS_EXFAT);
+        return;
+    }
+    if (dg_hit(mx, my, 316, DG_ROW_A_Y, 74, DG_BTN_H)) { dg_format_device_action(DISKMAN_LAYOUT_ICDA); return; }
+    if (dg_hit(mx, my, 398, DG_ROW_A_Y, 74, DG_BTN_H)) { dg_format_device_action(DISKMAN_LAYOUT_CLEAR); return; }
+
+    if (dg_hit(mx, my, 12, DG_ROW_B_Y, 62, DG_BTN_H)) { dg_set_role_action(1, "efi"); return; }
+    if (dg_hit(mx, my, 82, DG_ROW_B_Y, 62, DG_BTN_H)) { dg_set_role_action(2, "system"); return; }
+    if (dg_hit(mx, my, 152, DG_ROW_B_Y, 62, DG_BTN_H)) { dg_set_role_action(3, "swap"); return; }
+    if (dg_hit(mx, my, 222, DG_ROW_B_Y, 82, DG_BTN_H)) { diskman_refresh(); return; }
+    if (dg_hit(mx, my, 312, DG_ROW_B_Y, 62, DG_BTN_H)) {
+        gui_close_window();
+        icda_exit(0);
+        return;
+    }
+
+    if (dg_hit(mx, my, DG_LEFT_X, DG_PANEL_Y + 22, DG_LEFT_W, max_dev_rows * DG_DEV_ROW_H)) {
+        i = (my - DG_PANEL_Y - 22) / DG_DEV_ROW_H;
+        if (i >= 0 && (uint64_t)i < diskman_device_count) {
+            diskman_focus_parts = 0;
+            diskman_selected = (uint64_t)i;
+            diskman_refresh();
+        }
+        return;
+    }
+    if (dg_hit(mx, my, DG_RIGHT_X, DG_PANEL_Y + 40, w - DG_RIGHT_X - 14, max_part_rows * DG_PART_ROW_H)) {
+        int shown = 0;
+        for (uint64_t p = 0; p < diskman_part_count; p++) {
+            if (!dg_part_of_selected(p)) continue;
+            if (shown == (my - DG_PANEL_Y - 40) / DG_PART_ROW_H) {
+                diskman_focus_parts = 1;
+                diskman_selected_part = p;
+                return;
+            }
+            shown++;
+        }
+        return;
+    }
+    (void)w;
+}
+
+static uint64_t diskman_gui_main(void) {
+    int key_seq = 0;
+
+    if (gui_open_window("Disk Manager", DG_W, DG_H) != 0) {
+        return 1;
+    }
+    dg_status_set("ready");
+    diskman_focus_parts = 0;
+    diskman_refresh();
+    dg_draw();
+    gui_flush();
+
+    for (;;) {
+        gui_msg_t msg;
+        int changed = 0;
+        while (gui_poll_event(&msg)) {
+            changed = 1;
+            if (msg.type == GUI_MSG_MOUSE_EVENT && (msg.mouse.buttons & GUI_BTN_LEFT)) {
+                dg_mouse_click(msg.mouse.x, msg.mouse.y);
+            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
+                uint32_t code = msg.key.keycode;
+                if (key_seq == 0 && code == 27) {
+                    key_seq = 1;
+                } else if (key_seq == 1 && code == '[') {
+                    key_seq = 2;
+                } else if (key_seq == 2) {
+                    key_seq = 0;
+                    if (code == 'A') dg_key_action(DG_KEY_UP);
+                    else if (code == 'B') dg_key_action(DG_KEY_DOWN);
+                } else {
+                    key_seq = 0;
+                    dg_key_action(code);
+                }
+            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
+                gui_close_window();
+                return 0;
+            }
+        }
+        if (changed) {
+            dg_draw();
+            gui_flush();
+        }
+        icda_sleep(1);
+    }
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    if (icda_gui_available()) {
+        return (int)diskman_gui_main();
+    }
+    return (int)diskman_console_main();
 }
