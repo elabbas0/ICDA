@@ -348,7 +348,7 @@ int main(int argc, char **argv) {
             }
         }
         ap_refresh_status();
-        if (changed || (icda_ticks() % 5) == 0) {
+        if (changed || (icda_ticks() % 8) == 0) {
             ap_draw();
             gui_flush();
         }
