@@ -28,6 +28,7 @@
 #include "net/net.h"
 #include "syscall/syscall.h"
 #include "tty/tty.h"
+#include "vt/vt.h"
 #include "cpu/multiboot2.h"
 
 #include "cpu/gdt.h"
@@ -78,6 +79,9 @@ static void pit_set_frequency(uint32_t hz) {
 
 static void timer_handler(struct registers *regs) {
     keyboard_pump();
+    /* Apply any Ctrl+Alt+F1..F6 virtual terminal switch requested by the
+     * keyboard driver (force-exits the foreground user app if needed). */
+    vt_tick();
     audio_playback_tick();
     schedule(regs);
 }
@@ -386,8 +390,12 @@ void kernel_main(void *multiboot_info) {
         bootstage_set(22, "shell");
         int shell_failures = 0;
         for (;;) {
-            int shell_rc = user_run_path("/apps/wm.app");
-            if (shell_rc < 0) {
+            /* The active virtual terminal decides what runs: the desktop
+             * (WM) on F1, a full-screen text shell on F2+.  A VT switch
+             * force-exits the foreground app, which lands us back here to
+             * restart with the app for the newly selected VT. */
+            int shell_rc = user_run_path(vt_app_path());
+            if (shell_rc < 0 && vt_is_gui()) {
                 shell_rc = user_run_path("/apps/shell.app");
             }
             if (shell_rc < 0) {

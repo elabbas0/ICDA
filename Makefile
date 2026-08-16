@@ -145,6 +145,9 @@ tty.o: kernel/tty/tty.c kernel/tty/tty.h kernel/drivers/console/console.h \
        kernel/drivers/input/input.h kernel/memory/heap.h kernel/memory/pmm.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/tty/tty.c -o tty.o
 
+vt.o: kernel/vt/vt.c kernel/vt/vt.h kernel/proc/sched.h kernel/drivers/console/console.h
+	$(CC) $(CFLAGS) -c kernel/vt/vt.c -o vt.o
+
 syscall.o: kernel/syscall/syscall.c kernel/syscall/syscall.h kernel/fs/vfs.h kernel/proc/sched.h kernel/fs/install.h kernel/fs/diskfmt.h kernel/net/net.h kernel/memory/pmm.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/syscall/syscall.c -o syscall.o
 
@@ -256,23 +259,15 @@ shell_start.o: userspace/shell_start.asm
 	$(ASM) -f elf64 userspace/shell_start.asm -o /tmp/icda-shell_start.o
 	cp -f /tmp/icda-shell_start.o shell_start.o
 
-audioplay_start.o: userspace/audioplay_start.asm
-	$(ASM) -f elf64 userspace/audioplay_start.asm -o /tmp/icda-audioplay_start.o
-	cp -f /tmp/icda-audioplay_start.o audioplay_start.o
-
 editor_start.o: userspace/editor_start.asm
 	$(ASM) -f elf64 userspace/editor_start.asm -o /tmp/icda-editor_start.o
 	cp -f /tmp/icda-editor_start.o editor_start.o
-
-diskman_start.o: userspace/diskman_start.asm
-	$(ASM) -f elf64 userspace/diskman_start.asm -o /tmp/icda-diskman_start.o
-	cp -f /tmp/icda-diskman_start.o diskman_start.o
 
 shell.o: userspace/shell.c userspace/icda_sys.h Makefile
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
 
-audioplay.o: userspace/audioplay.c userspace/icda_sys.h
+audioplay.o: userspace/audioplay.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/audioplay.c -o /tmp/icda-audioplay.o
 	cp -f /tmp/icda-audioplay.o audioplay.o
 
@@ -280,7 +275,7 @@ editor.o: userspace/editor.c userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/editor.c -o /tmp/icda-editor.o
 	cp -f /tmp/icda-editor.o editor.o
 
-diskman.o: userspace/diskman.c userspace/icda_sys.h
+diskman.o: userspace/diskman.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/diskman.c -o /tmp/icda-diskman.o
 	cp -f /tmp/icda-diskman.o diskman.o
 
@@ -288,16 +283,16 @@ userspace/shell.app: shell_start.o shell.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-shell.app shell_start.o shell.o
 	cp -f /tmp/icda-shell.app userspace/shell.app
 
-userspace/audioplay.app: audioplay_start.o audioplay.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-audioplay.app audioplay_start.o audioplay.o
+userspace/audioplay.app: crt0.o audioplay.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-audioplay.app crt0.o audioplay.o gui.o libicda.o
 	cp -f /tmp/icda-audioplay.app userspace/audioplay.app
 
 userspace/editor.app: editor_start.o editor.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-editor.app editor_start.o editor.o
 	cp -f /tmp/icda-editor.app userspace/editor.app
 
-userspace/diskman.app: diskman_start.o diskman.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-diskman.app diskman_start.o diskman.o
+userspace/diskman.app: crt0.o diskman.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-diskman.app crt0.o diskman.o gui.o libicda.o
 	cp -f /tmp/icda-diskman.app userspace/diskman.app
 
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
@@ -439,20 +434,20 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc

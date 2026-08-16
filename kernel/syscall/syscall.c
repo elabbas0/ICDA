@@ -25,8 +25,26 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 
-/* Set to 1 once SYS_MAP_FRAMEBUFFER has been claimed */
+/* Set once SYS_MAP_FRAMEBUFFER has been claimed, along with the pid of
+ * the process that claimed it.  The claim is released when that process
+ * exits so a respawned window manager (e.g. after a VT switch) can map
+ * the framebuffer again. */
 static int fb_claimed = 0;
+static uint64_t fb_claim_pid = 0;
+
+static void fb_release_if_owner_gone(void) {
+    if (!fb_claimed) {
+        return;
+    }
+    if (fb_claim_pid == 0) {
+        return;
+    }
+    process_t *owner = sched_find_process(fb_claim_pid);
+    if (!owner || owner->state == PROCESS_EXITED || owner->state == PROCESS_REAPED) {
+        fb_claimed = 0;
+        fb_claim_pid = 0;
+    }
+}
 
 
 
@@ -1113,6 +1131,9 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return (uint64_t)msgq_poll(regs->rdi);
         case SYS_MAP_FRAMEBUFFER: {
             syscall_fb_info_t *info = (syscall_fb_info_t *)(uintptr_t)regs->rdi;
+            /* If the previous claimant is gone (killed, crashed, or exited
+             * via a VT switch), let the new process take over the screen. */
+            fb_release_if_owner_gone();
             if (fb_claimed) return (uint64_t)-1;
             if (!fb_available()) return (uint64_t)-1;
             process_t *fproc = sched_current_process();
@@ -1142,6 +1163,7 @@ uint64_t syscall_dispatch(struct registers *regs) {
             /* Keep the PS/2 cursor position clamped to the real screen size */
             mouse_set_screen(fb_width, fb_height);
             fb_claimed = 1;
+            fb_claim_pid = fproc->pid;
             return fb_virt + page_offset;
         }
         case SYS_INPUT_READ_MOUSE: {
@@ -1156,6 +1178,11 @@ uint64_t syscall_dispatch(struct registers *regs) {
             out->buttons = ev.buttons;
             return 0;
         }
+        case SYS_GUI_AVAILABLE:
+            /* 1 once the window manager has claimed the framebuffer, so
+             * GUI-capable apps know the desktop is on screen. */
+            fb_release_if_owner_gone();
+            return fb_claimed ? 1 : 0;
         default:
             return (uint64_t)-1;
     }

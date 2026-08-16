@@ -27,4 +27,10 @@ int sched_suspend_process(uint64_t pid);
 int sched_resume_process(uint64_t pid);
 int sched_kill_process(uint64_t pid, uint64_t exit_code);
 
+/* IRQ-context safe: marks the current user process (and every other user
+ * process) exited so user_run_path() returns and the boot loop can start
+ * the app for the newly selected virtual terminal. */
+void sched_force_exit_current_with_children(uint64_t exit_code);
+void sched_force_exit_all_user_processes(uint64_t exit_code);
+
 #endif

@@ -2,6 +2,7 @@
 
 #include "../device.h"
 #include "../../proc/sched.h"
+#include "../../vt/vt.h"
 
 #include <stdint.h>
 
@@ -48,6 +49,7 @@ static volatile uint32_t queue_head = 0;
 static volatile uint32_t queue_tail = 0;
 static int shift_down = 0;
 static int ctrl_down = 0;
+static int alt_down = 0;
 static int caps_lock = 0;
 static int extended_prefix = 0;
 static kernel_device_t keyboard_device;
@@ -179,6 +181,11 @@ static void keyboard_handle_scancode(uint8_t scancode) {
         return;
     }
 
+    if (scancode == 0x38) {
+        alt_down = 1;
+        return;
+    }
+
     if (scancode == 0xAA || scancode == 0xB6) {
         shift_down = 0;
         return;
@@ -186,6 +193,18 @@ static void keyboard_handle_scancode(uint8_t scancode) {
 
     if (scancode == 0x9D) {
         ctrl_down = 0;
+        return;
+    }
+
+    if (scancode == 0xB8) {
+        alt_down = 0;
+        return;
+    }
+
+    /* Ctrl+Alt+F1..F6 switch virtual terminals (Linux-style).  F-keys are
+     * not in the keymap so nothing else would consume them. */
+    if (ctrl_down && alt_down && scancode >= 0x3B && scancode <= 0x40) {
+        vt_request_switch((int)(scancode - 0x3B + 1));
         return;
     }
 
@@ -226,6 +245,7 @@ void keyboard_init(void) {
     queue_tail = 0;
     shift_down = 0;
     ctrl_down = 0;
+    alt_down = 0;
     caps_lock = 0;
     extended_prefix = 0;
 

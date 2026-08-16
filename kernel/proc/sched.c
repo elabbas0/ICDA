@@ -617,3 +617,37 @@ int sched_kill_process(uint64_t pid, uint64_t exit_code) {
     sched_wake_parent_if_waiting(target);
     return 0;
 }
+
+void sched_force_exit_current_with_children(uint64_t exit_code) {
+    thread_t *thread = current_thread_ptr;
+    process_t *proc = thread ? thread->owner : NULL;
+
+    if (!thread || !proc) {
+        return;
+    }
+
+    /* The timer IRQ that triggers a VT switch can fire while the
+     * foreground app is blocked (e.g. the WM waiting for input), with
+     * the idle thread current.  So force-exit every user process -
+     * the foreground app and all its descendants - rather than only
+     * the current thread's owner. */
+    sched_force_exit_all_user_processes(exit_code);
+}
+
+void sched_force_exit_all_user_processes(uint64_t exit_code) {
+    process_t *p = process_list;
+
+    while (p) {
+        thread_t *t = p->main_thread;
+        if (p->kind == PROCESS_USER &&
+            p->state != PROCESS_EXITED && p->state != PROCESS_REAPED && t) {
+            p->state = PROCESS_EXITED;
+            p->exit_code = exit_code;
+            t->block_reason = THREAD_BLOCK_NONE;
+            t->wake_tick = 0;
+            t->state = THREAD_ZOMBIE;
+            sched_wake_parent_if_waiting(p);
+        }
+        p = p->next_all;
+    }
+}
