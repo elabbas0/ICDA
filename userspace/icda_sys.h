@@ -67,7 +67,8 @@ enum {
     SYS_MSG_RECV          = 60,
     SYS_MSG_POLL          = 61,
     SYS_MAP_FRAMEBUFFER   = 62,
-    SYS_INPUT_READ_MOUSE  = 63
+    SYS_INPUT_READ_MOUSE  = 63,
+    SYS_GUI_AVAILABLE     = 64
 };
 
 typedef struct {
@@ -233,5 +234,8 @@ static inline int icda_msg_poll(uint64_t handle) { return (int)sys_call1(SYS_MSG
 
 static inline uint64_t icda_map_framebuffer(icda_fb_info_t *info) { return sys_call1(SYS_MAP_FRAMEBUFFER, (uint64_t)(uintptr_t)info); }
 static inline int icda_input_read_mouse(icda_mouse_event_t *out) { return (int)sys_call1(SYS_INPUT_READ_MOUSE, (uint64_t)(uintptr_t)out); }
+
+/* Returns 1 once the window manager has claimed the framebuffer. */
+static inline int icda_gui_available(void) { return (int)sys_call0(SYS_GUI_AVAILABLE); }
 
 #endif

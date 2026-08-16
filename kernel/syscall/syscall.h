@@ -71,7 +71,8 @@ typedef enum {
     SYS_MSG_RECV          = 60,
     SYS_MSG_POLL          = 61,
     SYS_MAP_FRAMEBUFFER   = 62,
-    SYS_INPUT_READ_MOUSE  = 63
+    SYS_INPUT_READ_MOUSE  = 63,
+    SYS_GUI_AVAILABLE     = 64
 } syscall_number_t;
 
 typedef struct {
