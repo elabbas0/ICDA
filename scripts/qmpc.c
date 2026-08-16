@@ -102,6 +102,20 @@ int main(int argc, char **argv) {
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":%d}}]}}",
                  atoi(argv[3]), atoi(argv[4]));
         cmd(buf);
+    } else if (strcmp(op, "rel") == 0) {
+        /* PS/2 mouse: relative motion, sent as separate events */
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
+                 "{\"type\":\"rel\",\"data\":{\"axis\":\"x\",\"value\":%d}}]}}",
+                 atoi(argv[3]));
+        cmd(buf);
+        usleep(20000);
+        snprintf(buf, sizeof(buf),
+                 "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
+                 "{\"type\":\"rel\",\"data\":{\"axis\":\"y\",\"value\":%d}}]}}",
+                 atoi(argv[4]));
+        cmd(buf);
     } else if (strcmp(op, "click") == 0) {
         cmd("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
             "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"left\"}},"
