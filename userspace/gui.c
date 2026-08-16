@@ -6,10 +6,22 @@ static uint64_t wm_queue = 0;
 static uint64_t app_queue = 0;
 static uint64_t win_shm_handle = 0;
 static uint32_t *win_pixels = NULL;
+static uint32_t *win_shm_pixels = NULL;
 static int win_w = 0;
 static int win_h = 0;
 static uint32_t win_id = 0;
 static uint64_t win_reply_queue = 0;
+
+/* Staging buffer.  Apps draw into this private copy instead of the shared
+ * window buffer so the WM never composites a half-painted frame: the WM
+ * re-samples window buffers on its own timer, and an app's multi-step draw
+ * (background first, then panels, then items) showed up as a flash of
+ * partial content whenever the two clocks crossed.  gui_flush() commits
+ * the finished frame to shared memory with one copy, then asks the WM to
+ * repaint.  Sized for any window the engine will hand out on a 1280x800
+ * screen; larger requests fall back to drawing straight into the SHM. */
+#define GUI_STAGING_PIXELS (1280 * 800)
+static uint32_t gui_staging[GUI_STAGING_PIXELS];
 
 int gui_open_window(const char *title, int w, int h) {
     wm_queue = icda_msg_open(WM_QUEUE_NAME);
@@ -74,7 +86,14 @@ int gui_open_window(const char *title, int w, int h) {
     if (!addr) {
         return -1;
     }
-    win_pixels = (uint32_t*)addr;
+    win_shm_pixels = (uint32_t*)addr;
+    /* Draw into the staging copy when it fits (the normal case); the
+     * WM sees only committed frames via gui_flush(). */
+    if ((uint64_t)win_w * (uint64_t)win_h <= GUI_STAGING_PIXELS) {
+        win_pixels = gui_staging;
+    } else {
+        win_pixels = win_shm_pixels;
+    }
 
     return 0;
 }
@@ -84,8 +103,15 @@ int gui_window_width(void) { return win_w; }
 int gui_window_height(void) { return win_h; }
 
 void gui_flush(void) {
-    if (!win_reply_queue) return;
     gui_msg_t msg;
+    if (!win_reply_queue) return;
+    if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
+        /* Commit the finished frame: one tight copy beats the WM
+         * catching us between draw steps. */
+        for (int i = 0; i < win_w * win_h; i++) {
+            win_shm_pixels[i] = win_pixels[i];
+        }
+    }
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_FLUSH;
     msg.window_id = win_id;
@@ -115,11 +141,16 @@ void gui_close_window(void) {
         icda_msg_send(win_reply_queue, &msg);
     }
     if (win_shm_handle) {
+        /* Unmap our side only.  The WM also has this region mapped (it
+         * composites from it), so closing the handle here would drop the
+         * refcount to zero and free the physical pages while the WM is
+         * still looking at them - a page fault.  The WM releases its own
+         * mapping and closes the region when it processes CLOSE_WINDOW. */
         icda_shm_unmap(win_shm_handle);
-        icda_shm_close(win_shm_handle);
         win_shm_handle = 0;
     }
     win_pixels = NULL;
+    win_shm_pixels = NULL;
     win_w = 0;
     win_h = 0;
     win_id = 0;
