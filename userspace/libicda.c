@@ -570,23 +570,25 @@ int ic_icon_load_folder(const char *dir) {
 /* =============================== theme =============================== */
 
 const ic_theme_t *ic_theme_default(void) {
+    /* Flat, modern light theme (Material-style): white surfaces, thin
+     * neutral borders, a single blue accent, dark slate taskbar. */
     static const ic_theme_t t = {
-        .title_top = 0x008EA3B7,
-        .title_bottom = 0x00475569,
-        .title_top_active = 0x00499BFF,
-        .title_bottom_active = 0x001D4FA8,
-        .border = 0x00475569,
-        .border_active = 0x000D47A1,
-        .shadow = 0x004B5563,
-        .taskbar_top = 0x002B73D7,
-        .taskbar_bottom = 0x0015449C,
-        .accent = 0x003D8BFF,
-        .accent_hi = 0x000C3C88,
-        .accent_lo = 0x001F5EBE,
-        .panel = 0x00F8FBFF,
-        .panel_edge = 0x0092B7E8,
-        .text = 0x001F2937,
-        .text_muted = 0x0064758B,
+        .title_top = 0x00F1F3F4,
+        .title_bottom = 0x00F1F3F4,
+        .title_top_active = 0x00FAFBFC,
+        .title_bottom_active = 0x00FAFBFC,
+        .border = 0x00DADCE0,
+        .border_active = 0x00DADCE0,
+        .shadow = 0x00C7C9CC,
+        .taskbar_top = 0x001F2124,
+        .taskbar_bottom = 0x001F2124,
+        .accent = 0x001A73E8,
+        .accent_hi = 0x001966C6,
+        .accent_lo = 0x001A73E8,
+        .panel = 0x00FFFFFF,
+        .panel_edge = 0x00DADCE0,
+        .text = 0x00202124,
+        .text_muted = 0x005F6368,
         .text_on_accent = 0x00FFFFFF
     };
     return &t;
@@ -599,9 +601,13 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
     int anim = win->anim;
     int anim_off;
     int wx, wy;
+    uint32_t title_bg;
+    uint32_t title_fg;
     uint32_t border;
-    uint32_t title_top;
-    uint32_t title_bottom;
+    int min_x;
+    int min_y;
+    int cls_x;
+    int cls_y;
 
     if (!c || !t || !win || win->minimized) return;
     if (anim < 0) anim = 0;
@@ -611,33 +617,51 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
     wy = win->y - anim_off;
 
     border = win->focused ? t->border_active : t->border;
-    title_top = win->focused ? t->title_top_active : t->title_top;
-    title_bottom = win->focused ? t->title_bottom_active : t->title_bottom;
+    title_bg = win->focused ? t->title_top_active : t->title_top;
+    title_fg = win->focused ? 0x00202124 : 0x005F6368;
 
-    ic_rect(c, wx + 7, wy - IC_TITLE_H + 8, win->w + 2, win->h + IC_TITLE_H + 1, t->shadow);
-    ic_outline(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, win->h + IC_TITLE_H + 2, border);
-    ic_gradient_v(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H, title_top, title_bottom);
-    ic_text_clip(c, wx + 9, wy - IC_TITLE_H + 6, win->title, 0x00FFFFFF, title_bottom,
+    min_x = wx + win->w - IC_BTN_MIN_OFF;
+    min_y = wy - IC_TITLE_H + 5;
+    cls_x = wx + win->w - IC_BTN_CLS_OFF;
+    cls_y = wy - IC_TITLE_H + 5;
+
+    /* Flat modern chrome: rounded top corners, 1px border, no bevels.
+     * A soft 2px drop shadow reads as depth without gradients. */
+    ic_rect_r(c, wx + 6, wy - IC_TITLE_H + 6, win->w + 2, win->h + IC_TITLE_H + 1, 10, t->shadow);
+    ic_rect_r(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, IC_TITLE_H + 2, 9, border);
+    ic_rect_r(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H, 8, title_bg);
+    ic_hline(c, wx + 1, wy - 1, win->w - 2, 0x00E8EAED);
+    ic_text_clip(c, wx + 10, wy - IC_TITLE_H + 6, win->title, title_fg, title_bg,
                  win->w > 80 ? win->w - 74 : win->w);
+    /* client-area frame: 1px sides and bottom */
+    ic_vline(c, wx - 1, wy, win->h + 1, border);
+    ic_vline(c, wx + win->w, wy, win->h + 1, border);
+    ic_hline(c, wx - 1, wy + win->h, win->w + 2, border);
 
-    /* minimize */
-    ic_gradient_v(c, wx + win->w - IC_BTN_MIN_OFF, wy - IC_TITLE_H + 5, IC_BTN_W, IC_BTN_H,
-                  0x00E5EEFF, 0x00AFCBFF);
-    ic_outline(c, wx + win->w - IC_BTN_MIN_OFF, wy - IC_TITLE_H + 5, IC_BTN_W, IC_BTN_H, 0x000D47A1);
+    /* minimize: flat, light gray hover */
+    if (win->hover_min) {
+        ic_rect_r(c, min_x, min_y, IC_BTN_W, IC_BTN_H, 6, 0x00E8EAED);
+    }
     if (icon_min && ic_icon_valid(icon_min)) {
-        ic_icon_draw(c, wx + win->w - IC_BTN_MIN_OFF + 3, wy - IC_TITLE_H + 8, 12, 10, icon_min);
+        ic_icon_draw(c, min_x + 3, min_y + 3, 12, 10, icon_min);
     } else {
-        ic_rect(c, wx + win->w - IC_BTN_MIN_OFF + 5, wy - IC_TITLE_H + 16, 8, 2, 0x000D47A1);
+        ic_rect(c, min_x + 5, min_y + 14, 8, 2, 0x005F6368);
     }
 
-    /* close */
-    ic_gradient_v(c, wx + win->w - IC_BTN_CLS_OFF, wy - IC_TITLE_H + 5, IC_BTN_W, IC_BTN_H,
-                  0x00FF7B7B, 0x00D31616);
-    ic_outline(c, wx + win->w - IC_BTN_CLS_OFF, wy - IC_TITLE_H + 5, IC_BTN_W, IC_BTN_H, 0x008B0000);
-    if (icon_close && ic_icon_valid(icon_close)) {
-        ic_icon_draw(c, wx + win->w - IC_BTN_CLS_OFF + 3, wy - IC_TITLE_H + 8, 12, 10, icon_close);
+    /* close: flat, red hover */
+    if (win->hover_close) {
+        ic_rect_r(c, cls_x, cls_y, IC_BTN_W, IC_BTN_H, 6, 0x00E81123);
+        if (icon_close && ic_icon_valid(icon_close)) {
+            ic_icon_draw(c, cls_x + 3, cls_y + 3, 12, 10, icon_close);
+        } else {
+            ic_text(c, cls_x + 5, cls_y + 1, "x", 0x00FFFFFF, 0x00E81123);
+        }
     } else {
-        ic_text(c, wx + win->w - IC_BTN_CLS_OFF + 5, wy - IC_TITLE_H + 5, "x", 0x00FFFFFF, 0x00D31616);
+        if (icon_close && ic_icon_valid(icon_close)) {
+            ic_icon_draw(c, cls_x + 3, cls_y + 3, 12, 10, icon_close);
+        } else {
+            ic_text(c, cls_x + 5, cls_y + 1, "x", 0x005F6368, title_bg);
+        }
     }
 }
 
@@ -680,45 +704,42 @@ ic_btn_state_t ic_button_state(int enabled, int hover, int pressed) {
 
 void ic_draw_button(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
                     const char *label, ic_btn_state_t state) {
-    uint32_t top, bottom, edge, fg;
+    uint32_t fill, edge, fg;
     int tw, tx, ty;
 
     if (!c || !t) return;
     switch (state) {
         case IC_BTN_ACTIVE:
-            top = t->accent;
-            bottom = t->accent_lo;
+            fill = t->accent;
             edge = t->accent_hi;
             fg = t->text_on_accent;
             break;
         case IC_BTN_HOVER:
-            top = 0x00F2F8FF;
-            bottom = 0x00D9E9FF;
-            edge = t->accent_hi;
+            fill = 0x00F1F3F4;
+            edge = 0x00DADCE0;
             fg = t->text;
             break;
         case IC_BTN_DISABLED:
-            top = 0x00F0F2F5;
-            bottom = 0x00E2E6EC;
-            edge = 0x00C7CFDA;
+            fill = 0x00F8F9FA;
+            edge = 0x00E8EAED;
             fg = t->text_muted;
             break;
         default:
-            top = 0x00FFFFFF;
-            bottom = 0x00DDEBFF;
-            edge = t->accent_hi;
+            fill = 0x00F8F9FA;
+            edge = 0x00DADCE0;
             fg = t->text;
             break;
     }
 
-    ic_gradient_v(c, r.x, r.y, r.w, r.h, top, bottom);
-    ic_outline(c, r.x, r.y, r.w, r.h, edge);
+    /* Flat, rounded (Material-style) button - no bevel gradient. */
+    ic_rect_r(c, r.x, r.y, r.w, r.h, 6, fill);
+    ic_outline_r(c, r.x, r.y, r.w, r.h, 6, edge);
 
     tw = ic_text_width(label);
     tx = r.x + (r.w - tw) / 2;
     ty = r.y + (r.h - FONT_HEIGHT) / 2;
     if (tx < r.x + 4) tx = r.x + 4;
-    ic_text(c, tx, ty, label, fg, bottom);
+    ic_text(c, tx, ty, label, fg, fill);
 }
 
 /* ============================ app skeleton =========================== */
@@ -744,8 +765,9 @@ int ic_run_app(const char *title, int w, int h,
                 return 0;
             }
         }
-        /* Repaint after input, and ~5x/sec so animations keep moving. */
-        if (changed || (icda_ticks() % 5) == 0) {
+        /* Repaint after input, and on the 8-tick cadence so nothing
+         * animates the WM at a fixed 20fps while idle. */
+        if (changed || (icda_ticks() % 8) == 0) {
             on_draw(ud);
         }
         icda_sleep(1);

@@ -138,6 +138,8 @@ typedef struct {
     int      minimized;
     int      anim;        /* 0..IC_ANIM_MAX window open/restore animation */
     const char *title;
+    int      hover_close; /* pointer over the close button (chrome hover) */
+    int      hover_min;   /* pointer over the minimize button */
 } ic_window_t;
 
 void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
