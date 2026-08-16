@@ -1,11 +1,16 @@
 #include "initramfs.h"
 #include "vfs.h"
 #include "audio_assets_gen.h"
+#include "icon_assets_gen.h"
 
 #include <stdint.h>
 
 #ifndef INITRAMFS_INCLUDE_AUDIO_ASSETS
 #define INITRAMFS_INCLUDE_AUDIO_ASSETS 1
+#endif
+
+#ifndef INITRAMFS_INCLUDE_ICON_ASSETS
+#define INITRAMFS_INCLUDE_ICON_ASSETS 1
 #endif
 
 extern const char userprog_hello_start[];
@@ -36,6 +41,8 @@ extern const char userprog_desktop_start[];
 extern const char userprog_desktop_end[];
 extern const char userprog_terminal_start[];
 extern const char userprog_terminal_end[];
+extern const char userprog_gui_demo_start[];
+extern const char userprog_gui_demo_end[];
 static const char motd_txt[] =
     "welcome to icda\n"
     "\n"
@@ -108,7 +115,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/demo.sh", demo_sh, sizeof(demo_sh) - 1 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
-    { "/apps/terminal.app", 0, 0 }
+    { "/apps/terminal.app", 0, 0 },
+    { "/apps/gui_demo.app", 0, 0 }
 };
 
 int initramfs_init(void) {
@@ -140,6 +148,8 @@ int initramfs_init(void) {
     initramfs_files[17].size = (uint64_t)(userprog_desktop_end - userprog_desktop_start);
     initramfs_files[18].data = userprog_terminal_start;
     initramfs_files[18].size = (uint64_t)(userprog_terminal_end - userprog_terminal_start);
+    initramfs_files[19].data = userprog_gui_demo_start;
+    initramfs_files[19].size = (uint64_t)(userprog_gui_demo_end - userprog_gui_demo_start);
     return 0;
 }
 
@@ -153,6 +163,14 @@ int initramfs_populate(void) {
     for (uint64_t i = 0; i < generated_audio_asset_count; i++) {
         uint64_t size = (uint64_t)(generated_audio_assets[i].data_end - generated_audio_assets[i].data);
         if (vfs_seed_readonly(generated_audio_assets[i].path, generated_audio_assets[i].data, size) != 0) {
+            return -1;
+        }
+    }
+#endif
+#if INITRAMFS_INCLUDE_ICON_ASSETS
+    for (uint64_t i = 0; i < generated_icon_asset_count; i++) {
+        uint64_t size = (uint64_t)(generated_icon_assets[i].data_end - generated_icon_assets[i].data);
+        if (vfs_seed_readonly(generated_icon_assets[i].path, generated_icon_assets[i].data, size) != 0) {
             return -1;
         }
     }
@@ -198,6 +216,25 @@ const initramfs_file_t *initramfs_find(const char *path) {
         }
     }
 #endif
+#if INITRAMFS_INCLUDE_ICON_ASSETS
+    for (uint64_t i = 0; i < generated_icon_asset_count; i++) {
+        const char *a = generated_icon_assets[i].path;
+        const char *b = path;
+
+        while (*a && *b && *a == *b) {
+            a++;
+            b++;
+        }
+
+        if (*a == '\0' && *b == '\0') {
+            static initramfs_file_t temp;
+            temp.path = generated_icon_assets[i].path;
+            temp.data = generated_icon_assets[i].data;
+            temp.size = (uint64_t)(generated_icon_assets[i].data_end - generated_icon_assets[i].data);
+            return &temp;
+        }
+    }
+#endif
 
     return 0;
 }
@@ -215,16 +252,29 @@ const initramfs_file_t *initramfs_file_at(uint64_t index) {
         temp.size = (uint64_t)(generated_audio_assets[index].data_end - generated_audio_assets[index].data);
         return &temp;
     }
+    index -= generated_audio_asset_count;
+#endif
+#if INITRAMFS_INCLUDE_ICON_ASSETS
+    if (index < generated_icon_asset_count) {
+        static initramfs_file_t temp;
+        temp.path = generated_icon_assets[index].path;
+        temp.data = generated_icon_assets[index].data;
+        temp.size = (uint64_t)(generated_icon_assets[index].data_end - generated_icon_assets[index].data);
+        return &temp;
+    }
 #endif
     return 0;
 }
 
 uint64_t initramfs_file_count(void) {
+    uint64_t count = sizeof(initramfs_files) / sizeof(initramfs_files[0]);
 #if INITRAMFS_INCLUDE_AUDIO_ASSETS
-    return (sizeof(initramfs_files) / sizeof(initramfs_files[0])) + generated_audio_asset_count;
-#else
-    return (sizeof(initramfs_files) / sizeof(initramfs_files[0]));
+    count += generated_audio_asset_count;
 #endif
+#if INITRAMFS_INCLUDE_ICON_ASSETS
+    count += generated_icon_asset_count;
+#endif
+    return count;
 }
 
 uint64_t initramfs_total_bytes(void) {
@@ -236,6 +286,11 @@ uint64_t initramfs_total_bytes(void) {
  #if INITRAMFS_INCLUDE_AUDIO_ASSETS
     for (uint64_t i = 0; i < generated_audio_asset_count; i++) {
         total += (uint64_t)(generated_audio_assets[i].data_end - generated_audio_assets[i].data);
+    }
+ #endif
+ #if INITRAMFS_INCLUDE_ICON_ASSETS
+    for (uint64_t i = 0; i < generated_icon_asset_count; i++) {
+        total += (uint64_t)(generated_icon_assets[i].data_end - generated_icon_assets[i].data);
     }
  #endif
 

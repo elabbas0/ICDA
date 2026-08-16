@@ -8,6 +8,7 @@ SGDISK ?= /usr/sbin/sgdisk
 SHELL_AUTOTEST ?= 0
 SERIAL_SHELL_MIRROR ?= 0
 AUDIO_WAVS := $(wildcard userspace/*.wav)
+ICON_ICOS := $(wildcard resources/icons/*.ico)
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector \
@@ -108,11 +109,11 @@ pci.o: kernel/drivers/pci/pci.c kernel/drivers/pci/pci.h kernel/firmware/acpi.h 
        kernel/cpu/lapic.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/drivers/pci/pci.c -o pci.o
 
-initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c Makefile
+initramfs.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c kernel/fs/icon_assets_gen.h kernel/fs/icon_assets_gen.c Makefile
 	$(CC) $(CFLAGS) -c kernel/fs/initramfs.c -o initramfs.o
 
-initramfs_install.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c Makefile
-	$(CC) $(CFLAGS) -DINITRAMFS_INCLUDE_AUDIO_ASSETS=0 -c kernel/fs/initramfs.c -o initramfs_install.o
+initramfs_install.o: kernel/fs/initramfs.c kernel/fs/initramfs.h kernel/fs/audio_assets_gen.h kernel/fs/audio_assets_gen.c kernel/fs/icon_assets_gen.h kernel/fs/icon_assets_gen.c Makefile
+	$(CC) $(CFLAGS) -DINITRAMFS_INCLUDE_AUDIO_ASSETS=0 -DINITRAMFS_INCLUDE_ICON_ASSETS=0 -c kernel/fs/initramfs.c -o initramfs_install.o
 
 install.o: kernel/fs/install.c kernel/fs/install.h kernel/fs/initramfs.h kernel/fs/vfs.h \
            kernel/fs/boot_assets.h kernel/fs/persistfs.h kernel/drivers/storage/partition.h
@@ -308,7 +309,7 @@ kernel/fs/bootx64-install.efi: boot/grub/grub-install.cfg
 boot_assets.o: kernel/proc/boot_assets.asm kernel/fs/bootx64-install.efi kernel/install-kernel.bin
 	$(ASM) -f elf64 kernel/proc/boot_assets.asm -o boot_assets.o
 
-kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS)
+kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm &: Makefile $(AUDIO_WAVS)
 	@mkdir -p kernel/fs kernel/proc
 	@printf '#include <stdint.h>\n#include "audio_assets_gen.h"\n\n' > kernel/fs/audio_assets_gen.c
 	@rm -f kernel/fs/.audio_assets.externs.tmp kernel/fs/.audio_assets.entries.tmp
@@ -342,6 +343,43 @@ kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm: Makefile $(AUDIO_WAVS
 audio_assets.o: kernel/proc/audio_assets.asm kernel/fs/audio_assets_gen.c
 	$(ASM) -f elf64 kernel/proc/audio_assets.asm -o audio_assets.o
 
+kernel/fs/icon_assets_gen.c kernel/proc/icon_assets.asm &: Makefile $(ICON_ICOS)
+	@mkdir -p kernel/fs kernel/proc resources/icons
+	@printf '#include <stdint.h>\n#include "icon_assets_gen.h"\n\n' > kernel/fs/icon_assets_gen.c
+	@rm -f kernel/fs/.icon_assets.externs.tmp kernel/fs/.icon_assets.entries.tmp
+	@touch kernel/fs/.icon_assets.externs.tmp kernel/fs/.icon_assets.entries.tmp
+	@printf 'bits 64\n\nsection .rodata\n' > kernel/proc/icon_assets.asm
+	@count=0; \
+	for f in resources/icons/*.ico; do \
+		if [ ! -f "$$f" ]; then continue; fi; \
+		base=$$(basename "$$f"); \
+		sym=$$(printf '%s' "$$base" | sed 's/[^A-Za-z0-9]/_/g'); \
+		printf 'extern const char icon_asset_%s_start[];\n' "$$sym" >> kernel/fs/.icon_assets.externs.tmp; \
+		printf 'extern const char icon_asset_%s_end[];\n' "$$sym" >> kernel/fs/.icon_assets.externs.tmp; \
+		printf 'global icon_asset_%s_start\n' "$$sym" >> kernel/proc/icon_assets.asm; \
+		printf 'global icon_asset_%s_end\n' "$$sym" >> kernel/proc/icon_assets.asm; \
+		printf 'icon_asset_%s_start:\n    incbin "%s"\nicon_asset_%s_end:\n\n' "$$sym" "$$f" "$$sym" >> kernel/proc/icon_assets.asm; \
+		printf '    { "/usr/share/icons/%s", icon_asset_%s_start, icon_asset_%s_end },\n' "$$base" "$$sym" "$$sym" >> kernel/fs/.icon_assets.entries.tmp; \
+		count=$$((count + 1)); \
+	done; \
+	cat kernel/fs/.icon_assets.externs.tmp >> kernel/fs/icon_assets_gen.c; \
+	printf '\nconst generated_icon_asset_t generated_icon_assets[] = {\n' >> kernel/fs/icon_assets_gen.c; \
+	if [ "$$count" -eq 0 ]; then \
+		printf '    { 0, 0, 0 }\n};\n' >> kernel/fs/icon_assets_gen.c; \
+		printf 'const uint64_t generated_icon_asset_count = 0;\n' >> kernel/fs/icon_assets_gen.c; \
+	else \
+		cat kernel/fs/.icon_assets.entries.tmp >> kernel/fs/icon_assets_gen.c; \
+		printf '};\nconst uint64_t generated_icon_asset_count = %s;\n' "$$count" >> kernel/fs/icon_assets_gen.c; \
+	fi; \
+	rm -f kernel/fs/.icon_assets.externs.tmp kernel/fs/.icon_assets.entries.tmp; \
+	printf '\nsection .note.GNU-stack noalloc noexec nowrite progbits\n' >> kernel/proc/icon_assets.asm
+
+icon_assets_gen.o: kernel/fs/icon_assets_gen.c kernel/fs/icon_assets_gen.h
+	$(CC) $(CFLAGS) -c kernel/fs/icon_assets_gen.c -o icon_assets_gen.o
+
+icon_assets.o: kernel/proc/icon_assets.asm kernel/fs/icon_assets_gen.c
+	$(ASM) -f elf64 kernel/proc/icon_assets.asm -o icon_assets.o
+
 curl_start.o: userspace/curl_start.asm
 	$(ASM) -f elf64 userspace/curl_start.asm -o /tmp/icda-curl_start.o
 	cp -f /tmp/icda-curl_start.o curl_start.o
@@ -358,43 +396,47 @@ gui.o: userspace/gui.c userspace/gui.h userspace/gui_proto.h userspace/font.h us
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/gui.c -o /tmp/icda-gui.o
 	cp -f /tmp/icda-gui.o gui.o
 
-wm_start.o: userspace/wm_start.asm
-	$(ASM) -f elf64 userspace/wm_start.asm -o /tmp/icda-wm_start.o
-	cp -f /tmp/icda-wm_start.o wm_start.o
+crt0.o: userspace/crt0.asm
+	$(ASM) -f elf64 userspace/crt0.asm -o /tmp/icda-crt0.o
+	cp -f /tmp/icda-crt0.o crt0.o
 
-wm.o: userspace/wm.c userspace/gui_proto.h userspace/font.h userspace/icda_sys.h
+libicda.o: userspace/libicda.c userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/libicda.c -o /tmp/icda-libicda.o
+	cp -f /tmp/icda-libicda.o libicda.o
+
+gui_demo.o: userspace/gui_demo.c userspace/libicda.h userspace/icda_sys.h
+	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/gui_demo.c -o /tmp/icda-gui_demo.o
+	cp -f /tmp/icda-gui_demo.o gui_demo.o
+
+userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
+	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
+
+wm.o: userspace/wm.c userspace/gui_proto.h userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o
 
-userspace/wm.app: wm_start.o wm.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app wm_start.o wm.o
+userspace/wm.app: crt0.o wm.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o gui.o libicda.o
 	cp -f /tmp/icda-wm.app userspace/wm.app
 
-desktop_start.o: userspace/desktop_start.asm
-	$(ASM) -f elf64 userspace/desktop_start.asm -o /tmp/icda-desktop_start.o
-	cp -f /tmp/icda-desktop_start.o desktop_start.o
-
-desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h userspace/font.h userspace/icda_sys.h
+desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/font.h userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/desktop.c -o /tmp/icda-desktop.o
 	cp -f /tmp/icda-desktop.o desktop.o
 
-userspace/desktop.app: desktop_start.o desktop.o gui.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-desktop.app desktop_start.o desktop.o gui.o
+userspace/desktop.app: crt0.o desktop.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-desktop.app crt0.o desktop.o gui.o libicda.o
 	cp -f /tmp/icda-desktop.app userspace/desktop.app
 
-terminal_start.o: userspace/terminal_start.asm
-	$(ASM) -f elf64 userspace/terminal_start.asm -o /tmp/icda-terminal_start.o
-	cp -f /tmp/icda-terminal_start.o terminal_start.o
-
-terminal.o: userspace/terminal.c userspace/gui.h userspace/icda_sys.h
+terminal.o: userspace/terminal.c userspace/gui.h userspace/libicda.h userspace/icda_sys.h
 	$(CC) -ffreestanding -O0 -Wall -Wextra -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector -mno-mmx -mno-sse -mno-sse2 -Iuserspace -c userspace/terminal.c -o /tmp/icda-terminal.o
 	cp -f /tmp/icda-terminal.o terminal.o
 
-userspace/terminal.app: terminal_start.o terminal.o gui.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-terminal.app terminal_start.o terminal.o gui.o
+userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-terminal.app crt0.o terminal.o gui.o libicda.o
 	cp -f /tmp/icda-terminal.app userspace/terminal.app
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
@@ -406,11 +448,11 @@ kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o 
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o net.o vga.o framebuffer.o keyboard.o input.o mouse.o shm.o msgq.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o \
 	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o tls.o -lgcc
@@ -422,7 +464,10 @@ kernel.iso: kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkstandalone -O x86_64-efi -o isodir/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub.cfg"
 	grub-mkrescue -o /tmp/kernel.iso isodir
-	cp /tmp/kernel.iso $@
+	# Docker Desktop 9p bind mounts can return EEXIST when creating a path
+	# whose entry lingers in the file-sharing cache; rename over it instead.
+	cp /tmp/kernel.iso $@.tmp
+	mv -f $@.tmp $@
 
 kernel-usb.img: kernel.bin
 	mkdir -p usbroot/EFI/BOOT

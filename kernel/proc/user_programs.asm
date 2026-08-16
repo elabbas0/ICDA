@@ -27,6 +27,8 @@ global userprog_desktop_start
 global userprog_desktop_end
 global userprog_terminal_start
 global userprog_terminal_end
+global userprog_gui_demo_start
+global userprog_gui_demo_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -79,5 +81,9 @@ userprog_desktop_end:
 userprog_terminal_start:
     incbin "userspace/terminal.app"
 userprog_terminal_end:
+
+userprog_gui_demo_start:
+    incbin "userspace/gui_demo.app"
+userprog_gui_demo_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits
