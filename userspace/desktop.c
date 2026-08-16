@@ -165,29 +165,6 @@ static int hit_rect(int mx, int my, int x, int y, int w, int h) {
     return mx >= x && my >= y && mx < x + w && my < y + h;
 }
 
-static uint32_t blend(uint32_t a, uint32_t b, int n, int d) {
-    int ar = (int)((a >> 16) & 0xFF);
-    int ag = (int)((a >> 8) & 0xFF);
-    int ab = (int)(a & 0xFF);
-    int br = (int)((b >> 16) & 0xFF);
-    int bg = (int)((b >> 8) & 0xFF);
-    int bb = (int)(b & 0xFF);
-    int r = ar + ((br - ar) * n) / d;
-    int g = ag + ((bg - ag) * n) / d;
-    int c = ab + ((bb - ab) * n) / d;
-    return (uint32_t)((r << 16) | (g << 8) | c);
-}
-
-static void draw_gradient(int x, int y, int w, int h, uint32_t a, uint32_t b) {
-    if (h <= 1) {
-        gui_fill_rect(x, y, w, h, a);
-        return;
-    }
-    for (int row = 0; row < h; row++) {
-        gui_fill_rect(x, y + row, w, 1, blend(a, b, row, h - 1));
-    }
-}
-
 static void draw_text_clip(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
     int cx = x;
     if (max_px <= 0) return;
@@ -204,12 +181,16 @@ static void draw_panel(int x, int y, int w, int h, uint32_t fill, uint32_t edge)
 }
 
 static void draw_button(int x, int y, int w, int h, const char *label, int active) {
-    uint32_t top = active ? 0x003D8BFF : 0x00FFFFFF;
-    uint32_t bottom = active ? 0x001F5EBE : 0x00DDEBFF;
-    uint32_t edge = active ? 0x000C3C88 : 0x006EA6E8;
-    draw_gradient(x, y, w, h, top, bottom);
-    gui_draw_rect_outline(x, y, w, h, edge);
-    draw_text_clip(x + 8, y + 5, label, active ? 0x00FFFFFF : 0x001D3F66, bottom, w - 14);
+    uint32_t fill = active ? 0x001A73E8 : 0x00F8F9FA;
+    uint32_t edge = active ? 0x001966C6 : 0x00DADCE0;
+    uint32_t fg = active ? 0x00FFFFFF : 0x00202124;
+    ic_canvas_t c;
+    c.px = gui_pixel_buffer();
+    c.w = gui_window_width();
+    c.h = gui_window_height();
+    ic_rect_r(&c, x, y, w, h, 6, fill);
+    ic_outline_r(&c, x, y, w, h, 6, edge);
+    draw_text_clip(x + 8, y + 5, label, fg, fill, w - 14);
 }
 
 static void path_join(char *out, uint64_t cap, const char *dir, const char *name) {
@@ -369,22 +350,26 @@ static void draw_item(desktop_item_t *item, int idx, uint64_t tick) {
     int selected = idx == selected_item;
     int hover = idx == hover_item;
     int lift = hover ? 2 : 0;
-    uint32_t bg = selected ? 0x00CFE6FF : (hover ? 0x00EEF7FF : 0x00FFFFFF);
-    uint32_t edge = selected ? 0x003D8BFF : (hover ? 0x0092C5F8 : 0x00D7E2F1);
+    uint32_t bg = selected ? 0x00E8F0FE : (hover ? 0x00F1F3F4 : 0x00FFFFFF);
+    uint32_t edge = selected ? 0x001A73E8 : (hover ? 0x00DADCE0 : 0x00FFFFFF);
     const char *icon_name;
     const ic_icon_t *icon;
     ic_canvas_t c;
 
-    if (selected && ((tick / 8) & 1)) bg = 0x00DDF0FF;
-    draw_panel(item->x, item->y - lift, item->w, item->h, bg, edge);
+    if (selected && ((tick / 8) & 1)) bg = 0x00D2E3FC;
+    /* Rounded Material-style tile; border disappears when idle. */
+    c.px = gui_pixel_buffer();
+    c.w = gui_window_width();
+    c.h = gui_window_height();
+    ic_rect_r(&c, item->x, item->y - lift, item->w, item->h, 8, bg);
+    if (selected || hover) {
+        ic_outline_r(&c, item->x, item->y - lift, item->w, item->h, 8, edge);
+    }
 
     /* Real icons from the engine's builtin set instead of hand-drawn pixels */
     icon_name = item->is_dir ? "folder" : (item->is_wav ? "wav" : (item->is_app ? "app" : "file"));
     icon = ic_icon_builtin(icon_name);
     if (icon) {
-        c.px = gui_pixel_buffer();
-        c.w = gui_window_width();
-        c.h = gui_window_height();
         ic_icon_draw(&c, item->x + 10, item->y + 4 - lift, 54, 48, icon);
     }
     draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, 0x001F2937, bg, item->w - 12);
@@ -403,14 +388,23 @@ static void draw_browser(void) {
     char count_buf[32];
 
     layout_items(w, h);
-    draw_gradient(0, 0, w, h, 0x00E7F1FF, 0x00F9FCFF);
-    draw_gradient(0, 0, w, TOP_H, 0x003D8BFF, 0x001F5EBE);
-    gui_fill_rect(0, TOP_H, SIDE_W, h - TOP_H - STATUS_H, 0x00DDEBFF);
-    gui_draw_vline(SIDE_W, TOP_H, h - TOP_H - STATUS_H, 0x0092B7E8);
+    /* Flat modern chrome: white surfaces, thin neutral borders, one
+     * accent.  No blue gradient headers. */
+    gui_fill_rect(0, 0, w, h, 0x00FFFFFF);
+    gui_fill_rect(0, 0, w, TOP_H, 0x00FFFFFF);
+    gui_draw_hline(0, TOP_H, w, 0x00E8EAED);
+    gui_fill_rect(0, TOP_H, SIDE_W, h - TOP_H - STATUS_H, 0x00F8F9FA);
+    gui_draw_vline(SIDE_W, TOP_H, h - TOP_H - STATUS_H, 0x00E8EAED);
 
-    gui_fill_rect(12, 12, w - 24, 26, 0x00FFFFFF);
-    gui_draw_rect_outline(12, 12, w - 24, 26, 0x006EA6E8);
-    draw_text_clip(20, 17, current_path, 0x001F2937, 0x00FFFFFF, w - 40);
+    {
+        ic_canvas_t c;
+        c.px = gui_pixel_buffer();
+        c.w = gui_window_width();
+        c.h = gui_window_height();
+        ic_rect_r(&c, 12, 12, w - 24, 26, 6, 0x00F1F3F4);
+        ic_outline_r(&c, 12, 12, w - 24, 26, 6, 0x00DADCE0);
+    }
+    draw_text_clip(20, 17, current_path, 0x00202124, 0x00F1F3F4, w - 40);
 
     draw_button(12, 50, 50, 25, "Back", history_count > 0);
     draw_button(68, 50, 42, 25, "Up", !d_streq(current_path, "/"));
@@ -423,7 +417,7 @@ static void draw_browser(void) {
     draw_button(w - 174, 50, 78, 25, "Terminal", 0);
     draw_button(w - 88, 50, 76, 25, "Diskman", 0);
 
-    draw_text_clip(18, TOP_H + 14, "Places", 0x001D3F66, 0x00DDEBFF, SIDE_W - 28);
+    draw_text_clip(18, TOP_H + 14, "Places", 0x005F6368, 0x00F8F9FA, SIDE_W - 28);
     draw_sidebar_button(TOP_H + 42, "Root", "/");
     draw_sidebar_button(TOP_H + 74, "Home", "/home");
     draw_sidebar_button(TOP_H + 106, "Apps", "/apps");
@@ -432,35 +426,35 @@ static void draw_browser(void) {
     draw_button(12, h - STATUS_H - 42, SIDE_W - 24, 26, "Open Path", 0);
 
     gui_fill_rect(SIDE_W + 1, TOP_H, w - SIDE_W - 1, h - TOP_H - STATUS_H, 0x00FFFFFF);
-    gui_draw_hline(SIDE_W + 1, TOP_H, w - SIDE_W - 1, 0x00C9DAF2);
+    gui_draw_hline(SIDE_W + 1, TOP_H, w - SIDE_W - 1, 0x00E8EAED);
 
     for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
         draw_item(&items[i], i, tick);
     }
 
     if (item_count == 0) {
-        draw_text_clip(SIDE_W + 28, TOP_H + 34, "This folder is empty.", 0x0064758B, 0x00FFFFFF, w - SIDE_W - 56);
+        draw_text_clip(SIDE_W + 28, TOP_H + 34, "This folder is empty.", 0x005F6368, 0x00FFFFFF, w - SIDE_W - 56);
     }
 
     if (page_offset > 0) draw_button(w - 176, h - STATUS_H - 30, 72, 22, "Previous", 0);
     if (page_offset + layout_visible < item_count) draw_button(w - 94, h - STATUS_H - 30, 72, 22, "Next", 0);
 
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00EAF2FF);
-    gui_draw_hline(0, h - STATUS_H, w, 0x0092B7E8);
+    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00F8F9FA);
+    gui_draw_hline(0, h - STATUS_H, w, 0x00E8EAED);
     uint_to_text((uint64_t)item_count, count_buf, sizeof(count_buf));
-    draw_text_clip(12, h - 25, count_buf, 0x001D3F66, 0x00EAF2FF, 56);
-    draw_text_clip(36, h - 25, "items", 0x001D3F66, 0x00EAF2FF, 56);
-    draw_text_clip(96, h - 25, status_text, 0x00334455, 0x00EAF2FF, 340);
+    draw_text_clip(12, h - 25, count_buf, 0x005F6368, 0x00F8F9FA, 56);
+    draw_text_clip(36, h - 25, "items", 0x005F6368, 0x00F8F9FA, 56);
+    draw_text_clip(96, h - 25, status_text, 0x005F6368, 0x00F8F9FA, 340);
 
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
         char secs[32];
         uint_to_text(audio.seconds_left, secs, sizeof(secs));
-        draw_text_clip(w - 284, h - 25, "Playing:", 0x007C3AED, 0x00EAF2FF, 72);
-        draw_text_clip(w - 212, h - 25, audio.name, 0x001F2937, 0x00EAF2FF, 130);
-        draw_text_clip(w - 74, h - 25, secs, 0x001F2937, 0x00EAF2FF, 32);
-        draw_text_clip(w - 42, h - 25, "s", 0x001F2937, 0x00EAF2FF, 16);
+        draw_text_clip(w - 284, h - 25, "Playing:", 0x001A73E8, 0x00F8F9FA, 72);
+        draw_text_clip(w - 212, h - 25, audio.name, 0x00202124, 0x00F8F9FA, 130);
+        draw_text_clip(w - 74, h - 25, secs, 0x00202124, 0x00F8F9FA, 32);
+        draw_text_clip(w - 42, h - 25, "s", 0x00202124, 0x00F8F9FA, 16);
     } else {
-        draw_text_clip(w - 120, h - 25, "Audio idle", 0x0064758B, 0x00EAF2FF, 100);
+        draw_text_clip(w - 120, h - 25, "Audio idle", 0x005F6368, 0x00F8F9FA, 100);
     }
 }
 
@@ -504,15 +498,20 @@ static void draw_dialog(void) {
     int h = gui_window_height();
     int x = (w - 390) / 2;
     int y = (h - 150) / 2;
+    ic_canvas_t c;
     if (dialog == DIALOG_NONE) return;
-    draw_panel(x + 4, y + 5, 390, 150, 0x0064758B, 0x0064758B);
-    draw_panel(x, y, 390, 150, 0x00F8FBFF, 0x003D8BFF);
-    draw_gradient(x + 1, y + 1, 388, 30, 0x003D8BFF, 0x001F5EBE);
-    draw_text_clip(x + 12, y + 8, dialog_title, 0x00FFFFFF, 0x002C73D2, 260);
-    gui_fill_rect(x + 20, y + 58, 350, 28, 0x00FFFFFF);
-    gui_draw_rect_outline(x + 20, y + 58, 350, 28, 0x006EA6E8);
-    draw_text_clip(x + 28, y + 64, dialog_input, 0x001F2937, 0x00FFFFFF, 320);
-    gui_fill_rect(x + 28 + dialog_cursor * 8, y + 63, 2, 18, 0x003D8BFF);
+    c.px = gui_pixel_buffer();
+    c.w = gui_window_width();
+    c.h = gui_window_height();
+    ic_rect_r(&c, x + 5, y + 6, 390, 150, 10, 0x005F6368);
+    ic_rect_r(&c, x, y, 390, 150, 10, 0x00FFFFFF);
+    ic_outline_r(&c, x, y, 390, 150, 10, 0x00DADCE0);
+    ic_rect_r(&c, x + 1, y + 1, 388, 34, 9, 0x00F8F9FA);
+    draw_text_clip(x + 12, y + 9, dialog_title, 0x00202124, 0x00F8F9FA, 260);
+    ic_rect_r(&c, x + 20, y + 58, 350, 28, 6, 0x00F1F3F4);
+    ic_outline_r(&c, x + 20, y + 58, 350, 28, 6, 0x00DADCE0);
+    draw_text_clip(x + 28, y + 64, dialog_input, 0x00202124, 0x00F1F3F4, 320);
+    gui_fill_rect(x + 28 + dialog_cursor * 8, y + 63, 2, 18, 0x001A73E8);
     draw_button(x + 210, y + 108, 72, 25, "OK", 1);
     draw_button(x + 292, y + 108, 78, 25, "Cancel", 0);
 }
@@ -696,14 +695,15 @@ static void draw_editor(void) {
     if (rows < 1) rows = 1;
     if (cols < 8) cols = 8;
 
-    draw_gradient(0, 0, w, h, 0x00F9FCFF, 0x00EEF6FF);
-    draw_gradient(0, 0, w, 70, 0x002B6FD4, 0x001D4FA8);
-    draw_text_clip(14, 12, "ICDA Notepad", 0x00FFFFFF, 0x002762C4, 160);
-    draw_text_clip(14, 36, editor_path, 0x00EAF2FF, 0x002762C4, w - 220);
+    gui_fill_rect(0, 0, w, h, 0x00FFFFFF);
+    gui_fill_rect(0, 0, w, 70, 0x00FFFFFF);
+    gui_draw_hline(0, 70, w, 0x00E8EAED);
+    draw_text_clip(14, 12, "ICDA Notepad", 0x00202124, 0x00FFFFFF, 160);
+    draw_text_clip(14, 36, editor_path, 0x005F6368, 0x00FFFFFF, w - 220);
     draw_button(w - 176, 24, 72, 26, "Save", editor_modified);
     draw_button(w - 94, 24, 76, 26, "Back", 0);
 
-    draw_panel(area_x, area_y, area_w, area_h, 0x00FFFFFF, 0x0092B7E8);
+    draw_panel(area_x, area_y, area_w, area_h, 0x00FFFFFF, 0x00DADCE0);
     for (int r = 0; r < rows; r++) {
         char nbuf[16];
         uint64_t line_end;
@@ -711,7 +711,7 @@ static void draw_editor(void) {
         int y = area_y + 4 + r * FONT_CELL_HEIGHT;
         int x = area_x + 8;
         uint_to_text(line_no, nbuf, sizeof(nbuf));
-        draw_text_clip(x, y, nbuf, 0x0091A5C4, 0x00FFFFFF, 40);
+        draw_text_clip(x, y, nbuf, 0x009AA0A6, 0x00FFFFFF, 40);
         x += 50;
         line_end = editor_line_end(pos);
         for (int c = 0; c < cols; c++) {
@@ -723,8 +723,8 @@ static void draw_editor(void) {
                 if (ch < 32 || ch > 126) ch = '.';
             }
             if (is_cursor) {
-                gui_fill_rect(x + c * FONT_CELL_WIDTH, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x003D8BFF);
-                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x00FFFFFF, 0x003D8BFF);
+                gui_fill_rect(x + c * FONT_CELL_WIDTH, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x001A73E8);
+                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x00FFFFFF, 0x001A73E8);
             } else {
                 gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x001F2937, 0x00FFFFFF);
             }
@@ -733,10 +733,10 @@ static void draw_editor(void) {
         if (pos < editor_len && editor_buf[pos] == '\n') pos++;
     }
 
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00EAF2FF);
-    gui_draw_hline(0, h - STATUS_H, w, 0x0092B7E8);
-    draw_text_clip(12, h - 25, editor_modified ? "Modified" : "Saved", editor_modified ? 0x00B45309 : 0x001D6F42, 0x00EAF2FF, 92);
-    draw_text_clip(112, h - 25, status_text, 0x00334455, 0x00EAF2FF, w - 130);
+    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00F8F9FA);
+    gui_draw_hline(0, h - STATUS_H, w, 0x00E8EAED);
+    draw_text_clip(12, h - 25, editor_modified ? "Modified" : "Saved", editor_modified ? 0x00B45309 : 0x001D6F42, 0x00F8F9FA, 92);
+    draw_text_clip(112, h - 25, status_text, 0x005F6368, 0x00F8F9FA, w - 130);
 }
 
 static void open_dialog(int kind, const char *title, const char *initial) {
@@ -1085,10 +1085,11 @@ int main(int argc, char **argv) {
                 return 0;
             }
         }
-        /* Redraw immediately on input; otherwise keep ~20fps for the
-         * selection blink / status animations instead of repainting the
-         * whole window (and flushing to the WM) 100 times a second. */
-        if (changed || (icda_ticks() % 5) == 0) {
+        /* Redraw immediately on input; otherwise only when the selection
+         * blink flips (every 8 ticks).  Repainting the whole window at a
+         * fixed 20fps made the WM composite full frames even when the
+         * explorer sat idle on a laptop. */
+        if (changed || (icda_ticks() % 8) == 0) {
             draw_all();
         }
         icda_sleep(1);
