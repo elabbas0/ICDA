@@ -152,7 +152,9 @@ static void pci_enumerate_bus(const struct acpi_mcfg_entry *entry, uint8_t bus) 
 }
 
 static void pci_enumerate_entry(const struct acpi_mcfg_entry *entry) {
-    pci_enumerate_bus(entry, entry->start_bus);
+    for (uint8_t bus = entry->start_bus; bus <= entry->end_bus; bus++) {
+        pci_enumerate_bus(entry, bus);
+    }
 }
 
 static void pci_legacy_enumerate(void) {
