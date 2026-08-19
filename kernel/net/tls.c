@@ -598,10 +598,10 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                     sha256_update(&conn->handshake_hash, payload + off, 4 + hs_len);
 
                     if (ht == TLS_HANDSHAKE_SERVER_HELLO) {
-                        conn->server_random[0] = TLS_VERSION_MAJOR;
-                        conn->server_random[1] = TLS_VERSION_MINOR;
-                        for (int i = 0; i < 32 && i + 2 < (int)hs_len; i++) conn->server_random[i] = hs_data[2 + i];
-                        if (hs_len >= 38) {
+                        /* TLS 1.2 ServerHello: version(2) + random(32) + sid_len(1) + sid + cipher(2) + comp(1) */
+                        for (int i = 0; i < 32 && (uint32_t)(2 + i) < hs_len; i++)
+                            conn->server_random[i] = hs_data[2 + i];
+                        if (hs_len >= 39) {
                             uint8_t sid_len = hs_data[34];
                             if ((uint32_t)(35 + sid_len + 2) <= hs_len) {
                                 conn->cipher_suite = r16(hs_data + 35 + sid_len);
@@ -708,7 +708,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     for (int i = 0; i < 32; i++) key_seed[32 + i] = conn->client_random[i];
 
     uint8_t key_block[128];
-    uint32_t key_block_len = (uint32_t)(conn->mac_key_len * 2 + 16 + 16 + 4 + 4);
+    uint32_t key_block_len = (uint32_t)(conn->mac_key_len * 2 + 16 + 16 + 16 + 16);
     uint32_t kb = 0;
     tls_prf(conn->master_secret, 48, "key expansion", key_seed, 64, key_block, (int)key_block_len);
 
@@ -716,13 +716,9 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     for (uint32_t i = 0; i < conn->mac_key_len; i++) conn->server_write_mac_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->client_write_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->server_write_key[i] = key_block[kb++];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 16; i++) {
         conn->client_write_iv[i] = key_block[kb++];
         conn->server_write_iv[i] = key_block[kb++];
-    }
-    for (int i = 0; i < 16; i++) {
-        conn->client_write_iv[i + 4] = 0;
-        conn->server_write_iv[i + 4] = 0;
     }
 
     aes128_expand_key(conn->client_write_key, conn->client_enc_expanded);
