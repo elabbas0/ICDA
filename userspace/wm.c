@@ -50,7 +50,7 @@ typedef struct {
     int      restore_y;
     int      restore_w;
     int      restore_h;
-    int      focus_glow;   /* one-shot brighten on focus gain, decays to 0 */
+
     char     title[32];
 } wm_window_t;
 
@@ -93,7 +93,7 @@ static uint8_t mouse_buttons = 0;
  * 1920x1080 frame on every event (which is what made real hardware
  * crawl).  A pure mouse move still takes the tiny cursor-only path. */
 #define MAX_DIRTY 32
-#define SHADOW_MARGIN 12
+#define SHADOW_MARGIN 2
 typedef struct { int x, y, w, h; } dirty_rect_t;
 static dirty_rect_t dirty_rects[MAX_DIRTY];
 static int dirty_count = 0;
@@ -552,7 +552,6 @@ static void set_focus(int idx) {
      * &windows[idx] live across the call to write focus_glow.  Order the
      * write first so no user pointer is dereferenced after a syscall. */
     if (idx != old && windows[idx].valid) {
-        windows[idx].focus_glow = 96;   /* brief pulse on focus gain */
         mark_dirty_win(&windows[idx]);
     }
     notify_focus_change(old, focused_window_idx);
@@ -947,14 +946,6 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
         iw.hover_close = ic_hit_close(&iw, mx, my);
         iw.hover_min = ic_hit_minimize(&iw, mx, my);
         iw.hover_max = ic_hit_maximize(&iw, mx, my);
-        /* One-shot focus glow: the chrome brightens briefly when the
-         * window gains focus, then settles fully static. */
-        if (active && win->focus_glow > 0) {
-            int m = win->focus_glow;
-            t.title_top_active = ic_blend(0x006BB1FF, 0x00499BFF, m, 255);
-            t.title_bottom_active = ic_blend(0x00296FD0, 0x001D4FA8, m, 255);
-            t.border_active = ic_blend(0x00155EC2, 0x000D47A1, m, 255);
-        }
         ic_draw_chrome(&c, &t, &iw, ic_icon_builtin("close"), ic_icon_builtin("min"),
                        ic_icon_builtin("max"));
     }
@@ -1010,7 +1001,7 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
             win->anim++;
         }
     }
-    if (win->focus_glow > 0) win->focus_glow -= 4;
+
 }
 
 static uint32_t fb_pitch_pixels(void) {
@@ -1538,7 +1529,7 @@ int main(int argc, char **argv) {
             int animating = 0;
             for (int i = 0; i < num_windows; i++) {
                 if (windows[i].valid &&
-                    (windows[i].anim < IC_ANIM_MAX || windows[i].focus_glow > 0 ||
+                    (windows[i].anim < IC_ANIM_MAX ||
                      windows[i].anim_kind != WM_ANIM_NONE)) {
                     animating = 1;
                     mark_dirty_win(&windows[i]);
