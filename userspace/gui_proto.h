@@ -64,6 +64,13 @@ typedef struct {
             uint8_t  _pad[39];
         } focus;          /* 40 bytes */
 
+        /* GUI_MSG_RESIZE: WM -> app */
+        struct {
+            uint64_t shm_handle;  /* new window pixel buffer */
+            int32_t  w, h;
+            uint8_t  _pad[24];
+        } resize;         /* 40 bytes */
+
         /* GUI_MSG_FLUSH: app -> WM (no extra payload) */
         /* GUI_MSG_CLOSE_WINDOW: no extra payload */
 

@@ -117,13 +117,22 @@ static int ic_in_bounds(const ic_canvas_t *c, int x, int y) {
     return c && c->px && x >= 0 && y >= 0 && x < c->w && y < c->h;
 }
 
+/* A canvas dimension can never legitimately exceed the 2560x1600 back
+ * buffer; the window manager has been observed passing wildly corrupted
+ * dims (tens of millions of pixels) when its stack frame is disturbed,
+ * which turns every draw into an out-of-bounds write past the buffer
+ * and panics the kernel.  Reject anything implausible outright. */
+static int ic_canvas_sane(const ic_canvas_t *c) {
+    return c && c->px && c->w > 0 && c->h > 0 && c->w <= 8192 && c->h <= 8192;
+}
+
 void ic_fill(ic_canvas_t *c, uint32_t color) {
-    if (!c || !c->px) return;
+    if (!ic_canvas_sane(c)) return;
     for (int i = 0; i < c->w * c->h; i++) c->px[i] = color;
 }
 
 void ic_rect(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color) {
-    if (!c || !c->px) return;
+    if (!ic_canvas_sane(c)) return;
     int x1 = x;
     int y1 = y;
     int x2 = x + w;
@@ -140,7 +149,7 @@ void ic_rect(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color) {
 }
 
 void ic_hline(ic_canvas_t *c, int x, int y, int len, uint32_t color) {
-    if (!c || !c->px || y < 0 || y >= c->h) return;
+    if (!ic_canvas_sane(c) || y < 0 || y >= c->h) return;
     int x1 = x;
     int x2 = x + len;
     if (x1 < 0) x1 = 0;
@@ -149,7 +158,7 @@ void ic_hline(ic_canvas_t *c, int x, int y, int len, uint32_t color) {
 }
 
 void ic_vline(ic_canvas_t *c, int x, int y, int len, uint32_t color) {
-    if (!c || !c->px || x < 0 || x >= c->w) return;
+    if (!ic_canvas_sane(c) || x < 0 || x >= c->w) return;
     int y1 = y;
     int y2 = y + len;
     if (y1 < 0) y1 = 0;
@@ -181,8 +190,72 @@ static int ic_in_round(const int dx, const int dy, const int w, const int h, con
     }
 }
 
+/* Soft drop shadow: a real blurred-feel falloff (quadratic alpha ramp)
+ * around a rounded rect, blended over whatever is already in the canvas.
+ * Only the perimeter band is iterated (2r*(w+h) pixels), so it is cheap
+ * enough to redraw per frame.  This is the "actual shadow" - not a flat
+ * grey outline - modern desktops draw under windows. */
+void ic_draw_shadow(ic_canvas_t *c, int x, int y, int w, int h, int radius, uint32_t color) {
+    int m = radius;
+    int sh_r;
+    uint32_t sr, sg, sb;
+
+    if (!ic_canvas_sane(c) || m <= 0) return;
+    if (m > 24) m = 24;
+    if (w <= 0 || h <= 0) return;
+    sh_r = m < 10 ? m : 10;      /* corner radius of the shadow body */
+    sr = (color >> 16) & 0xFF;
+    sg = (color >> 8) & 0xFF;
+    sb = color & 0xFF;
+
+    /* Row loop over the expanded rect; the band is the outer m pixels. */
+    for (int yy = y - m; yy < y + h + m; yy++) {
+        int x0, x1;
+        if (yy < 0 || yy >= c->h) continue;
+        if (yy >= y && yy < y + h) {
+            /* Side bands only */
+            x0 = x - m; x1 = x;
+        } else {
+            /* Top/bottom strips span the full width */
+            x0 = x - m; x1 = x + w + m;
+        }
+        for (int xx = x0; xx < x1; xx++) {
+            int dx, dy, d2;
+            int ax;
+            if (xx < 0 || xx >= c->w) continue;
+            if (xx >= x && xx < x + w && yy >= y && yy < y + h) continue;
+
+            /* Distance to the rounded-rect body (Euclidean at corners). */
+            dx = 0; dy = 0;
+            if (xx < x) dx = x - xx; else if (xx >= x + w) dx = xx - (x + w - 1);
+            if (yy < y) dy = y - yy; else if (yy >= y + h) dy = yy - (y + h - 1);
+            d2 = dx * dx + dy * dy;
+            /* In the corner regions subtract the body radius for a
+             * rounded-corner shadow silhouette. */
+            if (dx > 0 && dy > 0 && d2 <= (sh_r - 1) * (sh_r - 1)) continue;
+            {
+                int dist = 0;
+                while (d2 > dist * dist) dist++;
+                if (dist <= 0) continue;
+                if (dist >= m) continue;
+                /* Quadratic falloff: sharp near the window, soft far out. */
+                ax = (m - dist) * (m - dist) * 255 / (m * m);
+                if (ax > 255) ax = 255;
+                if (ax < 4) continue;
+                {
+                    uint32_t old = c->px[yy * c->w + xx];
+                    uint32_t r = (((old >> 16) & 0xFF) * (255 - ax) + sr * ax) / 255;
+                    uint32_t g = (((old >> 8) & 0xFF) * (255 - ax) + sg * ax) / 255;
+                    uint32_t b = ((old & 0xFF) * (255 - ax) + sb * ax) / 255;
+                    c->px[yy * c->w + xx] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    }
+}
+
 void ic_rect_r(ic_canvas_t *c, int x, int y, int w, int h, int r, uint32_t color) {
-    if (!c || !c->px || r < 0) return;
+    if (!ic_canvas_sane(c) || r < 0) return;
     if (r > w / 2) r = w / 2;
     if (r > h / 2) r = h / 2;
     for (int dy = 0; dy < h; dy++) {
@@ -272,7 +345,7 @@ int ic_text_width(const char *s) {
 }
 
 void ic_text(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg) {
-    if (!c || !c->px || !s) return;
+    if (!ic_canvas_sane(c) || !s) return;
     int cx = x;
     while (*s) {
         font_draw_char(c->px, c->w, c->h, c->w, cx, y, *s, fg, bg);
@@ -282,7 +355,7 @@ void ic_text(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t 
 }
 
 void ic_text_clip(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg, int max_px) {
-    if (!c || !c->px || !s || max_px <= 0) return;
+    if (!ic_canvas_sane(c) || !s || max_px <= 0) return;
     int cx = x;
     while (*s && cx + FONT_CELL_WIDTH <= x + max_px) {
         font_draw_char(c->px, c->w, c->h, c->w, cx, y, *s, fg, bg);
@@ -324,7 +397,7 @@ int ic_icon_valid(const ic_icon_t *icon) {
 }
 
 void ic_icon_draw(ic_canvas_t *c, int x, int y, int dw, int dh, const ic_icon_t *icon) {
-    if (!c || !c->px || !ic_icon_valid(icon) || dw <= 0 || dh <= 0) return;
+    if (!ic_canvas_sane(c) || !ic_icon_valid(icon) || dw <= 0 || dh <= 0) return;
     for (int dy = 0; dy < dh; dy++) {
         int yy = y + dy;
         if (yy < 0 || yy >= c->h) continue;
@@ -597,13 +670,15 @@ const ic_theme_t *ic_theme_default(void) {
 /* =========================== window chrome =========================== */
 
 void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
-                    const ic_icon_t *icon_close, const ic_icon_t *icon_min) {
+                    const ic_icon_t *icon_close, const ic_icon_t *icon_min,
+                    const ic_icon_t *icon_max) {
     int anim = win->anim;
-    int anim_off;
     int wx, wy;
     uint32_t title_bg;
     uint32_t title_fg;
     uint32_t border;
+    int max_x;
+    int max_y;
     int min_x;
     int min_y;
     int cls_x;
@@ -612,31 +687,42 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
     if (!c || !t || !win || win->minimized) return;
     if (anim < 0) anim = 0;
     if (anim > IC_ANIM_MAX) anim = IC_ANIM_MAX;
-    anim_off = (IC_ANIM_MAX - anim) * 2;
     wx = win->x;
-    wy = win->y - anim_off;
+    wy = win->y;
 
     border = win->focused ? t->border_active : t->border;
     title_bg = win->focused ? t->title_top_active : t->title_top;
     title_fg = win->focused ? 0x00202124 : 0x005F6368;
 
+    max_x = wx + win->w - IC_BTN_MAX_OFF;
+    max_y = wy - IC_TITLE_H + 5;
     min_x = wx + win->w - IC_BTN_MIN_OFF;
     min_y = wy - IC_TITLE_H + 5;
     cls_x = wx + win->w - IC_BTN_CLS_OFF;
     cls_y = wy - IC_TITLE_H + 5;
 
-    /* Flat modern chrome: rounded top corners, 1px border, no bevels.
-     * A soft 2px drop shadow reads as depth without gradients. */
-    ic_rect_r(c, wx + 6, wy - IC_TITLE_H + 6, win->w + 2, win->h + IC_TITLE_H + 1, 10, t->shadow);
+    /* Modern chrome: soft blurred-feel drop shadow, rounded top corners,
+     * a 1px border (blue accent when focused), no bevels.  The shadow is
+     * the real depth cue; the border just frames the client. */
+    ic_draw_shadow(c, wx, wy - IC_TITLE_H, win->w, win->h + IC_TITLE_H, 9, t->shadow);
     ic_rect_r(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, IC_TITLE_H + 2, 9, border);
     ic_rect_r(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H, 8, title_bg);
-    ic_hline(c, wx + 1, wy - 1, win->w - 2, 0x00E8EAED);
+    ic_hline(c, wx + 1, wy - 1, win->w - 2, win->focused ? 0x00E3EDFB : 0x00E8EAED);
     ic_text_clip(c, wx + 10, wy - IC_TITLE_H + 6, win->title, title_fg, title_bg,
-                 win->w > 80 ? win->w - 74 : win->w);
+                 win->w > 104 ? win->w - 98 : win->w);
     /* client-area frame: 1px sides and bottom */
     ic_vline(c, wx - 1, wy, win->h + 1, border);
     ic_vline(c, wx + win->w, wy, win->h + 1, border);
     ic_hline(c, wx - 1, wy + win->h, win->w + 2, border);
+
+    if (win->hover_max) {
+        ic_rect_r(c, max_x, max_y, IC_BTN_W, IC_BTN_H, 6, 0x00E8EAED);
+    }
+    if (icon_max && ic_icon_valid(icon_max)) {
+        ic_icon_draw(c, max_x + 3, max_y + 3, 12, 10, icon_max);
+    } else {
+        ic_outline(c, max_x + 5, max_y + 4, 8, 7, 0x005F6368);
+    }
 
     /* minimize: flat, light gray hover */
     if (win->hover_min) {
@@ -674,6 +760,13 @@ int ic_hit_minimize(const ic_window_t *win, int mx, int my) {
     return win && mx >= win->x + win->w - IC_BTN_MIN_OFF &&
            my >= win->y - IC_TITLE_H + 5 &&
            mx < win->x + win->w - IC_BTN_MIN_OFF + IC_BTN_W &&
+           my < win->y - IC_TITLE_H + 5 + IC_BTN_H;
+}
+
+int ic_hit_maximize(const ic_window_t *win, int mx, int my) {
+    return win && mx >= win->x + win->w - IC_BTN_MAX_OFF &&
+           my >= win->y - IC_TITLE_H + 5 &&
+           mx < win->x + win->w - IC_BTN_MAX_OFF + IC_BTN_W &&
            my < win->y - IC_TITLE_H + 5 + IC_BTN_H;
 }
 

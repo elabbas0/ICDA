@@ -5,6 +5,7 @@
 #include "drivers/audio/hda.h"
 #include "drivers/audio/playback.h"
 #include "drivers/display/framebuffer.h"
+#include "drivers/display/gpu.h"
 #include "drivers/display/vga.h"
 #include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
@@ -18,6 +19,7 @@
 #include "drivers/storage/nvme.h"
 #include "drivers/storage/partition.h"
 #include "diag/bootstage.h"
+#include "diag/splash.h"
 #include "fs/fat32.h"
 #include "fs/exfat.h"
 #include "fs/initramfs.h"
@@ -165,6 +167,17 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(2, has_fb ? "framebuffer" : "vga");
     console_init(has_fb);
 
+    /* GPU device layer: registers the firmware framebuffer as the fbdev
+     * display driver (the same role efifb/simpledrm play on Linux). */
+    gpu_init(multiboot_info);
+
+    /* Boot splash: hides the raw probe log behind a clean loading screen
+     * (the full text still goes to the serial log).  Finished right
+     * before the shell starts so the text console works afterwards. */
+    if (has_fb) {
+        splash_init();
+    }
+
     console_write("ICDA Boot Sequence\n\n", CONSOLE_STYLE_INFO);
     if (live_installer) {
         boot_line("mode", "live installer mode");
@@ -175,6 +188,10 @@ void kernel_main(void *multiboot_info) {
         console_write_dec64((uint64_t)fb_width, CONSOLE_STYLE_INFO);
         console_write("x", CONSOLE_STYLE_MUTED);
         console_write_dec64((uint64_t)fb_height, CONSOLE_STYLE_INFO);
+        console_write(" bpp=", CONSOLE_STYLE_MUTED);
+        console_write_dec64((uint64_t)fb_bpp_value(), CONSOLE_STYLE_INFO);
+        console_write(" pitch=", CONSOLE_STYLE_MUTED);
+        console_write_dec64((uint64_t)fb_pitch_value(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
     } else {
         boot_line("display", "vga fallback attached");
@@ -394,6 +411,7 @@ void kernel_main(void *multiboot_info) {
     }
 #endif
     {
+        splash_finish();
         if (has_fb) {
             console_clear();
         }

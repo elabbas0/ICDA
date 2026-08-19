@@ -43,6 +43,10 @@ extern const char userprog_terminal_start[];
 extern const char userprog_terminal_end[];
 extern const char userprog_gui_demo_start[];
 extern const char userprog_gui_demo_end[];
+extern const char userprog_taskman_start[];
+extern const char userprog_taskman_end[];
+extern const char userprog_browser_start[];
+extern const char userprog_browser_end[];
 static const char motd_txt[] =
     "welcome to icda\n"
     "\n"
@@ -116,7 +120,9 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
     { "/apps/terminal.app", 0, 0 },
-    { "/apps/gui_demo.app", 0, 0 }
+    { "/apps/gui_demo.app", 0, 0 },
+    { "/apps/taskman.app", 0, 0 },
+    { "/apps/browser.app", 0, 0 }
 };
 
 int initramfs_init(void) {
@@ -150,6 +156,10 @@ int initramfs_init(void) {
     initramfs_files[18].size = (uint64_t)(userprog_terminal_end - userprog_terminal_start);
     initramfs_files[19].data = userprog_gui_demo_start;
     initramfs_files[19].size = (uint64_t)(userprog_gui_demo_end - userprog_gui_demo_start);
+    initramfs_files[20].data = userprog_taskman_start;
+    initramfs_files[20].size = (uint64_t)(userprog_taskman_end - userprog_taskman_start);
+    initramfs_files[21].data = userprog_browser_start;
+    initramfs_files[21].size = (uint64_t)(userprog_browser_end - userprog_browser_start);
     return 0;
 }
 

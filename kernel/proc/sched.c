@@ -393,6 +393,11 @@ static void schedule_inner(int force) {
 void schedule(struct registers *regs) {
     (void)regs;
     uptime_ticks++;
+    /* Per-process CPU accounting: the timer fires at 100 Hz, so each
+     * tick a thread runs counts as one cpu_tick for its owner. */
+    if (current_thread_ptr && current_thread_ptr->owner) {
+        current_thread_ptr->owner->cpu_ticks++;
+    }
     wake_blocked_threads();
     schedule_inner(0);
 }

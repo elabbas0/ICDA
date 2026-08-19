@@ -68,7 +68,12 @@ enum {
     SYS_MSG_POLL          = 61,
     SYS_MAP_FRAMEBUFFER   = 62,
     SYS_INPUT_READ_MOUSE  = 63,
-    SYS_GUI_AVAILABLE     = 64
+    SYS_GUI_AVAILABLE     = 64,
+    SYS_GPU_QUERY         = 65,
+    SYS_GPU_PRESENT       = 66,
+    SYS_GPU_CURSOR        = 67,
+    SYS_POWER             = 68,
+    SYS_PROC_STATS        = 69
 };
 
 typedef struct {
@@ -237,5 +242,33 @@ static inline int icda_input_read_mouse(icda_mouse_event_t *out) { return (int)s
 
 /* Returns 1 once the window manager has claimed the framebuffer. */
 static inline int icda_gui_available(void) { return (int)sys_call0(SYS_GUI_AVAILABLE); }
+
+typedef struct {
+    char     name[32];
+    int32_t  width;
+    int32_t  height;
+    uint32_t pitch;
+    uint32_t bpp;
+    uint32_t mode_count;
+    uint32_t hw_cursor;
+    uint32_t present_supported;
+} icda_gpu_info_t;
+
+typedef struct {
+    uint64_t cpu_ticks;
+    uint64_t mem_bytes;
+    char     name[64];
+} icda_proc_stats_t;
+
+/* GPU device layer (DRM/KMS-shaped general GPU driver) */
+static inline uint64_t icda_gpu_query(icda_gpu_info_t *out) { return sys_call1(SYS_GPU_QUERY, (uint64_t)(uintptr_t)out); }
+static inline uint64_t icda_gpu_present(void) { return sys_call0(SYS_GPU_PRESENT); }
+static inline uint64_t icda_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) { return sys_call5(SYS_GPU_CURSOR, (uint64_t)x, (uint64_t)y, (uint64_t)(uintptr_t)image, (uint64_t)w, (uint64_t)h); }
+
+/* Power: 0 = shutdown, 1 = reboot.  Does not return. */
+static inline uint64_t icda_power(uint64_t action) { return sys_call1(SYS_POWER, action); }
+
+/* Task-manager stats for one process */
+static inline uint64_t icda_proc_stats(uint64_t pid, icda_proc_stats_t *out) { return sys_call2(SYS_PROC_STATS, pid, (uint64_t)(uintptr_t)out); }
 
 #endif

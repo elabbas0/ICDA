@@ -72,7 +72,15 @@ typedef enum {
     SYS_MSG_POLL          = 61,
     SYS_MAP_FRAMEBUFFER   = 62,
     SYS_INPUT_READ_MOUSE  = 63,
-    SYS_GUI_AVAILABLE     = 64
+    SYS_GUI_AVAILABLE     = 64,
+    /* GPU device layer (DRM/KMS-shaped general GPU driver) */
+    SYS_GPU_QUERY         = 65,
+    SYS_GPU_PRESENT       = 66,
+    SYS_GPU_CURSOR        = 67,
+    /* Power management */
+    SYS_POWER             = 68,
+    /* Process stats for the task manager */
+    SYS_PROC_STATS        = 69
 } syscall_number_t;
 
 typedef struct {
@@ -105,6 +113,23 @@ typedef struct {
     uint32_t pitch;      /* bytes per row */
     uint32_t bpp;
 } syscall_fb_info_t;
+
+typedef struct {
+    char     name[32];   /* driver name, e.g. "fbdev" */
+    int32_t  width;      /* current mode */
+    int32_t  height;
+    uint32_t pitch;
+    uint32_t bpp;
+    uint32_t mode_count;
+    uint32_t hw_cursor;  /* device has a hardware cursor plane */
+    uint32_t present_supported;
+} syscall_gpu_info_t;
+
+typedef struct {
+    uint64_t cpu_ticks;  /* scheduler ticks consumed by this process */
+    uint64_t mem_bytes;  /* user-space pages mapped, in bytes */
+    char     name[64];   /* executable basename */
+} syscall_proc_stats_t;
 
 typedef struct {
     int32_t  abs_x;

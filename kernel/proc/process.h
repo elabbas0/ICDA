@@ -56,6 +56,10 @@ typedef struct process {
     int linux_personality;
     uint64_t linux_brk_pos;
     uint64_t linux_mmap_next;
+    /* Task-manager accounting: scheduler ticks consumed and user memory */
+    uint64_t         cpu_ticks;
+    uint64_t         mem_bytes;
+    char             name[64];
 } process_t;
 
 typedef struct thread {
