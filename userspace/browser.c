@@ -439,8 +439,16 @@ static void navigate_to(const char *url) {
     long rc;
 
     if (!url || !*url) return;
-    b_strcpy(current_url, url, BROWSER_URL_CAP);
-    b_strcpy(address_buf, url, BROWSER_URL_CAP);
+    /* Auto-prepend http:// if no scheme given */
+    if (!b_strprefix(url, "http://") && !b_strprefix(url, "https://")) {
+        char full[BROWSER_URL_CAP];
+        b_strcpy(full, "http://", sizeof(full));
+        b_strcat(full, url, sizeof(full));
+        b_strcpy(current_url, full, BROWSER_URL_CAP);
+    } else {
+        b_strcpy(current_url, url, BROWSER_URL_CAP);
+    }
+    b_strcpy(address_buf, current_url, BROWSER_URL_CAP);
     addr_cursor = (int)b_strlen(address_buf);
 
     /* Add to history */
