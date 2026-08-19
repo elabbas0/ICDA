@@ -9,7 +9,7 @@
 #include "../memory/heap.h"
 
 #define TLS_VERSION_MAJOR 3
-#define TLS_VERSION_MINOR 1
+#define TLS_VERSION_MINOR 3  /* TLS 1.2 = 3.3 */
 
 #define TLS_CONTENT_CHANGE_CIPHER_SPEC 20
 #define TLS_CONTENT_ALERT              21
