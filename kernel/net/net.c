@@ -679,11 +679,15 @@ static int dns_skip_name(const uint8_t *buf, uint16_t size, uint16_t offset, uin
 }
 
 int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
-    static const uint32_t dns_servers[] = {
-        NET_DNS_IP,
-        NET_DNS_IP_ALT1,
-        NET_DNS_IP_ALT2,
-    };
+    /* Use DHCP-provided DNS first, then fallbacks */
+    uint32_t dns_servers[4];
+    uint32_t dns_count = 0;
+    if (net_state.dns) {
+        dns_servers[dns_count++] = net_state.dns;
+    }
+    dns_servers[dns_count++] = NET_DNS_IP;
+    dns_servers[dns_count++] = NET_DNS_IP_ALT1;
+    dns_servers[dns_count++] = NET_DNS_IP_ALT2;
     uint8_t dst_mac[6];
     uint8_t query[512];
     uint8_t frame[NET_FRAME_CAP];
@@ -718,7 +722,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
     query[query_len++] = 0x00;
     query[query_len++] = 0x01;
 
-    for (uint32_t srv_i = 0; srv_i < (uint32_t)(sizeof(dns_servers) / sizeof(dns_servers[0])); srv_i++) {
+    for (uint32_t srv_i = 0; srv_i < dns_count; srv_i++) {
         uint32_t dns_ip = dns_servers[srv_i];
         arp_target = ip_same_subnet(net_state.ip, dns_ip, net_state.netmask) ? dns_ip : net_state.gateway;
         if (net_arp_resolve(arp_target, dst_mac) != 0) {
@@ -728,7 +732,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
             continue;
         }
 
-        deadline = sched_ticks() + 800;
+        deadline = sched_ticks() + 100;
         while (sched_ticks() < deadline) {
             int rc = e1000_recv_frame(frame, sizeof(frame), &len);
             if (rc < 0) {
@@ -800,6 +804,199 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
     return -1;
 }
 
+/* ---- DHCP client ---- */
+
+#define DHCP_OP_BOOTREQUEST  1
+#define DHCP_OP_BOOTREPLY   2
+#define DHCP_HTYPE_ETHERNET  1
+#define DHCP_HLEN_ETHERNET   6
+#define DHCP_MAGIC_COOKIE    0x63825363U
+#define DHCP_MSG_DISCOVER    1
+#define DHCP_MSG_OFFER       2
+#define DHCP_MSG_REQUEST     3
+#define DHCP_MSG_ACK         5
+#define DHCP_OPT_MSG_TYPE    53
+#define DHCP_OPT_REQUESTED_IP 50
+#define DHCP_OPT_SERVER_ID   54
+#define DHCP_OPT_SUBNET_MASK 1
+#define DHCP_OPT_ROUTER      3
+#define DHCP_OPT_DNS_SERVER  6
+#define DHCP_OPT_END         0xFF
+
+static void dhcp_write32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t dhcp_read32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int net_dhcp_discover(void) {
+    uint8_t packet[548];
+    uint8_t frame[NET_FRAME_CAP];
+    uint8_t dst_mac[6];
+    uint16_t len = 0;
+    uint64_t deadline;
+    uint8_t frame_buf[NET_FRAME_CAP];
+    uint32_t offered_ip = 0;
+    uint32_t server_ip = 0;
+    uint32_t offered_mask = 0;
+    uint32_t offered_router = 0;
+    uint32_t offered_dns = 0;
+    int got_offer = 0;
+
+    /* Build DHCP DISCOVER */
+    zero_bytes(packet, sizeof(packet));
+    packet[0] = DHCP_OP_BOOTREQUEST;
+    packet[1] = DHCP_HTYPE_ETHERNET;
+    packet[2] = DHCP_HLEN_ETHERNET;
+    packet[4] = 0x00; /* xid - use ticks as transaction id */
+    packet[5] = 0x00;
+    packet[6] = (uint8_t)(sched_ticks() & 0xFF);
+    packet[7] = (uint8_t)((sched_ticks() >> 8) & 0xFF);
+    /* flags = broadcast */
+    packet[10] = 0x80;
+    packet[11] = 0x00;
+    /* ciaddr = 0 (discover) */
+    /* chaddr = our MAC */
+    for (int i = 0; i < 6; i++) {
+        packet[28 + i] = net_state.mac[i];
+    }
+    /* magic cookie */
+    dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
+    /* options: message type = DISCOVER */
+    packet[240] = DHCP_OPT_MSG_TYPE;
+    packet[241] = 1;
+    packet[242] = DHCP_MSG_DISCOVER;
+    /* end option */
+    packet[243] = DHCP_OPT_END;
+
+    /* Broadcast MAC */
+    for (int i = 0; i < 6; i++) dst_mac[i] = 0xFF;
+
+    /* Send DISCOVER on UDP port 68 -> 67 */
+    if (send_udp_packet(dst_mac, 0xFFFFFFFFU, 68, 67, packet, 244) != 0) {
+        return -1;
+    }
+
+    /* Wait for OFFER (up to 2 seconds) */
+    deadline = sched_ticks() + 200;
+    while (sched_ticks() < deadline && !got_offer) {
+        int rc = e1000_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        if (rc < 0) break;
+        if (rc == 0) { sched_sleep(1); continue; }
+
+        udp_packet_info_t pkt;
+        if (parse_udp_packet(frame_buf, len, 0, 67, 68, &pkt) != 0) continue;
+        if (pkt.payload_len < 240) continue;
+        if (dhcp_read32(pkt.payload + 236) != DHCP_MAGIC_COOKIE) continue;
+
+        /* Parse options */
+        const uint8_t *opts = pkt.payload + 240;
+        uint8_t msg_type = 0;
+        uint32_t srv_id = 0;
+        for (uint32_t oi = 0; oi + 1 < pkt.payload_len - 236; ) {
+            uint8_t tag = opts[oi];
+            if (tag == 0xFF) break;
+            if (tag == 0) { oi++; continue; }
+            if (oi + 1 >= pkt.payload_len - 236) break;
+            uint8_t olen = opts[oi + 1];
+            if (oi + 2 + olen > pkt.payload_len - 236) break;
+            const uint8_t *oval = opts + oi + 2;
+            if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
+            if (tag == DHCP_OPT_SERVER_ID && olen >= 4) srv_id = dhcp_read32(oval);
+            oi += 2 + olen;
+        }
+        if (msg_type == DHCP_MSG_OFFER) {
+            offered_ip = dhcp_read32(pkt.payload + 16);
+            server_ip = srv_id;
+            got_offer = 1;
+        }
+    }
+    if (!got_offer) return -1;
+
+    /* Build DHCP REQUEST */
+    zero_bytes(packet, sizeof(packet));
+    packet[0] = DHCP_OP_BOOTREQUEST;
+    packet[1] = DHCP_HTYPE_ETHERNET;
+    packet[2] = DHCP_HLEN_ETHERNET;
+    packet[6] = (uint8_t)(sched_ticks() & 0xFF);
+    packet[7] = (uint8_t)((sched_ticks() >> 8) & 0xFF);
+    packet[10] = 0x80;
+    packet[11] = 0x00;
+    for (int i = 0; i < 6; i++) {
+        packet[28 + i] = net_state.mac[i];
+    }
+    dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
+    {
+        uint32_t opt_off = 240;
+        /* message type = REQUEST */
+        packet[opt_off++] = DHCP_OPT_MSG_TYPE;
+        packet[opt_off++] = 1;
+        packet[opt_off++] = DHCP_MSG_REQUEST;
+        /* requested IP */
+        packet[opt_off++] = DHCP_OPT_REQUESTED_IP;
+        packet[opt_off++] = 4;
+        dhcp_write32(packet + opt_off, offered_ip);
+        opt_off += 4;
+        /* server id */
+        packet[opt_off++] = DHCP_OPT_SERVER_ID;
+        packet[opt_off++] = 4;
+        dhcp_write32(packet + opt_off, server_ip);
+        opt_off += 4;
+        packet[opt_off++] = DHCP_OPT_END;
+    }
+
+    if (send_udp_packet(dst_mac, 0xFFFFFFFFU, 68, 67, packet, 260) != 0) {
+        return -1;
+    }
+
+    /* Wait for ACK (up to 2 seconds) */
+    deadline = sched_ticks() + 200;
+    while (sched_ticks() < deadline) {
+        int rc = e1000_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        if (rc < 0) break;
+        if (rc == 0) { sched_sleep(1); continue; }
+
+        udp_packet_info_t pkt;
+        if (parse_udp_packet(frame_buf, len, 0, 67, 68, &pkt) != 0) continue;
+        if (pkt.payload_len < 240) continue;
+        if (dhcp_read32(pkt.payload + 236) != DHCP_MAGIC_COOKIE) continue;
+
+        const uint8_t *opts = pkt.payload + 240;
+        uint8_t msg_type = 0;
+        for (uint32_t oi = 0; oi + 1 < pkt.payload_len - 236; ) {
+            uint8_t tag = opts[oi];
+            if (tag == 0xFF) break;
+            if (tag == 0) { oi++; continue; }
+            if (oi + 1 >= pkt.payload_len - 236) break;
+            uint8_t olen = opts[oi + 1];
+            if (oi + 2 + olen > pkt.payload_len - 236) break;
+            const uint8_t *oval = opts + oi + 2;
+            if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
+            if (tag == DHCP_OPT_SUBNET_MASK && olen >= 4) offered_mask = dhcp_read32(oval);
+            if (tag == DHCP_OPT_ROUTER && olen >= 4) offered_router = dhcp_read32(oval);
+            if (tag == DHCP_OPT_DNS_SERVER && olen >= 4) offered_dns = dhcp_read32(oval);
+            oi += 2 + olen;
+        }
+        if (msg_type == DHCP_MSG_ACK) {
+            net_state.ip = offered_ip;
+            if (offered_mask) net_state.netmask = offered_mask;
+            if (offered_router) net_state.gateway = offered_router;
+            if (offered_dns) {
+                /* Store primary DNS for later use */
+                net_state.dns = offered_dns;
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int net_init(void) {
     zero_bytes(&net_state, sizeof(net_state));
     if (e1000_init() != 0) {
@@ -810,6 +1007,13 @@ int net_init(void) {
         net_error = NET_ERR_NO_NIC;
         return -1;
     }
+    /* Try DHCP first */
+    if (net_dhcp_discover() == 0) {
+        net_state.ready = 1;
+        net_error = 0;
+        return 0;
+    }
+    /* Fallback to QEMU static config */
     net_state.ip = NET_LOCAL_IP;
     net_state.gateway = NET_GATEWAY_IP;
     net_state.netmask = NET_NETMASK;
