@@ -183,14 +183,18 @@ static uint32_t tls_prf(const uint8_t *secret, int secret_len,
 }
 
 static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, uint16_t len) {
-    uint8_t frame[TLS_CAP + 256];
+    /* Heap-allocate large buffers to avoid stack overflow (kernel stack = 16KB) */
+    uint8_t *frame = (uint8_t *)kmalloc(TLS_CAP + 256);
+    if (!frame) return -1;
     uint8_t *payload;
     uint16_t frame_len;
 
     if (conn->enc_client && type != TLS_CONTENT_CHANGE_CIPHER_SPEC) {
         uint8_t mac_buf[32];
         uint8_t seq_buf[8];
-        uint8_t plaintext[TLS_CAP + 64];
+        uint8_t *plaintext = (uint8_t *)kmalloc(TLS_CAP + 64);
+        uint8_t *hmac_in = (uint8_t *)kmalloc(8 + 1 + 2 + 2 + TLS_CAP);
+        if (!plaintext || !hmac_in) { kfree(frame); kfree(plaintext); kfree(hmac_in); return -1; }
         uint8_t aad[13];
         int pt_len = len;
 
@@ -200,7 +204,6 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
         aad[2] = TLS_VERSION_MINOR;
         w16(aad + 3, len);
 
-        uint8_t hmac_in[8 + 1 + 2 + 2 + TLS_CAP];
         int hi = 0;
         for (int i = 0; i < 8; i++) hmac_in[hi++] = seq_buf[i];
         hmac_in[hi++] = aad[0];
@@ -210,6 +213,7 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
         hmac_in[hi++] = (uint8_t)(len & 0xFF);
         for (int i = 0; i < len; i++) hmac_in[hi++] = data[i];
         tls_hmac(conn->client_write_mac_key, conn->mac_key_len, conn->mac_alg, hmac_in, hi, mac_buf);
+        kfree(hmac_in);
 
         for (int i = 0; i < len; i++) plaintext[i] = data[i];
         for (int i = 0; i < conn->mac_len; i++) plaintext[len + i] = mac_buf[i];
@@ -233,6 +237,7 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
             body[i] = iv[i];
         }
         aes128_cbc_encrypt(conn->client_enc_expanded, iv, plaintext, pt_len, body + 16);
+        kfree(plaintext);
         uint16_t enc_len = (uint16_t)(16 + pt_len);
         w16((uint8_t*)&rec->length, enc_len);
 
@@ -257,7 +262,7 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
     uint16_t ip_len = (uint16_t)(sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t) + frame_len);
     uint16_t eth_frame_len = (uint16_t)(sizeof(eth_hdr_t) + ip_len);
 
-    if (eth_frame_len > sizeof(eth_frame)) return -1;
+    if (eth_frame_len > sizeof(eth_frame)) { kfree(frame); return -1; }
     for (uint64_t i = 0; i < eth_frame_len; i++) eth_frame[i] = 0;
 
     build_eth(eth, conn->dst_mac, ETH_TYPE_IPV4);
@@ -282,19 +287,23 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
     tcp->checksum_be = htons16(tcp_checksum(ip, tcp, tcp_data, frame_len));
 
     int rc = e1000_send_frame(eth_frame, eth_frame_len);
+    kfree(frame);
     if (rc == 0) conn->tcp_seq += frame_len;
     return rc;
 }
 
 static int tls_send_handshake(tls_conn_t *conn, uint8_t htype, const uint8_t *data, uint32_t len) {
-    uint8_t buf[TLS_CAP];
+    uint8_t *buf = (uint8_t *)kmalloc(TLS_CAP);
+    if (!buf) return -1;
     tls_handshake_hdr_t *hdr = (tls_handshake_hdr_t *)buf;
     hdr->type = htype;
     w24((uint8_t*)&hdr->length, len);
     for (uint32_t i = 0; i < len; i++) buf[4 + i] = data[i];
     uint32_t total = 4 + len;
     sha256_update(&conn->handshake_hash, buf, total);
-    return tls_send_record(conn, TLS_CONTENT_HANDSHAKE, buf, (uint16_t)total);
+    int rc = tls_send_record(conn, TLS_CONTENT_HANDSHAKE, buf, (uint16_t)total);
+    kfree(buf);
+    return rc;
 }
 
 static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
@@ -418,15 +427,18 @@ static int tls_parse_record(tls_conn_t *conn, uint8_t *content_type, uint8_t *pa
         uint8_t *rdata = p + 5;
 
         if (conn->enc_server && rtype != TLS_CONTENT_CHANGE_CIPHER_SPEC) {
-            uint8_t decrypted[TLS_CAP];
+            uint8_t *decrypted = (uint8_t *)kmalloc(TLS_CAP);
+            if (!decrypted) return -1;
             uint16_t dlen = 0;
             if (tls_decrypt_record(conn, rtype, rdata, rlen, decrypted, &dlen) == 0) {
                 *content_type = rtype;
                 for (int i = 0; i < dlen; i++) payload[i] = decrypted[i];
                 *payload_len = dlen;
                 conn->rx_offset = conn->rx_offset + 5 + rlen;
+                kfree(decrypted);
                 return 1;
             }
+            kfree(decrypted);
             return -1;
         } else {
             *content_type = rtype;
@@ -796,15 +808,17 @@ int tls_write(tls_conn_t *conn, const uint8_t *data, uint32_t len) {
 }
 
 int tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *out_len) {
+    /* Heap-allocate payload to avoid stack overflow (TLS_CAP=16K, kernel stack=16K) */
+    uint8_t *payload = (uint8_t *)kmalloc(TLS_CAP);
+    if (!payload) return -1;
     uint64_t deadline = sched_ticks() + 500;
 
     while (sched_ticks() < deadline) {
-        uint8_t payload[TLS_CAP];
         uint16_t plen = 0;
         uint8_t ctype = 0;
 
         int rc = tls_recv_frame(conn, 50);
-        if (rc < 0) return -1;
+        if (rc < 0) { kfree(payload); return -1; }
 
         while (1) {
             int ret = tls_parse_record(conn, &ctype, payload, &plen);
@@ -813,11 +827,13 @@ int tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *out_len) {
                 uint32_t copy = plen < cap ? plen : cap;
                 for (uint32_t i = 0; i < copy; i++) buf[i] = payload[i];
                 *out_len = copy;
+                kfree(payload);
                 return 0;
             }
         }
         sched_sleep(1);
     }
+    kfree(payload);
     return -1;
 }
 
