@@ -1035,14 +1035,15 @@ int net_init(void) {
     if (net_dhcp_discover() == 0) {
         net_state.ready = 1;
         net_error = 0;
-        return 0;
+    } else {
+        /* Fallback to QEMU static config */
+        net_state.ip = NET_LOCAL_IP;
+        net_state.gateway = NET_GATEWAY_IP;
+        net_state.netmask = NET_NETMASK;
+        net_state.ready = 1;
+        net_error = 0;
     }
-    /* Fallback to QEMU static config */
-    net_state.ip = NET_LOCAL_IP;
-    net_state.gateway = NET_GATEWAY_IP;
-    net_state.netmask = NET_NETMASK;
-    net_state.ready = 1;
-    net_error = 0;
+
     return 0;
 }
 
