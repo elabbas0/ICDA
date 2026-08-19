@@ -701,10 +701,7 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
     cls_x = wx + win->w - IC_BTN_CLS_OFF;
     cls_y = wy - IC_TITLE_H + 5;
 
-    /* Modern chrome: soft blurred-feel drop shadow, rounded top corners,
-     * a 1px border (blue accent when focused), no bevels.  The shadow is
-     * the real depth cue; the border just frames the client. */
-    ic_draw_shadow(c, wx, wy - IC_TITLE_H, win->w, win->h + IC_TITLE_H, 9, t->shadow);
+    /* Modern chrome: rounded top corners, 1px border (blue accent when focused). */
     ic_rect_r(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, IC_TITLE_H + 2, 9, border);
     ic_rect_r(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H, 8, title_bg);
     ic_hline(c, wx + 1, wy - 1, win->w - 2, win->focused ? 0x00E3EDFB : 0x00E8EAED);

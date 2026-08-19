@@ -732,7 +732,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
             continue;
         }
 
-        deadline = sched_ticks() + 100;
+        deadline = sched_ticks() + 300;
         while (sched_ticks() < deadline) {
             int rc = e1000_recv_frame(frame, sizeof(frame), &len);
             if (rc < 0) {
