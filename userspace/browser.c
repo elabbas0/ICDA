@@ -10,6 +10,9 @@
 #include "libicda.h"
 #include "gui_proto.h"
 
+/* Forward declarations */
+static void draw_all(void);
+
 #define BROWSER_URL_CAP   256
 #define BROWSER_HTML_CAP  (256 * 1024)
 #define BROWSER_TITLE_CAP 64
@@ -122,16 +125,20 @@ static void b_uint_to_str(uint64_t v, char *out, uint64_t cap) {
 
 /* ---- URL parsing ---- */
 
-static int parse_url(const char *url, uint32_t *ip_out, uint16_t *port_out,
-                     int *https_out, char *host_out, uint64_t host_cap,
-                     char *path_out, uint64_t path_cap) {
+/*
+ * parse_url_format: parse URL into scheme/host/port/path without DNS.
+ * Returns 0 on success, -1 on format error.
+ */
+static int parse_url_format(const char *url, uint16_t *port_out,
+                            int *https_out, char *host_out, uint64_t host_cap,
+                            char *path_out, uint64_t path_cap) {
     const char *host;
     uint64_t host_len = 0;
     uint64_t path_len = 0;
     uint16_t port = 80;
     int use_https = 0;
 
-    if (!url || !*url || !ip_out || !port_out || !https_out) return -1;
+    if (!url || !*url || !port_out || !https_out) return -1;
     if (b_strprefix(url, "http://")) {
         host = url + 7;
     } else if (b_strprefix(url, "https://")) {
@@ -174,51 +181,47 @@ static int parse_url(const char *url, uint32_t *ip_out, uint16_t *port_out,
         path_out[path_len] = 0;
     }
 
-    {
-        uint32_t resolved = 0;
-        /* Try IPv4 literal first */
-        int is_ip = 1;
-        const char *p = host_out;
-        int dots = 0;
-        while (*p) {
-            if (*p == '.') dots++;
-            else if (*p < '0' || *p > '9') { is_ip = 0; break; }
-            p++;
-        }
-        if (is_ip && dots == 3) {
-            /* Parse dotted quad */
-            uint32_t octets[4];
-            uint64_t i = 0;
-            uint64_t used = 0;
-            for (int o = 0; o < 4; o++) {
-                uint32_t v = 0;
-                uint64_t start = i;
-                while (host_out[i] >= '0' && host_out[i] <= '9') {
-                    v = v * 10U + (uint32_t)(host_out[i] - '0');
-                    if (v > 255U) { is_ip = 0; break; }
-                    i++;
-                }
-                if (i == start || (o < 3 && host_out[i] != '.')) { is_ip = 0; break; }
-                if (o < 3) i++;
-                octets[o] = v;
-            }
-            if (is_ip && host_out[i] == 0) {
-                resolved = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
-            } else {
-                is_ip = 0;
-            }
-        } else {
-            is_ip = 0;
-        }
-        if (!is_ip) {
-            long rc = (long)icda_dns_resolve(host_out, &resolved);
-            if (rc < 0) return (int)rc;
-        }
-        *ip_out = resolved;
-    }
     *port_out = port;
     *https_out = use_https;
     return 0;
+}
+
+/*
+ * resolve_host: resolve hostname to IPv4. Returns 0 on success.
+ * Tries IPv4 literal first, then DNS.
+ */
+static int resolve_host(const char *host, uint32_t *ip_out) {
+    int is_ip = 1;
+    const char *p = host;
+    int dots = 0;
+    while (*p) {
+        if (*p == '.') dots++;
+        else if (*p < '0' || *p > '9') { is_ip = 0; break; }
+        p++;
+    }
+    if (is_ip && dots == 3) {
+        uint32_t octets[4];
+        uint64_t i = 0;
+        for (int o = 0; o < 4; o++) {
+            uint32_t v = 0;
+            uint64_t start = i;
+            while (host[i] >= '0' && host[i] <= '9') {
+                v = v * 10U + (uint32_t)(host[i] - '0');
+                if (v > 255U) { is_ip = 0; break; }
+                i++;
+            }
+            if (i == start || (o < 3 && host[i] != '.')) { is_ip = 0; break; }
+            if (o < 3) i++;
+            octets[o] = v;
+        }
+        if (is_ip && host[i] == 0) {
+            *ip_out = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
+            return 0;
+        }
+    }
+    /* DNS resolution */
+    long rc = (long)icda_dns_resolve(host, ip_out);
+    return (int)rc;
 }
 
 /* ---- HTML rendering ---- */
@@ -461,14 +464,33 @@ static void navigate_to(const char *url) {
     }
 
     loading = 1;
-    b_strcpy(status, "Loading...", sizeof(status));
+    b_strcpy(status, "Resolving...", sizeof(status));
+    draw_all();
 
-    rc = parse_url(url, &ip, &port, &https, host, sizeof(host), path, sizeof(path));
+    /* Step 1: parse URL format */
+    rc = parse_url_format(url, &port, &https, host, sizeof(host), path, sizeof(path));
     if (rc < 0) {
-        b_strcpy(status, "Invalid URL", sizeof(status));
+        b_strcpy(status, "Invalid URL format", sizeof(status));
         loading = 0;
         return;
     }
+
+    /* Step 2: resolve hostname */
+    b_strcpy(status, "Resolving hostname...", sizeof(status));
+    draw_all();
+    rc = (long)resolve_host(host, &ip);
+    if (rc < 0) {
+        long err = -rc;
+        if (err == 2) b_strcpy(status, "DNS: ARP timeout", sizeof(status));
+        else if (err == 3) b_strcpy(status, "DNS: network timeout", sizeof(status));
+        else b_strcpy(status, "DNS resolution failed", sizeof(status));
+        loading = 0;
+        return;
+    }
+
+    /* Step 3: fetch page */
+    b_strcpy(status, "Connecting...", sizeof(status));
+    draw_all();
 
     b_strcpy(out_path, "/tmp/.browser.page", sizeof(out_path));
 
