@@ -724,7 +724,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
 
     for (uint32_t srv_i = 0; srv_i < dns_count; srv_i++) {
         uint32_t dns_ip = dns_servers[srv_i];
-        arp_target = ip_same_subnet(net_state.ip, dns_ip, net_state.netmask) ? dns_ip : net_state.gateway;
+        arp_target = net_state.gateway;
         if (net_arp_resolve(arp_target, dst_mac) != 0) {
             continue;
         }
@@ -810,7 +810,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
 #define DHCP_OP_BOOTREPLY   2
 #define DHCP_HTYPE_ETHERNET  1
 #define DHCP_HLEN_ETHERNET   6
-#define DHCP_MAGIC_COOKIE    0x63825363U
+#define DHCP_MAGIC_COOKIE    0x63538263U
 #define DHCP_MSG_DISCOVER    1
 #define DHCP_MSG_OFFER       2
 #define DHCP_MSG_REQUEST     3
@@ -890,34 +890,47 @@ static int net_dhcp_discover(void) {
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
-        udp_packet_info_t pkt;
-        if (parse_udp_packet(frame_buf, len, 0, 67, 68, &pkt) != 0) continue;
-        if (pkt.payload_len < 240) continue;
-        if (dhcp_read32(pkt.payload + 236) != DHCP_MAGIC_COOKIE) continue;
+        /* Parse DHCP manually: expect UDP from port 67 to broadcast:68 */
+        {
+            const eth_hdr_t *eth = (const eth_hdr_t *)frame_buf;
+            if (ntohs16(eth->type_be) != ETH_TYPE_IPV4) continue;
+            const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(frame_buf + sizeof(eth_hdr_t));
+            if ((ip->ver_ihl >> 4) != 4 || ip->proto != IP_PROTO_UDP) continue;
+            uint16_t ip_hdr_len = (uint16_t)((ip->ver_ihl & 0x0FU) * 4U);
+            const udp_hdr_t *udp = (const udp_hdr_t *)((const uint8_t *)ip + ip_hdr_len);
+            if (ntohs16(udp->src_port_be) != 67 || ntohs16(udp->dst_port_be) != 68) continue;
+            uint16_t udp_len = ntohs16(udp->len_be);
+            if (udp_len < sizeof(udp_hdr_t) + 240) continue;
+            const uint8_t *dhcp_payload = (const uint8_t *)udp + sizeof(udp_hdr_t);
+            if (dhcp_read32(dhcp_payload + 236) != DHCP_MAGIC_COOKIE) continue;
 
         /* Parse options */
-        const uint8_t *opts = pkt.payload + 240;
+        const uint8_t *opts = dhcp_payload + 240;
         uint8_t msg_type = 0;
         uint32_t srv_id = 0;
-        for (uint32_t oi = 0; oi + 1 < pkt.payload_len - 236; ) {
+        uint32_t opt_len = udp_len - sizeof(udp_hdr_t) - 240;
+        for (uint32_t oi = 0; oi + 1 < opt_len; ) {
             uint8_t tag = opts[oi];
             if (tag == 0xFF) break;
             if (tag == 0) { oi++; continue; }
-            if (oi + 1 >= pkt.payload_len - 236) break;
+            if (oi + 1 >= opt_len) break;
             uint8_t olen = opts[oi + 1];
-            if (oi + 2 + olen > pkt.payload_len - 236) break;
+            if (oi + 2 + olen > opt_len) break;
             const uint8_t *oval = opts + oi + 2;
             if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
             if (tag == DHCP_OPT_SERVER_ID && olen >= 4) srv_id = dhcp_read32(oval);
             oi += 2 + olen;
         }
         if (msg_type == DHCP_MSG_OFFER) {
-            offered_ip = dhcp_read32(pkt.payload + 16);
+            offered_ip = dhcp_read32(dhcp_payload + 16);
             server_ip = srv_id;
             got_offer = 1;
         }
+        } /* end parse block */
+    } /* end while */
+    if (!got_offer) {
+        return -1;
     }
-    if (!got_offer) return -1;
 
     /* Build DHCP REQUEST */
     zero_bytes(packet, sizeof(packet));
@@ -956,27 +969,37 @@ static int net_dhcp_discover(void) {
     }
 
     /* Wait for ACK (up to 2 seconds) */
+
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline) {
         int rc = e1000_recv_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
-        udp_packet_info_t pkt;
-        if (parse_udp_packet(frame_buf, len, 0, 67, 68, &pkt) != 0) continue;
-        if (pkt.payload_len < 240) continue;
-        if (dhcp_read32(pkt.payload + 236) != DHCP_MAGIC_COOKIE) continue;
+        /* Parse DHCP manually: UDP from port 67 to broadcast:68 */
+        const eth_hdr_t *eth2 = (const eth_hdr_t *)frame_buf;
+        if (ntohs16(eth2->type_be) != ETH_TYPE_IPV4) continue;
+        const ipv4_hdr_t *ip2 = (const ipv4_hdr_t *)(frame_buf + sizeof(eth_hdr_t));
+        if ((ip2->ver_ihl >> 4) != 4 || ip2->proto != IP_PROTO_UDP) continue;
+        uint16_t ip_hdr_len2 = (uint16_t)((ip2->ver_ihl & 0x0FU) * 4U);
+        const udp_hdr_t *udp2 = (const udp_hdr_t *)((const uint8_t *)ip2 + ip_hdr_len2);
+        if (ntohs16(udp2->src_port_be) != 67 || ntohs16(udp2->dst_port_be) != 68) continue;
+        uint16_t udp_len2 = ntohs16(udp2->len_be);
+        if (udp_len2 < sizeof(udp_hdr_t) + 240) continue;
+        const uint8_t *dhcp2 = (const uint8_t *)udp2 + sizeof(udp_hdr_t);
+        if (dhcp_read32(dhcp2 + 236) != DHCP_MAGIC_COOKIE) continue;
 
-        const uint8_t *opts = pkt.payload + 240;
+        const uint8_t *opts2 = dhcp2 + 240;
         uint8_t msg_type = 0;
-        for (uint32_t oi = 0; oi + 1 < pkt.payload_len - 236; ) {
-            uint8_t tag = opts[oi];
+        uint32_t opt_len2 = udp_len2 - sizeof(udp_hdr_t) - 240;
+        for (uint32_t oi = 0; oi + 1 < opt_len2; ) {
+            uint8_t tag = opts2[oi];
             if (tag == 0xFF) break;
             if (tag == 0) { oi++; continue; }
-            if (oi + 1 >= pkt.payload_len - 236) break;
-            uint8_t olen = opts[oi + 1];
-            if (oi + 2 + olen > pkt.payload_len - 236) break;
-            const uint8_t *oval = opts + oi + 2;
+            if (oi + 1 >= opt_len2) break;
+            uint8_t olen = opts2[oi + 1];
+            if (oi + 2 + olen > opt_len2) break;
+            const uint8_t *oval = opts2 + oi + 2;
             if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
             if (tag == DHCP_OPT_SUBNET_MASK && olen >= 4) offered_mask = dhcp_read32(oval);
             if (tag == DHCP_OPT_ROUTER && olen >= 4) offered_router = dhcp_read32(oval);
@@ -984,16 +1007,17 @@ static int net_dhcp_discover(void) {
             oi += 2 + olen;
         }
         if (msg_type == DHCP_MSG_ACK) {
+
             net_state.ip = offered_ip;
             if (offered_mask) net_state.netmask = offered_mask;
             if (offered_router) net_state.gateway = offered_router;
             if (offered_dns) {
-                /* Store primary DNS for later use */
                 net_state.dns = offered_dns;
             }
             return 0;
         }
     }
+
     return -1;
 }
 
