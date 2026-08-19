@@ -17,6 +17,14 @@
 #define USER_STACK_TOP    0x00007FFFFFFFE000ULL  // first byte ABOVE user stack
 #define USER_STACK_LIMIT  0x00007FFFFFF00000ULL  // max stack size ~8 MiB
 
+// How many pages are mapped up front when a user process is created.
+// One page is far too small: apps keep multi-KB stack buffers (e.g. a
+// 4KiB directory listing in ic_icon_load_folder), and at different
+// optimization levels the compiler can lay those frames out so they
+// cross the single mapped page, faulting in the middle of a kernel
+// copy.  16 KiB of headroom covers the startup path of every app.
+#define USER_STACK_INITIAL_PAGES 4
+
 //  scheduler hook 
 // The scheduler must call this whenever it switches to a new process so the
 // page fault handler knows which addr_space_t to map new pages into.

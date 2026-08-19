@@ -120,6 +120,9 @@ int vmm_map_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags)
     phys &= ~0xFFFULL;
     pte_t *pte = get_pte(as, virt, 1);
     if (!pte) return -1;
+    if (!(*pte & PTE_PRESENT) && as && !(flags & VMM_GLOBAL)) {
+        as->mapped_pages++;
+    }
     *pte = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;
     vmm_invlpg(virt);
     return 0;
@@ -130,6 +133,9 @@ void vmm_unmap_page(addr_space_t *as, uint64_t virt, int free_phys) {
     pte_t *pte = get_pte(as, virt, 0);
     if (!pte || !(*pte & PTE_PRESENT)) return;
     if (free_phys) pmm_free(PTE_FRAME(*pte));
+    if (as && !(*pte & PTE_GLOBAL) && as->mapped_pages > 0) {
+        as->mapped_pages--;
+    }
     *pte = 0;
     vmm_invlpg(virt);
 }

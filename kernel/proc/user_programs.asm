@@ -29,6 +29,10 @@ global userprog_terminal_start
 global userprog_terminal_end
 global userprog_gui_demo_start
 global userprog_gui_demo_end
+global userprog_taskman_start
+global userprog_taskman_end
+global userprog_browser_start
+global userprog_browser_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -85,5 +89,13 @@ userprog_terminal_end:
 userprog_gui_demo_start:
     incbin "userspace/gui_demo.app"
 userprog_gui_demo_end:
+
+userprog_taskman_start:
+    incbin "userspace/taskman.app"
+userprog_taskman_end:
+
+userprog_browser_start:
+    incbin "userspace/browser.app"
+userprog_browser_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

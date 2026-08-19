@@ -253,8 +253,30 @@ syscall_common:
     mov rdi, rsp
     call syscall_handler
 
+    ; Exit-pending check must happen BEFORE restoring the user register
+    ; frame: the old code loaded current_thread_ptr into RDX after the
+    ; pops, so every int 0x80 returned to user mode with RDX holding a
+    ; kernel direct-map pointer (the thread struct).  User code that kept
+    ; a pointer live in RDX across a syscall and dereferenced it after
+    ; then wrote/read through a kernel address and page-faulted - the
+    ; root cause of the WM's intermittent crashes.  r11 is in the syscall
+    ; ABI's clobber set, so using it here leaks nothing.
     mov rax, [rsp + 14*8]
-
+    mov r11, [rel current_thread_ptr]
+    cmp qword [r11 + THREAD_USER_RETURN_PENDING], 0
+    je .sysret_user
+    mov qword [r11 + THREAD_USER_RETURN_PENDING], 0
+    mov rsp, [r11 + THREAD_KERNEL_STACK_TOP]
+    sub rsp, 8
+    mov qword [rsp], 0
+    mov ax, GDT_KERNEL_DATA
+    mov ss, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    jmp user_thread_finish
+.sysret_user:
     pop r15
     pop r14
     pop r13
@@ -272,21 +294,6 @@ syscall_common:
     add rsp, 8
 
     add rsp, 16
-    mov rdx, [rel current_thread_ptr]
-    cmp qword [rdx + THREAD_USER_RETURN_PENDING], 0
-    je .sysret_user
-    mov qword [rdx + THREAD_USER_RETURN_PENDING], 0
-    mov rsp, [rdx + THREAD_KERNEL_STACK_TOP]
-    sub rsp, 8
-    mov qword [rsp], 0
-    mov ax, GDT_KERNEL_DATA
-    mov ss, ax
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    jmp user_thread_finish
-.sysret_user:
     xor ecx, ecx
     mov ds, cx
     mov es, cx

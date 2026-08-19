@@ -2,7 +2,9 @@
 
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
+#include "../drivers/display/gpu.h"
 #include "../drivers/display/vga.h"
+#include "../power/power.h"
 #include "../drivers/input/input.h"
 #include "../drivers/input/mouse.h"
 #include "../drivers/audio/speaker.h"
@@ -471,6 +473,88 @@ static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
 
 static uint64_t sys_kill(uint64_t pid, uint64_t exit_code) {
     return sched_kill_process(pid, exit_code) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
+    process_t *proc;
+
+    if (!out) {
+        return (uint64_t)-1;
+    }
+    proc = sched_find_process(pid);
+    if (!proc) {
+        return (uint64_t)-1;
+    }
+
+    out->cpu_ticks = proc->cpu_ticks;
+    /* Count the pages this process actually has mapped in its own
+     * address space (kernel and framebuffer pages are shared/global
+     * and excluded by the accounting in vmm_map_page). */
+    out->mem_bytes = proc->addr_space ? proc->addr_space->mapped_pages * PAGE_SIZE_4K : 0;
+    {
+        uint64_t i = 0;
+        while (proc->name[i] && i < sizeof(out->name) - 1) {
+            out->name[i] = proc->name[i];
+            i++;
+        }
+        out->name[i] = 0;
+    }
+    return 0;
+}
+
+static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
+    gpu_device_t *dev;
+
+    if (!out) {
+        return (uint64_t)-1;
+    }
+    dev = gpu_primary();
+    if (!dev) {
+        return (uint64_t)-1;
+    }
+
+    {
+        uint64_t i = 0;
+        while (dev->name[i] && i < sizeof(out->name) - 1) {
+            out->name[i] = dev->name[i];
+            i++;
+        }
+        out->name[i] = 0;
+    }
+    out->width = (int32_t)dev->modes[dev->current_mode].width;
+    out->height = (int32_t)dev->modes[dev->current_mode].height;
+    out->pitch = dev->modes[dev->current_mode].pitch;
+    out->bpp = dev->modes[dev->current_mode].bpp;
+    out->mode_count = dev->mode_count;
+    out->hw_cursor = dev->hw_cursor ? 1U : 0U;
+    out->present_supported = dev->present_supported ? 1U : 0U;
+    return 0;
+}
+
+static uint64_t sys_gpu_present(void) {
+    gpu_device_t *dev = gpu_primary();
+    if (!dev || !dev->present) {
+        return (uint64_t)-1;
+    }
+    return dev->present(dev) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) {
+    gpu_device_t *dev = gpu_primary();
+    if (!dev || !dev->set_cursor) {
+        return (uint64_t)-1;
+    }
+    return dev->set_cursor(dev, x, y, image, w, h) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_power(uint64_t action) {
+    /* 0 = shutdown, 1 = reboot.  Neither returns. */
+    if (action == 1) {
+        power_reboot();
+    } else {
+        power_shutdown();
+    }
+    return 0;
 }
 
 static uint64_t sys_suspend(uint64_t pid) {
@@ -1158,7 +1242,10 @@ uint64_t syscall_dispatch(struct registers *regs) {
                 info->width     = fb_width;
                 info->height    = fb_height;
                 info->pitch     = (fb_height > 0) ? (uint32_t)(fb_size / (uint64_t)fb_height) : 0;
-                info->bpp       = 32;
+                /* Report the real pixel format.  The window manager blits
+                 * into this mapping, so it must know whether it is 32bpp
+                 * (typical on real GPUs) or 24bpp (QEMU/GRUB fallbacks). */
+                info->bpp       = (uint32_t)fb_bpp_value();
             }
             /* Keep the PS/2 cursor position clamped to the real screen size */
             mouse_set_screen(fb_width, fb_height);
@@ -1183,6 +1270,19 @@ uint64_t syscall_dispatch(struct registers *regs) {
              * GUI-capable apps know the desktop is on screen. */
             fb_release_if_owner_gone();
             return fb_claimed ? 1 : 0;
+        case SYS_GPU_QUERY:
+            return sys_gpu_query((syscall_gpu_info_t *)(uintptr_t)regs->rdi);
+        case SYS_GPU_PRESENT:
+            return sys_gpu_present();
+        case SYS_GPU_CURSOR:
+            return sys_gpu_cursor((int)regs->rdi, (int)regs->rsi,
+                                  (const uint32_t *)(uintptr_t)regs->rdx,
+                                  (int)regs->r10, (int)regs->r8);
+        case SYS_POWER:
+            return sys_power(regs->rdi);
+        case SYS_PROC_STATS:
+            return sys_proc_stats(regs->rdi,
+                                  (syscall_proc_stats_t *)(uintptr_t)regs->rsi);
         default:
             return (uint64_t)-1;
     }

@@ -1,6 +1,7 @@
 #include "console.h"
 
 #include "../device.h"
+#include "../../diag/splash.h"
 #include "../display/framebuffer.h"
 #include "../display/font.h"
 #include "../display/vga.h"
@@ -292,7 +293,7 @@ void console_write(const char *str, console_style_t style) {
     }
 
     if (console_has_framebuffer && console_display_is_framebuffer) {
-        if (fb_available()) {
+        if (fb_available() && !splash_active()) {
             fb_print(str, fb_color_for(style), FB_BLACK);
         }
     } else {

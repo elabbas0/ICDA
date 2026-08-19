@@ -205,21 +205,30 @@ int user_prepare_address_space(process_t *proc) {
         }
     }
 
-    stack_page = pmm_alloc();
-    if (!stack_page) {
-        return -1;
-    }
-
-    {
-        uint64_t *stack = (uint64_t *)PHYS_TO_VIRT(stack_page);
-        for (int i = 0; i < (int)(PAGE_SIZE_4K / sizeof(uint64_t)); i++) {
-            stack[i] = 0;
+    /* Map USER_STACK_INITIAL_PAGES of stack up front.  Apps carry multi-KB
+     * stack buffers (a 4KiB directory listing is common), so a single
+     * mapped page lets the kernel's buffer copy fault on an unmapped page
+     * mid-syscall.  Extra pages are mapped on demand by the page fault
+     * handler (see is_stack_growth in pf.c). */
+    for (int i = 0; i < USER_STACK_INITIAL_PAGES; i++) {
+        stack_page = pmm_alloc();
+        if (!stack_page) {
+            return -1;
         }
-    }
 
-    if (vmm_map_page(proc->addr_space, USER_STACK_TOP - PAGE_SIZE_4K, stack_page, VMM_FLAGS_USER_RW) != 0) {
-        pmm_free(stack_page);
-        return -1;
+        {
+            uint64_t *stack = (uint64_t *)PHYS_TO_VIRT(stack_page);
+            for (int j = 0; j < (int)(PAGE_SIZE_4K / sizeof(uint64_t)); j++) {
+                stack[j] = 0;
+            }
+        }
+
+        if (vmm_map_page(proc->addr_space,
+                         USER_STACK_TOP - (uint64_t)PAGE_SIZE_4K * (i + 1),
+                         stack_page, VMM_FLAGS_USER_RW) != 0) {
+            pmm_free(stack_page);
+            return -1;
+        }
     }
 
     return 0;
@@ -649,6 +658,23 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
     thread = proc_create_user_thread(user_proc, entry_rip, user_rsp, user_thread_start);
     if (!thread) {
         return -1;
+    }
+    /* Task-manager label: the basename of the spawned image. */
+    {
+        const char *base = path;
+        const char *p = path;
+        while (*p) {
+            if (*p == '/') base = p + 1;
+            p++;
+        }
+        {
+            uint64_t i = 0;
+            while (base[i] && i < sizeof(user_proc->name) - 1) {
+                user_proc->name[i] = base[i];
+                i++;
+            }
+            user_proc->name[i] = 0;
+        }
     }
     if (pid_out) {
         *pid_out = user_proc->pid;

@@ -157,6 +157,14 @@ uint64_t fb_phys_size(void) {
     return fb_ready ? (uint64_t)fb_pitch * (uint64_t)fb_height : 0;
 }
 
+int fb_bpp_value(void) {
+    return fb_ready ? (int)fb_bpp : 0;
+}
+
+uint32_t fb_pitch_value(void) {
+    return fb_ready ? fb_pitch : 0;
+}
+
 // adjust fb_addr to point through the HHDM; call once after vmm_init
 void fb_remap(uint64_t physical_base) {
     if (!fb_ready || fb_hhdm) return;
@@ -171,6 +179,33 @@ void fb_put_pixel(int x, int y, uint32_t color) {
     if (x < 0 || x >= fb_width || y < 0 || y >= fb_height) return;
     volatile uint32_t* pixel = (volatile uint32_t*)((uint8_t*)fb_addr + y * fb_pitch + x * (fb_bpp / 8));
     *pixel = color;
+}
+
+void fb_fill_rect(int x, int y, int w, int h, uint32_t color) {
+    uint32_t *row;
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+
+    if (!fb_ready || fb_bpp != 32 || w <= 0 || h <= 0) return;
+    x1 = x;
+    y1 = y;
+    x2 = x + w;
+    y2 = y + h;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > fb_width) x2 = fb_width;
+    if (y2 > fb_height) y2 = fb_height;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    row = (uint32_t *)(uintptr_t)fb_addr + (uint64_t)y1 * (fb_pitch / 4);
+    for (int cy = y1; cy < y2; cy++) {
+        for (int cx = x1; cx < x2; cx++) {
+            row[cx] = color;
+        }
+        row = (uint32_t *)((uint8_t *)row + fb_pitch);
+    }
 }
 
 void fb_clear(uint32_t color) {

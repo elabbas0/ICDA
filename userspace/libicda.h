@@ -54,6 +54,8 @@ typedef struct {
 void     ic_fill(ic_canvas_t *c, uint32_t color);
 void     ic_rect(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color);
 void     ic_rect_r(ic_canvas_t *c, int x, int y, int w, int h, int r, uint32_t color);
+/* Soft drop shadow (quadratic alpha falloff band around a rounded rect). */
+void     ic_draw_shadow(ic_canvas_t *c, int x, int y, int w, int h, int radius, uint32_t color);
 void     ic_hline(ic_canvas_t *c, int x, int y, int len, uint32_t color);
 void     ic_vline(ic_canvas_t *c, int x, int y, int len, uint32_t color);
 void     ic_outline(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color);
@@ -127,7 +129,8 @@ const ic_theme_t *ic_theme_default(void);
 #define IC_TITLE_H     26
 #define IC_BTN_W       18
 #define IC_BTN_H       16
-#define IC_BTN_MIN_OFF 48   /* x offset of the minimize button from the right edge */
+#define IC_BTN_MAX_OFF 72   /* x offsets of title-bar buttons from the right edge */
+#define IC_BTN_MIN_OFF 48
 #define IC_BTN_CLS_OFF 24
 #define IC_ANIM_MAX    8
 
@@ -140,12 +143,15 @@ typedef struct {
     const char *title;
     int      hover_close; /* pointer over the close button (chrome hover) */
     int      hover_min;   /* pointer over the minimize button */
+    int      hover_max;   /* pointer over the maximize/restore button */
 } ic_window_t;
 
 void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
-                    const ic_icon_t *icon_close, const ic_icon_t *icon_min);
+                    const ic_icon_t *icon_close, const ic_icon_t *icon_min,
+                    const ic_icon_t *icon_max);
 int  ic_hit_title(const ic_window_t *win, int mx, int my);
 int  ic_hit_minimize(const ic_window_t *win, int mx, int my);
+int  ic_hit_maximize(const ic_window_t *win, int mx, int my);
 int  ic_hit_close(const ic_window_t *win, int mx, int my);
 int  ic_hit_client(const ic_window_t *win, int mx, int my);
 

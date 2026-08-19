@@ -54,6 +54,9 @@ typedef struct { pte_t e[PT_ENTRIES]; } __attribute__((aligned(PAGE_SIZE_4K))) p
 // address space identified by its PML4 physical address
 typedef struct {
     uint64_t pml4_phys;
+    /* Number of 4 KiB pages mapped (tracked for task-manager memory
+     * accounting; only increments for newly allocated mappings). */
+    uint64_t mapped_pages;
 } addr_space_t;
 
 // public flag aliases

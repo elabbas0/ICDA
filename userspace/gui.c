@@ -23,6 +23,46 @@ static uint64_t win_reply_queue = 0;
 #define GUI_STAGING_PIXELS (1280 * 800)
 static uint32_t gui_staging[GUI_STAGING_PIXELS];
 
+static void gui_copy_pixels(uint32_t *dst, const uint32_t *src, uint64_t count) {
+    if (!dst || !src) return;
+    for (uint64_t i = 0; i < count; i++) dst[i] = src[i];
+}
+
+static void gui_use_pixel_buffer(void) {
+    uint64_t pixels = (uint64_t)win_w * (uint64_t)win_h;
+    if (pixels <= GUI_STAGING_PIXELS) {
+        win_pixels = gui_staging;
+        if (win_shm_pixels) gui_copy_pixels(win_pixels, win_shm_pixels, pixels);
+    } else {
+        win_pixels = win_shm_pixels;
+    }
+}
+
+static void gui_apply_resize(const gui_msg_t *msg) {
+    uint64_t new_handle;
+    uint64_t old_handle;
+    uint64_t addr;
+
+    if (!msg || msg->type != GUI_MSG_RESIZE) return;
+    if (msg->resize.w <= 0 || msg->resize.h <= 0 || !msg->resize.shm_handle) return;
+
+    new_handle = msg->resize.shm_handle;
+    old_handle = win_shm_handle;
+    addr = icda_shm_map(new_handle);
+    if (!addr) return;
+
+    if (old_handle) {
+        icda_shm_unmap(old_handle);
+        icda_shm_close(old_handle);
+    }
+
+    win_shm_handle = new_handle;
+    win_w = msg->resize.w;
+    win_h = msg->resize.h;
+    win_shm_pixels = (uint32_t*)addr;
+    gui_use_pixel_buffer();
+}
+
 int gui_open_window(const char *title, int w, int h) {
     wm_queue = icda_msg_open(WM_QUEUE_NAME);
     if (!wm_queue) return -1;
@@ -89,11 +129,7 @@ int gui_open_window(const char *title, int w, int h) {
     win_shm_pixels = (uint32_t*)addr;
     /* Draw into the staging copy when it fits (the normal case); the
      * WM sees only committed frames via gui_flush(). */
-    if ((uint64_t)win_w * (uint64_t)win_h <= GUI_STAGING_PIXELS) {
-        win_pixels = gui_staging;
-    } else {
-        win_pixels = win_shm_pixels;
-    }
+    gui_use_pixel_buffer();
 
     return 0;
 }
@@ -108,9 +144,7 @@ void gui_flush(void) {
     if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
         /* Commit the finished frame: one tight copy beats the WM
          * catching us between draw steps. */
-        for (int i = 0; i < win_w * win_h; i++) {
-            win_shm_pixels[i] = win_pixels[i];
-        }
+        gui_copy_pixels(win_shm_pixels, win_pixels, (uint64_t)win_w * (uint64_t)win_h);
     }
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_FLUSH;
@@ -122,6 +156,7 @@ int gui_poll_event(gui_msg_t *out) {
     if (!app_queue) return 0;
     if (icda_msg_poll(app_queue) <= 0) return 0;
     if (icda_msg_recv(app_queue, out, 0) == 0) {
+        if (out->type == GUI_MSG_RESIZE) gui_apply_resize(out);
         return 1;
     }
     return 0;
@@ -129,7 +164,9 @@ int gui_poll_event(gui_msg_t *out) {
 
 void gui_wait_event(gui_msg_t *out) {
     if (!app_queue) return;
-    icda_msg_recv(app_queue, out, 1);
+    if (icda_msg_recv(app_queue, out, 1) == 0 && out && out->type == GUI_MSG_RESIZE) {
+        gui_apply_resize(out);
+    }
 }
 
 void gui_close_window(void) {

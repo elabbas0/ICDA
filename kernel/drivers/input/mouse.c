@@ -1,5 +1,6 @@
 #include "mouse.h"
 #include "../../cpu/isr.h"
+#include "../../proc/sched.h"
 #include <stdint.h>
 
 #define PS2_DATA    0x60
@@ -191,6 +192,10 @@ void mouse_irq(struct registers *regs) {
                 mouse_buf[mouse_buf_head].buttons = mouse_btn;
                 mouse_buf_head = next;
             }
+            /* Wake any process blocked on input (e.g. the window manager
+             * waiting for events) so a mouse move is handled immediately
+             * instead of on the next scheduler tick. */
+            sched_wake_input_waiters();
         }
     }
 }

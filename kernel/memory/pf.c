@@ -4,6 +4,9 @@
 #include "../cpu/isr.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
+#include "../drivers/serial/serial.h"
+#include "../proc/sched.h"
+#include "../proc/process.h"
 
 // scheduler hook 
 // the page fault handler needs the address space of the currently running process so it can map the new page into the right PML4.
@@ -44,7 +47,62 @@ static void console_print_hex(uint64_t v) {
 
 //  panic helper 
 
+/* Fault details always go straight to the serial port too: the console
+ * mirror can be disabled by the time the GUI is running, and a panic on
+ * a headless box is otherwise invisible. */
+static void pf_serial_hex(uint64_t v) {
+    char buf[17];
+    const char *hex = "0123456789abcdef";
+    buf[16] = 0;
+    for (int i = 15; i >= 0; i--) {
+        buf[i] = hex[v & 0xF];
+        v >>= 4;
+    }
+    serial_write(buf);
+}
+
+static inline uint64_t read_cr3(void) {
+    uint64_t val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(val));
+    return val;
+}
+
+static void pf_serial_dump(struct registers *regs, uint64_t cr2) {
+    static const char *names[20] = {
+        "RAX", "RCX", "RDX", "RBX", "RBP", "RSI", "RDI",
+        "R8",  "R9",  "R10", "R11", "R12", "R13", "R14", "R15"
+    };
+    uint64_t vals[20];
+    int i;
+    if (!serial_ready()) return;
+    vals[0] = regs->rax; vals[1] = regs->rcx; vals[2] = regs->rdx;
+    vals[3] = regs->rbx; vals[4] = regs->rbp; vals[5] = regs->rsi;
+    vals[6] = regs->rdi; vals[7] = regs->r8;  vals[8] = regs->r9;
+    vals[9] = regs->r10; vals[10] = regs->r11; vals[11] = regs->r12;
+    vals[12] = regs->r13; vals[13] = regs->r14; vals[14] = regs->r15;
+    serial_write("\n*** PAGE FAULT ***\n");
+    serial_write("  CR2: ");
+    pf_serial_hex(cr2);
+    serial_write("  RIP: ");
+    pf_serial_hex(regs->rip);
+    serial_write("  RSP: ");
+    pf_serial_hex(regs->rsp);
+    serial_write("  ERR: ");
+    pf_serial_hex(regs->err_code);
+    serial_write("  CR3: ");
+    pf_serial_hex(read_cr3());
+    serial_write("\n");
+    for (i = 0; i < 15; i++) {
+        serial_write("  ");
+        serial_write(names[i]);
+        serial_write(": ");
+        pf_serial_hex(vals[i]);
+        serial_write("\n");
+    }
+}
+
 static void pf_panic(struct registers *regs, uint64_t cr2) {
+    pf_serial_dump(regs, cr2);
     console_write("\n*** PAGE FAULT ***\n", CONSOLE_STYLE_ERROR);
     console_write("  CR2 (fault addr): ", CONSOLE_STYLE_ERROR);
     console_print_hex(cr2);
@@ -119,6 +177,17 @@ static int is_stack_growth(struct registers *regs, uint64_t cr2) {
 
     // must be in the user stack region
     if (cr2 < USER_STACK_LIMIT || cr2 >= USER_STACK_TOP) return 0;
+
+    /* Kernel-mode fault (PF_USER clear): the kernel legitimately writes
+     * into user stack buffers passed as syscall arguments (e.g. a
+     * directory listing copied into an app's stack array).  The app's
+     * frame can straddle a page boundary that hasn't been mapped yet;
+     * RSP here is the *kernel* stack, so the distance check below does
+     * not apply - bound by process kind and the stack region instead. */
+    if (!(e & PF_USER)) {
+        process_t *proc = sched_current_process();
+        return proc && proc->kind == PROCESS_USER;
+    }
 
     // must be within SLACK pages below rsp's current page
     uint64_t rsp_page   = regs->rsp & ~0xFFFULL;
