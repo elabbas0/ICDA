@@ -826,13 +826,13 @@ int tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *out_len) {
     /* Heap-allocate payload to avoid stack overflow (TLS_CAP=16K, kernel stack=16K) */
     uint8_t *payload = (uint8_t *)kmalloc(TLS_CAP);
     if (!payload) return -1;
-    uint64_t deadline = sched_ticks() + 500;
+    uint64_t deadline = sched_ticks() + 1000;
 
     while (sched_ticks() < deadline) {
         uint16_t plen = 0;
         uint8_t ctype = 0;
 
-        int rc = tls_recv_frame(conn, 50);
+        int rc = tls_recv_frame(conn, 100);
         if (rc < 0) { kfree(payload); return -1; }
 
         while (1) {

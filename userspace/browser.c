@@ -467,8 +467,8 @@ static void navigate_to(const char *url) {
     b_strcpy(status, "Resolving...", sizeof(status));
     draw_all();
 
-    /* Step 1: parse URL format */
-    rc = parse_url_format(url, &port, &https, host, sizeof(host), path, sizeof(path));
+    /* Step 1: parse URL format (use current_url which has http:// prepended) */
+    rc = parse_url_format(current_url, &port, &https, host, sizeof(host), path, sizeof(path));
     if (rc < 0) {
         b_strcpy(status, "Invalid URL format", sizeof(status));
         loading = 0;

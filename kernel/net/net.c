@@ -1119,7 +1119,7 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
     rx_body = (uint8_t *)kmalloc(NET_HTTP_CAP);
     if (!rx_body) return -1;
 
-    deadline = sched_ticks() + 1000;
+    deadline = sched_ticks() + 3000;
     while (sched_ticks() < deadline) {
         int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) {
@@ -1259,7 +1259,7 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
     {
         uint8_t *tls_buf = (uint8_t *)kmalloc(TLS_CAP);
         if (!tls_buf) { tls_close(conn); kfree(rx_buf); net_error = NET_ERR_HTTP_TOO_LARGE; return -1; }
-        uint64_t deadline = sched_ticks() + 1000;
+        uint64_t deadline = sched_ticks() + 3000;
         while (sched_ticks() < deadline) {
             uint32_t got = 0;
             if (tls_read(conn, tls_buf, TLS_CAP, &got) == 0 && got > 0) {
@@ -1272,7 +1272,7 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
                 }
                 copy_bytes(rx_buf + rx_size, tls_buf, got);
                 rx_size += got;
-                deadline = sched_ticks() + 200;
+                deadline = sched_ticks() + 500;
             }
             sched_sleep(1);
         }
