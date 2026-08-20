@@ -492,7 +492,7 @@ static void navigate_to(const char *url) {
     b_strcpy(status, "Connecting...", sizeof(status));
     draw_all();
 
-    b_strcpy(out_path, "/tmp/.browser.page", sizeof(out_path));
+    b_strcpy(out_path, "/browser.page", sizeof(out_path));
 
     if (https) {
         rc = (long)icda_https_get_ipv4(ip, port, host, path, out_path, &bytes);
