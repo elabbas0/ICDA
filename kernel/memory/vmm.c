@@ -169,6 +169,7 @@ addr_space_t *vmm_kernel_address_space(void) {
 }
 
 void *vmm_map_physical(uint64_t phys, uint64_t size, uint64_t flags) {
+    if (phys == 0 || size == 0) return 0;
     uint64_t aligned_phys = phys & ~0xFFFULL;
     uint64_t page_offset = phys & 0xFFFULL;
     uint64_t end = (phys + size + PAGE_SIZE_4K - 1) & ~0xFFFULL;

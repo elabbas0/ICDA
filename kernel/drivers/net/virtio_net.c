@@ -127,18 +127,21 @@ static int vn_alloc_page(uint64_t *phys_out, void **virt_out) {
  */
 static volatile uint8_t *vn_find_pci_cap(const pci_device_t *pci, uint8_t cap_type) {
     uint8_t cap_off = pci_read_config8(pci, VIRTIO_PCI_CFG_CAP_OFFSET);
+    if (cap_off == 0) return 0;
     for (int i = 0; i < 16 && cap_off != 0; i++) {
         uint8_t cap_id = pci_read_config8(pci, cap_off);
         if (cap_id == 0x09) { /* Virtio PCI capability */
             uint8_t type = pci_read_config8(pci, cap_off + 3);
             if (type == cap_type) {
-                uint32_t bar = pci_read_config32(pci, cap_off + 4) & 0xFF;
+                uint8_t bar = pci_read_config8(pci, cap_off + 4);
                 uint32_t bar_off = pci_read_config32(pci, cap_off + 8);
-                /* Read BAR */
+                if (bar > 5) return 0;
                 uint32_t bar_val = pci_read_config32(pci, 0x10 + bar * 4);
+                if (bar_val == 0) return 0; /* BAR not assigned */
                 if (bar_val & 0x01) return 0; /* I/O BAR, not MMIO */
                 uint64_t mmio_phys = (uint64_t)(bar_val & ~0xFU);
                 mmio_phys += bar_off;
+                if (mmio_phys == 0) return 0;
                 return (volatile uint8_t *)vmm_map_physical(mmio_phys, 0x1000, VMM_FLAGS_KERNEL_RW);
             }
         }
@@ -152,10 +155,10 @@ static volatile uint8_t *vn_find_pci_cap(const pci_device_t *pci, uint8_t cap_ty
  */
 static volatile uint8_t *vn_legacy_mmio(const pci_device_t *pci) {
     uint32_t bar0 = pci_read_config32(pci, 0x10);
-    if (bar0 & 0x01) return 0;
+    if (bar0 == 0) return 0;
+    if (bar0 & 0x01) return 0; /* I/O BAR */
     uint64_t mmio_phys = (uint64_t)(bar0 & ~0xFU);
-    /* Legacy virtio uses BAR0 + 0x20 for device-specific config.
-     * The general config registers are at BAR0. */
+    if (mmio_phys == 0) return 0;
     return (volatile uint8_t *)vmm_map_physical(mmio_phys, 0x1000, VMM_FLAGS_KERNEL_RW);
 }
 
@@ -209,8 +212,6 @@ static void vn_notify_queue(uint16_t q) {
 
 int virtio_net_init(void) {
     const pci_device_t *pci = 0;
-    uint32_t bar0;
-    uint64_t mmio_phys;
 
     for (uint32_t i = 0; i < pci_device_count(); i++) {
         const pci_device_t *cand = pci_device_at(i);
