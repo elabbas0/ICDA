@@ -1211,13 +1211,17 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
 static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out, int depth) {
     tls_conn_t *conn = NULL;
     char request[512];
-    uint8_t rx_buf[NET_HTTP_CAP];
+    uint8_t *rx_buf;
     uint32_t rx_size = 0;
     int header_end;
     int status;
     uint64_t req_len;
 
+    rx_buf = (uint8_t *)kmalloc(NET_HTTP_CAP);
+    if (!rx_buf) { net_error = NET_ERR_HTTP_TOO_LARGE; return -1; }
+
     if (!net_state.ready || !host || !host[0] || !path || !out_path || path[0] != '/') {
+        kfree(rx_buf);
         net_error = NET_ERR_URL_PATH;
         return -1;
     }
@@ -1250,33 +1254,39 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
     }
 
     {
+        uint8_t *tls_buf = (uint8_t *)kmalloc(TLS_CAP);
+        if (!tls_buf) { tls_close(conn); kfree(rx_buf); net_error = NET_ERR_HTTP_TOO_LARGE; return -1; }
         uint64_t deadline = sched_ticks() + 1000;
         while (sched_ticks() < deadline) {
-            uint8_t buf[TLS_CAP];
             uint32_t got = 0;
-            if (tls_read(conn, buf, TLS_CAP, &got) == 0 && got > 0) {
+            if (tls_read(conn, tls_buf, TLS_CAP, &got) == 0 && got > 0) {
                 if (rx_size + got > NET_HTTP_CAP) {
+                    kfree(tls_buf);
                     tls_close(conn);
+                    kfree(rx_buf);
                     net_error = NET_ERR_HTTP_TOO_LARGE;
                     return -1;
                 }
-                copy_bytes(rx_buf + rx_size, buf, got);
+                copy_bytes(rx_buf + rx_size, tls_buf, got);
                 rx_size += got;
                 deadline = sched_ticks() + 200;
             }
             sched_sleep(1);
         }
+        kfree(tls_buf);
     }
 
     tls_close(conn);
 
     if (rx_size == 0) {
+        kfree(rx_buf);
         net_error = NET_ERR_TCP_TIMEOUT;
         return -1;
     }
 
     header_end = find_header_end(rx_buf, rx_size);
     if (header_end < 0) {
+        kfree(rx_buf);
         net_error = NET_ERR_HTTP_PARSE;
         return -1;
     }
@@ -1291,6 +1301,7 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
         int next_https = 0;
         if (http_header_value(rx_buf, rx_size, "Location", location, sizeof(location)) == 0 &&
             parse_redirect_url(location, 1, host, port, &next_https, &next_ip, &next_port, next_host, sizeof(next_host), next_path, sizeof(next_path)) == 0) {
+            kfree(rx_buf);
             if (next_https) {
                 return net_https_get_ipv4_follow(next_ip, next_port, next_host, next_path, out_path, bytes_out, depth + 1);
             }
@@ -1298,16 +1309,19 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
         }
     }
     if (status < 200 || status >= 300) {
+        kfree(rx_buf);
         net_error = (uint32_t)(2000 + (status < 0 ? 0 : status));
         return -1;
     }
 
     if (vfs_write(vfs_root(), out_path, (const char *)(rx_buf + header_end), rx_size - (uint64_t)header_end) != 0) {
+        kfree(rx_buf);
         net_error = NET_ERR_WRITE_FAILED;
         return -1;
     }
 
     if (bytes_out) *bytes_out = rx_size - (uint64_t)header_end;
+    kfree(rx_buf);
     net_error = 0;
     return 0;
 }
