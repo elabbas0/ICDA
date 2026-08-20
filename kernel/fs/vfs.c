@@ -1,5 +1,4 @@
 #include "vfs.h"
-
 #include "../memory/heap.h"
 
 struct vfs_node {
@@ -364,6 +363,7 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
     vfs_node_t *parent = resolve_parent(cwd, path, leaf, sizeof(leaf), 0);
     vfs_node_t *node;
 
+
     if (!parent || !valid_name(leaf)) {
         return -1;
     }
@@ -386,8 +386,10 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     vfs_node_t *node = vfs_resolve(cwd, path);
     char *next;
 
+
     if (!node) {
-        if (vfs_create(cwd, path) != 0) {
+        int crc = vfs_create(cwd, path);
+        if (crc != 0) {
             return -1;
         }
         node = vfs_resolve(cwd, path);
