@@ -1,5 +1,6 @@
 #include "net.h"
 #include "tls.h"
+#include "drivers/net/net_drv.h"
 
 #include <stdint.h>
 
@@ -348,7 +349,7 @@ static int send_arp_request(uint32_t target_ip) {
     copy_bytes(arp->spa, our_ip, 4);
     zero_bytes(arp->tha, 6);
     copy_bytes(arp->tpa, target, 4);
-    return e1000_send_frame(frame, sizeof(eth_hdr_t) + sizeof(arp_pkt_t));
+    return net_drv_send_frame(frame, sizeof(eth_hdr_t) + sizeof(arp_pkt_t));
 }
 
 static int try_parse_arp_reply(const uint8_t *frame, uint16_t len, uint32_t target_ip, uint8_t mac_out[6]) {
@@ -378,7 +379,7 @@ int net_arp_resolve(uint32_t target_ip, uint8_t mac_out[6]) {
     net_log("arp request sent");
     deadline = sched_ticks() + 50;
     while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
         if (rc > 0 && try_parse_arp_reply(frame, len, target_ip, mac_out)) {
             net_log("arp reply received");
@@ -432,7 +433,7 @@ int send_tcp_packet(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t src_port
     if (payload_len) copy_bytes(data, payload, payload_len);
     tcp->checksum_be = htons16(tcp_checksum(ip, tcp, payload, payload_len));
 
-    return e1000_send_frame(frame, frame_len);
+    return net_drv_send_frame(frame, frame_len);
 }
 
 int send_udp_packet(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
@@ -467,7 +468,7 @@ int send_udp_packet(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t src_port
     udp->len_be = htons16(udp_len);
     udp->checksum_be = 0;
     if (payload_len) copy_bytes(data, payload, payload_len);
-    return e1000_send_frame(frame, frame_len);
+    return net_drv_send_frame(frame, frame_len);
 }
 
 int parse_tcp_packet(const uint8_t *frame, uint16_t len, uint32_t expect_src_ip, uint16_t expect_src_port,
@@ -584,7 +585,7 @@ int tcp_connect(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t dst_port,
     net_log("tcp syn sent");
     deadline = sched_ticks() + 500;
     while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
         if (rc > 0) debug_dump_tcp_frame(frame, len);
         if (rc > 0 && parse_tcp_packet(frame, len, dst_ip, dst_port, src_port, &pkt)) {
@@ -734,7 +735,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
 
         deadline = sched_ticks() + 300;
         while (sched_ticks() < deadline) {
-            int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+            int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
             if (rc < 0) {
                 break;
             }
@@ -886,7 +887,7 @@ static int net_dhcp_discover(void) {
     /* Wait for OFFER (up to 2 seconds) */
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline && !got_offer) {
-        int rc = e1000_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        int rc = net_drv_recv_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
@@ -972,7 +973,7 @@ static int net_dhcp_discover(void) {
 
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        int rc = net_drv_recv_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
@@ -1023,11 +1024,11 @@ static int net_dhcp_discover(void) {
 
 int net_init(void) {
     zero_bytes(&net_state, sizeof(net_state));
-    if (e1000_init() != 0) {
-        net_error = e1000_last_error() ? (100U + e1000_last_error()) : NET_ERR_NO_NIC;
+    if (net_drv_init() != 0) {
+        net_error = NET_ERR_NO_NIC;
         return -1;
     }
-    if (e1000_mac(net_state.mac) != 0) {
+    if (net_drv_mac(net_state.mac) != 0) {
         net_error = NET_ERR_NO_NIC;
         return -1;
     }
@@ -1120,7 +1121,7 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
 
     deadline = sched_ticks() + 1000;
     while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) {
             kfree(rx_body);
             return -1;
@@ -1230,16 +1231,17 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
 
     {
         int tls_rc = tls_connect(&conn, ipv4_addr, port, host);
-        if (tls_rc == -2) { net_error = NET_ERR_ARP_TIMEOUT; return -1; }
-        if (tls_rc == -3) { net_error = NET_ERR_TCP_TIMEOUT; return -1; }
-        if (tls_rc == -4) { net_error = NET_ERR_TCP_REFUSED; return -1; }
-        if (tls_rc != 0)  { net_error = NET_ERR_TLS_HANDSHAKE; return -1; }
+        if (tls_rc == -2) { kfree(rx_buf); net_error = NET_ERR_ARP_TIMEOUT; return -1; }
+        if (tls_rc == -3) { kfree(rx_buf); net_error = NET_ERR_TCP_TIMEOUT; return -1; }
+        if (tls_rc == -4) { kfree(rx_buf); net_error = NET_ERR_TCP_REFUSED; return -1; }
+        if (tls_rc != 0)  { kfree(rx_buf); net_error = NET_ERR_TLS_HANDSHAKE; return -1; }
     }
 
     {
         int built = build_http_request(request, sizeof(request), host, path);
         if (built < 0) {
             tls_close(conn);
+            kfree(rx_buf);
             net_error = NET_ERR_URL_PATH;
             return -1;
         }
@@ -1249,6 +1251,7 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
 
     if (tls_write(conn, (const uint8_t *)request, (uint32_t)req_len) != 0) {
         tls_close(conn);
+        kfree(rx_buf);
         net_error = NET_ERR_TLS_HANDSHAKE;
         return -1;
     }

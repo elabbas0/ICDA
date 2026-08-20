@@ -4,7 +4,7 @@
 #include "crypto/hmac.h"
 #include "crypto/aes.h"
 #include "crypto/rsa.h"
-#include "../drivers/net/e1000.h"
+#include "../drivers/net/net_drv.h"
 #include "../drivers/console/console.h"
 #include "../memory/heap.h"
 
@@ -286,7 +286,7 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
     for (int i = 0; i < frame_len; i++) tcp_data[i] = frame[i];
     tcp->checksum_be = htons16(tcp_checksum(ip, tcp, tcp_data, frame_len));
 
-    int rc = e1000_send_frame(eth_frame, eth_frame_len);
+    int rc = net_drv_send_frame(eth_frame, eth_frame_len);
     kfree(frame);
     if (rc == 0) conn->tcp_seq += frame_len;
     return rc;
@@ -312,12 +312,14 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
     uint64_t deadline = sched_ticks() + timeout_ticks;
 
     while (sched_ticks() < deadline) {
-        int rc = e1000_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
         if (rc == 0) { sched_sleep(1); continue; }
 
         tcp_packet_info_t pkt;
-        if (!parse_tcp_packet(frame, len, conn->dst_ip, conn->dst_port, conn->src_port, &pkt)) continue;
+        if (!parse_tcp_packet(frame, len, conn->dst_ip, conn->dst_port, conn->src_port, &pkt)) {
+            continue;
+        }
 
         if (pkt.flags & 0x04U) return -2;
         if (pkt.payload_len && pkt.seq == conn->tcp_ack) {
@@ -350,7 +352,7 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
             at->flags = TCP_FLAG_ACK;
             at->window_be = htons16(4096);
             at->checksum_be = htons16(tcp_checksum(ai, at, 0, 0));
-            e1000_send_frame(ack_frame, sizeof(ack_frame));
+            net_drv_send_frame(ack_frame, sizeof(ack_frame));
             return 1;
         }
         if (pkt.flags & TCP_FLAG_FIN) {
@@ -389,7 +391,8 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t record_type, uint8_t *da
     uint8_t seq_buf[8];
     for (int i = 0; i < 8; i++) seq_buf[i] = (uint8_t)(conn->seq_in >> (56 - i * 8));
 
-    uint8_t hmac_data[8 + 1 + 2 + 2 + TLS_CAP];
+    uint8_t *hmac_data = (uint8_t *)kmalloc(13 + (uint32_t)ct_len);
+    if (!hmac_data) { kfree(plaintext); return -1; }
     int hi = 0;
     for (int i = 0; i < 8; i++) hmac_data[hi++] = seq_buf[i];
     hmac_data[hi++] = record_type;
@@ -401,6 +404,7 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t record_type, uint8_t *da
 
     uint8_t computed_mac[32];
     tls_hmac(conn->server_write_mac_key, conn->mac_key_len, conn->mac_alg, hmac_data, hi, computed_mac);
+    kfree(hmac_data);
 
     uint8_t *received_mac = plaintext + content_len;
     int mac_ok = 1;
@@ -738,10 +742,9 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     for (uint32_t i = 0; i < conn->mac_key_len; i++) conn->server_write_mac_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->client_write_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->server_write_key[i] = key_block[kb++];
-    for (int i = 0; i < 16; i++) {
-        conn->client_write_iv[i] = key_block[kb++];
-        conn->server_write_iv[i] = key_block[kb++];
-    }
+    /* TLS 1.2 key_block layout: client_mac, server_mac, client_key, server_key, client_iv, server_iv */
+    for (int i = 0; i < 16; i++) conn->client_write_iv[i] = key_block[kb++];
+    for (int i = 0; i < 16; i++) conn->server_write_iv[i] = key_block[kb++];
 
     aes128_expand_key(conn->client_write_key, conn->client_enc_expanded);
     aes128_expand_key(conn->server_write_key, conn->server_enc_expanded);
