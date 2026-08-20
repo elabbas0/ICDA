@@ -346,9 +346,9 @@ int persistfs_sync(void) {
         char *buffer = 0;
         uint64_t size = 0;
 
-        if (persistfs_active_partition_index < 0) return -1;
+        if (persistfs_active_partition_index < 0) return 0;
         part = partition_get((uint32_t)persistfs_active_partition_index);
-        if (!part) return -1;
+        if (!part) return 0;
         if (persistfs_export_image(&buffer, &size, 0) != 0) return -1;
         if (system_install_write_root_bundle(part, buffer, size, persistfs_swap_partition_index) != 0) {
             kfree(buffer);
@@ -359,11 +359,11 @@ int persistfs_sync(void) {
     } else {
         block_device_t *dev;
         if (persistfs_active_device_index < 0) {
-            return -1;
+            return 0;
         }
         dev = block_get((uint32_t)persistfs_active_device_index);
         if (!dev) {
-            return -1;
+            return 0;
         }
         return persistfs_sync_to_device(dev);
     }

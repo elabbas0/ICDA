@@ -45,7 +45,7 @@
 #define TCP_FLAG_ACK               0x10U
 
 #define NET_FRAME_CAP              1600U
-#define NET_HTTP_CAP               (8U * 1024U * 1024U)
+#define NET_HTTP_CAP               (64U * 1024U)
 
 #define NET_LOCAL_IP               0x0F02000AU // 10.0.2.15 little-endian host order
 #define NET_GATEWAY_IP             0x0202000AU // 10.0.2.2

@@ -1,6 +1,7 @@
 #include "net.h"
 #include "tls.h"
 #include "drivers/net/net_drv.h"
+#include "fs/vfs.h"
 
 #include <stdint.h>
 
@@ -1280,6 +1281,7 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
     }
 
     tls_close(conn);
+
 
     if (rx_size == 0) {
         kfree(rx_buf);
