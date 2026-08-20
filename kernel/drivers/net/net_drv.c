@@ -18,14 +18,7 @@ typedef enum {
 static net_drv_type_t active_driver = NET_DRV_NONE;
 
 int net_drv_init(void) {
-    /* Try virtio-net first (modern, paravirtualized) */
-    if (virtio_net_init() == 0) {
-        active_driver = NET_DRV_VIRTIO;
-        serial_write("[net-drv] virtio-net initialized\n");
-        return 0;
-    }
-
-    /* Fall back to e1000 (legacy emulation) */
+    /* Try e1000 first (works in QEMU and VirtualBox) */
     if (e1000_init() == 0) {
         active_driver = NET_DRV_E1000;
         serial_write("[net-drv] e1000 initialized\n");
