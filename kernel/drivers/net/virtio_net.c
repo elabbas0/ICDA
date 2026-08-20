@@ -127,25 +127,42 @@ static int vn_alloc_page(uint64_t *phys_out, void **virt_out) {
  */
 static volatile uint8_t *vn_find_pci_cap(const pci_device_t *pci, uint8_t cap_type) {
     uint8_t cap_off = pci_read_config8(pci, VIRTIO_PCI_CFG_CAP_OFFSET);
+    serial_write("[virtio] cap_ptr=");
+    { char _b[3]; _b[0]="0123456789abcdef"[(cap_off>>4)&0xF]; _b[1]="0123456789abcdef"[cap_off&0xF]; _b[2]=0; serial_write(_b); }
+    serial_write("\n");
     if (cap_off == 0) return 0;
-    for (int i = 0; i < 16 && cap_off != 0; i++) {
+    for (int i = 0; i < 32 && cap_off != 0; i++) {
         uint8_t cap_id = pci_read_config8(pci, cap_off);
-        if (cap_id == 0x09) { /* Virtio PCI capability */
-            uint8_t type = pci_read_config8(pci, cap_off + 3);
-            if (type == cap_type) {
-                uint8_t bar = pci_read_config8(pci, cap_off + 4);
-                uint32_t bar_off = pci_read_config32(pci, cap_off + 8);
-                if (bar > 5) return 0;
+        uint8_t cap_next = pci_read_config8(pci, cap_off + 1);
+        if (cap_id == 0x09) {
+            uint8_t cfg_type = pci_read_config8(pci, cap_off + 3);
+            uint8_t bar = pci_read_config8(pci, cap_off + 4);
+            uint32_t bar_off = pci_read_config32(pci, cap_off + 8);
+            serial_write("[virtio] cap type=");
+            { char _b[3]; _b[0]="0123456789abcdef"[(cfg_type>>4)&0xF]; _b[1]="0123456789abcdef"[cfg_type&0xF]; _b[2]=0; serial_write(_b); }
+            serial_write(" bar=");
+            { char _b[3]; _b[0]="0123456789abcdef"[(bar>>4)&0xF]; _b[1]="0123456789abcdef"[bar&0xF]; _b[2]=0; serial_write(_b); }
+            serial_write(" off=");
+            { char _b[9]; uint32_t _v=bar_off; for(int _i=7;_i>=0;_i--){_b[7-_i]="0123456789abcdef"[(_v>>(_i*4))&0xF];} _b[8]=0; serial_write(_b); }
+            serial_write("\n");
+            if (cfg_type == cap_type && bar <= 5) {
                 uint32_t bar_val = pci_read_config32(pci, 0x10 + bar * 4);
-                if (bar_val == 0) return 0; /* BAR not assigned */
-                if (bar_val & 0x01) return 0; /* I/O BAR, not MMIO */
-                uint64_t mmio_phys = (uint64_t)(bar_val & ~0xFU);
-                mmio_phys += bar_off;
-                if (mmio_phys == 0) return 0;
-                return (volatile uint8_t *)vmm_map_physical(mmio_phys, 0x1000, VMM_FLAGS_KERNEL_RW);
+                serial_write("[virtio] bar_val=");
+                { char _b[9]; uint32_t _v=bar_val; for(int _i=7;_i>=0;_i--){_b[7-_i]="0123456789abcdef"[(_v>>(_i*4))&0xF];} _b[8]=0; serial_write(_b); }
+                serial_write("\n");
+                if (bar_val == 0) { serial_write("[virtio] bar==0 skip\n"); }
+                else if (bar_val & 0x01) { serial_write("[virtio] I/O bar skip\n"); }
+                else {
+                    uint64_t mmio_phys = (uint64_t)(bar_val & ~0xFU) + bar_off;
+                    if (mmio_phys == 0) return 0;
+                    serial_write("[virtio] mapping...");
+                    volatile uint8_t *p = (volatile uint8_t *)vmm_map_physical(mmio_phys, 0x1000, VMM_FLAGS_KERNEL_RW);
+                    serial_write(p ? "OK\n" : "FAIL\n");
+                    return p;
+                }
             }
         }
-        cap_off = pci_read_config8(pci, cap_off + 1);
+        cap_off = cap_next & 0xFC;
     }
     return 0;
 }
@@ -213,38 +230,43 @@ static void vn_notify_queue(uint16_t q) {
 int virtio_net_init(void) {
     const pci_device_t *pci = 0;
 
+    serial_write("[virtio] scanning PCI...\n");
     for (uint32_t i = 0; i < pci_device_count(); i++) {
         const pci_device_t *cand = pci_device_at(i);
         if (!cand) continue;
-        if (cand->vendor_id != 0x1AF4) continue; /* VirtIO vendor */
-        if (cand->device_id >= 0x1000 && cand->device_id <= 0x103F) {
-            pci = cand;
-            break;
-        }
-        /* Also check for some common virtio-net PCI IDs */
-        if (cand->device_id == 0x1041) { /* virtio-net-pci */
-            pci = cand;
-            break;
-        }
+        if (cand->vendor_id != 0x1AF4) continue;
+        if (cand->device_id >= 0x1000 && cand->device_id <= 0x103F) { pci = cand; break; }
+        if (cand->device_id == 0x1041) { pci = cand; break; }
     }
 
     if (!pci) {
+        serial_write("[virtio] no device found\n");
         vn_error = 1;
         return -1;
     }
+    serial_write("[virtio] found device\n");
 
     if (pci_enable_memory_busmaster(pci) != 0) {
+        serial_write("[virtio] busmaster failed\n");
         vn_error = 2;
         return -1;
     }
+    serial_write("[virtio] busmaster OK\n");
 
-    /* Try modern MMIO first (capability-based), then legacy */
-    vn.mmio = vn_find_pci_cap(pci, 1); /* Common config */
-    vn.cfg = vn_find_pci_cap(pci, 4);  /* Device config */
+    /* Read BAR0 value */
+    uint32_t bar0_val = pci_read_config32(pci, 0x10);
+    serial_write("[virtio] BAR0=");
+    { char _b[9]; uint32_t _v=bar0_val; for(int _i=7;_i>=0;_i--){_b[7-_i]="0123456789abcdef"[(_v>>(_i*4))&0xF];} _b[8]=0; serial_write(_b); }
+    serial_write("\n");
+
+    vn.mmio = vn_legacy_mmio(pci);
+    serial_write(vn.mmio ? "[virtio] legacy MMIO mapped\n" : "[virtio] legacy MMIO failed\n");
 
     if (!vn.mmio) {
-        /* Legacy mode: MMIO at BAR0 */
-        vn.mmio = vn_legacy_mmio(pci);
+        serial_write("[virtio] trying modern caps...\n");
+        vn.mmio = vn_find_pci_cap(pci, 1);
+        vn.cfg = vn_find_pci_cap(pci, 4);
+        serial_write(vn.mmio ? "[virtio] modern MMIO mapped\n" : "[virtio] modern MMIO failed\n");
     }
 
     if (!vn.mmio) {
@@ -253,27 +275,30 @@ int virtio_net_init(void) {
     }
 
     vn.pci = pci;
+    serial_write("[virtio] MMIO ready\n");
 
-    /* Reset device */
+    serial_write("[virtio] reset\n");
     vn_write8(vn.mmio, VIRTIO_REG_DEVICE_STATUS, 0);
     vn_pause();
 
-    /* Acknowledge */
+    serial_write("[virtio] ack\n");
     vn_write8(vn.mmio, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
     vn_pause();
 
-    /* Driver */
+    serial_write("[virtio] driver\n");
     vn_write8(vn.mmio, VIRTIO_REG_DEVICE_STATUS,
               VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
     vn_pause();
 
-    /* Read and negotiate features */
+    serial_write("[virtio] read features\n");
     uint32_t host_features = vn_read32(vn.mmio, VIRTIO_REG_DEVICE_FEATURES);
+    serial_write("[virtio] features ok\n");
     uint32_t wanted = 0;
     if (host_features & VIRTIO_NET_F_MAC) wanted |= VIRTIO_NET_F_MAC;
     if (host_features & VIRTIO_NET_F_STATUS) wanted |= VIRTIO_NET_F_STATUS;
     vn_write32(vn.mmio, VIRTIO_REG_DRIVER_FEATURES, wanted);
     vn_pause();
+    serial_write("[virtio] features negotiated\n");
 
     /* Setup queues */
     vn_select_queue(0); /* TX */
