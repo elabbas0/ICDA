@@ -491,7 +491,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     conn->mac_key_len = 32;
     conn->mac_len = 32;
 
-    uint8_t ch[TLS_CAP];
+    uint8_t *ch = (uint8_t *)kmalloc(TLS_CAP);
+    if (!ch) { kfree(conn); return -1; }
     int ch_len = 0;
     ch[ch_len++] = TLS_VERSION_MAJOR;
     ch[ch_len++] = TLS_VERSION_MINOR;
@@ -571,11 +572,14 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
 
     tls_log("sending client hello...");
     if (tls_send_handshake(conn, TLS_HANDSHAKE_CLIENT_HELLO, ch, ch_len) != 0) {
+        kfree(ch);
         kfree(conn);
         return -1;
     }
+    kfree(ch);
 
-    uint8_t payload[TLS_CAP];
+    uint8_t *payload = (uint8_t *)kmalloc(TLS_CAP);
+    if (!payload) { kfree(conn); return -1; }
     uint16_t plen = 0;
     uint8_t ctype = 0;
     int server_done = 0;
@@ -586,6 +590,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         if (rc < 0) {
             if (rc == -3) { tls_log("server closed"); break; }
             tls_log("recv failed");
+            kfree(payload);
             kfree(conn);
             return -1;
         }
@@ -603,6 +608,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                     uint8_t *hs_data = payload + off + 4;
                     if (off + 4 + hs_len > plen) {
                         tls_log("truncated handshake record");
+                        kfree(payload);
                         kfree(conn);
                         return -1;
                     }
@@ -640,6 +646,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                             if (offset + cert_len <= (int)hs_len) {
                                 if (rsa_pubkey_from_cert_der(hs_data + offset, cert_len, &server_key) != 0) {
                                     tls_log("cert parse failed");
+                                    kfree(payload);
                                     kfree(conn);
                                     return -1;
                                 }
@@ -668,6 +675,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                 console_write_dec64(alert_desc, CONSOLE_STYLE_WARN);
                 console_write("\n", CONSOLE_STYLE_WARN);
                 if (alert_level == TLS_ALERT_LEVEL_FATAL) {
+                    kfree(payload);
                     kfree(conn);
                     return -1;
                 }
@@ -677,6 +685,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
 
     if (!server_done) {
         tls_log("handshake incomplete");
+        kfree(payload);
         kfree(conn);
         return -1;
     }
@@ -697,6 +706,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     int enc_len = 0;
     if (rsa_encrypt(&server_key, conn->pre_master_secret, 48, encrypted_pms, &enc_len) != 0) {
         tls_log("rsa encrypt failed");
+        kfree(payload);
         kfree(conn);
         return -1;
     }
@@ -752,12 +762,13 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
 
     int server_finished_ok = 0;
     uint64_t fin_deadline = sched_ticks() + 500;
+    uint8_t *sp = (uint8_t *)kmalloc(TLS_CAP);
+    if (!sp) { kfree(payload); kfree(conn); return -1; }
     while (sched_ticks() < fin_deadline && !server_finished_ok) {
         int rc = tls_recv_frame(conn, 200);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
-        uint8_t sp[TLS_CAP];
         uint16_t sp_len = 0;
         uint8_t sct = 0;
         while (1) {
@@ -784,6 +795,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         }
     }
 
+    kfree(sp);
+    kfree(payload);
     if (!server_finished_ok) {
         tls_log("handshake failed (no server finished)");
         kfree(conn);
