@@ -310,7 +310,6 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
     uint8_t frame[NET_FRAME_CAP];
     uint16_t len = 0;
     uint64_t deadline = sched_ticks() + timeout_ticks;
-
     while (sched_ticks() < deadline) {
         int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
