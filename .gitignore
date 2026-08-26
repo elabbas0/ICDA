@@ -67,6 +67,23 @@ qemu-smoke.log
 kernel/install-kernel.bin
 kernel/fs/bootx64-install.efi
 
+# Release artifacts - use GitHub Releases, not git
+release/
+release/kernel.iso
+release/*.iso
+*.iso
+
+# Large audio assets - use GitHub Releases / LFS, not git
+userspace/ilove.wav
+userspace/radiohead_creep.wav
+userspace/tameimpala_thelessiknowthebetter.wav
+userspace/fly_spectrum.wav
+userspace/*.wav
+!userspace/boot.wav
+!userspace/chime.wav
+!userspace/melody.wav
+!userspace/hava_clip.wav
+
 # Freebuff app state
 .freebuff/
 userspace/ticker.icx
