@@ -1,6 +1,7 @@
 #include "net.h"
 #include "tls.h"
 #include "drivers/net/net_drv.h"
+#include "drivers/serial/serial.h"
 #include "fs/vfs.h"
 
 #include <stdint.h>
@@ -13,9 +14,9 @@ static uint16_t net_ephemeral_port = 40000;
 
 static void net_log(const char *text) {
 #if NET_DEBUG
-    console_write("[net] ", CONSOLE_STYLE_MUTED);
-    console_write(text, CONSOLE_STYLE_INFO);
-    console_write("\n", CONSOLE_STYLE_INFO);
+    serial_write("[net] ");
+    serial_write(text);
+    serial_write("\n");
 #else
     (void)text;
 #endif
@@ -23,10 +24,10 @@ static void net_log(const char *text) {
 
 static void net_log_u64(const char *label, uint64_t value) {
 #if NET_DEBUG
-    console_write("[net] ", CONSOLE_STYLE_MUTED);
-    console_write(label, CONSOLE_STYLE_INFO);
-    console_write_dec64(value, CONSOLE_STYLE_INFO);
-    console_write("\n", CONSOLE_STYLE_INFO);
+    { char b[17]; const char *hx="0123456789abcdef";
+      serial_write("[net] "); serial_write(label);
+      for (int i=15;i>=0;i--){ b[i]=hx[value&0xF]; value>>=4; }
+      b[16]=0; serial_write(b); serial_write("\n"); }
 #else
     (void)label;
     (void)value;
@@ -298,7 +299,7 @@ uint16_t tcp_checksum(const ipv4_hdr_t *ip, const tcp_hdr_t *tcp, const uint8_t 
     sum += IP_PROTO_TCP;
     sum += tcp_len;
 
-    for (uint16_t i = 0; i + 1 < sizeof(tcp_hdr_t); i += 2) {
+    for (uint32_t i = 0; i + 1 < sizeof(tcp_hdr_t); i += 2) {
         if (i == 16) continue;
         sum += ((uint32_t)tcp_bytes[i] << 8) | tcp_bytes[i + 1];
     }
@@ -657,7 +658,6 @@ static int dns_encode_name(const char *host, uint8_t *out, uint16_t cap, uint16_
 
 static int dns_skip_name(const uint8_t *buf, uint16_t size, uint16_t offset, uint16_t *next_out) {
     uint16_t pos = offset;
-    uint16_t next = offset;
     uint16_t guard = 0;
 
     if (!buf || !next_out || pos >= size) return -1;
@@ -675,7 +675,6 @@ static int dns_skip_name(const uint8_t *buf, uint16_t size, uint16_t offset, uin
         pos++;
         if ((uint16_t)(pos + len) > size) return -1;
         pos = (uint16_t)(pos + len);
-        next = pos;
     }
     return -1;
 }
@@ -839,7 +838,6 @@ static uint32_t dhcp_read32(const uint8_t *p) {
 
 static int net_dhcp_discover(void) {
     uint8_t packet[548];
-    uint8_t frame[NET_FRAME_CAP];
     uint8_t dst_mac[6];
     uint16_t len = 0;
     uint64_t deadline;
@@ -1140,13 +1138,15 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
             return -1;
         }
         if (pkt.payload_len && pkt.seq == ack) {
-            if (rx_size + pkt.payload_len > NET_HTTP_CAP) {
-                kfree(rx_body);
-                net_error = NET_ERR_HTTP_TOO_LARGE;
-                return -1;
+            /* Oversized pages (modern sites easily exceed the cap) are
+             * truncated to what fits instead of failing the request -
+             * the browser's tolerant parser renders the first part. */
+            uint32_t room = (rx_size < NET_HTTP_CAP) ? (uint32_t)(NET_HTTP_CAP - rx_size) : 0;
+            uint32_t take = pkt.payload_len < room ? pkt.payload_len : room;
+            if (take) {
+                copy_bytes(rx_body + rx_size, pkt.payload, take);
+                rx_size += take;
             }
-            copy_bytes(rx_body + rx_size, pkt.payload, pkt.payload_len);
-            rx_size += pkt.payload_len;
             ack += pkt.payload_len;
             if (send_tcp_packet(dst_mac, ipv4_addr, src_port, port, seq, ack, TCP_FLAG_ACK, 0, 0) != 0) {
                 kfree(rx_body);
@@ -1169,7 +1169,9 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
         return -1;
     }
 
+    net_log("http fin; parse headers");
     header_end = find_header_end(rx_body, rx_size);
+    net_log("http headers parsed");
     if (header_end < 0) {
         kfree(rx_body);
         net_error = NET_ERR_HTTP_PARSE;
@@ -1198,6 +1200,7 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
         return -1;
     }
 
+    net_log("http vfs write");
     if (vfs_write(vfs_root(), out_path, (const char *)(rx_body + header_end), rx_size - (uint64_t)header_end) != 0) {
         kfree(rx_body);
         net_error = NET_ERR_WRITE_FAILED;
@@ -1207,6 +1210,7 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
     if (bytes_out) *bytes_out = rx_size - (uint64_t)header_end;
     kfree(rx_body);
     net_error = 0;
+    net_log("http done");
     return 0;
 }
 
@@ -1264,15 +1268,14 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
         while (sched_ticks() < deadline) {
             uint32_t got = 0;
             if (tls_read(conn, tls_buf, TLS_CAP, &got) == 0 && got > 0) {
-                if (rx_size + got > NET_HTTP_CAP) {
-                    kfree(tls_buf);
-                    tls_close(conn);
-                    kfree(rx_buf);
-                    net_error = NET_ERR_HTTP_TOO_LARGE;
-                    return -1;
+                /* Truncate oversized pages instead of failing (see the
+                 * plain-HTTP path above). */
+                uint64_t room = (rx_size < NET_HTTP_CAP) ? (NET_HTTP_CAP - rx_size) : 0;
+                uint32_t take = (uint64_t)got < room ? got : (uint32_t)room;
+                if (take) {
+                    copy_bytes(rx_buf + rx_size, tls_buf, take);
+                    rx_size += take;
                 }
-                copy_bytes(rx_buf + rx_size, tls_buf, got);
-                rx_size += got;
                 deadline = sched_ticks() + 500;
             }
             sched_sleep(1);
