@@ -14,8 +14,8 @@
 #define BACK_BUFFER_WIDTH 2560
 #define BACK_BUFFER_HEIGHT 1600
 #define TASKBAR_H 42
-#define CURSOR_W 12
-#define CURSOR_H 19
+#define CURSOR_W 19
+#define CURSOR_H 30
 
 #define WM_ANIM_NONE        0
 #define WM_ANIM_OPEN        1
@@ -166,27 +166,59 @@ static void mark_dirty_full(void) {
     dirty_count = 0;
 }
 
-static const char cursor_bitmap[CURSOR_H][CURSOR_W + 1] = {
-    "X           ",
-    "XX          ",
-    "X.X         ",
-    "X..X        ",
-    "X...X       ",
-    "X....X      ",
-    "X.....X     ",
-    "X......X    ",
-    "X.......X   ",
-    "X........X  ",
-    "X.........X ",
-    "X......XXXXX",
-    "X...X..X    ",
-    "X..X X..X   ",
-    "X.X   X..X  ",
-    "XX     X..X ",
-    "X       X..X",
-    "         XX ",
-    "            "
-};
+/* Windows-style AA arrow, 19×30, hotspot 0,0 */
+typedef struct { int n; int x[8]; int y[8]; } cursor_poly_t;
+static const cursor_poly_t cursor_outline = {7, {0,0,5,9,14,10,18}, {0,26,21,29,27,18,18}};
+static uint8_t cursor_rgba[CURSOR_H][CURSOR_W][4];
+static uint16_t cursor_poly_x[8];
+static uint16_t cursor_poly_y[8];
+static int cursor_point_in_poly(int x, int y) {
+    int inside=0;
+    for(int i=0,j=cursor_outline.n-1;i<cursor_outline.n;j=i++){
+        int xi=cursor_poly_x[i], yi=cursor_poly_y[i];
+        int xj=cursor_poly_x[j], yj=cursor_poly_y[j];
+        if(((yi>y)!=(yj>y)) && (x < (int)((int64_t)(xj-xi)*(y-yi)/(yj-yi))+xi)) inside=!inside;
+    }
+    return inside;
+}
+static int64_t cursor_seg_dist2(int x,int y,int ax,int ay,int bx,int by){
+    int dx=bx-ax, dy=by-ay;
+    int64_t len2=(int64_t)dx*dx+(int64_t)dy*dy;
+    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
+    int64_t t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
+    int64_t cx,cy;
+    if(t<0) t=0; if(t>len2) t=len2;
+    cx=ax+t*dx/len2; cy=ay+t*dy/len2;
+    return (int64_t)(x-cx)*(x-cx)+(int64_t)(y-cy)*(y-cy);
+}
+#define CURSOR_RIM_R2 ((int64_t)22*22)
+static void build_cursor_sprite(void){
+    static const int sub[4]={2,6,10,14};
+    for(int i=0;i<cursor_outline.n;i++){cursor_poly_x[i]=cursor_outline.x[i]*16; cursor_poly_y[i]=cursor_outline.y[i]*16;}
+    for(int py=0;py<CURSOR_H;py++) for(int px=0;px<CURSOR_W;px++){
+        int w_hits=0,b_hits=0;
+        for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){
+            int ix=px*16+sub[sx], iy=py*16+sub[sy];
+            if(!cursor_point_in_poly(ix,iy)) continue;
+            int64_t d2=-1;
+            for(int e=0,j=cursor_outline.n-1;e<cursor_outline.n;j=e++){
+                int64_t dd=cursor_seg_dist2(ix,iy,cursor_poly_x[j],cursor_poly_y[j],cursor_poly_x[e],cursor_poly_y[e]);
+                if(d2<0||dd<d2) d2=dd;
+            }
+            if(d2<=CURSOR_RIM_R2) b_hits++; else w_hits++;
+        }
+        int total=w_hits+b_hits;
+        uint8_t *out=cursor_rgba[py][px];
+        if(total==0) out[0]=out[1]=out[2]=out[3]=0;
+        else{
+            int w_share=w_hits*255/total, b_share=255-w_share;
+            out[0]=(255*w_share+32*b_share)/255;
+            out[1]=(255*w_share+32*b_share)/255;
+            out[2]=(255*w_share+38*b_share)/255;
+            out[3]=total*255/16;
+        }
+    }
+}
 
 static void clear_msg(gui_msg_t *msg) {
     for (int i = 0; i < 64; i++) ((uint8_t*)msg)[i] = 0;
@@ -326,42 +358,25 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
         return;
     }
 
-    /* White arrow body, black 1px outline so the pointer stays visible
-     * on both the bright desktop and the dark taskbar/menu. */
     for (int cy = 0; cy < CURSOR_H; cy++) {
         int py = my + cy;
         if (py < 0 || py >= h) continue;
         for (int cx = 0; cx < CURSOR_W; cx++) {
+            const uint8_t *p = cursor_rgba[cy][cx];
             int px = mx + cx;
             if (px < 0 || px >= w) continue;
-            if (cursor_bitmap[cy][cx] == 'X') {
-                fb_write_px(px, py, 0x00FFFFFF);
-            }
-        }
-    }
-    for (int cy = 0; cy < CURSOR_H; cy++) {
-        for (int cx = 0; cx < CURSOR_W; cx++) {
-            if (cursor_bitmap[cy][cx] != 'X') continue;
-            for (int oy = -1; oy <= 1; oy++) {
-                for (int ox = -1; ox <= 1; ox++) {
-                    int cxx = cx + ox;
-                    int cyy = cy + oy;
-                    if (cxx < 0 || cxx >= CURSOR_W || cyy < 0 || cyy >= CURSOR_H) continue;
-                    if (cursor_bitmap[cyy][cxx] == 'X') continue;
-                    {
-                        int px = mx + cxx;
-                        int py = my + cyy;
-                        if (px < 0 || px >= w || py < 0 || py >= h) continue;
-                        fb_write_px(px, py, 0x00000000);
-                    }
-                }
+            if (p[3] == 0) continue;
+            {
+                uint32_t src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+                uint32_t dst = back_buffer[py * w + px];
+                fb_write_px(px, py, p[3] == 255 ? src : blend_over(dst, src, p[3]));
             }
         }
     }
 }
 
-#define WALL_TOP    0x00356CCB
-#define WALL_BOTTOM 0x00152A5E
+#define WALL_TOP    IC_WALL_TOP
+#define WALL_BOTTOM IC_WALL_BOTTOM
 
 /* Modern flat wallpaper: a calm blue vertical gradient, rendered once
  * into desktop_layer.  No per-pixel hills or per-row re-blends at
@@ -403,11 +418,13 @@ static void build_desktop_layer(void) {
 static void draw_start_button(int w, int h, int active) {
     ic_canvas_t c = bb_canvas(w, h);
     int y = h - TASKBAR_H + 6;
-    uint32_t fill = active ? 0x00444448 : 0x00313135;
+    uint32_t fill = active ? theme->accent : 0x001E293B;
+    uint32_t fg = active ? theme->text_on_accent : 0x00F1F5F9;
     const ic_icon_t *icon = ic_icon_builtin("app");
-    ic_rect_r(&c, 6, y, 94, 30, 6, fill);
+    ic_rect_r(&c, 6, y, 94, 30, IC_RADIUS_BUTTON, fill);
+    if (!active) ic_outline_r(&c, 6,y,94,30,IC_RADIUS_BUTTON,0x00334155);
     if (icon) ic_icon_draw(&c, 12, y + 4, 22, 22, icon);
-    ic_text(&c, 40, y + 7, "Start", 0x00FFFFFF, fill);
+    ic_text(&c, 40, y + 7, "Start", fg, fill);
 }
 
 static const char *window_icon_name(const char *title) {
@@ -428,38 +445,50 @@ static void draw_taskbar(int w, int h) {
     int y = h - TASKBAR_H;
     int tx = 112;
     icda_audio_info_t audio;
-
-    /* Flat dark taskbar - no gradient, one thin top border. */
     ic_rect(&c, 0, y, w, TASKBAR_H, theme->taskbar_top);
-    ic_hline(&c, 0, y, w, 0x003C4043);
+    ic_hline(&c, 0, y, w, 0x00334155);
     draw_start_button(w, h, start_menu_open);
-
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
         wm_window_t *win = &windows[idx];
         const ic_icon_t *icon;
-
         if (!win->valid) continue;
         {
             int focused = focused_window_idx == idx && !win->minimized;
-            uint32_t fill = focused ? 0x00444448 : 0x002A2D31;
-            ic_rect_r(&c, tx, y + 7, 136, 28, 6, fill);
-
+            uint32_t fill = focused ? theme->accent : 0x001E293B;
+            uint32_t fg = focused ? theme->text_on_accent : 0x00F1F5F9;
+            ic_rect_r(&c, tx, y + 7, 136, 28, IC_RADIUS_BUTTON, fill);
+            if (!focused) ic_outline_r(&c, tx, y+7, 136, 28, IC_RADIUS_BUTTON, 0x00334155);
+            if (focused) ic_rect(&c, tx+16, y+30, 104, 2, 0x00FFFFFF);
             icon = ic_icon_builtin(window_icon_name(win->title));
             if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
-            ic_text_clip(&c, tx + 30, y + 13, win->title, 0x00FFFFFF, fill, 100);
-            if (win->minimized) {
-                ic_rect(&c, tx + 122, y + 26, 8, 2, 0x00FFFFFF);
-            }
+            ic_text_clip(&c, tx + 30, y + 13, win->title, fg, fill, 100);
+            if (win->minimized) ic_rect(&c, tx + 122, y + 26, 8, 2, fg);
         }
         tx += 142;
     }
-
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x00B4B8BC, theme->taskbar_top, 56);
-        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00FFFFFF, theme->taskbar_top, 104);
+        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x0094A3B8, theme->taskbar_top, 56);
+        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00F1F5F9, theme->taskbar_top, 104);
     } else {
-        ic_text_clip(&c, w - 106, y + 14, "ICDA OS", 0x00B4B8BC, theme->taskbar_top, 88);
+        char clk[16];
+        uint64_t t = icda_ticks();
+        uint64_t secs = t/100;
+        uint64_t mins = (secs/60)%60;
+        uint64_t hrs = (secs/3600)%24;
+        char hbuf[8], mbuf[8];
+        ic_uint_to_str(hrs, hbuf, sizeof(hbuf));
+        ic_uint_to_str(mins, mbuf, sizeof(mbuf));
+        clk[0]=0;
+        if (hrs<10) ic_strcat(clk,"0",sizeof(clk));
+        ic_strcat(clk,hbuf,sizeof(clk));
+        ic_strcat(clk,":",sizeof(clk));
+        if (mins<10) ic_strcat(clk,"0",sizeof(clk));
+        ic_strcat(clk,mbuf,sizeof(clk));
+        ic_text_clip(&c, w - 68, y+14, clk, 0x00F1F5F9, theme->taskbar_top, 48);
+        ic_rect_r(&c, w-108, y+18, 4,4,2, 0x0038BDF8);
+        ic_rect_r(&c, w-100, y+18, 4,4,2, 0x0094A3B8);
+        ic_rect_r(&c, w-92, y+18, 4,4,2, 0x00475569);
     }
 }
 
@@ -467,10 +496,11 @@ static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
                            const char *icon_name, const char *label, int hover) {
     ic_canvas_t c = bb_canvas(sw, sh);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    uint32_t fill = hover ? 0x003C4043 : 0x002A2D31;
-    ic_rect_r(&c, x, y, w, h, 6, fill);
+    uint32_t fill = hover ? theme->accent : 0x001E293B;
+    uint32_t fg = hover ? theme->text_on_accent : 0x00F1F5F9;
+    ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
     if (icon) ic_icon_draw(&c, x + 6, y + 4, 22, 22, icon);
-    ic_text(&c, x + 34, y + 7, label, 0x00FFFFFF, fill);
+    ic_text(&c, x + 34, y + 7, label, fg, fill);
 }
 
 /* Start menu layout: apps at the top, system actions (task manager +
@@ -485,11 +515,11 @@ static void draw_start_menu(int w, int h, int mx, int my) {
     int x = 6;
     int y = h - TASKBAR_H - START_MENU_H;
     if (!start_menu_open) return;
-    /* Flat dark rounded panel, hover-highlighted rows. */
-    ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, 12, 0x002A2D31);
-    ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, 12, 0x003C4043);
-    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00FFFFFF, 0x002A2D31);
-    ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, 0x003C4043);
+    ic_draw_shadow(&c, x, y, START_MENU_W, START_MENU_H, 8, IC_SHADOW_COLOR);
+    ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x001E293B);
+    ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x00334155);
+    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00F1F5F9, 0x001E293B);
+    ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, 0x00334155);
 
     draw_start_row(w, h, x + 12, y + 56, 246, START_ROW_H, "folder", "Explorer",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 56, 246, START_ROW_H}));
@@ -629,7 +659,13 @@ static void send_close_to_app(wm_window_t *win) {
     clear_msg(&close_msg);
     close_msg.type = GUI_MSG_CLOSE_WINDOW;
     close_msg.window_id = win->id;
+    // Real HW: app queue may be full if app is busy listing / decoding Papirus 32px icons → drop instead of blocking WM
+    if (icda_msg_poll(win->app_queue_handle) > 32) return;
     icda_msg_send(win->app_queue_handle, &close_msg);
+}
+static int send_maybe(uint64_t q, gui_msg_t *m){
+    if (icda_msg_poll(q) > 32) return -1;
+    return icda_msg_send(q, m);
 }
 
 static void clamp_window(wm_window_t *win, int w, int h) {
@@ -1288,6 +1324,7 @@ int main(int argc, char **argv) {
     (void)argv;
 
     theme = ic_theme_default();
+    build_cursor_sprite();
 
     /* Replace the stock icon set with whatever the user dropped into
      * /usr/share/icons as .ico files (folder.ico, terminal.ico, ...). */
@@ -1363,6 +1400,10 @@ int main(int argc, char **argv) {
              * the final composite runs once the batch is consumed. */
             icda_mouse_event_t mev;
             while (icda_input_read_mouse(&mev) == 0) {
+                static uint64_t move_cnt = 0;
+                if ((++move_cnt % 50) == 0) {
+                    icda_write("WM mouse move\n");
+                }
                 int prev_mx = mouse_x;
                 int prev_my = mouse_y;
                 uint8_t prev_btn = mouse_buttons;
@@ -1438,7 +1479,7 @@ int main(int argc, char **argv) {
                                         click_msg.mouse.x = mouse_x - win->x;
                                         click_msg.mouse.y = mouse_y - win->y;
                                         click_msg.mouse.buttons = mouse_buttons;
-                                        icda_msg_send(win->app_queue_handle, &click_msg);
+                                        send_maybe(win->app_queue_handle, &click_msg);
                                     }
                                     hit = idx;
                                     break;
@@ -1489,7 +1530,7 @@ int main(int argc, char **argv) {
                                 motion_msg.mouse.x = mouse_x - win->x;
                                 motion_msg.mouse.y = mouse_y - win->y;
                                 motion_msg.mouse.buttons = mouse_buttons;
-                                icda_msg_send(win->app_queue_handle, &motion_msg);
+                                send_maybe(win->app_queue_handle, &motion_msg);
                             }
                         }
                     }
@@ -1510,7 +1551,7 @@ int main(int argc, char **argv) {
                         kmsg.window_id = win->id;
                         kmsg.key.keycode = (uint32_t)key;
                         kmsg.key.pressed = 1;
-                        icda_msg_send(win->app_queue_handle, &kmsg);
+                        send_maybe(win->app_queue_handle, &kmsg);
                         mark_dirty_win(win);
                     }
                 }
@@ -1542,7 +1583,8 @@ int main(int argc, char **argv) {
              * Full rebuild only for the initial frame or screen-wide
              * damage; everything else goes through the dirty-rect path. */
             if (now != last_composite_tick) {
-                if (need_redraw || animating || dragging_win_idx != -1) {
+                if (need_redraw || animating || dragging_win_idx != -1 ||
+                    dirty_full || dirty_count > 0) {
                     composite_dirty(w, h, mouse_x, mouse_y,
                                     prev_mouse_x, prev_mouse_y);
                     last_composite_tick = now;
@@ -1555,6 +1597,13 @@ int main(int argc, char **argv) {
             }
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
+            {
+                static uint64_t last_hb = 0;
+                if (now - last_hb > 200) {
+                    last_hb = now;
+                    icda_write("WM HB\n");
+                }
+            }
         }
 
         /* Event-driven pacing: the icda_read_char_timeout(1) above is the
