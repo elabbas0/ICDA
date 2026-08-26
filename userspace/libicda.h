@@ -108,15 +108,38 @@ const ic_icon_t *ic_icon_builtin(const char *name);
 
 /* =============================== theme =============================== */
 
+/* Centralized design tokens — radius, spacing, shadow. */
+#define IC_RADIUS_WINDOW  12
+#define IC_RADIUS_PANEL   12
+#define IC_RADIUS_BUTTON   8
+#define IC_RADIUS_TILE     8
+#define IC_RADIUS_MENU    12
+#define IC_RADIUS_TASKBAR 10
+#define IC_SHADOW_RADIUS   8
+#define IC_SHADOW_COLOR   0x000000
+#define IC_TASKBAR_H      42
+#define IC_SPACE_XS        4
+#define IC_SPACE_SM        8
+#define IC_SPACE_MD       12
+#define IC_SPACE_LG       16
+#define IC_WALL_TOP       0x000F172A
+#define IC_WALL_BOTTOM    0x001E293B
+#define IC_WALL_ACCENT    0x000EA5E9
+
 typedef struct {
-    uint32_t title_top, title_bottom;          /* unfocused title bar */
+    uint32_t title_top, title_bottom;
     uint32_t title_top_active, title_bottom_active;
-    uint32_t border, border_active;            /* window frame */
-    uint32_t shadow;                           /* drop shadow under windows */
+    uint32_t border, border_active;
+    uint32_t shadow;
     uint32_t taskbar_top, taskbar_bottom;
-    uint32_t accent, accent_hi, accent_lo;     /* buttons / highlights */
-    uint32_t panel, panel_edge;                /* raised panels */
+    uint32_t accent, accent_hi, accent_lo;
+    uint32_t panel, panel_edge;
     uint32_t text, text_muted, text_on_accent;
+    uint32_t wall_top, wall_bottom;
+    uint32_t desktop_bg;
+    uint32_t surface;
+    uint32_t surface_hover;
+    uint32_t surface_active;
 } ic_theme_t;
 
 const ic_theme_t *ic_theme_default(void);

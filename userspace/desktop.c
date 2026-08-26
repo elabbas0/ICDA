@@ -181,15 +181,15 @@ static void draw_panel(int x, int y, int w, int h, uint32_t fill, uint32_t edge)
 }
 
 static void draw_button(int x, int y, int w, int h, const char *label, int active) {
-    uint32_t fill = active ? 0x001A73E8 : 0x00F8F9FA;
-    uint32_t edge = active ? 0x001966C6 : 0x00DADCE0;
-    uint32_t fg = active ? 0x00FFFFFF : 0x00202124;
+    uint32_t fill = active ? 0x0038BDF8 : 0x001E293B;
+    uint32_t edge = active ? 0x000EA5E9 : 0x00334155;
+    uint32_t fg = active ? 0x000F172A : 0x00F1F5F9;
     ic_canvas_t c;
     c.px = gui_pixel_buffer();
     c.w = gui_window_width();
     c.h = gui_window_height();
-    ic_rect_r(&c, x, y, w, h, 6, fill);
-    ic_outline_r(&c, x, y, w, h, 6, edge);
+    ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
+    ic_outline_r(&c, x, y, w, h, IC_RADIUS_BUTTON, edge);
     draw_text_clip(x + 8, y + 5, label, fg, fill, w - 14);
 }
 
@@ -350,29 +350,24 @@ static void draw_item(desktop_item_t *item, int idx, uint64_t tick) {
     int selected = idx == selected_item;
     int hover = idx == hover_item;
     int lift = hover ? 2 : 0;
-    uint32_t bg = selected ? 0x00E8F0FE : (hover ? 0x00F1F3F4 : 0x00FFFFFF);
-    uint32_t edge = selected ? 0x001A73E8 : (hover ? 0x00DADCE0 : 0x00FFFFFF);
+    uint32_t bg = selected ? 0x0038BDF8 : (hover ? 0x0023344D : 0x001E293B);
+    uint32_t edge = selected ? 0x000EA5E9 : (hover ? 0x00334155 : 0x001E293B);
     const char *icon_name;
     const ic_icon_t *icon;
     ic_canvas_t c;
+    uint32_t fg = selected ? 0x000F172A : 0x00F1F5F9;
 
-    if (selected && ((tick / 8) & 1)) bg = 0x00D2E3FC;
-    /* Rounded Material-style tile; border disappears when idle. */
+    if (selected && ((tick / 8) & 1)) bg = 0x000EA5E9;
     c.px = gui_pixel_buffer();
     c.w = gui_window_width();
     c.h = gui_window_height();
-    ic_rect_r(&c, item->x, item->y - lift, item->w, item->h, 8, bg);
-    if (selected || hover) {
-        ic_outline_r(&c, item->x, item->y - lift, item->w, item->h, 8, edge);
-    }
-
-    /* Real icons from the engine's builtin set instead of hand-drawn pixels */
+    ic_rect_r(&c, item->x, item->y - lift, item->w, item->h, IC_RADIUS_TILE, bg);
+    if (selected || hover) ic_outline_r(&c, item->x, item->y - lift, item->w, item->h, IC_RADIUS_TILE, edge);
+    if (selected) ic_rect(&c, item->x + 8, item->y + 54 - lift, item->w - 16, 2, 0x00F1F5F9);
     icon_name = item->is_dir ? "folder" : (item->is_wav ? "wav" : (item->is_app ? "app" : "file"));
     icon = ic_icon_builtin(icon_name);
-    if (icon) {
-        ic_icon_draw(&c, item->x + 10, item->y + 4 - lift, 54, 48, icon);
-    }
-    draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, 0x001F2937, bg, item->w - 12);
+    if (icon) ic_icon_draw(&c, item->x + 10, item->y + 4 - lift, 54, 48, icon);
+    draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, fg, bg, item->w - 12);
 }
 
 static void draw_sidebar_button(int y, const char *label, const char *path) {
@@ -388,24 +383,20 @@ static void draw_browser(void) {
     char count_buf[32];
 
     layout_items(w, h);
-    /* Flat modern chrome: white surfaces, thin neutral borders, one
-     * accent.  No blue gradient headers. */
-    gui_fill_rect(0, 0, w, h, 0x00FFFFFF);
-    gui_fill_rect(0, 0, w, TOP_H, 0x00FFFFFF);
-    gui_draw_hline(0, TOP_H, w, 0x00E8EAED);
-    gui_fill_rect(0, TOP_H, SIDE_W, h - TOP_H - STATUS_H, 0x00F8F9FA);
-    gui_draw_vline(SIDE_W, TOP_H, h - TOP_H - STATUS_H, 0x00E8EAED);
-
+    gui_fill_rect(0, 0, w, h, 0x000F172A);
+    gui_fill_rect(0, 0, w, TOP_H, 0x001E293B);
+    gui_draw_hline(0, TOP_H, w, 0x00334155);
+    gui_fill_rect(0, TOP_H, SIDE_W, h - TOP_H - STATUS_H, 0x00111D2E);
+    gui_draw_vline(SIDE_W, TOP_H, h - TOP_H - STATUS_H, 0x00334155);
     {
         ic_canvas_t c;
         c.px = gui_pixel_buffer();
         c.w = gui_window_width();
         c.h = gui_window_height();
-        ic_rect_r(&c, 12, 12, w - 24, 26, 6, 0x00F1F3F4);
-        ic_outline_r(&c, 12, 12, w - 24, 26, 6, 0x00DADCE0);
+        ic_rect_r(&c, 12, 12, w - 24, 26, IC_RADIUS_BUTTON, 0x000F172A);
+        ic_outline_r(&c, 12, 12, w - 24, 26, IC_RADIUS_BUTTON, 0x00334155);
     }
-    draw_text_clip(20, 17, current_path, 0x00202124, 0x00F1F3F4, w - 40);
-
+    draw_text_clip(20, 17, current_path, 0x00F1F5F9, 0x000F172A, w - 40);
     draw_button(12, 50, 50, 25, "Back", history_count > 0);
     draw_button(68, 50, 42, 25, "Up", !d_streq(current_path, "/"));
     draw_button(116, 50, 62, 25, "Reload", 0);
@@ -416,45 +407,38 @@ static void draw_browser(void) {
     draw_button(482, 50, 54, 25, "Stop", 0);
     draw_button(w - 174, 50, 78, 25, "Terminal", 0);
     draw_button(w - 88, 50, 76, 25, "Diskman", 0);
-
-    draw_text_clip(18, TOP_H + 14, "Places", 0x005F6368, 0x00F8F9FA, SIDE_W - 28);
+    draw_text_clip(18, TOP_H + 14, "Places", 0x0094A3B8, 0x00111D2E, SIDE_W - 28);
     draw_sidebar_button(TOP_H + 42, "Root", "/");
     draw_sidebar_button(TOP_H + 74, "Home", "/home");
     draw_sidebar_button(TOP_H + 106, "Apps", "/apps");
     draw_sidebar_button(TOP_H + 138, "Audio", "/usr/share/audio");
     draw_sidebar_button(TOP_H + 170, "Volumes", "/volumes");
     draw_button(12, h - STATUS_H - 42, SIDE_W - 24, 26, "Open Path", 0);
-
-    gui_fill_rect(SIDE_W + 1, TOP_H, w - SIDE_W - 1, h - TOP_H - STATUS_H, 0x00FFFFFF);
-    gui_draw_hline(SIDE_W + 1, TOP_H, w - SIDE_W - 1, 0x00E8EAED);
-
+    gui_fill_rect(SIDE_W + 1, TOP_H, w - SIDE_W - 1, h - TOP_H - STATUS_H, 0x000F172A);
+    gui_draw_hline(SIDE_W + 1, TOP_H, w - SIDE_W - 1, 0x00334155);
     for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
         draw_item(&items[i], i, tick);
     }
-
     if (item_count == 0) {
-        draw_text_clip(SIDE_W + 28, TOP_H + 34, "This folder is empty.", 0x005F6368, 0x00FFFFFF, w - SIDE_W - 56);
+        draw_text_clip(SIDE_W + 28, TOP_H + 34, "This folder is empty.", 0x0094A3B8, 0x000F172A, w - SIDE_W - 56);
     }
-
     if (page_offset > 0) draw_button(w - 176, h - STATUS_H - 30, 72, 22, "Previous", 0);
     if (page_offset + layout_visible < item_count) draw_button(w - 94, h - STATUS_H - 30, 72, 22, "Next", 0);
-
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00F8F9FA);
-    gui_draw_hline(0, h - STATUS_H, w, 0x00E8EAED);
+    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00111D2E);
+    gui_draw_hline(0, h - STATUS_H, w, 0x00334155);
     uint_to_text((uint64_t)item_count, count_buf, sizeof(count_buf));
-    draw_text_clip(12, h - 25, count_buf, 0x005F6368, 0x00F8F9FA, 56);
-    draw_text_clip(36, h - 25, "items", 0x005F6368, 0x00F8F9FA, 56);
-    draw_text_clip(96, h - 25, status_text, 0x005F6368, 0x00F8F9FA, 340);
-
+    draw_text_clip(12, h - 25, count_buf, 0x0094A3B8, 0x00111D2E, 56);
+    draw_text_clip(36, h - 25, "items", 0x0094A3B8, 0x00111D2E, 56);
+    draw_text_clip(96, h - 25, status_text, 0x0094A3B8, 0x00111D2E, 340);
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
         char secs[32];
         uint_to_text(audio.seconds_left, secs, sizeof(secs));
-        draw_text_clip(w - 284, h - 25, "Playing:", 0x001A73E8, 0x00F8F9FA, 72);
-        draw_text_clip(w - 212, h - 25, audio.name, 0x00202124, 0x00F8F9FA, 130);
-        draw_text_clip(w - 74, h - 25, secs, 0x00202124, 0x00F8F9FA, 32);
-        draw_text_clip(w - 42, h - 25, "s", 0x00202124, 0x00F8F9FA, 16);
+        draw_text_clip(w - 284, h - 25, "Playing:", 0x0038BDF8, 0x00111D2E, 72);
+        draw_text_clip(w - 212, h - 25, audio.name, 0x00F1F5F9, 0x00111D2E, 130);
+        draw_text_clip(w - 74, h - 25, secs, 0x00F1F5F9, 0x00111D2E, 32);
+        draw_text_clip(w - 42, h - 25, "s", 0x00F1F5F9, 0x00111D2E, 16);
     } else {
-        draw_text_clip(w - 120, h - 25, "Audio idle", 0x005F6368, 0x00F8F9FA, 100);
+        draw_text_clip(w - 120, h - 25, "Audio idle", 0x0064758B, 0x00111D2E, 100);
     }
 }
 
@@ -503,15 +487,15 @@ static void draw_dialog(void) {
     c.px = gui_pixel_buffer();
     c.w = gui_window_width();
     c.h = gui_window_height();
-    ic_rect_r(&c, x + 5, y + 6, 390, 150, 10, 0x005F6368);
-    ic_rect_r(&c, x, y, 390, 150, 10, 0x00FFFFFF);
-    ic_outline_r(&c, x, y, 390, 150, 10, 0x00DADCE0);
-    ic_rect_r(&c, x + 1, y + 1, 388, 34, 9, 0x00F8F9FA);
-    draw_text_clip(x + 12, y + 9, dialog_title, 0x00202124, 0x00F8F9FA, 260);
-    ic_rect_r(&c, x + 20, y + 58, 350, 28, 6, 0x00F1F3F4);
-    ic_outline_r(&c, x + 20, y + 58, 350, 28, 6, 0x00DADCE0);
-    draw_text_clip(x + 28, y + 64, dialog_input, 0x00202124, 0x00F1F3F4, 320);
-    gui_fill_rect(x + 28 + dialog_cursor * 8, y + 63, 2, 18, 0x001A73E8);
+    ic_draw_shadow(&c, x, y, 390, 150, 8, IC_SHADOW_COLOR);
+    ic_rect_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x001E293B);
+    ic_outline_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x00334155);
+    ic_rect_r(&c, x + 1, y + 1, 388, 34, IC_RADIUS_BUTTON, 0x000F172A);
+    draw_text_clip(x + 12, y + 9, dialog_title, 0x00F1F5F9, 0x000F172A, 260);
+    ic_rect_r(&c, x + 20, y + 58, 350, 28, IC_RADIUS_BUTTON, 0x000F172A);
+    ic_outline_r(&c, x + 20, y + 58, 350, 28, IC_RADIUS_BUTTON, 0x0038BDF8);
+    draw_text_clip(x + 28, y + 64, dialog_input, 0x00F1F5F9, 0x000F172A, 320);
+    gui_fill_rect(x + 28 + dialog_cursor * 8, y + 63, 2, 18, 0x0038BDF8);
     draw_button(x + 210, y + 108, 72, 25, "OK", 1);
     draw_button(x + 292, y + 108, 78, 25, "Cancel", 0);
 }
@@ -695,15 +679,14 @@ static void draw_editor(void) {
     if (rows < 1) rows = 1;
     if (cols < 8) cols = 8;
 
-    gui_fill_rect(0, 0, w, h, 0x00FFFFFF);
-    gui_fill_rect(0, 0, w, 70, 0x00FFFFFF);
-    gui_draw_hline(0, 70, w, 0x00E8EAED);
-    draw_text_clip(14, 12, "ICDA Notepad", 0x00202124, 0x00FFFFFF, 160);
-    draw_text_clip(14, 36, editor_path, 0x005F6368, 0x00FFFFFF, w - 220);
+    gui_fill_rect(0, 0, w, h, 0x000F172A);
+    gui_fill_rect(0, 0, w, 70, 0x001E293B);
+    gui_draw_hline(0, 70, w, 0x00334155);
+    draw_text_clip(14, 12, "ICDA Notepad", 0x00F1F5F9, 0x001E293B, 160);
+    draw_text_clip(14, 36, editor_path, 0x0094A3B8, 0x001E293B, w - 220);
     draw_button(w - 176, 24, 72, 26, "Save", editor_modified);
     draw_button(w - 94, 24, 76, 26, "Back", 0);
-
-    draw_panel(area_x, area_y, area_w, area_h, 0x00FFFFFF, 0x00DADCE0);
+    draw_panel(area_x, area_y, area_w, area_h, 0x001E293B, 0x00334155);
     for (int r = 0; r < rows; r++) {
         char nbuf[16];
         uint64_t line_end;
@@ -711,7 +694,7 @@ static void draw_editor(void) {
         int y = area_y + 4 + r * FONT_CELL_HEIGHT;
         int x = area_x + 8;
         uint_to_text(line_no, nbuf, sizeof(nbuf));
-        draw_text_clip(x, y, nbuf, 0x009AA0A6, 0x00FFFFFF, 40);
+        draw_text_clip(x, y, nbuf, 0x0064758B, 0x001E293B, 40);
         x += 50;
         line_end = editor_line_end(pos);
         for (int c = 0; c < cols; c++) {
@@ -723,20 +706,19 @@ static void draw_editor(void) {
                 if (ch < 32 || ch > 126) ch = '.';
             }
             if (is_cursor) {
-                gui_fill_rect(x + c * FONT_CELL_WIDTH, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x001A73E8);
-                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x00FFFFFF, 0x001A73E8);
+                gui_fill_rect(x + c * FONT_CELL_WIDTH, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x0038BDF8);
+                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x000F172A, 0x0038BDF8);
             } else {
-                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x001F2937, 0x00FFFFFF);
+                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x00F1F5F9, 0x001E293B);
             }
         }
         pos = line_end;
         if (pos < editor_len && editor_buf[pos] == '\n') pos++;
     }
-
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00F8F9FA);
-    gui_draw_hline(0, h - STATUS_H, w, 0x00E8EAED);
-    draw_text_clip(12, h - 25, editor_modified ? "Modified" : "Saved", editor_modified ? 0x00B45309 : 0x001D6F42, 0x00F8F9FA, 92);
-    draw_text_clip(112, h - 25, status_text, 0x005F6368, 0x00F8F9FA, w - 130);
+    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00111D2E);
+    gui_draw_hline(0, h - STATUS_H, w, 0x00334155);
+    draw_text_clip(12, h - 25, editor_modified ? "Modified" : "Saved", editor_modified ? 0x00F59E0B : 0x0034D399, 0x00111D2E, 92);
+    draw_text_clip(112, h - 25, status_text, 0x0094A3B8, 0x00111D2E, w - 130);
 }
 
 static void open_dialog(int kind, const char *title, const char *initial) {
