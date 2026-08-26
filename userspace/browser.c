@@ -14,18 +14,23 @@
 static void draw_all(void);
 
 #define BROWSER_URL_CAP   256
-#define BROWSER_HTML_CAP  (256 * 1024)
+#define BROWSER_HTML_CAP  (1024 * 1024)
+#define BROWSER_TEXT_CAP  (1024 * 1024)
 #define BROWSER_TITLE_CAP 64
 #define BROWSER_HISTORY   16
-#define BROWSER_LINKS     64
-#define BROWSER_LINE_CAP  128
+#define BROWSER_LINKS     256
+#define BROWSER_LINE_CAP  512
+#define FONT_W            8
 
 #define ADDR_BAR_H  34
 #define TOOLBAR_H   30
 #define PAD         6
 
+/* Links are byte ranges in the processed render text; the clickable
+ * rectangle is computed at draw time from the monospace layout. */
 typedef struct {
-    int x, y, w, h;
+    uint64_t start;
+    uint64_t end;
     char url[BROWSER_URL_CAP];
 } browser_link_t;
 
@@ -34,6 +39,10 @@ static char address_buf[BROWSER_URL_CAP];
 static char page_title[BROWSER_TITLE_CAP];
 static char *html_buf = NULL;
 static uint64_t html_len = 0;
+static char *text_buf = NULL;
+static uint64_t text_len = 0;
+static uint64_t html_shm = 0;
+static uint64_t text_shm = 0;
 
 static char history[BROWSER_HISTORY][BROWSER_URL_CAP];
 static int history_count = 0;
@@ -332,101 +341,359 @@ static void extract_title(const char *html, char *title, uint64_t cap) {
     }
 }
 
-/* Parse HTML into a list of clickable links.  Returns the number found. */
-static int extract_links(const char *html, browser_link_t *out, int max_links,
-                         int view_w, int view_h) {
-    const char *p = html;
-    int count = 0;
-    int y = ADDR_BAR_H + TOOLBAR_H + PAD;
-    int x = PAD;
-    int line_h = 18;
+/* ---- HTML -> plain text extraction ----
+ *
+ * Modern pages (React/Next/etc.) are dominated by <script>, <style>,
+ * <svg> blobs and minified markup with no newlines.  This pipeline
+ * produces a readable, word-wrapped text view: invisible subtrees are
+ * dropped, entities and common UTF-8 punctuation are mapped to ASCII,
+ * block-level tags force line breaks, and <a href> anchors are tracked
+ * as byte ranges so the draw pass can highlight and hit-test them.
+ */
 
-    if (!html || !out || max_links <= 0) return 0;
+static uint64_t rt_i;            /* write index into text_buf */
+static uint64_t rt_line_start;   /* index where the current visual line began */
+static uint64_t rt_last_space;   /* offset of the last emitted space (wrap point) */
+static int rt_cols;              /* wrap width in characters */
 
-    while (*p && count < max_links) {
-        if (*p == '<') {
-            const char *tag = p + 1;
-            if (b_lower(tag[0]) == 'a') {
-                const char *text_start = 0;
-                /* Find href */
-                const char *q = tag;
-                const char *href = 0;
-                const char *href_end = 0;
-                while (*q && *q != '>') {
-                    if (b_lower(q[0]) == 'h' && b_lower(q[1]) == 'r' &&
-                        b_lower(q[2]) == 'e' && b_lower(q[3]) == 'f') {
-                        q += 4;
-                        while (*q == ' ' || *q == '=') q++;
-                        if (*q == '"' || *q == '\'') {
-                            char quote = *q++;
-                            href = q;
-                            while (*q && *q != quote) q++;
-                            href_end = q;
-                        } else {
-                            href = q;
-                            while (*q && *q != ' ' && *q != '>') q++;
-                            href_end = q;
-                        }
-                        break;
+static int match_word(const char *p, const char *w) {
+    uint64_t i = 0;
+    while (w[i]) {
+        if (b_lower(p[i]) != w[i]) return 0;
+        i++;
+    }
+    {
+        char c = p[i];
+        return c == 0 || c == '>' || c == '/' || c == ' ' ||
+               c == '\t' || c == '\n' || c == '\r';
+    }
+}
+
+/* Tags whose whole subtree carries no displayable text. */
+static int tag_skips_content(const char *t) {
+    return match_word(t, "script") || match_word(t, "style") ||
+           match_word(t, "svg") || match_word(t, "head") ||
+           match_word(t, "iframe") || match_word(t, "template") ||
+           match_word(t, "canvas") || match_word(t, "video") ||
+           match_word(t, "audio") || match_word(t, "object") ||
+           match_word(t, "select") || match_word(t, "button") ||
+           match_word(t, "input") || match_word(t, "textarea") ||
+           match_word(t, "link") || match_word(t, "meta") ||
+           match_word(t, "title") || match_word(t, "!doctype");
+}
+
+/* Tags that introduce a line break in the text view. */
+static int tag_is_block(const char *t) {
+    if (b_lower(t[0]) == 'h' && t[1] >= '1' && t[1] <= '6') {
+        char c = t[2];
+        return c == 0 || c == '>' || c == '/' || c == ' ';
+    }
+    return match_word(t, "p") || match_word(t, "div") ||
+           match_word(t, "br") || match_word(t, "li") ||
+           match_word(t, "ul") || match_word(t, "ol") ||
+           match_word(t, "tr") || match_word(t, "td") ||
+           match_word(t, "th") || match_word(t, "table") ||
+           match_word(t, "hr") || match_word(t, "form") ||
+           match_word(t, "section") || match_word(t, "article") ||
+           match_word(t, "header") || match_word(t, "footer") ||
+           match_word(t, "nav") || match_word(t, "main") ||
+           match_word(t, "aside") || match_word(t, "blockquote") ||
+           match_word(t, "pre") || match_word(t, "figure") ||
+           match_word(t, "figcaption") || match_word(t, "dl") ||
+           match_word(t, "dt") || match_word(t, "dd");
+}
+
+static void rt_newline(void) {
+    if (rt_i == 0 || rt_i + 1 >= BROWSER_TEXT_CAP) return;
+    if (text_buf[rt_i - 1] == '\n') return; /* collapse blank lines */
+    text_buf[rt_i++] = '\n';
+    rt_line_start = rt_i;
+    rt_last_space = (uint64_t)-1;
+}
+
+static void rt_put(char c) {
+    if (rt_i + 1 >= BROWSER_TEXT_CAP) return;
+    text_buf[rt_i++] = c;
+    /* Word wrap: rewind the current line at the last space. */
+    if (rt_i - rt_line_start > (uint64_t)rt_cols &&
+        rt_last_space != (uint64_t)-1 && rt_last_space >= rt_line_start) {
+        text_buf[rt_last_space] = '\n';
+        rt_line_start = rt_last_space + 1;
+        rt_last_space = (uint64_t)-1;
+    }
+}
+
+static void rt_space(void) {
+    if (rt_i == 0 || rt_i + 1 >= BROWSER_TEXT_CAP) return;
+    if (text_buf[rt_i - 1] == ' ' || text_buf[rt_i - 1] == '\n') return;
+    rt_last_space = rt_i;
+    rt_put(' ');
+}
+
+/* Map a Unicode codepoint to something the 8x16 font can show. */
+static void rt_emit_cp(uint32_t cp) {
+    char c;
+    switch (cp) {
+        case 0x2013: case 0x2014: c = '-'; break;   /* en/em dash */
+        case 0x2018: case 0x2019: c = '\''; break;  /* quotes */
+        case 0x201C: case 0x201D: c = '"'; break;
+        case 0x2026: c = '.'; break;                /* ellipsis */
+        case 0x00A0: c = ' '; break;                /* nbsp */
+        default:
+            if (cp >= 0x2000 && cp <= 0x206F) return; /* invisible format chars */
+            if (cp >= 0x80) return;                  /* no glyph available */
+            c = (char)cp;
+    }
+    if (c == ' ') rt_space(); else rt_put(c);
+}
+
+/* Decode one UTF-8 sequence; returns the codepoint and advance count. */
+static uint32_t rt_utf8(const char *p, uint64_t i, uint64_t len, uint64_t *adv) {
+    unsigned char c = (unsigned char)p[i];
+    uint32_t cp;
+    int extra;
+    if (c < 0x80) { *adv = 1; return c; }
+    if (c < 0xC0) { *adv = 1; return 0; }           /* stray continuation */
+    if (c < 0xE0) { cp = c & 0x1F; extra = 1; }
+    else if (c < 0xF0) { cp = c & 0x0F; extra = 2; }
+    else { cp = c & 0x07; extra = 3; }
+    for (int k = 0; k < extra; k++) {
+        if (i + 1 + (uint64_t)k >= len) { *adv = 1 + (uint64_t)k; return 0; }
+        unsigned char cc = (unsigned char)p[i + 1 + (uint64_t)k];
+        if ((cc & 0xC0) != 0x80) { *adv = 1 + (uint64_t)k; return 0; }
+        cp = (cp << 6) | (uint32_t)(cc & 0x3F);
+    }
+    *adv = 1 + (uint64_t)extra;
+    return cp;
+}
+
+/* Copy a tag attribute value (e.g. href) out of a tag's source range. */
+static void extract_attr(const char *p, uint64_t ts, uint64_t te,
+                         const char *name, char *out, uint64_t cap) {
+    uint64_t nlen = b_strlen(name);
+    uint64_t i = ts;
+    if (cap) out[0] = 0;
+    while (i + nlen + 1 < te) {
+        if (b_lower(p[i]) == b_lower(name[0])) {
+            uint64_t k = 0;
+            while (k < nlen && b_lower(p[i + k]) == b_lower(name[k])) k++;
+            if (k == nlen) {
+                uint64_t j = i + nlen;
+                while (j < te && (p[j] == ' ' || p[j] == '=')) j++;
+                if (j < te) {
+                    uint64_t v0, v1;
+                    if (p[j] == '"' || p[j] == '\'') {
+                        char q = p[j++];
+                        v0 = j;
+                        while (j < te && p[j] != q) j++;
+                        v1 = j;
+                    } else {
+                        v0 = j;
+                        while (j < te && p[j] != ' ' && p[j] != '>') j++;
+                        v1 = j;
                     }
-                    q++;
+                    uint64_t n = v1 > v0 ? v1 - v0 : 0;
+                    if (n >= cap) n = cap - 1;
+                    for (uint64_t b = 0; b < n; b++) out[b] = p[v0 + b];
+                    out[n] = 0;
+                    return;
                 }
-                /* Find link text */
-                while (*p && *p != '>') p++;
-                if (*p == '>') p++;
-                {
-                    text_start = p;
-                    while (*p && !(*p == '<' && b_lower(p[1]) == '/')) p++;
-                    if (href && href_end && href_end > href) {
-                        char url[BROWSER_URL_CAP];
-                        char text[64];
-                        uint64_t url_len = (uint64_t)(href_end - href);
-                        uint64_t text_len = (uint64_t)(p - text_start);
-                        if (url_len > BROWSER_URL_CAP - 1) url_len = BROWSER_URL_CAP - 1;
-                        if (text_len > sizeof(text) - 1) text_len = sizeof(text) - 1;
-                        for (uint64_t i = 0; i < url_len; i++) url[i] = href[i];
-                        url[url_len] = 0;
-                        for (uint64_t i = 0; i < text_len; i++) text[i] = text_start[i];
-                        text[text_len] = 0;
-                        strip_tags(text, sizeof(text), text);
-                        decode_entities(text, sizeof(text), text);
-                        if (text[0]) {
-                            out[count].x = x;
-                            out[count].y = y;
-                            out[count].w = ic_text_width(text);
-                            out[count].h = line_h;
-                            b_strcpy(out[count].url, url, BROWSER_URL_CAP);
-                            count++;
-                            x += out[count - 1].w + 8;
-                            if (x > view_w - PAD) {
-                                x = PAD;
-                                y += line_h;
-                            }
-                        }
-                    }
-                }
-                /* Skip closing tag */
-                while (*p && !(*p == '>' && p > text_start)) p++;
-                if (*p == '>') p++;
+            }
+        }
+        i++;
+    }
+}
+
+/* Turn a raw href into an absolute URL against the current page. */
+static void resolve_href(const char *href, char *out, uint64_t cap) {
+    uint16_t port;
+    int https;
+    char host[128];
+    char path[256];
+
+    if (cap) out[0] = 0;
+    if (!href || !*href || cap == 0) return;
+    if (b_strprefix(href, "http://") || b_strprefix(href, "https://")) {
+        b_strcpy(out, href, cap);
+        return;
+    }
+    if (parse_url_format(current_url, &port, &https, host, sizeof(host),
+                         path, sizeof(path)) < 0) {
+        b_strcpy(out, href, cap);
+        return;
+    }
+
+    if (b_strprefix(href, "//")) {
+        b_strcpy(out, https ? "https:" : "http:", cap);
+        b_strcat(out, href, cap);
+        return;
+    }
+    b_strcpy(out, https ? "https://" : "http://", cap);
+    b_strcat(out, host, cap);
+    if (href[0] == '/') {
+        b_strcat(out, href, cap);
+        return;
+    }
+    {
+        /* Relative to the current path's directory. */
+        uint64_t plen = b_strlen(path);
+        while (plen > 0 && path[plen - 1] != '/') plen--;
+        if (plen > 1) {
+            path[plen] = 0;
+            b_strcat(out, path, cap);
+        } else {
+            b_strcat(out, "/", cap);
+        }
+        b_strcat(out, href, cap);
+    }
+}
+
+/* Build the word-wrapped plain-text view of the fetched page. */
+static void build_render_text(void) {
+    const char *p = html_buf ? html_buf : "";
+    uint64_t len = html_len;
+    uint64_t i = 0;
+    int skip_depth = 0;
+    int cur_link = -1;
+
+    if (!text_buf) return;
+    rt_i = 0;
+    rt_line_start = 0;
+    rt_last_space = (uint64_t)-1;
+    rt_cols = (gui_window_width() - 2 * PAD) / FONT_W;
+    if (rt_cols < 20) rt_cols = 20;
+    link_count = 0;
+
+    while (i < len && rt_i + 1 < BROWSER_TEXT_CAP) {
+        char c = p[i];
+
+        /* Tags (quoted '>' inside attributes is handled) */
+        if (c == '<' && i + 1 < len &&
+            ((p[i + 1] >= 'a' && p[i + 1] <= 'z') ||
+             (p[i + 1] >= 'A' && p[i + 1] <= 'Z') ||
+             p[i + 1] == '/' || p[i + 1] == '!')) {
+            /* HTML comment */
+            if (p[i + 1] == '!' && i + 3 < len && p[i + 2] == '-' && p[i + 3] == '-') {
+                i += 4;
+                while (i + 2 < len && !(p[i] == '-' && p[i + 1] == '-' && p[i + 2] == '>')) i++;
+                i += 3;
+                if (i > len) i = len;
                 continue;
             }
-            /* Handle block elements: newline */
-            if (b_lower(tag[0]) == 'p' || b_lower(tag[0]) == 'd' ||
-                b_lower(tag[0]) == 'h' || b_lower(tag[0]) == 'l' ||
-                b_lower(tag[0]) == 'b' || b_lower(tag[0]) == 'u' ||
-                b_lower(tag[0]) == 'o' || b_lower(tag[0]) == 't' ||
-                b_lower(tag[0]) == 'c' || b_lower(tag[0]) == 'f' ||
-                b_lower(tag[0]) == 's' || b_lower(tag[0]) == 'n') {
-                x = PAD;
-                y += line_h;
+            {
+                uint64_t ts = i + 1;
+                uint64_t te = i + 1;
+                int closing = 0;
+                char quote = 0;
+                if (ts < len && p[ts] == '/') { closing = 1; ts++; }
+                while (te < len) {
+                    char t = p[te];
+                    if (quote) { if (t == quote) quote = 0; }
+                    else if (t == '"' || t == '\'') quote = t;
+                    else if (t == '>') break;
+                    te++;
+                }
+                {
+                    const char *tn = (ts < len) ? p + ts : "";
+                    if (tag_skips_content(tn)) {
+                        if (closing) { if (skip_depth > 0) skip_depth--; }
+                        else if (!match_word(tn, "meta") && !match_word(tn, "link") &&
+                                 !match_word(tn, "input") && !match_word(tn, "!doctype")) {
+                            skip_depth++;
+                        }
+                    } else if (skip_depth == 0) {
+                        if (!closing && match_word(tn, "a")) {
+                            char href[BROWSER_URL_CAP];
+                            extract_attr(p, ts, te, "href", href, sizeof(href));
+                            if (href[0] && href[0] != '#' &&
+                                !b_strprefix(href, "javascript:") &&
+                                link_count < BROWSER_LINKS) {
+                                resolve_href(href, links[link_count].url, BROWSER_URL_CAP);
+                                links[link_count].start = rt_i;
+                                links[link_count].end = rt_i;
+                                cur_link = (int)link_count++;
+                            } else {
+                                cur_link = -2; /* anchor without a usable href */
+                            }
+                        } else if (closing && match_word(tn, "a")) {
+                            if (cur_link >= 0) links[cur_link].end = rt_i;
+                            cur_link = -1;
+                        } else if (tag_is_block(tn)) {
+                            rt_newline();
+                        }
+                    }
+                }
+                i = (te < len) ? te + 1 : len;
+                continue;
             }
-            while (*p && *p != '>') p++;
-            if (*p == '>') p++;
+        }
+
+        if (skip_depth > 0) { i++; continue; }
+
+        /* Entities */
+        if (c == '&') {
+            uint64_t j = i + 1;
+            uint32_t cp = 0;
+            int ok = 0;
+            if (j < len && p[j] == '#') {
+                int hex = 0;
+                uint32_t v = 0;
+                uint64_t k = 0;
+                j++;
+                if (j < len && (p[j] == 'x' || p[j] == 'X')) { hex = 1; j++; }
+                while (j + k < len && k < 8) {
+                    char d = p[j + k];
+                    int dig = -1;
+                    if (d >= '0' && d <= '9') dig = d - '0';
+                    else if (hex && d >= 'a' && d <= 'f') dig = d - 'a' + 10;
+                    else if (hex && d >= 'A' && d <= 'F') dig = d - 'A' + 10;
+                    else break;
+                    v = hex ? v * 16U + (uint32_t)dig : v * 10U + (uint32_t)dig;
+                    k++;
+                }
+                if (k > 0) {
+                    cp = v;
+                    ok = 1;
+                    j += k;
+                    if (j < len && p[j] == ';') j++;
+                }
+            } else if (b_strprefix(p + i, "&amp;")) { cp = '&'; ok = 1; j = i + 5; }
+            else if (b_strprefix(p + i, "&lt;")) { cp = '<'; ok = 1; j = i + 4; }
+            else if (b_strprefix(p + i, "&gt;")) { cp = '>'; ok = 1; j = i + 4; }
+            else if (b_strprefix(p + i, "&quot;")) { cp = '"'; ok = 1; j = i + 6; }
+            else if (b_strprefix(p + i, "&apos;")) { cp = '\''; ok = 1; j = i + 6; }
+            else if (b_strprefix(p + i, "&nbsp;")) { cp = 0x00A0; ok = 1; j = i + 6; }
+            if (ok) {
+                rt_emit_cp(cp);
+                i = j;
+                continue;
+            }
+            rt_put('&');
+            i++;
             continue;
         }
-        p++;
+
+        /* Whitespace collapse */
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            rt_space();
+            i++;
+            continue;
+        }
+
+        /* UTF-8 */
+        if ((unsigned char)c >= 0x80) {
+            uint64_t adv = 1;
+            uint32_t cp = rt_utf8(p, i, len, &adv);
+            if (cp) rt_emit_cp(cp);
+            i += adv;
+            continue;
+        }
+
+        rt_put(c);
+        i++;
     }
-    return count;
+    text_buf[rt_i] = 0;
+    text_len = rt_i;
 }
 
 /* ---- page loading ---- */
@@ -525,18 +792,30 @@ static void navigate_to(const char *url) {
         return;
     }
 
+    if (!html_buf || !text_buf) {
+        b_strcpy(status, "No memory for page", sizeof(status));
+        loading = 0;
+        return;
+    }
     if (bytes > BROWSER_HTML_CAP - 1) bytes = BROWSER_HTML_CAP - 1;
-    if (html_buf) {
+    {
         uint64_t n = icda_read_file(out_path, html_buf, bytes);
         html_len = n > 0 ? n : 0;
-        if (html_len > 0) html_buf[html_len] = 0;
+        html_buf[html_len] = 0;
     }
 
-    extract_title(html_buf ? html_buf : "", page_title, BROWSER_TITLE_CAP);
+    extract_title(html_buf, page_title, BROWSER_TITLE_CAP);
+    build_render_text();
     scroll_y = 0;
     max_scroll = 0;
     loading = 0;
-    b_strcpy(status, "Done", sizeof(status));
+    b_strcpy(status, "Done ", sizeof(status));
+    {
+        char nb[16];
+        b_uint_to_str(html_len, nb, sizeof(nb));
+        b_strcat(status, nb, sizeof(status));
+        b_strcat(status, " bytes", sizeof(status));
+    }
 }
 
 static void go_back(void) {
@@ -605,18 +884,11 @@ static void draw_page(void) {
     int h = gui_window_height();
     int content_y = ADDR_BAR_H + TOOLBAR_H;
     int content_h = h - content_y;
-    int y = content_y + PAD - scroll_y;
-    int x = PAD;
     int line_h = 18;
+    uint64_t i;
+    uint64_t total_lines = 1;
+    int row = 0;
     char line[BROWSER_LINE_CAP];
-    uint64_t li = 0;
-    const char *p = html_buf ? html_buf : "";
-    int in_tag = 0;
-    int in_entity = 0;
-    int is_link = 0;
-    int link_idx = -1;
-    int bold = 0;
-    int heading = 0;
 
     /* Content background */
     gui_fill_rect(0, content_y, w, content_h, 0x00FFFFFF);
@@ -626,78 +898,63 @@ static void draw_page(void) {
         return;
     }
 
-    if (!html_buf || html_len == 0) {
+    if (!text_buf || text_len == 0) {
         gui_draw_text(PAD, content_y + PAD, "Enter a URL to browse the web.", 0x005F6368, 0x00FFFFFF);
-        gui_draw_text(PAD, content_y + PAD + 20, "Example: http://example.com", 0x005F6368, 0x00FFFFFF);
+        gui_draw_text(PAD, content_y + PAD + 20, "Example: example.com", 0x005F6368, 0x00FFFFFF);
         return;
     }
 
-    link_count = extract_links(html_buf, links, BROWSER_LINKS, w, content_h);
-    hover_link = -1;
-
-    while (*p && y < content_y + content_h + line_h) {
-        if (*p == '<') {
-            in_tag = 1;
-            p++;
-            continue;
-        }
-        if (*p == '>') {
-            in_tag = 0;
-            p++;
-            continue;
-        }
-        if (in_tag) {
-            /* Track bold/heading for styling */
-            if (b_lower(p[0]) == 'b' && (p[1] == '>' || p[1] == 'r')) {
-                bold = 1;
-            } else if (b_lower(p[0]) == '/' && b_lower(p[1]) == 'b') {
-                bold = 0;
-            } else if (b_lower(p[0]) == 'h' && p[1] >= '1' && p[1] <= '6') {
-                heading = 1;
-            } else if (b_lower(p[0]) == '/' && b_lower(p[1]) == 'h') {
-                heading = 0;
-            }
-            p++;
-            continue;
-        }
-        if (*p == '&') {
-            in_entity = 1;
-            p++;
-            continue;
-        }
-        if (in_entity) {
-            if (*p == ';') in_entity = 0;
-            p++;
-            continue;
-        }
-        if (*p == '\n' || *p == '\r') {
-            if (li > 0) {
-                line[li] = 0;
-                if (y >= content_y && y < content_y + content_h) {
-                    uint32_t fg = heading ? 0x001A73E8 : (bold ? 0x00202124 : 0x003C4043);
-                    gui_draw_text(x, y, line, fg, 0x00FFFFFF);
-                }
-                li = 0;
-                y += line_h;
-            }
-            p++;
-            continue;
-        }
-        if (li < BROWSER_LINE_CAP - 1) {
-            line[li++] = *p;
-        }
-        p++;
+    /* Total document height for the scrollbar range. */
+    for (i = 0; i < text_len; i++) {
+        if (text_buf[i] == '\n') total_lines++;
     }
-    if (li > 0) {
-        line[li] = 0;
-        if (y >= content_y && y < content_y + content_h) {
-            uint32_t fg = heading ? 0x001A73E8 : (bold ? 0x00202124 : 0x003C4043);
-            gui_draw_text(x, y, line, fg, 0x00FFFFFF);
-        }
-    }
-
-    max_scroll = y - content_h + line_h;
+    max_scroll = (int)(total_lines * (uint64_t)line_h) - content_h + PAD;
     if (max_scroll < 0) max_scroll = 0;
+    if (scroll_y > max_scroll) scroll_y = max_scroll;
+
+    /* Render visible lines; link spans are overdrawn in blue. */
+    i = 0;
+    while (i < text_len) {
+        uint64_t ls = i;
+        uint64_t le;
+        int y;
+
+        while (i < text_len && text_buf[i] != '\n') i++;
+        le = i;
+        if (i < text_len) i++; /* consume the newline */
+
+        y = content_y + PAD + row * line_h - scroll_y;
+        row++;
+
+        if (le == ls) continue;                 /* blank line */
+        if (y + line_h <= content_y) continue;  /* above viewport */
+        if (y >= content_y + content_h) break;  /* below viewport */
+        if (le - ls >= BROWSER_LINE_CAP) le = ls + BROWSER_LINE_CAP - 1;
+
+        {
+            uint64_t n = le - ls;
+            uint64_t b;
+            for (b = 0; b < n; b++) line[b] = text_buf[ls + b];
+            line[n] = 0;
+            gui_draw_text(PAD, y, line, 0x003C4043, 0x00FFFFFF);
+        }
+
+        /* Link spans overlapping this line. */
+        for (int li = 0; li < link_count; li++) {
+            uint64_t s = links[li].start;
+            uint64_t e = links[li].end;
+            uint64_t c0, c1, b;
+            if (e <= s || s >= le || e <= ls) continue;
+            c0 = s > ls ? s - ls : 0;
+            c1 = e < le ? e - ls : le - ls;
+            if (c1 <= c0) continue;
+            for (b = 0; b < c1 - c0; b++) line[b] = text_buf[ls + c0 + b];
+            line[c1 - c0] = 0;
+            gui_draw_text(PAD + (int)c0 * FONT_W, y, line, 0x001A73E8, 0x00FFFFFF);
+            gui_draw_hline(PAD + (int)c0 * FONT_W, y + line_h - 3,
+                           (int)(c1 - c0) * FONT_W, 0x001A73E8);
+        }
+    }
 }
 
 static void draw_status(void) {
@@ -747,11 +1004,33 @@ static void handle_click(int mx, int my) {
     }
     addr_active = 0;
 
-    /* Links */
-    for (int i = 0; i < link_count; i++) {
-        if (hit_rect(mx, my, links[i].x, links[i].y - scroll_y, links[i].w, links[i].h)) {
-            navigate_to(links[i].url);
-            return;
+    /* Links: map the click to a byte offset in the render text, then test
+     * it against each link's byte range (handles links that wrap across
+     * visual lines). */
+    if (text_buf && my >= content_y + PAD) {
+        int line_h = 18;
+        int row = (my - content_y - PAD + scroll_y) / line_h;
+        int col = (mx - PAD) / FONT_W;
+        if (row >= 0 && col >= 0) {
+            uint64_t ls = 0;
+            for (int r = 0; r < row && ls < text_len; r++) {
+                while (ls < text_len && text_buf[ls] != '\n') ls++;
+                if (ls < text_len) ls++;
+            }
+            {
+                uint64_t le = ls;
+                while (le < text_len && text_buf[le] != '\n') le++;
+                if (le - ls >= BROWSER_LINE_CAP) le = ls + BROWSER_LINE_CAP - 1;
+                uint64_t pos = ls + (uint64_t)col;
+                if (pos < le) {
+                    for (int li = 0; li < link_count; li++) {
+                        if (links[li].url[0] && pos >= links[li].start && pos < links[li].end) {
+                            navigate_to(links[li].url);
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -804,7 +1083,13 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    html_buf = (char *)0x60000000; /* Use a fixed high address for the page buffer */
+    /* Page buffers come from shared-memory regions - properly mapped,
+     * process-owned memory.  (The previous hardcoded 0x60000000 pointed
+     * at unmapped memory and page-faulted on the first fetch.) */
+    html_shm = icda_shm_create(BROWSER_HTML_CAP);
+    if (html_shm) html_buf = (char *)(uintptr_t)icda_shm_map(html_shm);
+    text_shm = icda_shm_create(BROWSER_TEXT_CAP);
+    if (text_shm) text_buf = (char *)(uintptr_t)icda_shm_map(text_shm);
 
     b_strcpy(current_url, "http://example.com", BROWSER_URL_CAP);
     b_strcpy(address_buf, current_url, BROWSER_URL_CAP);

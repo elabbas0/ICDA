@@ -7,6 +7,7 @@
  */
 #include "virtio_net.h"
 #include "../pci/pci.h"
+#include "../serial/serial.h"
 #include "../../memory/pmm.h"
 #include "../../memory/vmm.h"
 #include "../../proc/sched.h"

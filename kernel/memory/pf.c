@@ -233,6 +233,39 @@ static void page_fault_handler(struct registers *regs) {
         return;
     }
 
+    /* A user-mode fault kills the offending process instead of halting
+     * the machine: the desktop (or text shell) stays alive and the
+     * parent is woken so it can reap the child.  Kernel faults still
+     * panic - they indicate a kernel bug and are not recoverable. */
+    if (regs->err_code & PF_USER) {
+        process_t *proc = sched_current_process();
+        thread_t *thread = sched_current_thread();
+        if (proc && proc->kind == PROCESS_USER && thread) {
+            pf_serial_dump(regs, cr2);
+            serial_write("  user process killed\n");
+            proc->state = PROCESS_EXITED;
+            proc->exit_code = (uint64_t)-14;
+            thread->state = THREAD_ZOMBIE;
+            thread->block_reason = THREAD_BLOCK_NONE;
+            thread->wake_tick = 0;
+            if (proc->parent && proc->parent->main_thread &&
+                proc->parent->main_thread->state == THREAD_BLOCKED) {
+                proc->parent->main_thread->state = THREAD_READY;
+                proc->parent->main_thread->block_reason = THREAD_BLOCK_NONE;
+                proc->parent->main_thread->wake_tick = 0;
+                if (proc->parent->state == PROCESS_BLOCKED) {
+                    proc->parent->state = PROCESS_READY;
+                }
+            }
+            /* Switch away; the zombie thread is never rescheduled, so the
+             * faulting instruction is never re-executed. */
+            sched_yield();
+            for (;;) {
+                __asm__ volatile("hlt");
+            }
+        }
+    }
+
     // not a recoverable fault — panic with full details
     pf_panic(regs, cr2);
 }

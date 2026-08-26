@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "../drivers/serial/serial.h"
 
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
