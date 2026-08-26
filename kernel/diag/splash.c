@@ -5,11 +5,11 @@
 
 static int splash_on = 0;
 
-static const uint32_t splash_bg      = 0x00101830;   /* deep navy */
-static const uint32_t splash_accent  = 0x004FC3F7;   /* light blue */
-static const uint32_t splash_track   = 0x00333A48;   /* bar background */
-static const uint32_t splash_muted   = 0x0098A4B8;   /* secondary text */
-static const uint32_t splash_white   = 0x00FFFFFF;
+static const uint32_t splash_bg      = 0x000F172A;
+static const uint32_t splash_accent  = 0x0038BDF8;
+static const uint32_t splash_track   = 0x001E293B;
+static const uint32_t splash_muted   = 0x0094A3B8;
+static const uint32_t splash_white   = 0x00F1F5F9;
 
 static uint32_t splash_last_fill = 0;                /* bar fill permille */
 

@@ -1,6 +1,7 @@
 #include "mouse.h"
 #include "../../cpu/isr.h"
 #include "../../proc/sched.h"
+#include "../../drivers/serial/serial.h"
 #include <stdint.h>
 
 #define PS2_DATA    0x60
@@ -19,7 +20,7 @@
 #define MOUSE_CMD_ENABLE_STREAM  0xF4
 #define MOUSE_CMD_SET_DEFAULTS   0xF6
 
-#define MOUSE_BUF_CAP 64
+#define MOUSE_BUF_CAP 256
 
 static mouse_event_t mouse_buf[MOUSE_BUF_CAP];
 static uint32_t mouse_buf_head = 0;
@@ -135,6 +136,11 @@ void mouse_set_screen(int w, int h) {
 
 void mouse_irq(struct registers *regs) {
     (void)regs;
+    static uint64_t irq_cnt = 0;
+    irq_cnt++;
+    if ((irq_cnt % 200) == 0) {
+        serial_write("mouse irq\n");
+    }
     /* Drain every byte currently in the output buffer. One IRQ12 can
      * cover several bytes (the PIC may coalesce edges under load), and
      * some IRQs are spurious (e.g. an edge latched during init while the
@@ -143,10 +149,8 @@ void mouse_irq(struct registers *regs) {
      * QEMU, so always check the status port first. */
     for (int guard = 0; guard < 64; guard++) {
         uint8_t status = inb(PS2_STATUS);
-        /* Consume only mouse data: OBF is set for both devices, and bit
-         * 5 (MOUSE_OBF) selects the aux channel. Reading keyboard bytes
-         * here would steal them from the keyboard driver. */
-        if (!(status & PS2_STATUS_OUTPUT_FULL) || !(status & 0x20)) {
+        // Real HW: some PS/2 controllers (AUX) don't set bit 5 reliably after Explorer's heavy Papirus composite starves the PIC → just check OBF. We're in IRQ12, so it's mouse.
+        if (!(status & PS2_STATUS_OUTPUT_FULL)) {
             break;
         }
         uint8_t byte = inb(PS2_DATA);
@@ -184,14 +188,28 @@ void mouse_irq(struct registers *regs) {
             mouse_btn = flags & 0x07;
 
             uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
-            if (next != mouse_buf_tail) {
-                mouse_buf[mouse_buf_head].abs_x   = mouse_x;
-                mouse_buf[mouse_buf_head].abs_y   = mouse_y;
-                mouse_buf[mouse_buf_head].dx      = dx;
-                mouse_buf[mouse_buf_head].dy      = dy;
-                mouse_buf[mouse_buf_head].buttons = mouse_btn;
-                mouse_buf_head = next;
+            int overflow = (next == mouse_buf_tail);
+            if (overflow) {
+                // Real HW: WM compositing Papirus after Explorer open is heavy → keep newest
+                mouse_buf_tail = (mouse_buf_tail + 1) % MOUSE_BUF_CAP;
+                static uint64_t last_warn = 0;
+                uint64_t now = 0;
+                {
+                    uint32_t lo, hi;
+                    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+                    now = ((uint64_t)hi << 32) | lo;
+                }
+                if (now - last_warn > 10000000) {
+                    last_warn = now;
+                    serial_write("mouse: overflow, keeping newest\n");
+                }
             }
+            mouse_buf[mouse_buf_head].abs_x   = mouse_x;
+            mouse_buf[mouse_buf_head].abs_y   = mouse_y;
+            mouse_buf[mouse_buf_head].dx      = dx;
+            mouse_buf[mouse_buf_head].dy      = dy;
+            mouse_buf[mouse_buf_head].buttons = mouse_btn;
+            mouse_buf_head = next;
             /* Wake any process blocked on input (e.g. the window manager
              * waiting for events) so a mouse move is handled immediately
              * instead of on the next scheduler tick. */
