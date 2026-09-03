@@ -27,6 +27,8 @@
 #include "../net/net.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
+#include "../fs/fd.h"
+#include "uaccess.h"
 
 /* Set once SYS_MAP_FRAMEBUFFER has been claimed, along with the pid of
  * the process that claimed it.  The claim is released when that process
@@ -116,16 +118,35 @@ static uint64_t append_uint(char *buf, uint64_t out, uint64_t cap, uint64_t valu
 }
 
 static uint64_t sys_console_write(const char *text) {
+    uint64_t len;
+
     if (!text) {
         return (uint64_t)-1;
     }
+    /* P0 gate: probe the NUL-terminated string before the console
+     * layer scans it (unbounded read otherwise). */
+    len = strnlen_user(text, UACCESS_MAX_STR);
+    if (len == (uint64_t)-1) {
+        return (uint64_t)-U_EFAULT;
+    }
     console_write(text, CONSOLE_STYLE_INFO);
-    return str_len(text);
+    return len;
 }
 
 static uint64_t sys_get_pid(void) {
     process_t *proc = sched_current_process();
     return proc ? proc->pid : 0;
+}
+
+/* P0 gate helpers: validated path (512B cap) and buffer range. */
+static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
+                                 uint64_t skip, uint64_t *emitted_out);
+
+static int gate_path_ok(const char *path) {
+    if (!path) {
+        return 0;
+    }
+    return strnlen_user(path, 511) != (uint64_t)-1;
 }
 
 static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
@@ -135,6 +156,12 @@ static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
 
     if (!proc || !path || !buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), path, &size);
@@ -157,6 +184,12 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
     if (!proc || !path || (!buf && size != 0)) {
         return (uint64_t)-1;
     }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (size != 0 && !user_range_prepare_cur(buf, size)) {
+        return (uint64_t)-U_EFAULT;
+    }
 
     if (vfs_write(proc->cwd ? proc->cwd : vfs_root(), path, buf ? buf : "", size) != 0) {
         return (uint64_t)-1;
@@ -178,6 +211,12 @@ static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, ui
 
     if (!proc || !path || !buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), path, &size);
@@ -221,6 +260,9 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
 
     if (!buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     buf[0] = '\0';
@@ -271,6 +313,9 @@ static uint64_t sys_getcwd(char *buf, uint64_t cap) {
     if (!proc || !buf || cap == 0) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
+    }
     if (vfs_getcwd(proc->cwd ? proc->cwd : vfs_root(), buf, (size_t)cap) != 0) {
         return (uint64_t)-1;
     }
@@ -281,7 +326,13 @@ static uint64_t sys_chdir(const char *path) {
     process_t *proc = sched_current_process();
     vfs_node_t *next;
 
-    if (!proc || !path || !*path) {
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
 
@@ -297,11 +348,15 @@ static uint64_t sys_chdir(const char *path) {
 static uint64_t sys_list_dir(const char *path, char *buf, uint64_t cap) {
     process_t *proc = sched_current_process();
     vfs_node_t *dir;
-    uint64_t count;
-    uint64_t out = 0;
 
     if (!proc || !buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (path && !gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     if (!path || !*path || str_eq(path, ".")) {
@@ -313,21 +368,46 @@ static uint64_t sys_list_dir(const char *path, char *buf, uint64_t cap) {
         return (uint64_t)-1;
     }
 
+    return list_dir_entries(dir, buf, cap, 0, NULL);
+}
+
+/* Shared directory formatter: writes one-per-line child entries of `dir`
+ * into `buf`, skipping the first `skip` children (fd offset support).
+ * Returns bytes written; optionally reports emitted entry count. */
+static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
+                                 uint64_t skip, uint64_t *emitted_out) {
+    uint64_t count;
+    uint64_t out = 0;
+    uint64_t emitted = 0;
+
     buf[0] = '\0';
     count = vfs_child_count(dir);
-    for (uint64_t i = 0; i < count; i++) {
+    for (uint64_t i = skip; i < count; i++) {
         vfs_node_t *child = vfs_child_at(dir, i);
-        out = append_dir_entry(buf, out, cap, vfs_node_name(child), vfs_node_type(child) == VFS_NODE_DIR);
+        if (!child) {
+            break;
+        }
+        out = append_dir_entry(buf, out, cap, vfs_node_name(child),
+                               vfs_node_type(child) == VFS_NODE_DIR);
+        emitted++;
         if (out + 1 >= cap) {
             break;
         }
     }
-
+    if (emitted_out) {
+        *emitted_out = emitted;
+    }
     return out;
 }
 
 static uint64_t sys_exec(const char *path) {
-    if (!path || !*path) {
+    if (!path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
     if (user_run_path(path) != 0) {
@@ -347,8 +427,17 @@ static uint64_t sys_console_backspace(void) {
 }
 
 static uint64_t sys_exec_args(const char *path, const char *args) {
-    if (!path || !*path) {
+    if (!path) {
         return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
+        return (uint64_t)-1;
+    }
+    if (args && strnlen_user(args, 2048) == (uint64_t)-1) {
+        return (uint64_t)-U_EFAULT;
     }
     if (user_run_path_args(path, args) != 0) {
         return (uint64_t)-1;
@@ -359,7 +448,13 @@ static uint64_t sys_exec_args(const char *path, const char *args) {
 static uint64_t sys_mkdir(const char *path) {
     process_t *proc = sched_current_process();
 
-    if (!proc || !path || !*path) {
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
 
@@ -369,7 +464,13 @@ static uint64_t sys_mkdir(const char *path) {
 static uint64_t sys_create(const char *path) {
     process_t *proc = sched_current_process();
 
-    if (!proc || !path || !*path) {
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
 
@@ -379,8 +480,17 @@ static uint64_t sys_create(const char *path) {
 static uint64_t sys_stat(const char *path, vfs_stat_t *out) {
     process_t *proc = sched_current_process();
 
-    if (!proc || !path || !*path || !out) {
+    if (!proc || !path || !out) {
         return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
+        return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(out, sizeof(*out))) {
+        return (uint64_t)-U_EFAULT;
     }
 
     return vfs_stat(proc->cwd ? proc->cwd : vfs_root(), path, out) == 0 ? 0 : (uint64_t)-1;
@@ -392,6 +502,9 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
 
     if (!buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     buf[0] = '\0';
@@ -422,7 +535,13 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
 static uint64_t sys_spawn(const char *path) {
     uint64_t pid = 0;
 
-    if (!path || !*path) {
+    if (!path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
     if (user_spawn_path(path, &pid) != 0) {
@@ -456,6 +575,9 @@ static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
     if (!out) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(out, sizeof(*out))) {
+        return (uint64_t)-U_EFAULT;
+    }
 
     proc = sched_find_process(pid);
     if (!proc) {
@@ -481,6 +603,9 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
 
     if (!out) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(out, sizeof(*out))) {
+        return (uint64_t)-U_EFAULT;
     }
     proc = sched_find_process(pid);
     if (!proc) {
@@ -508,6 +633,9 @@ static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
 
     if (!out) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(out, sizeof(*out))) {
+        return (uint64_t)-U_EFAULT;
     }
     dev = gpu_primary();
     if (!dev) {
@@ -542,8 +670,23 @@ static uint64_t sys_gpu_present(void) {
 
 static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) {
     gpu_device_t *dev = gpu_primary();
+    uint64_t pixels;
     if (!dev || !dev->set_cursor) {
         return (uint64_t)-1;
+    }
+    if (w < 0 || h < 0) {
+        return (uint64_t)-U_EINVAL;
+    }
+    pixels = (uint64_t)w * (uint64_t)h;
+    /* Overflow-guarded image range probe (w*h*4 bytes). */
+    if (pixels > UACCESS_MAX_LEN / 4) {
+        return (uint64_t)-U_EINVAL;
+    }
+    if (pixels != 0 && !image) {
+        return (uint64_t)-U_EINVAL;
+    }
+    if (image && !user_range_prepare_cur(image, pixels * 4)) {
+        return (uint64_t)-U_EFAULT;
     }
     return dev->set_cursor(dev, x, y, image, w, h) == 0 ? 0 : (uint64_t)-1;
 }
@@ -573,8 +716,17 @@ static uint64_t sys_sync(void) {
 static uint64_t sys_spawn_args(const char *path, const char *args) {
     uint64_t pid = 0;
 
-    if (!path || !*path) {
+    if (!path) {
         return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
+        return (uint64_t)-1;
+    }
+    if (args && strnlen_user(args, 2048) == (uint64_t)-1) {
+        return (uint64_t)-U_EFAULT;
     }
     if (user_spawn_path_args(path, args, &pid) != 0) {
         return (uint64_t)-1;
@@ -585,7 +737,13 @@ static uint64_t sys_spawn_args(const char *path, const char *args) {
 static uint64_t sys_mount(uint64_t partition_index, const char *path) {
     const partition_info_t *part;
 
-    if (!path || !*path) {
+    if (!path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
     part = partition_get((uint32_t)partition_index);
@@ -624,6 +782,12 @@ static uint64_t sys_install_system(uint64_t *files_out, uint64_t *bytes_out) {
     uint64_t files = 0;
     uint64_t bytes = 0;
 
+    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
     if (system_install_run(&files, &bytes) != 0) {
         return (uint64_t)-1;
     }
@@ -641,6 +805,12 @@ static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, u
     uint64_t bytes = 0;
     int rc;
 
+    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
     rc = system_install_device((uint32_t)device_index, &files, &bytes);
     if (rc != 0) {
         return (uint64_t)(int64_t)rc;
@@ -661,6 +831,15 @@ static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint6
 
     if (!plan) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(plan, sizeof(*plan))) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+        return (uint64_t)-U_EFAULT;
     }
     rc = system_install_partitions((uint32_t)plan->efi_partition, (uint32_t)plan->root_partition, (int32_t)plan->swap_partition, &files, &bytes);
     if (rc != 0) {
@@ -687,6 +866,10 @@ static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
     if (!cols_out || !rows_out) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(cols_out, sizeof(*cols_out)) ||
+        !user_range_prepare_cur(rows_out, sizeof(*rows_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
     if (fb_available()) {
         int fb_cols = fb_columns();
         int fb_rows_count = fb_rows();
@@ -704,6 +887,10 @@ static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
     if (!x_out || !y_out) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(x_out, sizeof(*x_out)) ||
+        !user_range_prepare_cur(y_out, sizeof(*y_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
     console_get_cursor(&x, &y);
     *x_out = x < 0 ? 0 : (uint64_t)x;
     *y_out = y < 0 ? 0 : (uint64_t)y;
@@ -720,6 +907,9 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
 
     if (!buf || cap == 0) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
     }
 
     buf[0] = '\0';
@@ -798,7 +988,13 @@ static uint64_t sys_audio_pcm_play(const uint8_t *buf, uint64_t size, uint64_t s
 
 static uint64_t sys_audio_play_file(const char *path) {
     process_t *proc = sched_current_process();
-    if (!proc || !path || !*path) {
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
         return (uint64_t)-1;
     }
     return audio_playback_play_wav(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
@@ -815,6 +1011,9 @@ static uint64_t sys_audio_status(syscall_audio_info_t *out) {
 
     if (!out) {
         return (uint64_t)-1;
+    }
+    if (!user_range_prepare_cur(out, sizeof(*out))) {
+        return (uint64_t)-U_EFAULT;
     }
     if (audio_playback_status(&info) != 0) {
         return (uint64_t)-1;
@@ -840,6 +1039,10 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
     if (!proc || !token_out || !sample_rate_out) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(token_out, sizeof(*token_out)) ||
+        !user_range_prepare_cur(sample_rate_out, sizeof(*sample_rate_out))) {
+        return (uint64_t)-U_EFAULT;
+    }
     if (audio_playback_claim(proc->pid, &token, &rate) != 0) {
         return (uint64_t)-1;
     }
@@ -852,6 +1055,9 @@ static uint64_t sys_audio_read_chunk(uint64_t token, uint8_t *buf, uint64_t cap)
     if (!buf || cap == 0 || cap > 0xFFFFFFFFULL) {
         return (uint64_t)-1;
     }
+    if (!user_range_prepare_cur(buf, cap)) {
+        return (uint64_t)-U_EFAULT;
+    }
     return audio_playback_read_chunk(token, buf, (uint32_t)cap);
 }
 
@@ -860,10 +1066,30 @@ static uint64_t sys_audio_finish(uint64_t token) {
     return 0;
 }
 
+/* P0 gate for the (host, path, out_path) string triple shared by the
+ * HTTP/HTTPS fetch handlers. Paths into the network stack are the
+ * classic remote-input vector, so bound them tightly. */
+static int gate_fetch_args(const char *host, const char *path,
+                           const char *out_path, uint64_t *bytes_out) {
+    if (!host || !path || !out_path) {
+        return 0;
+    }
+    if (strnlen_user(host, 255) == (uint64_t)-1 ||
+        strnlen_user(path, 4095) == (uint64_t)-1 ||
+        strnlen_user(out_path, 511) == (uint64_t)-1) {
+        return 0;
+    }
+    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+        return 0;
+    }
+    return 1;
+}
+
 static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
     uint64_t bytes = 0;
-    if (!host || !path || !out_path) {
-        return (uint64_t)-1;
+    if (!gate_fetch_args(host, path, out_path, bytes_out)) {
+        return !host || !path || !out_path ? (uint64_t)-1
+                                           : (uint64_t)-U_EFAULT;
     }
     if (net_http_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, host, path, out_path, &bytes) != 0) {
         return (uint64_t)(-(int64_t)net_last_error());
@@ -876,8 +1102,9 @@ static uint64_t sys_http_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char 
 
 static uint64_t sys_https_get_ipv4(uint64_t ipv4_addr, uint64_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out) {
     uint64_t bytes = 0;
-    if (!host || !path || !out_path) {
-        return (uint64_t)-1;
+    if (!gate_fetch_args(host, path, out_path, bytes_out)) {
+        return !host || !path || !out_path ? (uint64_t)-1
+                                           : (uint64_t)-U_EFAULT;
     }
     if (net_https_get_ipv4((uint32_t)ipv4_addr, (uint16_t)port, host, path, out_path, &bytes) != 0) {
         return (uint64_t)(-(int64_t)net_last_error());
@@ -892,6 +1119,12 @@ static uint64_t sys_dns_resolve(const char *host, uint32_t *ipv4_out) {
     uint32_t ipv4 = 0;
     if (!host || !ipv4_out) {
         return (uint64_t)-1;
+    }
+    if (strnlen_user(host, 255) == (uint64_t)-1) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!user_range_prepare_cur(ipv4_out, sizeof(*ipv4_out))) {
+        return (uint64_t)-U_EFAULT;
     }
     if (net_dns_resolve_ipv4(host, &ipv4) != 0) {
         return (uint64_t)(-(int64_t)net_last_error());
@@ -909,42 +1142,165 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
     uint64_t a0 = regs->rdi, a1 = regs->rsi, a2 = regs->rdx;
     uint64_t a3 = regs->r10, a4 = regs->r8, a5 = regs->r9;
 
+    if (!proc) {
+        return (uint64_t)-1;
+    }
+
     switch (nr) {
         case 0: { // read
+            int fd = (int)a0;
             char *buf = (char *)(uintptr_t)a1;
             uint64_t count = a2;
-            if (!buf) return (uint64_t)-1;
-            if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
-            uint64_t size = 0;
-            const char *data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), "/dev/stdin", &size);
-            if (!data || count == 0) return 0;
-            uint64_t copy = count < size ? count : size;
-            for (uint64_t i = 0; i < copy; i++) buf[i] = data[i];
+            struct vfs_node *node;
+            uint64_t off;
+            int is_stdio = 0;
+            uint64_t size;
+            const char *data;
+            uint64_t avail;
+            uint64_t copy;
+            if (!buf && count != 0) return (uint64_t)-U_EFAULT;
+            if (count == 0) return 0;
+            if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
+            if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
+                return (uint64_t)-U_EBADF;
+            }
+            if (is_stdio) {
+                if (fd != 0) return (uint64_t)-U_EBADF;
+                if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
+                data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), "/dev/stdin", &size);
+                if (!data) return 0;
+                copy = count < size ? count : size;
+                if (copy_to_user(buf, data, copy) != 0) return (uint64_t)-U_EFAULT;
+                return copy;
+            }
+            if (vfs_node_type(node) != VFS_NODE_FILE) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if ((fd_get_flags(proc, fd) & FD_O_ACCMODE) == FD_O_WRONLY) {
+                return (uint64_t)-U_EBADF;
+            }
+            size = vfs_node_size(node);
+            if (off >= size) return 0;
+            data = vfs_node_data(node);
+            if (!data) return 0;
+            avail = size - off;
+            copy = count < avail ? count : avail;
+            if (copy_to_user(buf, data + off, copy) != 0) {
+                return (uint64_t)-U_EFAULT;
+            }
+            fd_set_off(proc, fd, off + copy);
             return copy;
         }
         case 1: { // write
+            int fd = (int)a0;
             const char *buf = (const char *)(uintptr_t)a1;
             uint64_t count = a2;
-            if (!buf) return (uint64_t)-1;
-            console_write(buf, CONSOLE_STYLE_INFO);
-            return count;
+            struct vfs_node *node;
+            uint64_t off;
+            int is_stdio = 0;
+            if (!buf && count != 0) return (uint64_t)-U_EFAULT;
+            if (count == 0) return 0;
+            if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
+            if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
+                return (uint64_t)-U_EBADF;
+            }
+            if (is_stdio) {
+                uint64_t done = 0;
+                char kbuf[4096];
+                if (fd == 0) return (uint64_t)-U_EBADF;
+                /* NUL-safe chunked console output: console_write scans
+                 * for NUL, so never hand it raw user memory. */
+                while (done < count) {
+                    uint64_t chunk = count - done;
+                    if (chunk > sizeof(kbuf) - 1) chunk = sizeof(kbuf) - 1;
+                    if (copy_from_user(kbuf, buf + done, chunk) != 0) {
+                        return (uint64_t)-U_EFAULT;
+                    }
+                    kbuf[chunk] = '\0';
+                    console_write(kbuf, CONSOLE_STYLE_INFO);
+                    done += chunk;
+                }
+                return count;
+            }
+            if (vfs_node_type(node) != VFS_NODE_FILE) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if ((fd_get_flags(proc, fd) & FD_O_ACCMODE) == FD_O_RDONLY) {
+                return (uint64_t)-U_EBADF;
+            }
+            if (vfs_node_readonly(node)) {
+                return (uint64_t)-U_EACCES;
+            }
+            {
+                uint64_t done = 0;
+                char kbuf[4096];
+                while (done < count) {
+                    uint64_t chunk = count - done;
+                    if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+                    if (copy_from_user(kbuf, buf + done, chunk) != 0) {
+                        return (uint64_t)-U_EFAULT;
+                    }
+                    if (vfs_node_write_at(node, off + done, kbuf, chunk) != 0) {
+                        return done ? done : (uint64_t)-1;
+                    }
+                    done += chunk;
+                }
+                fd_set_off(proc, fd, off + done);
+                return done;
+            }
         }
         case 2: { // open
             const char *pathname = (const char *)(uintptr_t)a0;
-            if (!pathname) return (uint64_t)-1;
-            vfs_node_t *node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), pathname);
-            if (!node) return (uint64_t)-1;
-            static int next_fd = 3;
-            int fd = next_fd++;
-            return fd;
+            uint64_t flags = a1;
+            uint64_t plen;
+            char kpath[512];
+            int fd;
+            if (!pathname) return (uint64_t)-U_EFAULT;
+            plen = strnlen_user(pathname, sizeof(kpath) - 1);
+            if (plen == (uint64_t)-1) return (uint64_t)-U_EFAULT;
+            if (copy_from_user(kpath, pathname, plen + 1) != 0) {
+                return (uint64_t)-U_EFAULT;
+            }
+            kpath[plen] = '\0';
+            fd = fd_open_path(proc, proc->cwd ? proc->cwd : vfs_root(),
+                              kpath, flags);
+            if (fd < 0) return (uint64_t)(int64_t)fd;
+            return (uint64_t)fd;
         }
         case 3: // close
-            return 0;
+            return fd_close(proc, (int)a0) == 0 ? 0 : (uint64_t)-U_EBADF;
         case 5: { // fstat
+            int fd = (int)a0;
             vfs_stat_t *st = (vfs_stat_t *)(uintptr_t)a1;
-            if (!st) return (uint64_t)-1;
-            st->size = 0;
-            st->type = VFS_NODE_FILE;
+            struct vfs_node *node;
+            uint64_t off;
+            int is_stdio = 0;
+            vfs_stat_t ks;
+            if (!st) return (uint64_t)-U_EFAULT;
+            if (!user_range_prepare_cur(st, sizeof(*st))) {
+                return (uint64_t)-U_EFAULT;
+            }
+            if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
+                return (uint64_t)-U_EBADF;
+            }
+            if (is_stdio) {
+                ks.inode = 0;
+                ks.size = 0;
+                ks.created = 0;
+                ks.modified = 0;
+                ks.type = VFS_NODE_FILE;
+                ks.readonly = 1;
+            } else {
+                ks.inode = vfs_node_inode(node);
+                ks.size = vfs_node_size(node);
+                ks.created = vfs_node_created(node);
+                ks.modified = vfs_node_modified(node);
+                ks.type = vfs_node_type(node);
+                ks.readonly = vfs_node_readonly(node);
+            }
+            if (copy_to_user(st, &ks, sizeof(ks)) != 0) {
+                return (uint64_t)-U_EFAULT;
+            }
             return 0;
         }
         case 9: { // mmap
@@ -977,8 +1333,45 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             return addr;
         }
-        case 11: // munmap
+        case 11: { // munmap — real implementation (P0/B3)
+            uint64_t addr = a0;
+            uint64_t length = a1;
+            uint64_t end;
+            uint64_t page;
+            /* Shared framebuffer window: device memory, not PMM-owned.
+             * Never free it here; use SYS_MAP_FRAMEBUFFER/SYS_SHM_UNMAP. */
+            uint64_t fb_virt = 0x500000000ULL;
+            uint64_t fb_size = fb_phys_size();
+            /* SHM window: ref-counted shared frames owned by shm.c.
+             * Detaching must go through SYS_SHM_UNMAP/SYS_SHM_CLOSE. */
+            uint64_t shm_end = SHM_VIRT_BASE + (uint64_t)SHM_MAX_REGIONS * SHM_SLOT_SIZE;
+            if (length == 0 || (addr & 0xFFFULL)) {
+                return (uint64_t)-U_EINVAL;
+            }
+            end = addr + length;
+            if (end < addr || end > USER_HALF_END) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (addr < fb_virt + fb_size && end > fb_virt) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (addr < shm_end && end > SHM_VIRT_BASE) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (!proc || !proc->addr_space) {
+                return (uint64_t)-U_EINVAL;
+            }
+            for (page = addr; page < end; page += PAGE_SIZE_4K) {
+                /* Present user pages here are always PMM-owned: text,
+                 * stack, brk and mmap regions are privately allocated
+                 * per process, and the shared FB/SHM windows are
+                 * excluded above. Non-present pages are skipped. */
+                if (vmm_virt_to_phys(proc->addr_space, page)) {
+                    vmm_unmap_page(proc->addr_space, page, 1);
+                }
+            }
             return 0;
+        }
         case 12: { // brk
             uint64_t new_brk = a0;
             if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
@@ -1004,43 +1397,73 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
         case 231: // exit_group
             user_request_exit_to_kernel(a0);
             return a0;
-        case 78: { // getdents
+        case 78: { // getdents — fd-based (P0/B2)
+            int fd = (int)a0;
             char *buf = (char *)(uintptr_t)a1;
             uint64_t count = a2;
-            if (!buf) return (uint64_t)-1;
-            if (count < 20) return 0;
+            struct vfs_node *node;
+            uint64_t entry;
+            int is_stdio = 0;
             char dirbuf[4096];
-            uint64_t len = sys_list_dir((const char *)0, dirbuf, sizeof(dirbuf));
-            uint64_t written = 0;
-            uint64_t pos = 0;
-            while (pos < len && written + 20 <= count) {
-                uint64_t name_start = pos;
-                while (pos < len && dirbuf[pos] != '\n') pos++;
-                uint64_t name_len = pos - name_start;
-                if (name_len > 255) name_len = 255;
-                uint8_t *dirent = (uint8_t *)(buf + written);
-                dirent[0] = 0;
-                dirent[1] = 0;
-                dirent[2] = 0;
-                dirent[3] = 0;
-                dirent[4] = 0;
-                dirent[5] = 0;
-                dirent[6] = 0;
-                dirent[7] = 0;
-                dirent[8] = 0;
-                dirent[9] = 0;
-                dirent[10] = 0;
-                dirent[11] = 0;
-                dirent[16] = (uint8_t)(name_len);
-                dirent[17] = (uint8_t)(name_len >> 8);
-                dirent[18] = 0; // DT_UNKNOWN
-                for (uint64_t i = 0; i < name_len && i < count - written - 19; i++) {
-                    dirent[19 + i] = (uint8_t)dirbuf[name_start + i];
-                }
-                written += 19 + name_len;
-                if (dirbuf[pos] == '\n') pos++;
+            uint64_t len;
+            if (!buf && count != 0) return (uint64_t)-U_EFAULT;
+            if (count == 0) return 0;
+            if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
+            if (fd_resolve(proc, fd, &node, &entry, &is_stdio) != 0 || is_stdio) {
+                return (uint64_t)-U_EBADF;
             }
-            return written;
+            if (vfs_node_type(node) != VFS_NODE_DIR) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (count < 20) return 0;
+            /* List the fd's own directory (not cwd), honoring the fd
+             * offset so repeated calls page through entries. */
+            len = list_dir_entries(node, dirbuf, sizeof(dirbuf), 0, NULL);
+            {
+                uint64_t written = 0;
+                uint64_t pos = 0;
+                uint64_t seen = 0;
+                uint64_t emitted = 0;
+                while (pos < len && written + 20 <= count) {
+                    uint64_t name_start = pos;
+                    uint8_t had_nl;
+                    uint64_t name_len;
+                    uint8_t *dirent;
+                    while (pos < len && dirbuf[pos] != '\n') pos++;
+                    had_nl = (pos < len && dirbuf[pos] == '\n');
+                    if (seen < entry) {
+                        seen++;
+                        if (had_nl) pos++;
+                        continue;
+                    }
+                    name_len = pos - name_start;
+                    if (name_len > 255) name_len = 255;
+                    dirent = (uint8_t *)(buf + written);
+                    dirent[0] = 0;
+                    dirent[1] = 0;
+                    dirent[2] = 0;
+                    dirent[3] = 0;
+                    dirent[4] = 0;
+                    dirent[5] = 0;
+                    dirent[6] = 0;
+                    dirent[7] = 0;
+                    dirent[8] = 0;
+                    dirent[9] = 0;
+                    dirent[10] = 0;
+                    dirent[11] = 0;
+                    dirent[16] = (uint8_t)(name_len);
+                    dirent[17] = (uint8_t)(name_len >> 8);
+                    dirent[18] = 0; // DT_UNKNOWN
+                    for (uint64_t i = 0; i < name_len && i < count - written - 19; i++) {
+                        dirent[19 + i] = (uint8_t)dirbuf[name_start + i];
+                    }
+                    written += 19 + name_len;
+                    emitted++;
+                    if (had_nl) pos++;
+                }
+                fd_set_off(proc, fd, entry + emitted);
+                return written;
+            }
         }
         case 158: // arch_prctl
             return 0;
@@ -1206,12 +1629,36 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return (uint64_t)shm_unmap(regs->rdi);
         case SYS_SHM_CLOSE:
             return (uint64_t)shm_close(regs->rdi);
-        case SYS_MSG_OPEN:
-            return msgq_open((const char *)(uintptr_t)regs->rdi);
-        case SYS_MSG_SEND:
-            return (uint64_t)msgq_send(regs->rdi, (const void *)(uintptr_t)regs->rsi);
-        case SYS_MSG_RECV:
-            return (uint64_t)msgq_recv(regs->rdi, (void *)(uintptr_t)regs->rsi, (int)regs->rdx);
+        case SYS_MSG_OPEN: {
+            const char *name = (const char *)(uintptr_t)regs->rdi;
+            if (!name) {
+                return (uint64_t)-1;
+            }
+            if (strnlen_user(name, 63) == (uint64_t)-1) {
+                return (uint64_t)-U_EFAULT;
+            }
+            return msgq_open(name);
+        }
+        case SYS_MSG_SEND: {
+            const void *msg = (const void *)(uintptr_t)regs->rsi;
+            if (!msg) {
+                return (uint64_t)-1;
+            }
+            if (!user_range_prepare_cur(msg, 64)) {
+                return (uint64_t)-U_EFAULT;
+            }
+            return (uint64_t)msgq_send(regs->rdi, msg);
+        }
+        case SYS_MSG_RECV: {
+            void *out = (void *)(uintptr_t)regs->rsi;
+            if (!out) {
+                return (uint64_t)-1;
+            }
+            if (!user_range_prepare_cur(out, 64)) {
+                return (uint64_t)-U_EFAULT;
+            }
+            return (uint64_t)msgq_recv(regs->rdi, out, (int)regs->rdx);
+        }
         case SYS_MSG_POLL:
             return (uint64_t)msgq_poll(regs->rdi);
         case SYS_MAP_FRAMEBUFFER: {
@@ -1220,6 +1667,9 @@ uint64_t syscall_dispatch(struct registers *regs) {
              * via a VT switch), let the new process take over the screen. */
             fb_release_if_owner_gone();
             if (fb_claimed) return (uint64_t)-1;
+            if (info && !user_range_prepare_cur(info, sizeof(*info))) {
+                return (uint64_t)-U_EFAULT;
+            }
             if (!fb_available()) return (uint64_t)-1;
             process_t *fproc = sched_current_process();
             if (!fproc || !fproc->addr_space) return (uint64_t)-1;
@@ -1257,6 +1707,9 @@ uint64_t syscall_dispatch(struct registers *regs) {
         case SYS_INPUT_READ_MOUSE: {
             syscall_mouse_event_t *out = (syscall_mouse_event_t *)(uintptr_t)regs->rdi;
             if (!out) return (uint64_t)-1;
+            if (!user_range_prepare_cur(out, sizeof(*out))) {
+                return (uint64_t)-U_EFAULT;
+            }
             mouse_event_t ev;
             if (mouse_read_event(&ev) != 0) return (uint64_t)-1;
             out->abs_x   = ev.abs_x;

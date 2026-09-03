@@ -56,6 +56,18 @@ typedef struct process {
     int linux_personality;
     uint64_t linux_brk_pos;
     uint64_t linux_mmap_next;
+    /* Real file-descriptor table for the Linux personality (B2).
+     * fds[0..2] are always the console stdio trio and never stored;
+     * entries 3..FD_TABLE_SIZE-1 hold VFS nodes when used.  The whole
+     * struct comes from zeroed pages (alloc_object_page), so a fresh
+     * process starts with fds_inited == 0 and an empty table; the fd
+     * helpers below lazily reserve stdio on first use. */
+#define FD_TABLE_SIZE 64
+    struct vfs_node *fd_nodes[FD_TABLE_SIZE];
+    uint64_t fd_off[FD_TABLE_SIZE];
+    uint64_t fd_flags[FD_TABLE_SIZE];
+    uint8_t  fd_used[FD_TABLE_SIZE];
+    int      fds_inited;
     /* Task-manager accounting: scheduler ticks consumed and user memory */
     uint64_t         cpu_ticks;
     uint64_t         mem_bytes;

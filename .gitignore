@@ -107,3 +107,9 @@ kernel/proc/icon_assets.asm
 qemu-audio-selftest.wav
 qemu-hda-*.log
 qemu-hda-*.wav
+
+# opencode project plugin residue (auto-generated, mirrors ~/.config/opencode)
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock

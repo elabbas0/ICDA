@@ -33,6 +33,8 @@ global userprog_taskman_start
 global userprog_taskman_end
 global userprog_browser_start
 global userprog_browser_end
+global userprog_nptest_start
+global userprog_nptest_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -97,5 +99,9 @@ userprog_taskman_end:
 userprog_browser_start:
     incbin "userspace/browser.app"
 userprog_browser_end:
+
+userprog_nptest_start:
+    incbin "userspace/nptest.app"
+userprog_nptest_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

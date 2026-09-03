@@ -6,6 +6,23 @@
 
 #define SYSCALL_VECTOR 0x80
 
+/*
+ * Errno contract for the validated gate (P0 hardening).
+ *
+ * Legacy convention is preserved: success is 0 (or a positive value),
+ * generic failure is (uint64_t)-1.  The gate below adds precise codes
+ * for the failures it newly detects; handlers return them as
+ * (uint64_t)-U_Exxx so existing userspace `(long)rc < 0` checks keep
+ * working.  Do NOT attach new meanings to -1.  (The page-fault killer
+ * in pf.c reports -11 for a dead process, deliberately distinct from
+ * U_EFAULT below.)
+ */
+#define U_ENOENT  2   /* no such file or directory */
+#define U_EBADF   9   /* bad file descriptor */
+#define U_EACCES  13  /* permission denied (incl. TLS refusing to connect) */
+#define U_EFAULT  14  /* bad user-space address */
+#define U_EINVAL  22  /* invalid argument */
+
 typedef enum {
     SYS_CONSOLE_WRITE = 0,
     SYS_GET_PID       = 1,
