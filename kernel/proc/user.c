@@ -646,6 +646,20 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
         return -1;
     }
 
+    /* External identity (B3: before READY, so no gate ever observes a
+     * half-set identity). Children inherit; the PID1 image is re-rooted
+     * to uid 0 / session leader with a fresh monotonic token. */
+    if (current_proc) {
+        user_proc->ex_uid = current_proc->ex_uid;
+        user_proc->ex_token = current_proc->ex_token;
+        user_proc->ex_session_leader = 0;
+    }
+    if (cstr_eq(path, "/sbin/init.app")) {
+        user_proc->ex_uid = 0;
+        user_proc->ex_session_leader = 1;
+        user_proc->ex_token = sched_ticks() ? (uint64_t)sched_ticks() : 1;
+    }
+
     user_proc->state = PROCESS_READY;
     if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
         user_proc->linux_personality = 1;

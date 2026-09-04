@@ -56,6 +56,14 @@ typedef struct process {
     int linux_personality;
     uint64_t linux_brk_pos;
     uint64_t linux_mmap_next;
+    /* External identity (P0 OS-ification, step 2). INERT for now: filled
+     * in at spawn, logged at privileged gates, never enforced. Children
+     * inherit the parent's values; /sbin/init.app is re-rooted to
+     * uid 0 / session leader inside user_spawn_pathv_depth (before the
+     * child goes READY, so no gate can observe a half-set identity). */
+    uint32_t ex_uid;
+    uint64_t ex_token;
+    int      ex_session_leader;
     /* Real file-descriptor table for the Linux personality (B2).
      * fds[0..2] are always the console stdio trio and never stored;
      * entries 3..FD_TABLE_SIZE-1 hold VFS nodes when used.  The whole

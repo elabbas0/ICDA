@@ -127,6 +127,31 @@ static uint64_t sys_get_pid(void) {
     return proc ? proc->pid : 0;
 }
 
+/* Minimal serial u64 printer for identity-gate logging (no printf). */
+static void ident_log_u64(uint64_t v) {
+    char buf[21];
+    int i = 0;
+    int a;
+    int b;
+    char t;
+
+    if (v == 0) {
+        serial_write("0");
+        return;
+    }
+    while (v > 0 && i < 20) {
+        buf[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    buf[i] = '\0';
+    for (a = 0, b = i - 1; a < b; a++, b--) {
+        t = buf[a];
+        buf[a] = buf[b];
+        buf[b] = t;
+    }
+    serial_write(buf);
+}
+
 /* P0 gate helpers: validated path (512B cap) and buffer range. */
 static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
                                  uint64_t skip, uint64_t *emitted_out);
@@ -731,8 +756,9 @@ static uint64_t sys_spawn_args(const char *path, const char *args) {
 
 static uint64_t sys_mount(uint64_t partition_index, const char *path) {
     const partition_info_t *part;
+    process_t *proc = sched_current_process();
 
-    if (!path) {
+    if (!proc || !path) {
         return (uint64_t)-1;
     }
     if (!gate_path_ok(path)) {
@@ -740,6 +766,23 @@ static uint64_t sys_mount(uint64_t partition_index, const char *path) {
     }
     if (!*path) {
         return (uint64_t)-1;
+    }
+    /* Identity gate, log-only (P0 step 2): record who mounts; no denial.
+     * Path is gate-probed above; print bounded to 64 chars. */
+    {
+        int pi = 0;
+        serial_write("[ident] op=mount pid=");
+        ident_log_u64(proc->pid);
+        serial_write(" uid=");
+        ident_log_u64(proc->ex_uid);
+        serial_write(" part=");
+        ident_log_u64(partition_index);
+        serial_write(" path=");
+        while (pi < 64 && path[pi]) {
+            serial_write_char(path[pi]);
+            pi++;
+        }
+        serial_write("\n");
     }
     part = partition_get((uint32_t)partition_index);
     if (!part) {
@@ -1042,6 +1085,14 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
         !user_range_prepare_cur_w(sample_rate_out, sizeof(*sample_rate_out))) {
         return (uint64_t)-U_EFAULT;
     }
+    /* Identity gate, log-only (P0 step 2): record who claims; no denial. */
+    serial_write("[ident] op=audio-claim pid=");
+    ident_log_u64(proc->pid);
+    serial_write(" uid=");
+    ident_log_u64(proc->ex_uid);
+    serial_write(" tok=");
+    ident_log_u64(proc->ex_token);
+    serial_write("\n");
     if (audio_playback_claim(proc->pid, &token, &rate) != 0) {
         return (uint64_t)-1;
     }

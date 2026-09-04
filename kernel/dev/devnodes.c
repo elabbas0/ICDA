@@ -1,5 +1,6 @@
 #include "devops.h"
 
+#include "../drivers/serial/serial.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 #include "../drivers/display/gpu.h"
@@ -12,6 +13,31 @@
 #include "../syscall/syscall.h"
 
 /* ---- local helpers ---- */
+
+/* Minimal serial u64 printer (no printf in kernel). */
+static void dev_serial_u64(uint64_t v) {
+    char buf[21];
+    int i = 0;
+    int a;
+    int b;
+    char t;
+
+    if (v == 0) {
+        serial_write("0");
+        return;
+    }
+    while (v > 0 && i < 20) {
+        buf[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    buf[i] = '\0';
+    for (a = 0, b = i - 1; a < b; a++, b--) {
+        t = buf[a];
+        buf[a] = buf[b];
+        buf[b] = t;
+    }
+    serial_write(buf);
+}
 
 static uint64_t dev_kstrlen(const char *text) {
     uint64_t len = 0;
@@ -130,6 +156,14 @@ static uint64_t dev_fb_claim_map(void *info) {
     if (!fproc || !fproc->addr_space) {
         return (uint64_t)-1;
     }
+    /* Identity gate, log-only (P0 step 2): record who claims; no denial. */
+    serial_write("[ident] op=fb-claim pid=");
+    dev_serial_u64(fproc->pid);
+    serial_write(" uid=");
+    dev_serial_u64(fproc->ex_uid);
+    serial_write(" tok=");
+    dev_serial_u64(fproc->ex_token);
+    serial_write(fproc->ex_session_leader ? " leader=1\n" : " leader=0\n");
     fb_phys = fb_phys_addr();
     fb_size = fb_phys_size();
     if (!fb_phys || !fb_size) {

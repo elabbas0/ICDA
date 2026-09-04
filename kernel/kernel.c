@@ -473,29 +473,46 @@ void kernel_main(void *multiboot_info) {
         }
         int shell_failures = 0;
         for (;;) {
-            /* The active virtual terminal decides what runs: the desktop
-             * (WM) on F1, a full-screen text shell on F2+.  A VT switch
-             * force-exits the foreground app, which lands us back here to
-             * restart with the app for the newly selected VT. */
-            int shell_rc = user_run_path(vt_app_path());
+            /* PID1 supervision (P0 step 2): the kernel runs init, init
+             * runs the VT app (desktop on F1, text shell on F2+). A VT
+             * switch force-exits the foreground tree, which lands us
+             * back here to restart with the app for the new VT.
+             * user_wait_pid reports status; the code comes from the
+             * out-param (B1) — nonzero init exit means failure. */
+            uint64_t init_pid = 0;
+            uint64_t init_code = 0;
+            int shell_rc;
+            if (user_spawn_path_args("/sbin/init.app",
+                                     vt_is_gui() ? "gui" : "text",
+                                     &init_pid) != 0) {
+                boot_line("init", "/sbin/init.app missing, direct-spawn fallback");
+                shell_rc = user_run_path(vt_app_path());
+            } else if (user_wait_pid(init_pid, &init_code) != 0) {
+                shell_rc = -1;
+            } else {
+                /* Reap init's orphans (B2): only init itself is waited
+                 * on, so its force-exited children would leak. */
+                sched_reap_orphans();
+                shell_rc = (init_code == 0) ? 0 : -1;
+            }
             if (shell_rc < 0 && vt_is_gui()) {
                 shell_rc = user_run_path("/apps/shell.app");
             }
             if (shell_rc < 0) {
                 shell_failures++;
                 if (shell_failures < 3) {
-                    boot_line("shell", "userspace shell failed to start, retrying");
+                    boot_line("init", "supervised tree failed to start, retrying");
                     continue;
                 }
-                boot_line("shell", "userspace shell failed repeatedly, entering recovery console");
+                boot_line("init", "supervised tree failed repeatedly, entering recovery console");
                 if (tty_init() != 0) {
                     console_write("\n", CONSOLE_STYLE_INFO);
                     boot_halt("tty", "recovery console failed to start");
                 }
                 break;
             }
-            boot_prefix("shell");
-            console_write("userspace shell exited rc=", CONSOLE_STYLE_INFO);
+            boot_prefix("init");
+            console_write("init supervised tree exited rc=", CONSOLE_STYLE_INFO);
             console_write_dec64((uint64_t)shell_rc, CONSOLE_STYLE_INFO);
             console_write(", restarting\n", CONSOLE_STYLE_INFO);
         }

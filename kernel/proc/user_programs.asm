@@ -37,6 +37,8 @@ global userprog_nptest_start
 global userprog_nptest_end
 global userprog_nptestlx_start
 global userprog_nptestlx_end
+global userprog_init_start
+global userprog_init_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -109,5 +111,9 @@ userprog_nptest_end:
 userprog_nptestlx_start:
     incbin "userspace/nptestlx.elf"
 userprog_nptestlx_end:
+
+userprog_init_start:
+    incbin "userspace/init.app"
+userprog_init_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

@@ -458,6 +458,18 @@ userspace/curl.app: curl_start.o curl.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-curl.app curl_start.o curl.o
 	cp -f /tmp/icda-curl.app userspace/curl.app
 
+init_start.o: userspace/init_start.asm
+	$(ASM) -f elf64 userspace/init_start.asm -o /tmp/icda-init_start.o
+	cp -f /tmp/icda-init_start.o init_start.o
+
+init.o: userspace/init.c userspace/icda_sys.h
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/init.c -o /tmp/icda-init.o
+	cp -f /tmp/icda-init.o init.o
+
+userspace/init.app: init_start.o init.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-init.app init_start.o init.o
+	cp -f /tmp/icda-init.app userspace/init.app
+
 nptest_start.o: userspace/nptest_start.asm
 	$(ASM) -f elf64 userspace/nptest_start.asm -o /tmp/icda-nptest_start.o
 	cp -f /tmp/icda-nptest_start.o nptest_start.o
@@ -514,7 +526,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-terminal.app crt0.o terminal.o gui.o libicda.o
 	cp -f /tmp/icda-terminal.app userspace/terminal.app
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app userspace/taskman.app userspace/browser.app userspace/nptest.app userspace/nptestlx.elf
+user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app userspace/taskman.app userspace/browser.app userspace/nptest.app userspace/nptestlx.elf userspace/init.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \

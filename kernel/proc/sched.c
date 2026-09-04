@@ -594,6 +594,25 @@ int sched_resume_process(uint64_t pid) {
     return 0;
 }
 
+/* Reap EXITED processes nobody will ever wait on: children whose
+ * parent is gone or already dead (B2 — e.g. init's VT-app child after
+ * a VT switch force-exits the whole tree and the kernel reaps only
+ * init). Live parents still reap their own children; this touches
+ * only orphans. */
+void sched_reap_orphans(void) {
+    process_t *p = process_list;
+
+    while (p) {
+        process_t *next = p->next_all;
+        if (p->state == PROCESS_EXITED &&
+            (!p->parent || p->parent->state == PROCESS_EXITED ||
+             p->parent->state == PROCESS_REAPED)) {
+            p->state = PROCESS_REAPED;
+        }
+        p = next;
+    }
+}
+
 int sched_kill_process(uint64_t pid, uint64_t exit_code) {
     process_t *actor = sched_current_process();
     process_t *target = sched_find_process(pid);

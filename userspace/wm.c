@@ -1400,10 +1400,6 @@ int main(int argc, char **argv) {
              * the final composite runs once the batch is consumed. */
             icda_mouse_event_t mev;
             while (icda_input_read_mouse(&mev) == 0) {
-                static uint64_t move_cnt = 0;
-                if ((++move_cnt % 50) == 0) {
-                    icda_write("WM mouse move\n");
-                }
                 int prev_mx = mouse_x;
                 int prev_my = mouse_y;
                 uint8_t prev_btn = mouse_buttons;
@@ -1597,13 +1593,6 @@ int main(int argc, char **argv) {
             }
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
-            {
-                static uint64_t last_hb = 0;
-                if (now - last_hb > 200) {
-                    last_hb = now;
-                    icda_write("WM HB\n");
-                }
-            }
         }
 
         /* Event-driven pacing: the icda_read_char_timeout(1) above is the
