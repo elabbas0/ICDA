@@ -37,10 +37,13 @@
 /* Upper bound for bounded string scans (1 MiB). */
 #define UACCESS_MAX_STR 0x100000ULL
 
-/* Ensure one user page is safe for kernel access: present, or demand-
- * mapped when it lies in the user stack growth region. Returns 1 if
- * the page may be touched, 0 to fail closed. */
-static inline int user_page_ready(addr_space_t *as, uint64_t page_va) {
+/* Ensure one user page is safe for kernel access: present (and, when
+ * for_write, PTE-writable — with CR0.WP=1 a supervisor store to a
+ * read-only user page faults instead of succeeding), or demand-mapped
+ * RW when it lies in the user stack growth region. Returns 1 if the
+ * page may be touched, 0 to fail closed. */
+static inline int user_page_ready(addr_space_t *as, uint64_t page_va,
+                                  int for_write) {
     uint64_t phys;
 
     page_va &= ~0xFFFULL;
@@ -49,7 +52,10 @@ static inline int user_page_ready(addr_space_t *as, uint64_t page_va) {
     }
     phys = vmm_virt_to_phys(as, page_va);
     if (phys) {
-        return 1;
+        if (!for_write) {
+            return 1;
+        }
+        return vmm_page_writable(as, page_va);
     }
     if (page_va < USER_STACK_LIMIT || page_va >= USER_STACK_TOP) {
         return 0;
@@ -73,9 +79,10 @@ static inline int user_page_ready(addr_space_t *as, uint64_t page_va) {
 }
 
 /* Validate + fault-in [addr, addr+len) for the given address space.
+ * for_write additionally requires every page PTE-writable (see above).
  * len == 0 is valid. Returns 1 (safe) or 0 (fail closed). */
 static inline int user_range_prepare(addr_space_t *as, uint64_t addr,
-                                     uint64_t len) {
+                                     uint64_t len, int for_write) {
     uint64_t end;
     uint64_t page;
     uint64_t last;
@@ -99,7 +106,7 @@ static inline int user_range_prepare(addr_space_t *as, uint64_t addr,
     page = addr & ~0xFFFULL;
     last = (end - 1) & ~0xFFFULL;
     for (;;) {
-        if (!user_page_ready(as, page)) {
+        if (!user_page_ready(as, page, for_write)) {
             return 0;
         }
         if (page == last) {
@@ -111,13 +118,27 @@ static inline int user_range_prepare(addr_space_t *as, uint64_t addr,
 }
 
 /* Same, for the calling process. Trusted (non-user) callers bypass. */
-static inline int user_range_prepare_cur(const void *uaddr, uint64_t len) {
+static inline int user_range_prepare_cur_r(const void *uaddr, uint64_t len) {
     process_t *proc = sched_current_process();
     if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
         return 1;
     }
     return user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)uaddr,
-                              len);
+                              len, 0);
+}
+
+static inline int user_range_prepare_cur_w(void *uaddr, uint64_t len) {
+    process_t *proc = sched_current_process();
+    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+        return 1;
+    }
+    return user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)uaddr,
+                              len, 1);
+}
+
+/* Back-compat alias: unqualified uses are reads. */
+static inline int user_range_prepare_cur(const void *uaddr, uint64_t len) {
+    return user_range_prepare_cur_r(uaddr, len);
 }
 
 /* Copy kernel -> user. Returns 0 on success, -1 with nothing touched
@@ -143,7 +164,7 @@ static inline int copy_to_user(void *udst, const void *ksrc, uint64_t len) {
         return 0;
     }
     if (!user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)udst,
-                            len)) {
+                            len, 1)) {
         return -1;
     }
     for (i = 0; i < len; i++) {
@@ -172,7 +193,7 @@ static inline int copy_from_user(void *kdst, const void *usrc, uint64_t len) {
         return 0;
     }
     if (!user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)usrc,
-                            len)) {
+                            len, 0)) {
         return -1;
     }
     for (i = 0; i < len; i++) {
@@ -211,7 +232,7 @@ static inline uint64_t strnlen_user(const char *usrc, uint64_t max) {
     while (n < max) {
         uint64_t page = (addr + n) & ~0xFFFULL;
         uint64_t page_end = page + PAGE_SIZE_4K;
-        if (!user_page_ready(proc->addr_space, page)) {
+        if (!user_page_ready(proc->addr_space, page, 0)) {
             return (uint64_t)-1;
         }
         while (n < max && addr + n < page_end) {

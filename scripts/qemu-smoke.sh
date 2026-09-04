@@ -3,7 +3,10 @@ set -eu
 
 iso="${1:-kernel.iso}"
 log="${QEMU_LOG:-qemu-smoke.log}"
-seconds="${QEMU_TIMEOUT:-8}"
+# 120 s: the tree takes ~60 s to reach the shell even on KVM (audio and
+# storage probes), and TCG hosts need far longer. Override per-run with
+# QEMU_TIMEOUT= (CI uses 600).
+seconds="${QEMU_TIMEOUT:-120}"
 
 rm -f "$log"
 

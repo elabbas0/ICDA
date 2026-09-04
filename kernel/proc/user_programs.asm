@@ -35,6 +35,8 @@ global userprog_browser_start
 global userprog_browser_end
 global userprog_nptest_start
 global userprog_nptest_end
+global userprog_nptestlx_start
+global userprog_nptestlx_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -103,5 +105,9 @@ userprog_browser_end:
 userprog_nptest_start:
     incbin "userspace/nptest.app"
 userprog_nptest_end:
+
+userprog_nptestlx_start:
+    incbin "userspace/nptestlx.elf"
+userprog_nptestlx_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

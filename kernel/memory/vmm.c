@@ -160,6 +160,24 @@ uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt) {
     return PTE_FRAME(*pte) | VA_OFFSET(virt);
 }
 
+/* True when virt is present and software-writable in this address
+ * space (PTE present + R/W, never a huge page, never kernel-half).
+ * Used by the syscall gate so copy_to_user never touches a read-only
+ * user page (with CR0.WP=1 that would panic the kernel instead of
+ * failing the syscall). No allocation, no side effects. */
+int vmm_page_writable(addr_space_t *as, uint64_t virt) {
+    pte_t *pte;
+
+    if (!as || virt >= 0x0000800000000000ULL) {
+        return 0;
+    }
+    pte = get_pte(as, virt & ~0xFFFULL, 0);
+    if (!pte || !(*pte & PTE_PRESENT)) {
+        return 0;
+    }
+    return (*pte & PTE_WRITE) ? 1 : 0;
+}
+
 void vmm_switch_address_space(addr_space_t *as) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(as->pml4_phys) : "memory");
 }

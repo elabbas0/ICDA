@@ -49,6 +49,8 @@ extern const char userprog_browser_start[];
 extern const char userprog_browser_end[];
 extern const char userprog_nptest_start[];
 extern const char userprog_nptest_end[];
+extern const char userprog_nptestlx_start[];
+extern const char userprog_nptestlx_end[];
 static const char motd_txt[] =
     "welcome to icda\n"
     "\n"
@@ -125,7 +127,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/gui_demo.app", 0, 0 },
     { "/apps/taskman.app", 0, 0 },
     { "/apps/browser.app", 0, 0 },
-    { "/apps/nptest.app", 0, 0 }
+    { "/apps/nptest.app", 0, 0 },
+    { "/bin/nptestlx.elf", 0, 0 }
 };
 
 int initramfs_init(void) {
@@ -165,6 +168,8 @@ int initramfs_init(void) {
     initramfs_files[21].size = (uint64_t)(userprog_browser_end - userprog_browser_start);
     initramfs_files[22].data = userprog_nptest_start;
     initramfs_files[22].size = (uint64_t)(userprog_nptest_end - userprog_nptest_start);
+    initramfs_files[23].data = userprog_nptestlx_start;
+    initramfs_files[23].size = (uint64_t)(userprog_nptestlx_end - userprog_nptestlx_start);
     return 0;
 }
 

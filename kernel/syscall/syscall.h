@@ -19,6 +19,7 @@
  */
 #define U_ENOENT  2   /* no such file or directory */
 #define U_EBADF   9   /* bad file descriptor */
+#define U_ENOMEM  12  /* out of memory / unmapped range */
 #define U_EACCES  13  /* permission denied (incl. TLS refusing to connect) */
 #define U_EFAULT  14  /* bad user-space address */
 #define U_EINVAL  22  /* invalid argument */

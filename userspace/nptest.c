@@ -69,6 +69,25 @@ int nptest_main(void) {
     check("getcwd hole buf",
           (long)icda_getcwd(hole, sizeof(good_buf)), 1);
 
+    /* W^X kill-path: spawn the linux test in suicide mode (it mprotects
+     * a page read-only, then stores through it). The kernel must
+     * terminate it with -11; survival or any other code is a FAIL. */
+    {
+        uint64_t pid = icda_spawn_args("/bin/nptestlx.elf", "suicide");
+        if ((long)pid < 0) {
+            failures++;
+            icda_write("FAIL suicide spawn\n");
+        } else {
+            long code = (long)icda_waitpid(pid);
+            if (code == -11) {
+                icda_write("PASS suicide killed -11\n");
+            } else {
+                failures++;
+                icda_write("FAIL suicide kill code\n");
+            }
+        }
+    }
+
     if (failures == 0) {
         icda_write("nptest: ALL PASS\n");
     } else {

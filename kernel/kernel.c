@@ -416,6 +416,51 @@ void kernel_main(void *multiboot_info) {
             console_clear();
         }
         bootstage_set(22, "shell");
+        /* Boot self-test facility (CI + bring-up debugging). With
+         * `icda.test=nptest` (or `=nptestlx`) on the kernel command
+         * line, run that test app first and report its exit code on
+         * the serial line, then continue booting normally. Default
+         * boot (no flag) is unaffected. Physical/cmdline access
+         * already implies full control, so this adds no privilege. */
+        if (boot_cmdline_has_flag(multiboot_info, "icda.test=nptest") ||
+            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")) {
+            const char *test_path =
+                boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")
+                ? "/bin/nptestlx.elf"
+                : "/apps/nptest.app";
+            /* Mirror the console to serial for the duration so every
+             * PASS/FAIL line lands in the serial log (the mirror is
+             * otherwise off once the framebuffer is up). Note:
+             * user_run_path returns spawn/wait status (0/-1), NOT the
+             * app's exit code — that comes from user_last_exit_code. */
+            int test_st;
+            int test_rc;
+            console_set_serial_mirror(1);
+            test_st = user_run_path(test_path);
+            console_set_serial_mirror(0);
+            test_rc = (test_st == 0) ? (int)user_last_exit_code() : 9999;
+            uint64_t rcv = (uint64_t)(int64_t)test_rc;
+            int rci = 0;
+            char rcb[20];
+            serial_write("[nptest] exit rc=");
+            if (rcv == 0) {
+                serial_write("0");
+            } else {
+                while (rcv > 0 && rci < 20) {
+                    rcb[rci++] = (char)('0' + (rcv % 10));
+                    rcv /= 10;
+                }
+                while (rci > 0) {
+                    char c[2];
+                    rci--;
+                    c[0] = rcb[rci];
+                    c[1] = '\0';
+                    serial_write(c);
+                }
+            }
+            serial_write(test_rc == 0 ? " NPTEST DONE ALL-PASS\n"
+                                      : " NPTEST DONE FAILURES\n");
+        }
         int shell_failures = 0;
         for (;;) {
             /* The active virtual terminal decides what runs: the desktop

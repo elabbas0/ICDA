@@ -91,6 +91,9 @@ void vmm_unmap_range(addr_space_t *as, uint64_t virt, uint64_t size, int free_ph
 // walk page tables and return the physical address for virt, or 0 if unmapped
 uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt);
 
+// 1 when virt is present and writable (PTE R/W) in user half, else 0
+int vmm_page_writable(addr_space_t *as, uint64_t virt);
+
 // allocate a new user address space with kernel mappings inherited; NULL on fail
 addr_space_t *vmm_create_address_space(void);
 

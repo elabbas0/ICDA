@@ -160,7 +160,7 @@ static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
     if (!gate_path_ok(path)) {
         return (uint64_t)-U_EFAULT;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -215,7 +215,7 @@ static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, ui
     if (!gate_path_ok(path)) {
         return (uint64_t)-U_EFAULT;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -261,7 +261,7 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
     if (!buf || cap == 0) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -313,7 +313,7 @@ static uint64_t sys_getcwd(char *buf, uint64_t cap) {
     if (!proc || !buf || cap == 0) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
     if (vfs_getcwd(proc->cwd ? proc->cwd : vfs_root(), buf, (size_t)cap) != 0) {
@@ -352,7 +352,7 @@ static uint64_t sys_list_dir(const char *path, char *buf, uint64_t cap) {
     if (!proc || !buf || cap == 0) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
     if (path && !gate_path_ok(path)) {
@@ -489,7 +489,7 @@ static uint64_t sys_stat(const char *path, vfs_stat_t *out) {
     if (!*path) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(out, sizeof(*out))) {
+    if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -503,7 +503,7 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
     if (!buf || cap == 0) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -575,7 +575,7 @@ static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
     if (!out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(out, sizeof(*out))) {
+    if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -604,7 +604,7 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
     if (!out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(out, sizeof(*out))) {
+    if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
     proc = sched_find_process(pid);
@@ -634,7 +634,7 @@ static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
     if (!out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(out, sizeof(*out))) {
+    if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
     dev = gpu_primary();
@@ -782,10 +782,10 @@ static uint64_t sys_install_system(uint64_t *files_out, uint64_t *bytes_out) {
     uint64_t files = 0;
     uint64_t bytes = 0;
 
-    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+    if (files_out && !user_range_prepare_cur_w(files_out, sizeof(*files_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+    if (bytes_out && !user_range_prepare_cur_w(bytes_out, sizeof(*bytes_out))) {
         return (uint64_t)-U_EFAULT;
     }
     if (system_install_run(&files, &bytes) != 0) {
@@ -805,10 +805,10 @@ static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, u
     uint64_t bytes = 0;
     int rc;
 
-    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+    if (files_out && !user_range_prepare_cur_w(files_out, sizeof(*files_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+    if (bytes_out && !user_range_prepare_cur_w(bytes_out, sizeof(*bytes_out))) {
         return (uint64_t)-U_EFAULT;
     }
     rc = system_install_device((uint32_t)device_index, &files, &bytes);
@@ -835,10 +835,10 @@ static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint6
     if (!user_range_prepare_cur(plan, sizeof(*plan))) {
         return (uint64_t)-U_EFAULT;
     }
-    if (files_out && !user_range_prepare_cur(files_out, sizeof(*files_out))) {
+    if (files_out && !user_range_prepare_cur_w(files_out, sizeof(*files_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+    if (bytes_out && !user_range_prepare_cur_w(bytes_out, sizeof(*bytes_out))) {
         return (uint64_t)-U_EFAULT;
     }
     rc = system_install_partitions((uint32_t)plan->efi_partition, (uint32_t)plan->root_partition, (int32_t)plan->swap_partition, &files, &bytes);
@@ -866,8 +866,8 @@ static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
     if (!cols_out || !rows_out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(cols_out, sizeof(*cols_out)) ||
-        !user_range_prepare_cur(rows_out, sizeof(*rows_out))) {
+    if (!user_range_prepare_cur_w(cols_out, sizeof(*cols_out)) ||
+        !user_range_prepare_cur_w(rows_out, sizeof(*rows_out))) {
         return (uint64_t)-U_EFAULT;
     }
     if (fb_available()) {
@@ -887,8 +887,8 @@ static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
     if (!x_out || !y_out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(x_out, sizeof(*x_out)) ||
-        !user_range_prepare_cur(y_out, sizeof(*y_out))) {
+    if (!user_range_prepare_cur_w(x_out, sizeof(*x_out)) ||
+        !user_range_prepare_cur_w(y_out, sizeof(*y_out))) {
         return (uint64_t)-U_EFAULT;
     }
     console_get_cursor(&x, &y);
@@ -908,7 +908,7 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
     if (!buf || cap == 0) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
 
@@ -1012,7 +1012,7 @@ static uint64_t sys_audio_status(syscall_audio_info_t *out) {
     if (!out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(out, sizeof(*out))) {
+    if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
     if (audio_playback_status(&info) != 0) {
@@ -1039,8 +1039,8 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
     if (!proc || !token_out || !sample_rate_out) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(token_out, sizeof(*token_out)) ||
-        !user_range_prepare_cur(sample_rate_out, sizeof(*sample_rate_out))) {
+    if (!user_range_prepare_cur_w(token_out, sizeof(*token_out)) ||
+        !user_range_prepare_cur_w(sample_rate_out, sizeof(*sample_rate_out))) {
         return (uint64_t)-U_EFAULT;
     }
     if (audio_playback_claim(proc->pid, &token, &rate) != 0) {
@@ -1055,7 +1055,7 @@ static uint64_t sys_audio_read_chunk(uint64_t token, uint8_t *buf, uint64_t cap)
     if (!buf || cap == 0 || cap > 0xFFFFFFFFULL) {
         return (uint64_t)-1;
     }
-    if (!user_range_prepare_cur(buf, cap)) {
+    if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
     return audio_playback_read_chunk(token, buf, (uint32_t)cap);
@@ -1079,7 +1079,7 @@ static int gate_fetch_args(const char *host, const char *path,
         strnlen_user(out_path, 511) == (uint64_t)-1) {
         return 0;
     }
-    if (bytes_out && !user_range_prepare_cur(bytes_out, sizeof(*bytes_out))) {
+    if (bytes_out && !user_range_prepare_cur_w(bytes_out, sizeof(*bytes_out))) {
         return 0;
     }
     return 1;
@@ -1123,7 +1123,7 @@ static uint64_t sys_dns_resolve(const char *host, uint32_t *ipv4_out) {
     if (strnlen_user(host, 255) == (uint64_t)-1) {
         return (uint64_t)-U_EFAULT;
     }
-    if (!user_range_prepare_cur(ipv4_out, sizeof(*ipv4_out))) {
+    if (!user_range_prepare_cur_w(ipv4_out, sizeof(*ipv4_out))) {
         return (uint64_t)-U_EFAULT;
     }
     if (net_dns_resolve_ipv4(host, &ipv4) != 0) {
@@ -1160,7 +1160,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             uint64_t copy;
             if (!buf && count != 0) return (uint64_t)-U_EFAULT;
             if (count == 0) return 0;
-            if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
+            if (!user_range_prepare_cur_w(buf, count)) return (uint64_t)-U_EFAULT;
             if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
                 return (uint64_t)-U_EBADF;
             }
@@ -1200,6 +1200,8 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             int is_stdio = 0;
             if (!buf && count != 0) return (uint64_t)-U_EFAULT;
             if (count == 0) return 0;
+            /* Source buffer: read probe (a read-only source mapping is
+             * legitimate here; chunks are re-probed per copy). */
             if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
             if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
                 return (uint64_t)-U_EBADF;
@@ -1277,7 +1279,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             int is_stdio = 0;
             vfs_stat_t ks;
             if (!st) return (uint64_t)-U_EFAULT;
-            if (!user_range_prepare_cur(st, sizeof(*st))) {
+            if (!user_range_prepare_cur_w(st, sizeof(*st))) {
                 return (uint64_t)-U_EFAULT;
             }
             if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
@@ -1332,6 +1334,59 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 for (int j = 0; j < (int)PAGE_SIZE_4K; j++) dst[j] = 0;
             }
             return addr;
+        }
+        case 10: { // mprotect — real implementation with W^X
+            uint64_t addr = a0;
+            uint64_t length = a1;
+            uint64_t prot = a2;
+            uint64_t end;
+            uint64_t page;
+            uint64_t fb_virt = 0x500000000ULL;
+            uint64_t fb_size = fb_phys_size();
+            uint64_t shm_end = SHM_VIRT_BASE + (uint64_t)SHM_MAX_REGIONS * SHM_SLOT_SIZE;
+            uint64_t newflags;
+            /* Linux PROT_* bits. PROT_EXEC without PROT_READ is mapped
+             * to read-only (x86 cannot express execute-only); PROT_NONE
+             * is rejected — no caller needs it yet. W|X is always
+             * rejected: this kernel is W^X. */
+            if (length == 0 || (addr & 0xFFFULL)) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (prot & ~7ULL) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if ((prot & 2) && (prot & 4)) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (prot == 0) {
+                return (uint64_t)-U_EINVAL;
+            }
+            end = addr + length;
+            if (end < addr || end > USER_HALF_END) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (addr < fb_virt + fb_size && end > fb_virt) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (addr < shm_end && end > SHM_VIRT_BASE) {
+                return (uint64_t)-U_EINVAL;
+            }
+            if (!proc || !proc->addr_space) {
+                return (uint64_t)-U_EINVAL;
+            }
+            newflags = (prot & 2) ? VMM_FLAGS_USER_RW : VMM_FLAGS_USER_RO;
+            for (page = addr; page < end; page += PAGE_SIZE_4K) {
+                uint64_t phys = vmm_virt_to_phys(proc->addr_space, page);
+                if (!phys) {
+                    return (uint64_t)-U_ENOMEM;
+                }
+                /* Re-map the same frame with new permissions. */
+                if (vmm_map_page(proc->addr_space, page, phys & ~0xFFFULL,
+                                 newflags) != 0) {
+                    return (uint64_t)-U_ENOMEM;
+                }
+            }
+            return 0;
         }
         case 11: { // munmap — real implementation (P0/B3)
             uint64_t addr = a0;
@@ -1408,7 +1463,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             uint64_t len;
             if (!buf && count != 0) return (uint64_t)-U_EFAULT;
             if (count == 0) return 0;
-            if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
+            if (!user_range_prepare_cur_w(buf, count)) return (uint64_t)-U_EFAULT;
             if (fd_resolve(proc, fd, &node, &entry, &is_stdio) != 0 || is_stdio) {
                 return (uint64_t)-U_EBADF;
             }
@@ -1654,7 +1709,7 @@ uint64_t syscall_dispatch(struct registers *regs) {
             if (!out) {
                 return (uint64_t)-1;
             }
-            if (!user_range_prepare_cur(out, 64)) {
+            if (!user_range_prepare_cur_w(out, 64)) {
                 return (uint64_t)-U_EFAULT;
             }
             return (uint64_t)msgq_recv(regs->rdi, out, (int)regs->rdx);
@@ -1667,7 +1722,7 @@ uint64_t syscall_dispatch(struct registers *regs) {
              * via a VT switch), let the new process take over the screen. */
             fb_release_if_owner_gone();
             if (fb_claimed) return (uint64_t)-1;
-            if (info && !user_range_prepare_cur(info, sizeof(*info))) {
+            if (info && !user_range_prepare_cur_w(info, sizeof(*info))) {
                 return (uint64_t)-U_EFAULT;
             }
             if (!fb_available()) return (uint64_t)-1;
@@ -1707,7 +1762,7 @@ uint64_t syscall_dispatch(struct registers *regs) {
         case SYS_INPUT_READ_MOUSE: {
             syscall_mouse_event_t *out = (syscall_mouse_event_t *)(uintptr_t)regs->rdi;
             if (!out) return (uint64_t)-1;
-            if (!user_range_prepare_cur(out, sizeof(*out))) {
+            if (!user_range_prepare_cur_w(out, sizeof(*out))) {
                 return (uint64_t)-U_EFAULT;
             }
             mouse_event_t ev;

@@ -1,0 +1,50 @@
+name: qemu
+
+on:
+  push:
+    branches: [dev, Production]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ca-certificates gcc git grub-common grub-pc-bin \
+            grub-efi-amd64-bin make mtools nasm ovmf qemu-system-x86 xorriso
+
+      - name: Build ISO and USB image
+        run: make kernel.iso kernel-usb.img
+
+      - name: QEMU smoke test (boot markers)
+        env:
+          QEMU_TIMEOUT: 300
+        run: sh scripts/qemu-smoke.sh kernel.iso
+
+      # The self-test hook (kernel cmdline icda.test=*) runs a test app
+      # before the desktop and reports on serial. Patch the GRUB entry
+      # at CI time only; the tree itself is untouched.
+      - name: Gate self-test (native syscalls)
+        run: |
+          cp boot/grub/grub.cfg /tmp/grub.cfg.orig
+          sed -i 's|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=nptest|' boot/grub/grub.cfg
+          make kernel.iso
+          QEMU_LOG=/tmp/nptest.log QEMU_TIMEOUT=300 sh scripts/qemu-smoke.sh kernel.iso || true
+          grep -a "NPTEST DONE ALL-PASS" /tmp/nptest.log
+          cp /tmp/grub.cfg.orig boot/grub/grub.cfg
+
+      - name: Gate self-test (linux personality)
+        run: |
+          cp boot/grub/grub.cfg /tmp/grub.cfg.orig
+          sed -i 's|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=nptestlx|' boot/grub/grub.cfg
+          make kernel.iso
+          QEMU_LOG=/tmp/nptestlx.log QEMU_TIMEOUT=300 sh scripts/qemu-smoke.sh kernel.iso || true
+          grep -a "NPTEST DONE ALL-PASS" /tmp/nptestlx.log
+          cp /tmp/grub.cfg.orig boot/grub/grub.cfg
