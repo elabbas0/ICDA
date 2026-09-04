@@ -1,12 +1,8 @@
 #include "syscall.h"
 #include "../drivers/serial/serial.h"
 
-#include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
-#include "../drivers/display/gpu.h"
-#include "../drivers/display/vga.h"
 #include "../power/power.h"
-#include "../drivers/input/input.h"
 #include "../drivers/input/mouse.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/audio/hda.h"
@@ -28,30 +24,19 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../fs/fd.h"
+#include "../dev/devops.h"
 #include "uaccess.h"
+#include "native_abi.h"
 
-/* Set once SYS_MAP_FRAMEBUFFER has been claimed, along with the pid of
- * the process that claimed it.  The claim is released when that process
- * exits so a respawned window manager (e.g. after a VT switch) can map
- * the framebuffer again. */
-static int fb_claimed = 0;
-static uint64_t fb_claim_pid = 0;
+/* ABI freeze (native_abi.h v1): the native numbers below are a stable
+ * contract. The compiler enforces the bookends; scripts/check-abi.sh
+ * enforces kernel/userspace sync. */
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v1: first number moved");
+_Static_assert(SYS_PROC_STATS == 69, "native ABI v1: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 70, "native ABI v1: count changed");
 
-static void fb_release_if_owner_gone(void) {
-    if (!fb_claimed) {
-        return;
-    }
-    if (fb_claim_pid == 0) {
-        return;
-    }
-    process_t *owner = sched_find_process(fb_claim_pid);
-    if (!owner || owner->state == PROCESS_EXITED || owner->state == PROCESS_REAPED) {
-        fb_claimed = 0;
-        fb_claim_pid = 0;
-    }
-}
-
-
+/* Framebuffer claim state lives in kernel/dev/devnodes.c alongside the
+ * /dev/fb0 ops (moved out of the syscall gate in P0 OS-ification). */
 
 static int str_eq(const char *a, const char *b) {
     uint64_t i = 0;
@@ -118,6 +103,7 @@ static uint64_t append_uint(char *buf, uint64_t out, uint64_t cap, uint64_t valu
 }
 
 static uint64_t sys_console_write(const char *text) {
+    const dev_calls_t *dcon;
     uint64_t len;
 
     if (!text) {
@@ -129,8 +115,11 @@ static uint64_t sys_console_write(const char *text) {
     if (len == (uint64_t)-1) {
         return (uint64_t)-U_EFAULT;
     }
-    console_write(text, CONSOLE_STYLE_INFO);
-    return len;
+    dcon = dev_console();
+    if (!dcon) {
+        return (uint64_t)-1;
+    }
+    return dcon->con_write(text);
 }
 
 static uint64_t sys_get_pid(void) {
@@ -234,7 +223,12 @@ static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, ui
 }
 
 static uint64_t sys_input_read(void) {
-    int c = input_read_char();
+    const dev_calls_t *din = dev_input();
+    int c;
+    if (!din) {
+        return (uint64_t)-1;
+    }
+    c = din->in_read_char();
     if (c < 0) {
         return (uint64_t)-1;
     }
@@ -242,13 +236,18 @@ static uint64_t sys_input_read(void) {
 }
 
 static uint64_t sys_input_read_timeout(uint64_t ticks) {
-    int c = input_read_char();
+    const dev_calls_t *din = dev_input();
+    int c;
+    if (!din) {
+        return (uint64_t)-1;
+    }
+    c = din->in_read_char();
     if (c >= 0) {
         return (uint64_t)(uint8_t)c;
     }
 
     sched_wait_input_timeout(ticks);
-    c = input_read_char();
+    c = din->in_read_char();
     if (c < 0) {
         return (uint64_t)-1;
     }
@@ -256,6 +255,8 @@ static uint64_t sys_input_read_timeout(uint64_t ticks) {
 }
 
 static uint64_t sys_input_readline(char *buf, uint64_t cap) {
+    const dev_calls_t *din = dev_input();
+    const dev_calls_t *dcon = dev_console();
     uint64_t len = 0;
 
     if (!buf || cap == 0) {
@@ -264,6 +265,9 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
     if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
+    if (!din || !dcon || !dcon->con_write || !dcon->con_backspace) {
+        return (uint64_t)-1;
+    }
 
     buf[0] = '\0';
 
@@ -271,12 +275,12 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
         int c;
         char out[2];
 
-        while ((c = input_read_char()) < 0) {
+        while ((c = din->in_read_char()) < 0) {
             sched_sleep(1);
         }
 
         if (c == '\r' || c == '\n') {
-            console_write("\n", CONSOLE_STYLE_INFO);
+            dcon->con_write("\n");
             buf[len] = '\0';
             return len;
         }
@@ -285,7 +289,7 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
             if (len > 0) {
                 len--;
                 buf[len] = '\0';
-                console_backspace();
+                dcon->con_backspace();
             }
             continue;
         }
@@ -304,7 +308,7 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
         buf[len] = '\0';
         out[0] = (char)c;
         out[1] = '\0';
-        console_write(out, CONSOLE_STYLE_INFO);
+        dcon->con_write(out);
     }
 }
 
@@ -417,12 +421,20 @@ static uint64_t sys_exec(const char *path) {
 }
 
 static uint64_t sys_console_clear(void) {
-    console_clear();
+    const dev_calls_t *dcon = dev_console();
+    if (!dcon || !dcon->con_clear) {
+        return (uint64_t)-1;
+    }
+    dcon->con_clear();
     return 0;
 }
 
 static uint64_t sys_console_backspace(void) {
-    console_backspace();
+    const dev_calls_t *dcon = dev_console();
+    if (!dcon || !dcon->con_backspace) {
+        return (uint64_t)-1;
+    }
+    dcon->con_backspace();
     return 0;
 }
 
@@ -629,7 +641,7 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
 }
 
 static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
-    gpu_device_t *dev;
+    const dev_calls_t *dfb = dev_fb();
 
     if (!out) {
         return (uint64_t)-1;
@@ -637,41 +649,24 @@ static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
     if (!user_range_prepare_cur_w(out, sizeof(*out))) {
         return (uint64_t)-U_EFAULT;
     }
-    dev = gpu_primary();
-    if (!dev) {
+    if (!dfb || !dfb->gpu_query) {
         return (uint64_t)-1;
     }
-
-    {
-        uint64_t i = 0;
-        while (dev->name[i] && i < sizeof(out->name) - 1) {
-            out->name[i] = dev->name[i];
-            i++;
-        }
-        out->name[i] = 0;
-    }
-    out->width = (int32_t)dev->modes[dev->current_mode].width;
-    out->height = (int32_t)dev->modes[dev->current_mode].height;
-    out->pitch = dev->modes[dev->current_mode].pitch;
-    out->bpp = dev->modes[dev->current_mode].bpp;
-    out->mode_count = dev->mode_count;
-    out->hw_cursor = dev->hw_cursor ? 1U : 0U;
-    out->present_supported = dev->present_supported ? 1U : 0U;
-    return 0;
+    return dfb->gpu_query(out) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_gpu_present(void) {
-    gpu_device_t *dev = gpu_primary();
-    if (!dev || !dev->present) {
+    const dev_calls_t *dfb = dev_fb();
+    if (!dfb || !dfb->gpu_present) {
         return (uint64_t)-1;
     }
-    return dev->present(dev) == 0 ? 0 : (uint64_t)-1;
+    return dfb->gpu_present() == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) {
-    gpu_device_t *dev = gpu_primary();
+    const dev_calls_t *dfb = dev_fb();
     uint64_t pixels;
-    if (!dev || !dev->set_cursor) {
+    if (!dfb || !dfb->gpu_set_cursor) {
         return (uint64_t)-1;
     }
     if (w < 0 || h < 0) {
@@ -688,7 +683,7 @@ static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h
     if (image && !user_range_prepare_cur(image, pixels * 4)) {
         return (uint64_t)-U_EFAULT;
     }
-    return dev->set_cursor(dev, x, y, image, w, h) == 0 ? 0 : (uint64_t)-1;
+    return dfb->gpu_set_cursor(x, y, image, w, h) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_power(uint64_t action) {
@@ -855,13 +850,16 @@ static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint6
 }
 
 static uint64_t sys_console_set_cursor(uint64_t x, uint64_t y) {
-    console_set_cursor((int)x, (int)y);
+    const dev_calls_t *dcon = dev_console();
+    if (!dcon || !dcon->con_set_cursor) {
+        return (uint64_t)-1;
+    }
+    dcon->con_set_cursor((int)x, (int)y);
     return 0;
 }
 
 static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
-    uint64_t cols = VGA_WIDTH;
-    uint64_t rows = VGA_HEIGHT;
+    const dev_calls_t *dcon = dev_console();
 
     if (!cols_out || !rows_out) {
         return (uint64_t)-1;
@@ -870,18 +868,16 @@ static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
         !user_range_prepare_cur_w(rows_out, sizeof(*rows_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    if (fb_available()) {
-        int fb_cols = fb_columns();
-        int fb_rows_count = fb_rows();
-        if (fb_cols > 0) cols = (uint64_t)fb_cols;
-        if (fb_rows_count > 0) rows = (uint64_t)fb_rows_count;
+    if (!dcon || !dcon->con_columns || !dcon->con_rows) {
+        return (uint64_t)-1;
     }
-    *cols_out = cols;
-    *rows_out = rows;
+    *cols_out = (uint64_t)dcon->con_columns();
+    *rows_out = (uint64_t)dcon->con_rows();
     return 0;
 }
 
 static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
+    const dev_calls_t *dcon = dev_console();
     int x = 0;
     int y = 0;
     if (!x_out || !y_out) {
@@ -891,7 +887,10 @@ static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
         !user_range_prepare_cur_w(y_out, sizeof(*y_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    console_get_cursor(&x, &y);
+    if (!dcon || !dcon->con_get_cursor) {
+        return (uint64_t)-1;
+    }
+    dcon->con_get_cursor(&x, &y);
     *x_out = x < 0 ? 0 : (uint64_t)x;
     *y_out = y < 0 ? 0 : (uint64_t)y;
     return 0;
@@ -1207,10 +1206,14 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return (uint64_t)-U_EBADF;
             }
             if (is_stdio) {
+                const dev_calls_t *dcon = dev_console();
                 uint64_t done = 0;
                 char kbuf[4096];
                 if (fd == 0) return (uint64_t)-U_EBADF;
-                /* NUL-safe chunked console output: console_write scans
+                if (!dcon || !dcon->con_write) {
+                    return (uint64_t)-1;
+                }
+                /* NUL-safe chunked console output: con_write scans
                  * for NUL, so never hand it raw user memory. */
                 while (done < count) {
                     uint64_t chunk = count - done;
@@ -1219,7 +1222,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                         return (uint64_t)-U_EFAULT;
                     }
                     kbuf[chunk] = '\0';
-                    console_write(kbuf, CONSOLE_STYLE_INFO);
+                    dcon->con_write(kbuf);
                     done += chunk;
                 }
                 return count;
@@ -1527,11 +1530,21 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
     }
 }
 
+/* Thin trap gate (P0 OS-ification): personality routing lives here and
+ * only here. The native switch below is frozen ABI — new capability
+ * goes to userspace servers behind the SYS_MSG / SYS_SHM IPC calls,
+ * never to new SYS numbers (see native_abi.h). */
+static uint64_t syscall_dispatch_native(struct registers *regs);
+
 uint64_t syscall_dispatch(struct registers *regs) {
     process_t *proc = sched_current_process();
     if (proc && proc->linux_personality) {
         return linux_syscall_dispatch(regs);
     }
+    return syscall_dispatch_native(regs);
+}
+
+static uint64_t syscall_dispatch_native(struct registers *regs) {
     switch (regs->rax) {
         case SYS_CONSOLE_WRITE:
             return sys_console_write((const char *)(uintptr_t)regs->rdi);
@@ -1718,46 +1731,16 @@ uint64_t syscall_dispatch(struct registers *regs) {
             return (uint64_t)msgq_poll(regs->rdi);
         case SYS_MAP_FRAMEBUFFER: {
             syscall_fb_info_t *info = (syscall_fb_info_t *)(uintptr_t)regs->rdi;
-            /* If the previous claimant is gone (killed, crashed, or exited
-             * via a VT switch), let the new process take over the screen. */
-            fb_release_if_owner_gone();
-            if (fb_claimed) return (uint64_t)-1;
+            const dev_calls_t *dfb = dev_fb();
+            /* Claim + mapping policy lives in /dev/fb0 (devnodes.c);
+             * the gate only validates the caller's info struct. */
             if (info && !user_range_prepare_cur_w(info, sizeof(*info))) {
                 return (uint64_t)-U_EFAULT;
             }
-            if (!fb_available()) return (uint64_t)-1;
-            process_t *fproc = sched_current_process();
-            if (!fproc || !fproc->addr_space) return (uint64_t)-1;
-            uint64_t fb_phys = fb_phys_addr();
-            uint64_t fb_size = fb_phys_size();
-            if (!fb_phys || !fb_size) return (uint64_t)-1;
-            uint64_t fb_virt = 0x500000000ULL;
-            uint64_t page_offset = fb_phys & 0xFFFULL;
-            uint64_t fb_phys_aligned = fb_phys & ~0xFFFULL;
-            uint64_t pages = (fb_size + page_offset + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
-            for (uint64_t pi = 0; pi < pages; pi++) {
-                if (vmm_map_page(fproc->addr_space,
-                                 fb_virt + pi * PAGE_SIZE_4K,
-                                 fb_phys_aligned + pi * PAGE_SIZE_4K,
-                                 VMM_FLAGS_USER_RW) != 0) {
-                    return (uint64_t)-1;
-                }
+            if (!dfb || !dfb->fb_claim_map) {
+                return (uint64_t)-1;
             }
-            if (info) {
-                info->virt_addr = fb_virt + page_offset;
-                info->width     = fb_width;
-                info->height    = fb_height;
-                info->pitch     = (fb_height > 0) ? (uint32_t)(fb_size / (uint64_t)fb_height) : 0;
-                /* Report the real pixel format.  The window manager blits
-                 * into this mapping, so it must know whether it is 32bpp
-                 * (typical on real GPUs) or 24bpp (QEMU/GRUB fallbacks). */
-                info->bpp       = (uint32_t)fb_bpp_value();
-            }
-            /* Keep the PS/2 cursor position clamped to the real screen size */
-            mouse_set_screen(fb_width, fb_height);
-            fb_claimed = 1;
-            fb_claim_pid = fproc->pid;
-            return fb_virt + page_offset;
+            return dfb->fb_claim_map(info);
         }
         case SYS_INPUT_READ_MOUSE: {
             syscall_mouse_event_t *out = (syscall_mouse_event_t *)(uintptr_t)regs->rdi;
@@ -1774,11 +1757,15 @@ uint64_t syscall_dispatch(struct registers *regs) {
             out->buttons = ev.buttons;
             return 0;
         }
-        case SYS_GUI_AVAILABLE:
+        case SYS_GUI_AVAILABLE: {
+            const dev_calls_t *dfb = dev_fb();
             /* 1 once the window manager has claimed the framebuffer, so
              * GUI-capable apps know the desktop is on screen. */
-            fb_release_if_owner_gone();
-            return fb_claimed ? 1 : 0;
+            if (!dfb || !dfb->fb_claimed) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)dfb->fb_claimed();
+        }
         case SYS_GPU_QUERY:
             return sys_gpu_query((syscall_gpu_info_t *)(uintptr_t)regs->rdi);
         case SYS_GPU_PRESENT:

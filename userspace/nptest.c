@@ -69,6 +69,27 @@ int nptest_main(void) {
     check("getcwd hole buf",
           (long)icda_getcwd(hole, sizeof(good_buf)), 1);
 
+    /* /dev/fb0 claim path (moved to devnodes.c in P0 OS-ification):
+     * claim must succeed pre-desktop with sane geometry. The claim is
+     * released on exit (owner-gone takeover), so the desktop that
+     * starts after us is unaffected. */
+    {
+        icda_fb_info_t fb;
+        uint64_t base;
+        fb.virt_addr = 0;
+        fb.width = 0;
+        fb.height = 0;
+        fb.pitch = 0;
+        fb.bpp = 0;
+        base = icda_map_framebuffer(&fb);
+        if ((long)base < 0 || fb.width <= 0 || fb.height <= 0) {
+            failures++;
+            icda_write("FAIL fb claim\n");
+        } else {
+            icda_write("PASS fb claim\n");
+        }
+    }
+
     /* W^X kill-path: spawn the linux test in suicide mode (it mprotects
      * a page read-only, then stores through it). The kernel must
      * terminate it with -11; survival or any other code is a FAIL. */

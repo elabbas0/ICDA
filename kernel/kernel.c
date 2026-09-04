@@ -31,6 +31,7 @@
 #include "syscall/syscall.h"
 #include "tty/tty.h"
 #include "vt/vt.h"
+#include "dev/devops.h"
 #include "cpu/multiboot2.h"
 
 #include "cpu/gdt.h"
@@ -400,6 +401,15 @@ void kernel_main(void *multiboot_info) {
 
     bootstage_set(20, "mounts");
     boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");
+
+    /* /dev nodes + ops registry for the syscall gate. Log-only on
+     * failure: handlers NULL-check the tables and fail closed, so a
+     * failed populate degrades syscalls instead of halting boot. */
+    if (dev_populate() != 0) {
+        boot_line("devices", "/dev populate failed, device syscalls will fail closed");
+    } else {
+        boot_line("devices", "/dev console/input/fb0 online");
+    }
 
     syscall_init();
     bootstage_set(21, "syscall");
