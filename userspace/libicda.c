@@ -881,7 +881,6 @@ void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
     if (w <= 0 || h <= 0) return;
     row = ic_menu_row_h();
 
-    ic_draw_shadow(c, x, y, w, h, IC_RADIUS_MENU, IC_SHADOW_COLOR);
     ic_rect_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel);
     ic_outline_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel_edge);
     for (i = 0; i < n; i++) {

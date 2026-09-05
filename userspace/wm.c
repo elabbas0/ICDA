@@ -1344,7 +1344,6 @@ static void draw_start_menu(int w, int h, int mx, int my) {
     int x = 6;
     int y = h - TASKBAR_H - START_MENU_H;
     if (!start_menu_open) return;
-    ic_draw_shadow(&c, x, y, START_MENU_W, START_MENU_H, 8, IC_SHADOW_COLOR);
     ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x001E293B);
     ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x00334155);
     ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00F1F5F9, 0x001E293B);
