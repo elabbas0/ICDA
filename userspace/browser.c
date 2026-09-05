@@ -60,6 +60,23 @@ static char status[64];
 static int addr_cursor = 0;
 static int addr_active = 0;
 
+/* ---- context-menu BSS (desktop.c pattern) ---- */
+#define CTX_BR_MAX  5
+#define CTX_BR_LBL  32
+
+enum { CTX_BR_BACK = 1, CTX_BR_FWD, CTX_BR_REFRESH, CTX_BR_ADDR };
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_BR_MAX];
+static char ctx_labels[CTX_BR_MAX][CTX_BR_LBL];
+static int prev_right = 0;
+static int prev_left = 0;
+static int last_mouse_x = 0;
+static int last_mouse_y = 0;
+
 /* ---- string helpers (freestanding) ---- */
 
 static uint64_t b_strlen(const char *s) {
@@ -838,6 +855,60 @@ static void go_forward(void) {
     }
 }
 
+/* ---- context-menu helpers ---- */
+static void br_ctx_set(int idx, int action, const char *label) {
+    if (idx < 0 || idx >= CTX_BR_MAX) return;
+    ctx_actions[idx] = action;
+    b_strcpy(ctx_labels[idx], label, CTX_BR_LBL);
+}
+
+static void br_ctx_menu_fill(ic_menu_t *m) {
+    int i;
+    if (!m) return;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
+        m->items[i] = ctx_labels[i];
+}
+
+static void br_ctx_close(void) { ctx_open = 0; }
+
+static void br_ctx_activate(int which) {
+    int a;
+    if (which < 0 || which >= ctx_nitems) { br_ctx_close(); return; }
+    a = ctx_actions[which];
+    if (a == CTX_BR_BACK)     go_back();
+    else if (a == CTX_BR_FWD)     go_forward();
+    else if (a == CTX_BR_REFRESH) navigate_to(current_url);
+    else if (a == CTX_BR_ADDR)    { addr_active = 1; addr_cursor = (int)b_strlen(address_buf); }
+    br_ctx_close();
+}
+
+static void br_ctx_open_at(int x, int y) {
+    ic_menu_t m;
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int mw, mh;
+    int i = 0;
+
+    br_ctx_set(i++, CTX_BR_BACK, "Back");
+    br_ctx_set(i++, CTX_BR_FWD, "Forward");
+    br_ctx_set(i++, CTX_BR_REFRESH, "Refresh");
+    br_ctx_set(i++, CTX_BR_ADDR, "Focus Address");
+    ctx_nitems = i;
+
+    br_ctx_menu_fill(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (x + mw > w) x = w - mw;
+    if (x < 0) x = 0;
+    if (y + mh > h) y = h - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
+}
+
 /* ---- drawing ---- */
 
 static void draw_toolbar(void) {
@@ -969,6 +1040,18 @@ static void draw_all(void) {
     draw_toolbar();
     draw_page();
     draw_status();
+    /* ---- context menu (topmost overlay) ---- */
+    if (ctx_open && ctx_nitems > 0) {
+        ic_canvas_t mc;
+        const ic_theme_t *t = ic_theme_default();
+        ic_menu_t m;
+        mc.px = gui_pixel_buffer();
+        mc.w = gui_window_width();
+        mc.h = gui_window_height();
+        br_ctx_menu_fill(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
+        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
+    }
     gui_flush();
 }
 
@@ -1036,6 +1119,7 @@ static void handle_click(int mx, int my) {
 }
 
 static void handle_key(uint32_t key) {
+    if (ctx_open) return; /* type-ahead guard */
     if (addr_active) {
         if (key == '\r' || key == '\n') {
             addr_active = 0;
@@ -1066,9 +1150,31 @@ static void handle_key(uint32_t key) {
 static int on_event(void *ud, const gui_msg_t *msg) {
     (void)ud;
     if (msg->type == GUI_MSG_MOUSE_EVENT) {
+        int mx = msg->mouse.x, my = msg->mouse.y;
+        /* Left-click: menu/press precedence */
         if (msg->mouse.buttons & GUI_BTN_LEFT) {
-            handle_click(msg->mouse.x, msg->mouse.y);
+            if (!prev_left) {
+                if (ctx_open) {
+                    ic_menu_t m; int hit;
+                    br_ctx_menu_fill(&m);
+                    hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+                    if (hit >= 0 && hit < ctx_nitems) br_ctx_activate(hit);
+                    else br_ctx_close();
+                } else {
+                    handle_click(mx, my);
+                }
+            }
         }
+        prev_left = (msg->mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+        /* Right-click: edge-detect (desktop.c pattern, single dispatch) */
+        if (msg->mouse.buttons & GUI_BTN_RIGHT) {
+            if (!prev_right) {
+                br_ctx_close();
+                br_ctx_open_at(mx, my);
+            }
+            prev_right = 1;
+        } else { prev_right = 0; }
+        last_mouse_x = mx; last_mouse_y = my;
     } else if (msg->type == GUI_MSG_KEY_EVENT) {
         if (msg->key.pressed) {
             handle_key(msg->key.keycode);
@@ -1109,18 +1215,10 @@ int main(int argc, char **argv) {
         int changed = 0;
         while (gui_poll_event(&msg)) {
             changed = 1;
-            if (msg.type == GUI_MSG_CLOSE_WINDOW) {
+            /* All events routed through on_event (single dispatch) */
+            if (!on_event(NULL, &msg)) {
                 gui_close_window();
                 return 0;
-            }
-            if (msg.type == GUI_MSG_MOUSE_EVENT) {
-                if (msg.mouse.buttons & GUI_BTN_LEFT) {
-                    handle_click(msg.mouse.x, msg.mouse.y);
-                }
-            } else if (msg.type == GUI_MSG_KEY_EVENT) {
-                if (msg.key.pressed) {
-                    handle_key(msg.key.keycode);
-                }
             }
         }
         if (changed) {

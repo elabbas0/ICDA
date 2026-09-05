@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "icda_sys.h"
+#include "libicda.h"
 
 #define GRID_ROWS 18
 #define GRID_COLS 62
@@ -10,6 +11,23 @@ static uint32_t bg_grid[GRID_ROWS][GRID_COLS];
 static int cursor_col = 0;
 static int cursor_row = 0;
 static char cmd_buf[128];
+
+/* ---- context-menu BSS (desktop.c pattern) ---- */
+#define CTX_TR_MAX  5
+#define CTX_TR_LBL  32
+
+enum { CTX_TR_CLEAR = 1, CTX_TR_NEW, CTX_TR_QUIT };
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_TR_MAX];
+static char ctx_labels[CTX_TR_MAX][CTX_TR_LBL];
+static int prev_right = 0;
+static int prev_left = 0;
+static int last_mouse_x = 0;
+static int last_mouse_y = 0;
 
 static int str_prefix(const char *text, const char *prefix) {
     int i = 0;
@@ -158,6 +176,73 @@ static void term_execute(const char *cmd) {
     }
 }
 
+/* ---- context-menu helpers ---- */
+static void tr_ctx_set(int idx, int action, const char *label) {
+    int i;
+    if (idx < 0 || idx >= CTX_TR_MAX) return;
+    ctx_actions[idx] = action;
+    for (i = 0; label[i] && i + 1 < CTX_TR_LBL; i++)
+        ctx_labels[idx][i] = label[i];
+    ctx_labels[idx][i] = 0;
+}
+
+static void tr_ctx_menu_fill(ic_menu_t *m) {
+    int i;
+    if (!m) return;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
+        m->items[i] = ctx_labels[i];
+}
+
+static void tr_ctx_close(void) { ctx_open = 0; }
+
+static void tr_ctx_activate(int which) {
+    int a;
+    if (which < 0 || which >= ctx_nitems) { tr_ctx_close(); return; }
+    a = ctx_actions[which];
+    if (a == CTX_TR_CLEAR) {
+        for (int r = 0; r < GRID_ROWS; r++)
+            for (int c = 0; c < GRID_COLS; c++) {
+                grid[r][c] = ' ';
+                fg_grid[r][c] = 0x00F8FAFC;
+                bg_grid[r][c] = 0x000F172A;
+            }
+        cursor_col = 0;
+        cursor_row = 0;
+    } else if (a == CTX_TR_NEW) {
+        icda_spawn("/apps/terminal.app");
+    } else if (a == CTX_TR_QUIT) {
+        gui_close_window();
+        icda_exit(0);
+    }
+    tr_ctx_close();
+}
+
+static void tr_ctx_open_at(int x, int y) {
+    ic_menu_t m;
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int mw, mh;
+    int i = 0;
+
+    tr_ctx_set(i++, CTX_TR_CLEAR, "Clear");
+    tr_ctx_set(i++, CTX_TR_NEW, "New Terminal");
+    tr_ctx_set(i++, CTX_TR_QUIT, "Quit");
+    ctx_nitems = i;
+
+    tr_ctx_menu_fill(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (x + mw > w) x = w - mw;
+    if (x < 0) x = 0;
+    if (y + mh > h) y = h - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -182,41 +267,80 @@ int main(int argc, char **argv) {
 
     for (;;) {
         gui_msg_t msg;
-        gui_wait_event(&msg);
-
-        if (msg.type == GUI_MSG_KEY_EVENT) {
-            uint32_t code = msg.key.keycode;
-            if (msg.key.pressed) {
-                if (code == '\n') {
-                    term_putc('\n', 0x00F8FAFC, 0x000F172A);
-                    cmd_buf[cmd_len] = '\0';
-                    term_execute(cmd_buf);
-                    cmd_len = 0;
-                    cmd_buf[0] = '\0';
-                    term_print("icda@desktop:$ ", 0x0010B981, 0x000F172A);
-                }
-                else if (code == '\b') {
-                    if (cmd_len > 0) {
-                        cmd_len--;
-                        cmd_buf[cmd_len] = '\0';
-                        term_putc('\b', 0x00F8FAFC, 0x000F172A);
+        int changed = 0;
+        while (gui_poll_event(&msg)) {
+            changed = 1;
+            if (msg.type == GUI_MSG_MOUSE_EVENT) {
+                int mx = msg.mouse.x, my = msg.mouse.y;
+                /* Left-click: menu/press precedence */
+                if (msg.mouse.buttons & GUI_BTN_LEFT) {
+                    if (!prev_left) {
+                        if (ctx_open) {
+                            ic_menu_t m; int hit;
+                            tr_ctx_menu_fill(&m);
+                            hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+                            if (hit >= 0 && hit < ctx_nitems) tr_ctx_activate(hit);
+                            else tr_ctx_close();
+                        }
                     }
                 }
-                else if (code >= 32 && code <= 126) {
-                    if (cmd_len < 120) {
-                        cmd_buf[cmd_len++] = (char)code;
+                prev_left = (msg.mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+                /* Right-click: edge-detect (desktop.c pattern) */
+                if (msg.mouse.buttons & GUI_BTN_RIGHT) {
+                    if (!prev_right) {
+                        tr_ctx_close();
+                        tr_ctx_open_at(mx, my);
+                    }
+                    prev_right = 1;
+                } else { prev_right = 0; }
+                last_mouse_x = mx; last_mouse_y = my;
+            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
+                if (!ctx_open) { /* type-ahead guard */
+                    uint32_t code = msg.key.keycode;
+                    if (code == '\n') {
+                        term_putc('\n', 0x00F8FAFC, 0x000F172A);
                         cmd_buf[cmd_len] = '\0';
-                        term_putc((char)code, 0x00F8FAFC, 0x000F172A);
+                        term_execute(cmd_buf);
+                        cmd_len = 0;
+                        cmd_buf[0] = '\0';
+                        term_print("icda@desktop:$ ", 0x0010B981, 0x000F172A);
+                    }
+                    else if (code == '\b') {
+                        if (cmd_len > 0) {
+                            cmd_len--;
+                            cmd_buf[cmd_len] = '\0';
+                            term_putc('\b', 0x00F8FAFC, 0x000F172A);
+                        }
+                    }
+                    else if (code >= 32 && code <= 126) {
+                        if (cmd_len < 120) {
+                            cmd_buf[cmd_len++] = (char)code;
+                            cmd_buf[cmd_len] = '\0';
+                            term_putc((char)code, 0x00F8FAFC, 0x000F172A);
+                        }
                     }
                 }
-                render_grid();
+            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
+                gui_close_window();
+                return 0;
             }
         }
-        else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-            break;
+        if (changed) {
+            render_grid();
+            /* ---- context menu (topmost overlay) ---- */
+            if (ctx_open && ctx_nitems > 0) {
+                ic_canvas_t mc;
+                const ic_theme_t *t = ic_theme_default();
+                ic_menu_t m;
+                mc.px = gui_pixel_buffer();
+                mc.w = gui_window_width();
+                mc.h = gui_window_height();
+                tr_ctx_menu_fill(&m);
+                m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
+                ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
+            }
+            gui_flush();
         }
+        icda_sleep(1);
     }
-
-    gui_close_window();
-    return 0;
 }

@@ -42,6 +42,23 @@ static uint64_t last_sample_tick = 0;
 static char status[TM_STATUS_CAP];
 static char list_buf[TM_BUF_CAP];
 
+/* ---- context-menu BSS (desktop.c pattern) ---- */
+#define CTX_TM_MAX  5
+#define CTX_TM_LBL  32
+
+enum { CTX_TM_KILL = 1, CTX_TM_REFRESH, CTX_TM_QUIT };
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_TM_MAX];
+static char ctx_labels[CTX_TM_MAX][CTX_TM_LBL];
+static int prev_right = 0;
+static int prev_left = 0;
+static int last_mouse_x = 0;
+static int last_mouse_y = 0;
+
 static uint64_t tm_strlen(const char *s) {
     uint64_t n = 0;
     while (s && s[n]) n++;
@@ -198,6 +215,9 @@ static void tm_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t b
     }
 }
 
+/* Forward declarations for context menu (used in tm_draw before definition) */
+static void tm_ctx_menu_fill(ic_menu_t *m);
+
 static void tm_draw_button(int x, int y, int w, int h, const char *label, int active) {
     uint32_t fill = active ? 0x001A73E8 : 0x00E8EAED;
     uint32_t fg = active ? 0x00FFFFFF : 0x00444A50;
@@ -304,6 +324,18 @@ static void tm_draw(void) {
     tm_draw_button(100, h - 36, 90, 26, "Refresh", 1);
     tm_draw_button(198, h - 36, 70, 26, "Quit", 1);
     tm_draw_text(290, h - 30, status, 0x00334455, 0x00E8ECF1, w - 300);
+    /* ---- context menu (topmost overlay) ---- */
+    if (ctx_open && ctx_nitems > 0) {
+        ic_canvas_t mc;
+        const ic_theme_t *t = ic_theme_default();
+        ic_menu_t m;
+        mc.px = gui_pixel_buffer();
+        mc.w = gui_window_width();
+        mc.h = gui_window_height();
+        tm_ctx_menu_fill(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
+        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
+    }
 }
 
 static void tm_kill_selected(void) {
@@ -320,6 +352,59 @@ static void tm_kill_selected(void) {
         tm_set_status("Kill failed (protected process?)");
     }
     tm_sample();
+}
+
+/* ---- context-menu helpers ---- */
+static void tm_ctx_set(int idx, int action, const char *label) {
+    if (idx < 0 || idx >= CTX_TM_MAX) return;
+    ctx_actions[idx] = action;
+    tm_copy(ctx_labels[idx], label, CTX_TM_LBL);
+}
+
+static void tm_ctx_menu_fill(ic_menu_t *m) {
+    int i;
+    if (!m) return;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
+        m->items[i] = ctx_labels[i];
+}
+
+static void tm_ctx_close(void) { ctx_open = 0; }
+
+static void tm_ctx_activate(int which) {
+    int a;
+    if (which < 0 || which >= ctx_nitems) { tm_ctx_close(); return; }
+    a = ctx_actions[which];
+    if (a == CTX_TM_KILL)    tm_kill_selected();
+    else if (a == CTX_TM_REFRESH) tm_sample();
+    else if (a == CTX_TM_QUIT) { gui_close_window(); icda_exit(0); }
+    tm_ctx_close();
+}
+
+static void tm_ctx_open_at(int x, int y) {
+    ic_menu_t m;
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int mw, mh;
+    int i = 0;
+
+    if (selected >= 0 && selected < proc_count)
+        tm_ctx_set(i++, CTX_TM_KILL, "Kill");
+    tm_ctx_set(i++, CTX_TM_REFRESH, "Refresh");
+    tm_ctx_set(i++, CTX_TM_QUIT, "Quit");
+    ctx_nitems = i;
+
+    tm_ctx_menu_fill(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (x + mw > w) x = w - mw;
+    if (x < 0) x = 0;
+    if (y + mh > h) y = h - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
 }
 
 static void tm_handle_mouse(gui_msg_t *msg) {
@@ -342,6 +427,7 @@ static void tm_handle_mouse(gui_msg_t *msg) {
 }
 
 static void tm_handle_key(uint32_t key) {
+    if (ctx_open) return; /* type-ahead guard */
     if (key == 24 || key == 'q' || key == 'Q') {
         gui_close_window();
         icda_exit(0);
@@ -372,8 +458,40 @@ int main(int argc, char **argv) {
         int changed = 0;
         while (gui_poll_event(&msg)) {
             changed = 1;
-            if (msg.type == GUI_MSG_MOUSE_EVENT && (msg.mouse.buttons & GUI_BTN_LEFT)) {
-                tm_handle_mouse(&msg);
+            if (msg.type == GUI_MSG_MOUSE_EVENT) {
+                int mx = msg.mouse.x, my = msg.mouse.y;
+                /* Left-click: menu/press precedence */
+                if (msg.mouse.buttons & GUI_BTN_LEFT) {
+                    if (!prev_left) {
+                        if (ctx_open) {
+                            ic_menu_t m; int hit;
+                            tm_ctx_menu_fill(&m);
+                            hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+                            if (hit >= 0 && hit < ctx_nitems) tm_ctx_activate(hit);
+                            else tm_ctx_close();
+                        } else {
+                            tm_handle_mouse(&msg);
+                        }
+                    }
+                }
+                prev_left = (msg.mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+                /* Right-click: edge-detect (desktop.c pattern) */
+                if (msg.mouse.buttons & GUI_BTN_RIGHT) {
+                    if (!prev_right) {
+                        int h = gui_window_height();
+                        int rows = (h - TM_LIST_Y - 92) / TM_ROW_H;
+                        tm_ctx_close();
+                        if (rows > TM_MAX_ROWS) rows = TM_MAX_ROWS;
+                        if (rows < 1) rows = 1;
+                        if (tm_hit(mx, my, TM_LIST_X, TM_LIST_Y, TM_LIST_W, rows * TM_ROW_H)) {
+                            int i = (my - TM_LIST_Y) / TM_ROW_H;
+                            if (i >= 0 && i < proc_count) selected = i;
+                        }
+                        tm_ctx_open_at(mx, my);
+                    }
+                    prev_right = 1;
+                } else { prev_right = 0; }
+                last_mouse_x = mx; last_mouse_y = my;
             } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
                 uint32_t code = msg.key.keycode;
                 if (key_seq == 0 && code == 27) {
