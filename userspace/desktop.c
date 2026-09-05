@@ -397,7 +397,7 @@ static void draw_item(desktop_item_t *item, int idx, uint64_t tick) {
     if (selected) ic_rect(&c, item->x + 8, item->y + 54 - lift, item->w - 16, 2, 0x00F1F5F9);
     icon_name = item->is_dir ? "folder" : (item->is_wav ? "wav" : (item->is_app ? "app" : "file"));
     icon = ic_icon_builtin(icon_name);
-    if (icon) ic_icon_draw(&c, item->x + 10, item->y + 4 - lift, 54, 48, icon);
+    if (icon) ic_icon_draw(&c, item->x + 20, item->y + 8 - lift, 48, 48, icon);
     draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, fg, bg, item->w - 12);
 }
 

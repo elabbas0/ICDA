@@ -1046,7 +1046,7 @@ static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
             if (gy + 82 > cy1) gy = cy1 - 82;
             if (gx + 74 > 0 && gy + 82 > 0 && gx < w && gy < h) {
                 if (icon) {
-                    ic_icon_draw(&c, gx + 13, gy + 8, 48, 48, icon);
+                    ic_icon_draw(&c, gx + 21, gy + 16, 32, 32, icon);
                 }
                 ic_outline_r(&c, gx, gy, 74, 82, 8, t->accent);
             }
@@ -1205,7 +1205,7 @@ static void desk_paint_cell(desk_icon_t *d) {
         label_bg = 0x0023344D;
     }
     if (icon) {
-        ic_icon_draw(&c, x + 13, y + 8, 48, 48, icon);
+        ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
     ic_text_clip(&c, x + 4, y + 60, d->label, 0x00FFFFFF, label_bg, 66);
     mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
@@ -1217,7 +1217,7 @@ static void draw_desktop_icon_layer(int w, int h, int x, int y,
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
     uint32_t label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
     if (icon) {
-        ic_icon_draw(&c, x + 13, y + 8, 48, 48, icon);
+        ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
     ic_text_clip(&c, x + 4, y + 60, label, 0x00FFFFFF, label_bg, 66);
 }
