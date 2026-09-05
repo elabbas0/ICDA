@@ -15,7 +15,7 @@
 #define HISTORY_CAP 16
 #define EDIT_CAP 4096
 
-#define TOP_H 88
+#define TOP_H 80
 #define SIDE_W 132
 #define STATUS_H 36
 #define ICON_CELL_W 96
@@ -85,6 +85,37 @@ static int editor_top_row = 0;
 static uint64_t last_click_tick = 0;
 static int last_click_item = -1;
 static int key_seq_state = 0;
+
+/* ---- context-menu BSS (ported from wm.c ctx pattern) ---- */
+#define CTX_MAX_ITEMS 10
+#define CTX_LABEL_LEN 32
+
+enum {
+    CTX_OPEN = 1,
+    CTX_EDIT,
+    CTX_PLAY_STOP,
+    CTX_PROPERTIES,
+    CTX_RELOAD,
+    CTX_NEW_FILE,
+    CTX_NEW_FOLDER,
+    CTX_GOTO,
+    CTX_TERMINAL,
+    CTX_DISKMAN
+};
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_item = -1;          /* -1 = background */
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_MAX_ITEMS];
+static char ctx_labels[CTX_MAX_ITEMS][CTX_LABEL_LEN];
+static int props_open = 0;
+static char props_body[192];
+static int prev_right = 0;         /* edge-detect latch for right button */
+static int prev_left = 0;          /* rising-edge latch for left button */
+static int last_mouse_x = 0;       /* for menu hover tracking */
+static int last_mouse_y = 0;
 
 static uint64_t d_strlen(const char *s) {
     uint64_t n = 0;
@@ -375,6 +406,31 @@ static void draw_sidebar_button(int y, const char *label, const char *path) {
     draw_button(12, y, SIDE_W - 24, 26, label, active);
 }
 
+/* ---- context menu helpers (BSS + draw primitives; actions wired below) ---- */
+static void ctx_set_item(int idx, int action, const char *label) {
+    if (idx < 0 || idx >= CTX_MAX_ITEMS) return;
+    ctx_actions[idx] = action;
+    d_copy(ctx_labels[idx], label, CTX_LABEL_LEN);
+}
+
+static void ctx_menu_fill(ic_menu_t *m) {
+    int i;
+    if (!m) return;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++) {
+        m->items[i] = ctx_labels[i];
+    }
+}
+
+static void ctx_close(void) { ctx_open = 0; }
+static void props_close(void) { props_open = 0; }
+
+static int is_audio_playing(void) {
+    icda_audio_info_t a;
+    return (long)icda_audio_info(&a) >= 0 && a.active;
+}
+
 static void draw_browser(void) {
     int w = gui_window_width();
     int h = gui_window_height();
@@ -399,14 +455,6 @@ static void draw_browser(void) {
     draw_text_clip(20, 17, current_path, 0x00F1F5F9, 0x000F172A, w - 40);
     draw_button(12, 50, 50, 25, "Back", history_count > 0);
     draw_button(68, 50, 42, 25, "Up", !d_streq(current_path, "/"));
-    draw_button(116, 50, 62, 25, "Reload", 0);
-    draw_button(190, 50, 72, 25, "New File", 0);
-    draw_button(268, 50, 86, 25, "New Folder", 0);
-    draw_button(366, 50, 50, 25, "Edit", selected_item >= 0 && !items[selected_item].is_dir);
-    draw_button(422, 50, 54, 25, "Play", selected_item >= 0 && items[selected_item].is_wav);
-    draw_button(482, 50, 54, 25, "Stop", 0);
-    draw_button(w - 174, 50, 78, 25, "Terminal", 0);
-    draw_button(w - 88, 50, 76, 25, "Diskman", 0);
     draw_text_clip(18, TOP_H + 14, "Places", 0x0094A3B8, 0x00111D2E, SIDE_W - 28);
     draw_sidebar_button(TOP_H + 42, "Root", "/");
     draw_sidebar_button(TOP_H + 74, "Home", "/home");
@@ -439,6 +487,34 @@ static void draw_browser(void) {
         draw_text_clip(w - 42, h - 25, "s", 0x00F1F5F9, 0x00111D2E, 16);
     } else {
         draw_text_clip(w - 120, h - 25, "Audio idle", 0x0064758B, 0x00111D2E, 100);
+    }
+    /* ---- context menu (topmost overlay) ---- */
+    if (ctx_open && ctx_nitems > 0) {
+        ic_canvas_t mc;
+        const ic_theme_t *t = ic_theme_default();
+        ic_menu_t m;
+        mc.px = gui_pixel_buffer();
+        mc.w = gui_window_width();
+        mc.h = gui_window_height();
+        ctx_menu_fill(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
+        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
+    }
+    /* ---- properties dialog (topmost overlay) ---- */
+    if (props_open) {
+        ic_canvas_t pc;
+        const ic_theme_t *t = ic_theme_default();
+        ic_rect_t r;
+        r.w = 380;
+        r.h = 120;
+        r.x = (w - r.w) / 2;
+        r.y = (h - r.h) / 2;
+        if (r.x < 0) r.x = 0;
+        if (r.y < 0) r.y = 0;
+        pc.px = gui_pixel_buffer();
+        pc.w = gui_window_width();
+        pc.h = gui_window_height();
+        ic_dialog_draw(&pc, t, r, "Properties", props_body);
     }
 }
 
@@ -722,6 +798,8 @@ static void draw_editor(void) {
 }
 
 static void open_dialog(int kind, const char *title, const char *initial) {
+    ctx_close();
+    props_close();
     dialog = kind;
     d_copy(dialog_title, title, sizeof(dialog_title));
     d_copy(dialog_input, initial ? initial : "", sizeof(dialog_input));
@@ -950,6 +1028,122 @@ static void handle_editor_click(int mx, int my) {
     }
 }
 
+/* ---- context menu actions (open / activate / press) ---- */
+static void ctx_open_at(int x, int y, int item_idx) {
+    ic_menu_t m;
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int mw, mh;
+    int i = 0;
+
+    ctx_item = item_idx;
+    if (item_idx >= 0 && item_idx < item_count) {
+        /* item context menu */
+        ctx_set_item(i++, CTX_OPEN, "Open");
+        if (!items[item_idx].is_dir)
+            ctx_set_item(i++, CTX_EDIT, "Edit");
+        if (items[item_idx].is_wav) {
+            if (is_audio_playing())
+                ctx_set_item(i++, CTX_PLAY_STOP, "Stop");
+            else
+                ctx_set_item(i++, CTX_PLAY_STOP, "Play");
+        }
+        ctx_set_item(i++, CTX_PROPERTIES, "Properties");
+    } else {
+        /* background context menu */
+        ctx_set_item(i++, CTX_RELOAD, "Reload");
+        ctx_set_item(i++, CTX_NEW_FILE, "New File");
+        ctx_set_item(i++, CTX_NEW_FOLDER, "New Folder");
+        ctx_set_item(i++, CTX_GOTO, "Open Path");
+        ctx_set_item(i++, CTX_TERMINAL, "Terminal");
+        ctx_set_item(i++, CTX_DISKMAN, "Diskman");
+    }
+    ctx_nitems = i;
+    if (ctx_nitems <= 0) return;
+
+    ctx_menu_fill(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (x + mw > w) x = w - mw;
+    if (x < 0) x = 0;
+    if (y + mh > h) y = h - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
+}
+
+static void explorer_ctx_activate(int which) {
+    int a;
+    if (which < 0 || which >= ctx_nitems) {
+        ctx_close();
+        return;
+    }
+    a = ctx_actions[which];
+    if (a == CTX_OPEN) {
+        open_selected();
+    } else if (a == CTX_EDIT) {
+        if (ctx_item >= 0 && !items[ctx_item].is_dir)
+            open_editor_path(items[ctx_item].path);
+        else
+            set_status("Select a file to edit");
+    } else if (a == CTX_PLAY_STOP) {
+        if (is_audio_playing()) {
+            icda_stop_audio();
+            set_status("Audio stopped");
+        } else {
+            play_selected();
+        }
+    } else if (a == CTX_PROPERTIES) {
+        if (ctx_item >= 0 && ctx_item < item_count) {
+            int pos = 0;
+            d_copy(props_body, items[ctx_item].path, sizeof(props_body));
+            pos = (int)d_strlen(props_body);
+            if (pos < (int)sizeof(props_body) - 2) {
+                props_body[pos++] = '\n';
+                props_body[pos] = 0;
+            }
+            uint_to_text(items[ctx_item].size, props_body + pos,
+                         sizeof(props_body) - (uint64_t)pos);
+        } else {
+            d_copy(props_body, current_path, sizeof(props_body));
+        }
+        props_open = 1;
+    } else if (a == CTX_RELOAD) {
+        browser_refresh();
+    } else if (a == CTX_NEW_FILE) {
+        open_dialog(DIALOG_NEW_FILE, "Create new file", "");
+    } else if (a == CTX_NEW_FOLDER) {
+        open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "");
+    } else if (a == CTX_GOTO) {
+        open_dialog(DIALOG_GOTO, "Open path", current_path);
+    } else if (a == CTX_TERMINAL) {
+        icda_spawn("/apps/terminal.app");
+    } else if (a == CTX_DISKMAN) {
+        icda_spawn("/apps/diskman.app");
+    }
+    ctx_close();
+}
+
+/* Left-press routing while a context menu or properties dialog is open.
+ * Returns 1 when the press was consumed (caller must skip normal handling).
+ * Mirrors wm.c ctx_press (960-974). */
+static int explorer_ctx_press(int mx, int my) {
+    if (props_open) {
+        props_close();
+        return 1;
+    }
+    if (!ctx_open) return 0;
+    {
+        ic_menu_t m;
+        int hit;
+        ctx_menu_fill(&m);
+        hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+        explorer_ctx_activate(hit);
+    }
+    return 1;
+}
+
 static void handle_browser_click(int mx, int my) {
     int w = gui_window_width();
     int h = gui_window_height();
@@ -961,18 +1155,6 @@ static void handle_browser_click(int mx, int my) {
     }
     if (hit_rect(mx, my, 12, 50, 50, 25)) { navigate_back(); return; }
     if (hit_rect(mx, my, 68, 50, 42, 25)) { navigate_up(); return; }
-    if (hit_rect(mx, my, 116, 50, 62, 25)) { browser_refresh(); return; }
-    if (hit_rect(mx, my, 190, 50, 72, 25)) { open_dialog(DIALOG_NEW_FILE, "Create new file", ""); return; }
-    if (hit_rect(mx, my, 268, 50, 86, 25)) { open_dialog(DIALOG_NEW_FOLDER, "Create new folder", ""); return; }
-    if (hit_rect(mx, my, 366, 50, 50, 25)) {
-        if (selected_item >= 0 && !items[selected_item].is_dir) open_editor_path(items[selected_item].path);
-        else set_status("Select a file to edit");
-        return;
-    }
-    if (hit_rect(mx, my, 422, 50, 54, 25)) { play_selected(); return; }
-    if (hit_rect(mx, my, 482, 50, 54, 25)) { icda_stop_audio(); set_status("Audio stopped"); return; }
-    if (hit_rect(mx, my, w - 174, 50, 78, 25)) { icda_spawn("/apps/terminal.app"); return; }
-    if (hit_rect(mx, my, w - 88, 50, 76, 25)) { icda_spawn("/apps/diskman.app"); return; }
 
     if (hit_rect(mx, my, 12, TOP_H + 42, SIDE_W - 24, 26)) { navigate_to("/", 1); return; }
     if (hit_rect(mx, my, 12, TOP_H + 74, SIDE_W - 24, 26)) { navigate_to("/home", 1); return; }
@@ -1011,6 +1193,9 @@ static void handle_mouse(gui_msg_t *msg) {
     int w = gui_window_width();
     int h = gui_window_height();
 
+    last_mouse_x = mx;
+    last_mouse_y = my;
+
     if (mode == MODE_BROWSER) {
         hover_item = -1;
         layout_items(w, h);
@@ -1022,14 +1207,48 @@ static void handle_mouse(gui_msg_t *msg) {
         }
     }
 
+    /* ---- left-click routing ---- */
     if (msg->mouse.buttons & GUI_BTN_LEFT) {
+        /* B2: dialog/editor/menu precedence */
         if (dialog != DIALOG_NONE) {
+            ctx_close();
+            props_close();
             handle_dialog_click(mx, my);
         } else if (mode == MODE_EDITOR) {
+            ctx_close();
+            props_close();
             handle_editor_click(mx, my);
+        } else if (ctx_open || props_open) {
+            /* Menu/props open: swallow held levels, act on the rising
+             * edge only. Otherwise the same held press that opens the
+             * Properties dialog would instantly close it again on the
+             * next motion message, and held drags would click through
+             * to the browser behind the menu. */
+            if (!prev_left) explorer_ctx_press(mx, my);
         } else {
             handle_browser_click(mx, my);
         }
+    }
+    prev_left = (msg->mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+
+    /* ---- right-click: edge-detect (C1) ---- */
+    if (msg->mouse.buttons & GUI_BTN_RIGHT) {
+        if (!prev_right && mode == MODE_BROWSER && dialog == DIALOG_NONE) {
+            int hit = -1;
+            ctx_close();
+            props_close();
+            for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
+                if (hit_rect(mx, my, items[i].x, items[i].y, items[i].w, items[i].h)) {
+                    hit = i;
+                    break;
+                }
+            }
+            selected_item = hit;
+            ctx_open_at(mx, my, hit);
+        }
+        prev_right = 1;
+    } else {
+        prev_right = 0;
     }
 }
 

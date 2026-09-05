@@ -834,6 +834,160 @@ void ic_draw_button(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
     ic_text(c, tx, ty, label, fg, fill);
 }
 
+/* ============================ menu / dialog / slider ================= */
+
+int ic_menu_row_h(void) {
+    return FONT_HEIGHT + 8;
+}
+
+int ic_menu_width(const ic_menu_t *m) {
+    int w = 0;
+    int i;
+
+    if (!m) return 0;
+    for (i = 0; i < m->count && i < IC_MENU_MAX_ITEMS; i++) {
+        int tw;
+        if (!m->items[i]) continue;
+        tw = ic_text_width(m->items[i]);
+        if (tw > w) w = tw;
+    }
+    return w + 32;
+}
+
+int ic_menu_height(const ic_menu_t *m) {
+    int n;
+
+    if (!m) return 0;
+    n = m->count;
+    if (n < 0) n = 0;
+    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
+    return n * ic_menu_row_h() + 12;
+}
+
+void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
+                  const ic_menu_t *m) {
+    int w;
+    int h;
+    int row;
+    int i;
+    int n;
+
+    if (!c || !t || !m) return;
+    n = m->count;
+    if (n <= 0) return;
+    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
+    w = ic_menu_width(m);
+    h = ic_menu_height(m);
+    if (w <= 0 || h <= 0) return;
+    row = ic_menu_row_h();
+
+    ic_draw_shadow(c, x, y, w, h, IC_RADIUS_MENU, IC_SHADOW_COLOR);
+    ic_rect_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel);
+    ic_outline_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel_edge);
+    for (i = 0; i < n; i++) {
+        int iy = y + 6 + i * row;
+        if (!m->items[i]) continue;
+        if (i == m->selected) {
+            ic_rect_r(c, x + 4, iy, w - 8, row, 6, t->accent);
+            ic_text(c, x + 16, iy + 4, m->items[i], t->text_on_accent, t->accent);
+        } else {
+            ic_text(c, x + 16, iy + 4, m->items[i], t->text, t->panel);
+        }
+    }
+}
+
+int ic_menu_hit(const ic_menu_t *m, int x, int y, int mx, int my) {
+    int row;
+    int n;
+    int i;
+
+    if (!m) return -1;
+    n = m->count;
+    if (n <= 0) return -1;
+    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
+    row = ic_menu_row_h();
+    for (i = 0; i < n; i++) {
+        ic_rect_t r;
+        r.x = x + 4;
+        r.y = y + 6 + i * row;
+        r.w = ic_menu_width(m) - 8;
+        r.h = row;
+        if (ic_hit_rect(mx, my, r)) return i;
+    }
+    return -1;
+}
+
+void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                    const char *title, const char *body) {
+    if (!c || !t) return;
+    if (r.w <= 0 || r.h <= 0) return;
+    ic_draw_shadow(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, IC_SHADOW_COLOR);
+    ic_rect_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel);
+    ic_outline_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel_edge);
+    if (title) {
+        ic_text(c, r.x + 16, r.y + 12, title, t->text, t->panel);
+        ic_rect(c, r.x + 16, r.y + 12 + FONT_HEIGHT + 6, r.w - 32, 1,
+                t->panel_edge);
+    }
+    if (body) {
+        ic_text_clip(c, r.x + 16, r.y + 12 + FONT_HEIGHT + 6 + 10, body,
+                     t->text_muted, t->panel, r.w - 32);
+    }
+}
+
+void ic_slider_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t track,
+                    int value, int vmin, int vmax) {
+    int span;
+    int frac_num;
+    int thumb_x;
+    int fill_w;
+
+    if (!c || !t) return;
+    if (track.w < 32 || track.h < 16) return;
+    span = vmax - vmin;
+    if (span <= 0) {
+        value = vmin;
+        span = 1;
+    }
+    if (value < vmin) value = vmin;
+    if (value > vmax) value = vmax;
+    frac_num = (value - vmin) * (track.w - 16);
+
+    ic_rect_r(c, track.x, track.y + track.h / 2 - 4, track.w, 8, 4,
+              t->surface_hover);
+    ic_outline_r(c, track.x, track.y + track.h / 2 - 4, track.w, 8, 4,
+                 t->border);
+    fill_w = frac_num / span;
+    if (fill_w > 0) {
+        ic_rect_r(c, track.x, track.y + track.h / 2 - 4, fill_w, 8, 4,
+                  t->accent);
+    }
+    thumb_x = track.x + frac_num / span;
+    ic_rect_r(c, thumb_x, track.y, 16, track.h, 6, t->text);
+    ic_outline_r(c, thumb_x, track.y, 16, track.h, 6, t->accent);
+}
+
+int ic_slider_hit(ic_rect_t track, int mx, int my) {
+    ic_rect_t big;
+    big.x = track.x - 8;
+    big.y = track.y - 8;
+    big.w = track.w + 16;
+    big.h = track.h + 16;
+    return ic_hit_rect(mx, my, big);
+}
+
+int ic_slider_value_from_x(ic_rect_t track, int vmin, int vmax, int mx) {
+    int span = vmax - vmin;
+    int denom = track.w - 16;
+    int rel;
+
+    if (span <= 0 || denom <= 0) return vmin;
+    rel = mx - (track.x + 8);
+    if (rel < 0) rel = 0;
+    if (rel > denom) rel = denom;
+    return vmin + rel * span / denom;
+}
+
 /* ============================ app skeleton =========================== */
 
 int ic_run_app(const char *title, int w, int h,

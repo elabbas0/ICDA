@@ -381,6 +381,828 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
 /* Modern flat wallpaper: a calm blue vertical gradient, rendered once
  * into desktop_layer.  No per-pixel hills or per-row re-blends at
  * runtime - this is the base every frame is copied from. */
+/* ---- desktop icon grid (step 3) ------------------------------------
+ * Icons live in a registry, not hardcoded call sites. Positions come
+ * from grid cells so drag/reorder only changes data. All state is
+ * file-scope BSS (see the note at mouse_x): locals in the hot paths
+ * have been observed corrupted by the generated code. */
+#define DESK_MAX_ICONS 12
+#define DESK_CELL_W 96
+#define DESK_CELL_H 90
+#define DESK_GRID_X0 22
+#define DESK_GRID_Y0 64
+#define DESK_HIT_W 74
+#define DESK_HIT_H 74
+#define DESK_DBLCLICK_TICKS 50
+
+typedef struct {
+    const char *label;
+    const char *icon;
+    const char *path;
+    int pinned;     /* shown on the desktop */
+    int cell_x;     /* grid cell */
+    int cell_y;
+    int selected;
+} desk_icon_t;
+
+static desk_icon_t desk_icons[DESK_MAX_ICONS];
+static int desk_icon_count = 0;
+static uint64_t desk_last_click_tick = 0;
+static int desk_last_click_icon = -1;
+
+static void desk_add(const char *label, const char *icon, const char *path,
+                     int pinned, int cx, int cy) {
+    desk_icon_t *d;
+    if (desk_icon_count >= DESK_MAX_ICONS) return;
+    d = &desk_icons[desk_icon_count++];
+    d->label = label;
+    d->icon = icon;
+    d->path = path;
+    d->pinned = pinned;
+    d->cell_x = cx;
+    d->cell_y = cy;
+    d->selected = 0;
+}
+
+static void desk_init_registry(void) {
+    desk_icon_count = 0;
+    desk_add("Explorer", "folder", "/apps/desktop.app", 1, 0, 0);
+    desk_add("Terminal", "terminal", "/apps/terminal.app", 1, 0, 1);
+    desk_add("Music", "music", "/apps/audioplay.app", 1, 0, 2);
+    desk_add("Browser", "app", "/apps/browser.app", 1, 0, 3);
+    desk_add("Editor", "editor", "/apps/editor.app", 0, 0, 0);
+    desk_add("Task Manager", "gear", "/apps/taskman.app", 0, 0, 0);
+}
+
+static int desk_icon_x(desk_icon_t *d) {
+    return DESK_GRID_X0 + d->cell_x * DESK_CELL_W;
+}
+
+static int desk_icon_y(desk_icon_t *d) {
+    return DESK_GRID_Y0 + d->cell_y * DESK_CELL_H;
+}
+
+/* ---- drag + rubber-band state (step 3b, all BSS) ---- */
+static int desk_drag_icon = -1;   /* press-armed icon, -1 none */
+static int desk_dragging = 0;     /* threshold passed, ghost follows */
+static int desk_press_x = 0;
+static int desk_press_y = 0;
+static int desk_grab_dx = 0;      /* cursor offset inside the cell */
+static int desk_grab_dy = 0;
+static int desk_ghost_x = 0;
+static int desk_ghost_y = 0;
+static int desk_press_desktop = 0;/* press began on desktop, not a window */
+
+static void desk_paint_cell(desk_icon_t *d);
+static void desk_erase_rect(int x, int y, int w, int h);
+static void build_desktop_layer(void);
+static void desk_save(void);
+static void desk_load(void);
+static int rubber_armed = 0;      /* press began on empty desktop */
+static int rubber_active = 0;
+static int rubber_x0 = 0;
+static int rubber_y0 = 0;
+static int rubber_x1 = 0;
+static int rubber_y1 = 0;
+
+#define DESK_DRAG_THRESH_PX 8
+
+static void desk_snap_cell(int x, int y, int *cx, int *cy) {
+    int h = (int)fb_info.height;
+    int max_cy;
+    *cx = (x < DESK_GRID_X0) ? 0 : (x - DESK_GRID_X0 + DESK_CELL_W / 2) / DESK_CELL_W;
+    *cy = (y < DESK_GRID_Y0) ? 0 : (y - DESK_GRID_Y0 + DESK_CELL_H / 2) / DESK_CELL_H;
+    if (*cx < 0) *cx = 0;
+    if (*cy < 0) *cy = 0;
+    if (*cx > 8) *cx = 8;
+    max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+    if (max_cy < 0) max_cy = 0;
+    if (*cy > max_cy) *cy = max_cy;
+}
+
+/* Motion with the left button held (called per mouse event, out of
+ * line to protect the hot loop's registers). Starts icon drags and
+ * rubber-bands past the movement threshold. */
+static void desk_track_motion(int mx, int my, uint8_t buttons) {
+    int dx;
+    int dy;
+
+    if (!(buttons & 1)) return;
+    if (!desk_press_desktop) return;
+    dx = mx - desk_press_x;
+    dy = my - desk_press_y;
+    if (!desk_dragging && desk_drag_icon >= 0 &&
+        dx * dx + dy * dy > DESK_DRAG_THRESH_PX * DESK_DRAG_THRESH_PX) {
+        desk_dragging = 1;
+        mark_dirty_full();
+    }
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_ghost_x = mx - desk_grab_dx;
+        desk_ghost_y = my - desk_grab_dy;
+        mark_dirty_full();
+        return;
+    }
+    if (!rubber_active && rubber_armed &&
+        dx * dx + dy * dy > DESK_DRAG_THRESH_PX * DESK_DRAG_THRESH_PX) {
+        rubber_active = 1;
+        rubber_x0 = desk_press_x;
+        rubber_y0 = desk_press_y;
+        mark_dirty_full();
+    }
+    if (rubber_active) {
+        rubber_x1 = mx;
+        rubber_y1 = my;
+        mark_dirty_full();
+    }
+}
+
+static int desk_rects_overlap(int ax, int ay, int aw, int ah,
+                              int bx, int by, int bw, int bh) {
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+
+/* ---- context menus + properties + persist (step 3c) ----
+ * Doctrine: context menus carry the full option set (Windows-style);
+ * topbars keep only quick actions (those move app by app, later).
+ * All state BSS; geometry clamped; modal-ish (clicks route here first
+ * while open). Persist is best-effort: /cfg survives only where the
+ * boot device persists (RAM-only on live ISO). */
+#define CTX_MAX_ITEMS 10
+#define CTX_LABEL_LEN 36
+
+enum {
+    CTX_OPEN = 1,
+    CTX_TOGGLE_PIN,
+    CTX_PROPS,
+    CTX_ARRANGE,
+    CTX_PIN_BASE = 16
+};
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_icon = -1;   /* target icon, -1 = desktop background */
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_MAX_ITEMS];
+static char ctx_labels[CTX_MAX_ITEMS][CTX_LABEL_LEN];
+static int props_open = 0;
+static int props_icon = -1;
+static char props_body[192];
+
+static void ctx_set_item(int idx, int action, const char *a, const char *b) {
+    int i = 0;
+    int j = 0;
+    if (idx < 0 || idx >= CTX_MAX_ITEMS) return;
+    ctx_actions[idx] = action;
+    while (a && a[i] && i < CTX_LABEL_LEN - 1) {
+        ctx_labels[idx][i] = a[i];
+        i++;
+    }
+    while (b && b[j] && i < CTX_LABEL_LEN - 1) {
+        ctx_labels[idx][i] = b[j];
+        i++;
+        j++;
+    }
+    ctx_labels[idx][i] = '\0';
+}
+
+/* Fill a stack menu struct from BSS (for draw + hit-test). */
+static int ctx_menu(ic_menu_t *m) {
+    int i;
+    if (!m) return 0;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++) {
+        m->items[i] = ctx_labels[i];
+    }
+    return ctx_nitems;
+}
+
+static void ctx_close(void) {
+    if (ctx_open) {
+        ctx_open = 0;
+        mark_dirty_full();
+    }
+}
+
+static void props_close(void) {
+    if (props_open) {
+        props_open = 0;
+        mark_dirty_full();
+    }
+}
+
+static void ctx_open_at(int x, int y, int icon) {
+    ic_menu_t m;
+    int fw = (int)fb_info.width;
+    int fh = (int)fb_info.height;
+    int mw;
+    int mh;
+    int i = 0;
+    int j;
+
+    ctx_icon = icon;
+    if (icon >= 0 && icon < desk_icon_count) {
+        ctx_set_item(i++, CTX_OPEN, "Open", 0);
+        ctx_set_item(i++, CTX_TOGGLE_PIN,
+                     desk_icons[icon].pinned ? "Unpin from desktop" : "Pin to desktop", 0);
+        ctx_set_item(i++, CTX_PROPS, "Properties", 0);
+    } else {
+        for (j = 0; j < desk_icon_count && i < CTX_MAX_ITEMS - 1; j++) {
+            if (!desk_icons[j].pinned) {
+                /* NOTE: pass the action through set_item — it owns
+                 * ctx_actions[idx]. A direct assignment here would be
+                 * clobbered (caught live: pin clicks silently died). */
+                ctx_set_item(i, CTX_PIN_BASE + j, "Pin ",
+                             desk_icons[j].label);
+                i++;
+            }
+        }
+        ctx_set_item(i++, CTX_ARRANGE, "Arrange icons", 0);
+    }
+    ctx_nitems = i;
+    if (ctx_nitems <= 0) return;
+    ctx_menu(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (fw <= 0 || fh <= 0) return;
+    if (x + mw > fw) x = fw - mw;
+    if (x < 0) x = 0;
+    if (y + mh > fh - TASKBAR_H) y = fh - TASKBAR_H - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
+    mark_dirty_full();
+}
+
+/* Tiny decimal printer (freestanding: no snprintf). */
+static void ctx_put_u64(char *dst, int cap, int *pos, uint64_t v) {
+    char tmp[20];
+    int n = 0;
+    int k;
+    if (!dst || !pos || *pos >= cap - 1) return;
+    if (v == 0) {
+        dst[(*pos)++] = '0';
+        dst[*pos] = '\0';
+        return;
+    }
+    while (v > 0 && n < 20) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = n - 1; k >= 0 && *pos < cap - 1; k--) {
+        dst[(*pos)++] = tmp[k];
+    }
+    dst[*pos] = '\0';
+}
+
+static void ctx_put_str(char *dst, int cap, int *pos, const char *s) {
+    int i = 0;
+    if (!dst || !pos || !s) return;
+    while (s[i] && *pos < cap - 1) {
+        dst[(*pos)++] = s[i++];
+    }
+    dst[*pos] = '\0';
+}
+
+static void props_open_for(int icon) {
+    desk_icon_t *d;
+    icda_stat_t st;
+    int have_size = 0;
+    int pos = 0;
+
+    if (icon < 0 || icon >= desk_icon_count) return;
+    d = &desk_icons[icon];
+    props_icon = icon;
+    props_body[0] = '\0';
+    ctx_put_str(props_body, sizeof(props_body), &pos, d->label);
+    ctx_put_str(props_body, sizeof(props_body), &pos, "  ");
+    ctx_put_str(props_body, sizeof(props_body), &pos, d->path);
+    if (icda_stat(d->path, &st) == 0) {
+        have_size = 1;
+    }
+    if (have_size) {
+        ctx_put_str(props_body, sizeof(props_body), &pos, "  ");
+        ctx_put_u64(props_body, sizeof(props_body), &pos, st.size);
+        ctx_put_str(props_body, sizeof(props_body), &pos, " bytes");
+    }
+    props_open = 1;
+    mark_dirty_full();
+}
+
+static void desk_arrange(void) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int cx = 0;
+    int cy = 0;
+    int i;
+
+    if (w <= 0 || h <= 0) return;
+    for (i = 0; i < desk_icon_count; i++) {
+        desk_icon_t *d = &desk_icons[i];
+        int max_cy;
+        if (!d->pinned) continue;
+        max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+        if (max_cy < 0) max_cy = 0;
+        if (cy > max_cy) {
+            cy = 0;
+            cx++;
+            if (cx > 8) cx = 8;
+        }
+        d->cell_x = cx;
+        d->cell_y = cy;
+        d->selected = 0;
+        cy++;
+    }
+    build_desktop_layer();
+    mark_dirty_full();
+}
+
+static int desk_free_cell(int *cx, int *cy) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int x;
+    int y;
+    int max_cy;
+    int i;
+
+    if (w <= 0 || h <= 0) return 0;
+    (void)w;
+    max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+    if (max_cy < 0) max_cy = 0;
+    for (y = 0; y <= max_cy; y++) {
+        for (x = 0; x <= 8; x++) {
+            int taken = 0;
+            for (i = 0; i < desk_icon_count; i++) {
+                if (desk_icons[i].pinned && desk_icons[i].cell_x == x &&
+                    desk_icons[i].cell_y == y) {
+                    taken = 1;
+                    break;
+                }
+            }
+            if (!taken) {
+                *cx = x;
+                *cy = y;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void desk_activate(int which) {
+    int a;
+
+    if (which < 0 || which >= ctx_nitems) {
+        ctx_close();
+        return;
+    }
+    a = ctx_actions[which];
+    if (a == CTX_OPEN && ctx_icon >= 0 && ctx_icon < desk_icon_count) {
+        icda_spawn(desk_icons[ctx_icon].path);
+        ctx_close();
+    } else if (a == CTX_TOGGLE_PIN && ctx_icon >= 0 &&
+               ctx_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[ctx_icon];
+        d->pinned = !d->pinned;
+        d->selected = 0;
+        if (d->pinned) {
+            int cx;
+            int cy;
+            if (desk_free_cell(&cx, &cy)) {
+                d->cell_x = cx;
+                d->cell_y = cy;
+            }
+            desk_paint_cell(d);
+        } else {
+            desk_erase_rect(DESK_GRID_X0 + d->cell_x * DESK_CELL_W,
+                            DESK_GRID_Y0 + d->cell_y * DESK_CELL_H,
+                            DESK_CELL_W, DESK_CELL_H + 8);
+        }
+        desk_save();
+        ctx_close();
+    } else if (a == CTX_PROPS && ctx_icon >= 0 &&
+               ctx_icon < desk_icon_count) {
+        props_open_for(ctx_icon);
+        ctx_close();
+    } else if (a == CTX_ARRANGE) {
+        desk_arrange();
+        desk_save();
+        ctx_close();
+    } else if (a >= CTX_PIN_BASE && a < CTX_PIN_BASE + DESK_MAX_ICONS) {
+        int j = a - CTX_PIN_BASE;
+        if (j >= 0 && j < desk_icon_count && !desk_icons[j].pinned) {
+            int cx;
+            int cy;
+            if (desk_free_cell(&cx, &cy)) {
+                desk_icons[j].pinned = 1;
+                desk_icons[j].cell_x = cx;
+                desk_icons[j].cell_y = cy;
+                desk_paint_cell(&desk_icons[j]);
+                desk_save();
+            }
+        }
+        ctx_close();
+    } else {
+        ctx_close();
+    }
+}
+
+/* ---- persist (best-effort; RAM-only on live ISO) ----
+ * /cfg/desktop.cfg lines: "1 <cx> <cy> <path>" pinned,
+ * "0 <path>" unpinned. Unknown paths and out-of-range cells are
+ * ignored on load; registry defaults stand in. */
+#define DESK_CFG_PATH "/cfg/desktop.cfg"
+
+static int desk_atoi(const char **p) {
+    int v = 0;
+    int neg = 0;
+    if (!p || !*p) return 0;
+    if (**p == '-') {
+        neg = 1;
+        (*p)++;
+    }
+    while (**p >= '0' && **p <= '9') {
+        v = v * 10 + (**p - '0');
+        (*p)++;
+    }
+    return neg ? -v : v;
+}
+
+static int desk_streq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+static void desk_put_u64(char *dst, int cap, int *pos, uint64_t v) {
+    char rev[20];
+    int r = 0;
+    int k;
+    if (!dst || !pos || *pos >= cap - 1) return;
+    if (v == 0) {
+        dst[(*pos)++] = '0';
+        dst[*pos] = '\0';
+        return;
+    }
+    while (v > 0 && r < 19) {
+        rev[r++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = r - 1; k >= 0 && *pos < cap - 1; k--) {
+        dst[(*pos)++] = rev[k];
+    }
+    dst[*pos] = '\0';
+}
+
+static void desk_save(void) {
+    char buf[512];
+    int pos = 0;
+    int i;
+
+    icda_mkdir("/cfg");
+    for (i = 0; i < desk_icon_count && pos < 430; i++) {
+        desk_icon_t *d = &desk_icons[i];
+        const char *p;
+        buf[pos++] = d->pinned ? '1' : '0';
+        buf[pos++] = ' ';
+        if (d->pinned) {
+            desk_put_u64(buf, (int)sizeof(buf), &pos,
+                         (uint64_t)(d->cell_x < 0 ? 0 : d->cell_x));
+            if (pos < 430) buf[pos++] = ' ';
+            desk_put_u64(buf, (int)sizeof(buf), &pos,
+                         (uint64_t)(d->cell_y < 0 ? 0 : d->cell_y));
+            if (pos < 430) buf[pos++] = ' ';
+        }
+        p = d->path;
+        while (p && *p && pos < 430) buf[pos++] = *p++;
+        if (pos < 511) buf[pos++] = '\n';
+    }
+    buf[pos < 512 ? pos : 511] = '\0';
+    if (pos > 0) {
+        icda_write_file(DESK_CFG_PATH, buf, (uint64_t)pos);
+    }
+}
+
+static void desk_load(void) {
+    char buf[512];
+    long n;
+    int p = 0;
+
+    n = (long)icda_read_file(DESK_CFG_PATH, buf, sizeof(buf) - 1);
+    if (n <= 0) return;
+    if (n > 511) n = 511;
+    buf[n] = '\0';
+    while (p < n) {
+        int pinned;
+        int cx = 0;
+        int cy = 0;
+        char path[96];
+        int k = 0;
+        int i;
+        if (buf[p] != '0' && buf[p] != '1') {
+            while (p < n && buf[p] != '\n') p++;
+            if (p < n) p++;
+            continue;
+        }
+        pinned = buf[p++] - '0';
+        if (p >= n || buf[p] != ' ') {
+            while (p < n && buf[p] != '\n') p++;
+            if (p < n) p++;
+            continue;
+        }
+        p++;
+        if (pinned) {
+            const char *q = buf + p;
+            cx = desk_atoi(&q);
+            if (*q != ' ') {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+            q++;
+            cy = desk_atoi(&q);
+            if (*q != ' ') {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+            q++;
+            p = (int)(q - buf);
+            if (cx < 0 || cx > 8 || cy < 0 || cy > 8) {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+        }
+        while (p < n && buf[p] != '\n' && k < 95) path[k++] = buf[p++];
+        path[k] = '\0';
+        if (p < n && buf[p] == '\n') p++;
+        if (k == 0) continue;
+        for (i = 0; i < desk_icon_count; i++) {
+            if (desk_streq(desk_icons[i].path, path)) {
+                desk_icons[i].pinned = pinned ? 1 : 0;
+                if (pinned) {
+                    desk_icons[i].cell_x = cx;
+                    desk_icons[i].cell_y = cy;
+                }
+                desk_icons[i].selected = 0;
+                break;
+            }
+        }
+    }
+}
+
+/* Left press routing while a menu/dialog is open. Returns 1 when the
+ * press was consumed (caller must skip normal handling). */
+static int ctx_press(int mx, int my) {
+    if (props_open) {
+        props_close();
+        return 1;
+    }
+    if (!ctx_open) return 0;
+    {
+        ic_menu_t m;
+        int hit;
+        ctx_menu(&m);
+        hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+        desk_activate(hit);
+    }
+    return 1;
+}
+
+/* Desktop overlays (rubber-band, drag ghost; menus/dialogs join in
+ * 3c). Drawn topmost from BSS state on every composite that covers
+ * them; callers force a full composite via mark_dirty_full on change.
+ * All coordinates are clamped to the given clip bounds (never trust
+ * unclamped drawing near the framebuffer edge). */
+static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    ic_canvas_t c;
+    const ic_theme_t *t;
+
+    if (w <= 0 || h <= 0) return;
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 > w) cx1 = w;
+    if (cy1 > h) cy1 = h;
+    if (cx1 <= cx0 || cy1 <= cy0) return;
+    c = bb_canvas(w, h);
+    t = ic_theme_default();
+    if (rubber_active) {
+        int x0 = rubber_x0 < rubber_x1 ? rubber_x0 : rubber_x1;
+        int y0 = rubber_y0 < rubber_y1 ? rubber_y0 : rubber_y1;
+        int x1 = rubber_x0 < rubber_x1 ? rubber_x1 : rubber_x0;
+        int y1 = rubber_y0 < rubber_y1 ? rubber_y1 : rubber_y0;
+        int i;
+        if (x0 < cx0) x0 = cx0;
+        if (y0 < cy0) y0 = cy0;
+        if (x1 >= cx1) x1 = cx1 - 1;
+        if (y1 >= cy1) y1 = cy1 - 1;
+        /* Fill + outline via clipped horizontal spans (ic_rect clips
+         * rows itself through the canvas bounds). */
+        for (i = x0; i <= x1; i += 1) {
+            if (i < 0 || i >= w) continue;
+            /* top/bottom edges */
+            if (y0 >= cy0 && y0 < cy1) {
+                ic_rect(&c, i, y0, 1, 1, t->accent);
+            }
+            if (y1 >= cy0 && y1 < cy1 && y1 != y0) {
+                ic_rect(&c, i, y1, 1, 1, t->accent);
+            }
+        }
+        {
+            int y;
+            for (y = y0; y <= y1; y++) {
+                if (y < cy0 || y >= cy1) continue;
+                if (x0 >= cx0 && x0 < cx1) ic_rect(&c, x0, y, 1, 1, t->accent);
+                if (x1 >= cx0 && x1 < cx1 && x1 != x0) {
+                    ic_rect(&c, x1, y, 1, 1, t->accent);
+                }
+            }
+        }
+    }
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[desk_drag_icon];
+        const ic_icon_t *icon = ic_icon_builtin(d->icon);
+        int gx = desk_ghost_x;
+        int gy = desk_ghost_y;
+        if (d->pinned) {
+            if (gx < cx0) gx = cx0;
+            if (gy < cy0) gy = cy0;
+            if (gx + 74 > cx1) gx = cx1 - 74;
+            if (gy + 82 > cy1) gy = cy1 - 82;
+            if (gx + 74 > 0 && gy + 82 > 0 && gx < w && gy < h) {
+                if (icon) {
+                    ic_icon_draw(&c, gx + 13, gy + 8, 48, 48, icon);
+                }
+                ic_outline_r(&c, gx, gy, 74, 82, 8, t->accent);
+            }
+        }
+    }
+    if (ctx_open && ctx_nitems > 0) {
+        ic_menu_t m;
+        /* Hover follows the live cursor (file-scope mouse_x/mouse_y);
+         * motion forces scene redraws while open (see batch loop). */
+        ctx_menu(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, mouse_x, mouse_y);
+        ic_menu_draw(&c, t, ctx_x, ctx_y, &m);
+    }
+    if (props_open && props_icon >= 0 && props_icon < desk_icon_count) {
+        ic_rect_t r;
+        r.w = 380;
+        r.h = 150;
+        r.x = (w - r.w) / 2;
+        r.y = (h - TASKBAR_H - r.h) / 2;
+        if (r.x < 0) r.x = 0;
+        if (r.y < 0) r.y = 0;
+        /* Clamp to the clip bounds (both screen and dirty rect). */
+        if (r.x < cx0) r.x = cx0;
+        if (r.y < cy0) r.y = cy0;
+        if (r.x + r.w > cx1) r.w = cx1 - r.x;
+        if (r.y + r.h > cy1) r.h = cy1 - r.y;
+        if (r.w > 0 && r.h > 0) {
+            ic_dialog_draw(&c, t, r, "Properties", props_body);
+        }
+    }
+}
+
+/* Left release: drop a drag (snap + swap) or finish a rubber-band
+ * (exclusive select). No-ops unless this press began on the desktop. */
+static void desk_left_release(int mx, int my) {
+    int i;
+
+    (void)mx;
+    (void)my;
+    if (!desk_press_desktop) return;
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[desk_drag_icon];
+        int ocx = d->cell_x;
+        int ocy = d->cell_y;
+        int ncx;
+        int ncy;
+        desk_snap_cell(mx, my, &ncx, &ncy);
+        /* Erase the vacated cell first: painting only the destination
+         * leaves a ghost behind (caught live on first drag test). */
+        desk_erase_rect(DESK_GRID_X0 + ocx * DESK_CELL_W,
+                        DESK_GRID_Y0 + ocy * DESK_CELL_H,
+                        DESK_CELL_W, DESK_CELL_H + 8);
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *o = &desk_icons[i];
+            if (i != desk_drag_icon && o->pinned &&
+                o->cell_x == ncx && o->cell_y == ncy) {
+                o->cell_x = ocx;
+                o->cell_y = ocy;
+                desk_paint_cell(o);
+            }
+        }
+        d->cell_x = ncx;
+        d->cell_y = ncy;
+        desk_paint_cell(d);
+    } else if (rubber_active) {
+        int x0 = rubber_x0 < rubber_x1 ? rubber_x0 : rubber_x1;
+        int y0 = rubber_y0 < rubber_y1 ? rubber_y0 : rubber_y1;
+        int x1 = rubber_x0 < rubber_x1 ? rubber_x1 : rubber_x0;
+        int y1 = rubber_y0 < rubber_y1 ? rubber_y1 : rubber_y0;
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *d = &desk_icons[i];
+            int sel = 0;
+            if (d->pinned) {
+                sel = desk_rects_overlap(
+                    desk_icon_x(d), desk_icon_y(d), DESK_HIT_W, DESK_HIT_H,
+                    x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+            }
+            if (d->selected != sel) {
+                d->selected = sel;
+                desk_paint_cell(d);
+            }
+        }
+        desk_last_click_icon = -1;
+    }
+    desk_drag_icon = -1;
+    desk_dragging = 0;
+    desk_press_desktop = 0;
+    rubber_armed = 0;
+    rubber_active = 0;
+    mark_dirty_full();
+}
+
+static int desk_hit(int idx, int mx, int my) {
+    desk_icon_t *d;
+    if (idx < 0 || idx >= desk_icon_count) return 0;
+    d = &desk_icons[idx];
+    if (!d->pinned) return 0;
+    return ic_hit_rect(mx, my, (ic_rect_t){desk_icon_x(d), desk_icon_y(d),
+                                           DESK_HIT_W, DESK_HIT_H});
+}
+
+/* Repaint the wallpaper gradient over a raw rectangle (used to erase
+ * a vacated icon cell). */
+static void desk_erase_rect(int x, int y, int w, int h) {
+    int fw = (int)fb_info.width;
+    int fh = (int)fb_info.height;
+    ic_canvas_t c;
+    int i;
+
+    if (fw <= 0 || fh <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > fw) w = fw - x;
+    if (y + h > fh) y = fh - y;
+    if (w <= 0 || h <= 0) return;
+    c = layer_canvas(fw, fh);
+    for (i = 0; i < h; i++) {
+        ic_rect(&c, x, y + i, w, 1,
+                ic_blend(WALL_TOP, WALL_BOTTOM, y + i, fh));
+    }
+    mark_dirty(x - 2, y - 2, w + 4, h + 4);
+}
+
+/* Repaint one icon cell of the wallpaper layer (selection changes,
+ * moves) and mark it dirty. Dimensions come from BSS fb_info, never
+ * from parameters. */
+static void desk_paint_cell(desk_icon_t *d) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int x = desk_icon_x(d);
+    int y = desk_icon_y(d);
+    ic_canvas_t c;
+    const ic_icon_t *icon;
+    uint32_t label_bg;
+    int i;
+
+    if (w <= 0 || h <= 0) return;
+    if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
+    if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
+    c = layer_canvas(w, h);
+    for (i = 0; i < DESK_CELL_H + 8 && y + i < h; i++) {
+        if (y + i < 0) continue;
+        ic_rect(&c, x, y + i, DESK_CELL_W, 1,
+                ic_blend(WALL_TOP, WALL_BOTTOM, y + i, h));
+    }
+    if (!d->pinned) {
+        mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
+        return;
+    }
+    icon = ic_icon_builtin(d->icon);
+    label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
+    if (d->selected) {
+        ic_rect_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0023344D);
+        ic_outline_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0038BDF8);
+        label_bg = 0x0023344D;
+    }
+    if (icon) {
+        ic_icon_draw(&c, x + 13, y + 8, 48, 48, icon);
+    }
+    ic_text_clip(&c, x + 4, y + 60, d->label, 0x00FFFFFF, label_bg, 66);
+    mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
+}
+
 static void draw_desktop_icon_layer(int w, int h, int x, int y,
                                     const char *label, const char *icon_name) {
     ic_canvas_t c = layer_canvas(w, h);
@@ -409,10 +1231,17 @@ static void build_desktop_layer(void) {
     for (int y = 0; y < h; y++) {
         ic_rect(&c, 0, y, w, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, h));
     }
-    draw_desktop_icon_layer(w, h, 22, 64, "Explorer", "folder");
-    draw_desktop_icon_layer(w, h, 22, 154, "Terminal", "terminal");
-    draw_desktop_icon_layer(w, h, 22, 244, "Music", "music");
-    draw_desktop_icon_layer(w, h, 22, 334, "Browser", "app");
+    {
+        int i;
+        desk_init_registry();
+        desk_load();
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *d = &desk_icons[i];
+            if (!d->pinned) continue;
+            draw_desktop_icon_layer(w, h, desk_icon_x(d), desk_icon_y(d),
+                                    d->label, d->icon);
+        }
+    }
 }
 
 static void draw_start_button(int w, int h, int active) {
@@ -914,23 +1743,61 @@ static int handle_start_menu_click(int mx, int my, int w, int h) {
     return 1;
 }
 
+/* Left-click on the desktop: select the icon under the cursor
+ * (exclusively), double-click opens it. Clicking empty space clears
+ * the selection. Returns 1 when an icon was hit (handled). */
 static int handle_desktop_icon_click(int mx, int my) {
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 64, 74, 74})) {
-        icda_spawn("/apps/desktop.app");
-        return 1;
+    int i;
+    int j;
+
+    for (i = 0; i < desk_icon_count; i++) {
+        if (desk_hit(i, mx, my)) {
+            uint64_t now = icda_ticks();
+            for (j = 0; j < desk_icon_count; j++) {
+                int sel = (j == i);
+                if (desk_icons[j].selected != sel) {
+                    desk_icons[j].selected = sel;
+                    desk_paint_cell(&desk_icons[j]);
+                }
+            }
+            if (desk_last_click_icon == i &&
+                now - desk_last_click_tick < DESK_DBLCLICK_TICKS) {
+                desk_last_click_icon = -1;
+                icda_spawn(desk_icons[i].path);
+            } else {
+                desk_last_click_icon = i;
+                desk_last_click_tick = now;
+            }
+            /* Arm a potential icon drag (3b); motion past the
+             * threshold converts it, release without motion keeps
+             * the click behavior above. */
+            desk_drag_icon = i;
+            desk_dragging = 0;
+            desk_press_x = mx;
+            desk_press_y = my;
+            desk_grab_dx = mx - desk_icon_x(&desk_icons[i]);
+            desk_grab_dy = my - desk_icon_y(&desk_icons[i]);
+            desk_press_desktop = 1;
+            rubber_armed = 0;
+            rubber_active = 0;
+            return 1;
+        }
     }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 154, 74, 74})) {
-        icda_spawn("/apps/terminal.app");
-        return 1;
+    for (j = 0; j < desk_icon_count; j++) {
+        if (desk_icons[j].selected) {
+            desk_icons[j].selected = 0;
+            desk_paint_cell(&desk_icons[j]);
+        }
     }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 244, 74, 74})) {
-        icda_spawn("/apps/audioplay.app");
-        return 1;
-    }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 334, 74, 74})) {
-        icda_spawn("/apps/browser.app");
-        return 1;
-    }
+    desk_last_click_icon = -1;
+    /* Arm a potential rubber-band (3b) on empty desktop. */
+    desk_drag_icon = -1;
+    desk_dragging = 0;
+    desk_press_x = mx;
+    desk_press_y = my;
+    desk_press_desktop = 1;
+    rubber_armed = 1;
+    rubber_active = 0;
     return 0;
 }
 
@@ -1060,19 +1927,25 @@ static void fb_write_px(int x, int y, uint32_t color) {
     if (fb_info.bpp == 32) {
         real_fb[y * fb_pitch_pixels() + x] = color;
     } else {
+        /* 24-bit wire order is B,G,R (VBE masks: red at bit 16), not
+         * R,G,B — writing RGB shows every color R/B-swapped. The 32-bit
+         * path stays native. */
         uint8_t *p = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch + (uint64_t)x * 3;
-        p[0] = (uint8_t)(color >> 16);
+        p[0] = (uint8_t)color;
         p[1] = (uint8_t)(color >> 8);
-        p[2] = (uint8_t)color;
+        p[2] = (uint8_t)(color >> 16);
     }
 }
 
+/* 24-bit wire order is B,G,R (VBE color masks report red at bit 16,
+ * i.e. blue in byte 0). Writing R,G,B shows the whole desktop R/B
+ * swapped; 32-bit blits are unaffected (native uint32 order). */
 static void blit_row_24(uint8_t *dst, const uint32_t *src, int count) {
     for (int i = 0; i < count; i++) {
         uint32_t c = src[i];
-        dst[i * 3 + 0] = (uint8_t)(c >> 16);
+        dst[i * 3 + 0] = (uint8_t)c;
         dst[i * 3 + 1] = (uint8_t)(c >> 8);
-        dst[i * 3 + 2] = (uint8_t)c;
+        dst[i * 3 + 2] = (uint8_t)(c >> 16);
     }
 }
 
@@ -1134,9 +2007,9 @@ static void restore_cursor_area(int mx, int my) {
             for (int x = x0; x < x1; x++) {
                 uint32_t c = src[x];
                 uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)(c >> 16);
+                p[0] = (uint8_t)c;
                 p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)c;
+                p[2] = (uint8_t)(c >> 16);
             }
         }
     }
@@ -1158,6 +2031,7 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     }
     draw_taskbar(w, h);
     draw_start_menu(w, h, mouse_x, mouse_y);
+    draw_desktop_overlays(0, 0, w, h);
     blit_to_screen(w, h);
     draw_cursor_at(w, h, mouse_x, mouse_y);
 }
@@ -1232,6 +2106,9 @@ static void composite_dirty(int w, int h, int mx, int my, int pmx, int pmy) {
             rect_hit(d->x, d->y, rw, rh, 6, h - TASKBAR_H - START_MENU_H, START_MENU_W, START_MENU_H)) {
             draw_start_menu(w, h, mx, my);
         }
+        /* 3b. Desktop overlays (rubber-band, drag ghost, menus),
+         * clipped to this dirty rect. */
+        draw_desktop_overlays(d->x, d->y, d->x + rw, d->y + rh);
 
         /* 4. Blit the region to the real framebuffer. */
         blit_region(d->x, d->y, rw, rh, w);
@@ -1301,13 +2178,97 @@ static void composite_cursor_only(int w, int h, int mx, int my, int pmx, int pmy
             for (int x = x0; x < x0 + bw; x++) {
                 uint32_t c = src[x];
                 uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)(c >> 16);
+                p[0] = (uint8_t)c;
                 p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)c;
+                p[2] = (uint8_t)(c >> 16);
             }
         }
     }
     draw_cursor_at(sw, sh, mx, my);
+}
+
+/* Right-button press/release edges for client windows. Deliberately
+ * out of line (own stack frame, args by value): the hot mouse-batch
+ * loop below keeps register-tracked coordinates that must not be
+ * disturbed by extra calls inline (see the note at mouse_x). Desktop
+ * background right-clicks are ignored here; step 3 opens menus.
+ * Returns 1 when an event reached a client (caller marks redraw),
+ * -1 on a right-press over the desktop background (step 3: menu),
+ * 0 when no right edge is present. */
+static int handle_right_edge(uint8_t buttons, uint8_t prev_buttons,
+                             int mx, int my) {
+    int right_clicked = (buttons & 2) && !(prev_buttons & 2);
+    int right_released = !(buttons & 2) && (prev_buttons & 2);
+    int i;
+
+    if (!right_clicked && !right_released) {
+        return 0;
+    }
+    /* An open menu/dialog eats a new right PRESS entirely (dismiss).
+     * Releases never dismiss: the press that opened the menu would
+     * otherwise close it again on the way up. */
+    if (right_clicked && (ctx_open || props_open)) {
+        ctx_close();
+        props_close();
+        return 0;
+    }
+    for (i = num_windows - 1; i >= 0; i--) {
+        int idx = z_order[i];
+        wm_window_t *win;
+        ic_window_t iw;
+        gui_msg_t rmsg;
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        win = &windows[idx];
+        if (!win->valid || win->minimized) continue;
+        iw.x = win->x;
+        iw.y = win->y;
+        iw.w = win->w;
+        iw.h = win->h;
+        iw.focused = 0;
+        iw.minimized = 0;
+        iw.anim = 0;
+        iw.title = win->title;
+        iw.hover_close = 0;
+        iw.hover_min = 0;
+        iw.hover_max = 0;
+        if (!ic_hit_client(&iw, mx, my)) continue;
+        bring_to_front(idx);
+        clear_msg(&rmsg);
+        rmsg.type = GUI_MSG_MOUSE_EVENT;
+        rmsg.window_id = win->id;
+        rmsg.mouse.x = mx - win->x;
+        rmsg.mouse.y = my - win->y;
+        rmsg.mouse.buttons = buttons;
+        send_maybe(win->app_queue_handle, &rmsg);
+        return 1;
+    }
+    /* Desktop background press: open the context menu (icon menu over
+     * an icon, desktop menu otherwise). Skip the taskbar strip and
+     * leave the start menu alone. */
+    if (right_clicked && !start_menu_open) {
+        int h = (int)fb_info.height;
+        if (my < h - TASKBAR_H) {
+            int icon = -1;
+            for (i = 0; i < desk_icon_count; i++) {
+                if (desk_hit(i, mx, my)) {
+                    icon = i;
+                    break;
+                }
+            }
+            if (icon >= 0) {
+                int j;
+                for (j = 0; j < desk_icon_count; j++) {
+                    int sel = (j == icon);
+                    if (desk_icons[j].selected != sel) {
+                        desk_icons[j].selected = sel;
+                        desk_paint_cell(&desk_icons[j]);
+                    }
+                }
+            }
+            ctx_open_at(mx, my, icon);
+        }
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -1411,6 +2372,15 @@ int main(int argc, char **argv) {
                 if (mouse_y < 0) mouse_y = 0;
                 if (mouse_x >= w) mouse_x = w - 1;
                 if (mouse_y >= h) mouse_y = h - 1;
+                /* Icon-drag / rubber-band tracking lives out of line
+                 * (same register-safety rule as the right-edge path). */
+                desk_track_motion(mouse_x, mouse_y, mouse_buttons);
+                /* Open menus/dialogs need scene repaints (not just the
+                 * cursor path) so hover highlights track the pointer. */
+                if ((ctx_open || props_open) &&
+                    (mouse_x != prev_mx || mouse_y != prev_my)) {
+                    need_redraw = 1;
+                }
 
                 {
                     int left_clicked = (mouse_buttons & 1) && !(prev_btn & 1);
@@ -1419,9 +2389,27 @@ int main(int argc, char **argv) {
                     if (left_clicked || left_released) {
                         need_redraw = 1;
                     }
+                    /* Right-button edges are handled out of line (see
+                     * handle_right_edge above): the main loop's
+                     * register-tracked coordinates must not be disturbed
+                     * by extra calls inline here. Desktop background
+                     * ignores right-clicks until step 3 (menus). */
+                    {
+                        int rr = handle_right_edge(mouse_buttons, prev_btn,
+                                                   mouse_x, mouse_y);
+                        if (rr == 1) {
+                            need_redraw = 1;
+                        }
+                        /* rr == -1: right-press over the desktop
+                         * background; step 3 opens the context menu. */
+                    }
                     if (left_clicked) {
                         int handled = 0;
-                        if (start_menu_open) handled = handle_start_menu_click(mouse_x, mouse_y, w, h);
+                        /* Open menus/dialogs consume presses first. */
+                        if (ctx_open || props_open) {
+                            handled = ctx_press(mouse_x, mouse_y);
+                        }
+                        if (!handled && start_menu_open) handled = handle_start_menu_click(mouse_x, mouse_y, w, h);
                         if (!handled && mouse_y >= h - TASKBAR_H) handled = handle_taskbar_click(mouse_x, mouse_y, w, h);
 
                         if (!handled) {
@@ -1493,6 +2481,7 @@ int main(int argc, char **argv) {
                         }
                     } else if (left_released) {
                         dragging_win_idx = -1;
+                        desk_left_release(mouse_x, mouse_y);
                     } else if (dragging_win_idx != -1) {
                         need_redraw = 1;
                         wm_window_t *win = &windows[dragging_win_idx];
@@ -1538,7 +2527,13 @@ int main(int argc, char **argv) {
             long key = icda_read_char_timeout(1);
             if (key >= 0) {
                 need_redraw = 1;
-                if (focused_window_idx != -1) {
+                /* Esc dismisses menus/dialogs (Enter dismisses the
+                 * Properties dialog too); swallowed, never forwarded. */
+                if ((ctx_open || props_open) &&
+                    (key == 27 || (props_open && key == 13))) {
+                    ctx_close();
+                    props_close();
+                } else if (focused_window_idx != -1) {
                     wm_window_t *win = &windows[focused_window_idx];
                     if (win->valid && !win->minimized) {
                         gui_msg_t kmsg;

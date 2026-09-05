@@ -11,6 +11,10 @@ static uint32_t           fb_pitch  = 0;
 static uint32_t           fb_bpp    = 0;
 static int                fb_ready  = 0;
 static int                fb_hhdm   = 0;
+/* 1 when 24-bit pixels are BGR-ordered on the wire (byte 0 = blue),
+ * decided from the VBE color masks at init. All 24-bit writers below
+ * honor this; 32-bit native writes are unaffected. */
+static int                fb_bgr_order = 0;
 
 // cursor position in characters
 static int cursor_x = 0;
@@ -118,6 +122,24 @@ int fb_init(void* multiboot_info) {
             fb_width  = (int)fb_tag->framebuffer_width;
             fb_height = (int)fb_tag->framebuffer_height;
             fb_ready  = 1;
+            /* 24-bit color order comes from the VBE masks, not from the
+             * bpp alone: QEMU/Bochs report red at bit 16, i.e. byte
+             * order [B,G,R] on the wire. Writing [R,G,B] (the naive
+             * order) shows every color R/B-swapped system-wide, which
+             * is exactly what happened before this flag existed. */
+            if (fb_bpp == 24 && (uint64_t)tag->size >= 38) {
+                const uint8_t *ci = (const uint8_t *)fb_tag + 32;
+                uint8_t rpos = ci[0];
+                uint8_t bpos = ci[4];
+                /* Byte 0 carries the channel at bit position 0. */
+                fb_bgr_order = (rpos == 16 && bpos == 0) ? 1 : 0;
+            } else if (fb_bpp == 24) {
+                /* No mask info: assume the common BGR 24-bit layout. */
+                fb_bgr_order = 1;
+            } else {
+                /* 32-bit native uint32 writes are order-correct. */
+                fb_bgr_order = 0;
+            }
             fb_hhdm   = 0;
 
             framebuffer_device.name = "framebuffer";
@@ -175,20 +197,36 @@ void fb_remap(uint64_t physical_base) {
 // ============================================================
 // pixel operations
 void fb_put_pixel(int x, int y, uint32_t color) {
+    volatile uint8_t *p;
+
     if (!fb_ready) return;
     if (x < 0 || x >= fb_width || y < 0 || y >= fb_height) return;
-    volatile uint32_t* pixel = (volatile uint32_t*)((uint8_t*)fb_addr + y * fb_pitch + x * (fb_bpp / 8));
-    *pixel = color;
+    /* Byte-wise store: a 32-bit store overlaps into the next pixel on
+     * 24-bit layouts, and must honor the BGR wire order there. */
+    p = (volatile uint8_t *)fb_addr + (uint64_t)y * fb_pitch +
+        (uint64_t)x * (fb_bpp / 8);
+    if (fb_bpp == 32) {
+        *(volatile uint32_t *)p = color;
+        return;
+    }
+    if (fb_bgr_order) {
+        p[0] = (uint8_t)color;
+        p[1] = (uint8_t)(color >> 8);
+        p[2] = (uint8_t)(color >> 16);
+    } else {
+        p[0] = (uint8_t)(color >> 16);
+        p[1] = (uint8_t)(color >> 8);
+        p[2] = (uint8_t)color;
+    }
 }
 
 void fb_fill_rect(int x, int y, int w, int h, uint32_t color) {
-    uint32_t *row;
     int x1;
     int y1;
     int x2;
     int y2;
 
-    if (!fb_ready || fb_bpp != 32 || w <= 0 || h <= 0) return;
+    if (!fb_ready || w <= 0 || h <= 0) return;
     x1 = x;
     y1 = y;
     x2 = x + w;
@@ -199,12 +237,41 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (y2 > fb_height) y2 = fb_height;
     if (x2 <= x1 || y2 <= y1) return;
 
-    row = (uint32_t *)(uintptr_t)fb_addr + (uint64_t)y1 * (fb_pitch / 4);
-    for (int cy = y1; cy < y2; cy++) {
-        for (int cx = x1; cx < x2; cx++) {
-            row[cx] = color;
+    if (fb_bpp == 32) {
+        uint32_t *row =
+            (uint32_t *)(uintptr_t)fb_addr + (uint64_t)y1 * (fb_pitch / 4);
+        for (int cy = y1; cy < y2; cy++) {
+            for (int cx = x1; cx < x2; cx++) {
+                row[cx] = color;
+            }
+            row = (uint32_t *)((uint8_t *)row + fb_pitch);
         }
-        row = (uint32_t *)((uint8_t *)row + fb_pitch);
+        return;
+    }
+    /* 24-bit: byte stores honoring the BGR wire order. Previously this
+     * function silently did nothing below 32bpp. */
+    {
+        uint8_t b0;
+        uint8_t b1;
+        uint8_t b2;
+        if (fb_bgr_order) {
+            b0 = (uint8_t)color;
+            b1 = (uint8_t)(color >> 8);
+            b2 = (uint8_t)(color >> 16);
+        } else {
+            b0 = (uint8_t)(color >> 16);
+            b1 = (uint8_t)(color >> 8);
+            b2 = (uint8_t)color;
+        }
+        for (int cy = y1; cy < y2; cy++) {
+            volatile uint8_t *row =
+                (volatile uint8_t *)fb_addr + (uint64_t)cy * fb_pitch;
+            for (int cx = x1; cx < x2; cx++) {
+                row[(uint64_t)cx * 3 + 0] = b0;
+                row[(uint64_t)cx * 3 + 1] = b1;
+                row[(uint64_t)cx * 3 + 2] = b2;
+            }
+        }
     }
 }
 
@@ -222,10 +289,25 @@ void fb_clear(uint32_t color) {
             row = (uint32_t *)((uint8_t *)row + fb_pitch);
         }
     } else {
+        uint8_t b0;
+        uint8_t b1;
+        uint8_t b2;
+        if (fb_bgr_order) {
+            b0 = (uint8_t)color;
+            b1 = (uint8_t)(color >> 8);
+            b2 = (uint8_t)(color >> 16);
+        } else {
+            b0 = (uint8_t)(color >> 16);
+            b1 = (uint8_t)(color >> 8);
+            b2 = (uint8_t)color;
+        }
         for (int y = 0; y < fb_height; y++) {
+            volatile uint8_t *row =
+                (volatile uint8_t *)fb_addr + (uint64_t)y * fb_pitch;
             for (int x = 0; x < fb_width; x++) {
-                volatile uint32_t* pixel = (volatile uint32_t*)((uint8_t*)fb_addr + y * fb_pitch + x * (fb_bpp / 8));
-                *pixel = color;
+                row[(uint64_t)x * 3 + 0] = b0;
+                row[(uint64_t)x * 3 + 1] = b1;
+                row[(uint64_t)x * 3 + 2] = b2;
             }
         }
     }

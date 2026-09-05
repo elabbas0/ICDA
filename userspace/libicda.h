@@ -195,6 +195,32 @@ void ic_draw_button(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
                     const char *label, ic_btn_state_t state);
 ic_btn_state_t ic_button_state(int enabled, int hover, int pressed);
 
+/* ============================ menu / dialog / slider ================= */
+/* Stateless primitives (hit-testing kept separate, like buttons): the
+ * caller owns open/close/value state and redraws on change. */
+#define IC_MENU_MAX_ITEMS 12
+
+typedef struct {
+    const char *items[IC_MENU_MAX_ITEMS];
+    int count;
+    int selected;   /* highlighted index, -1 for none */
+} ic_menu_t;
+
+int ic_menu_row_h(void);
+int ic_menu_width(const ic_menu_t *m);
+int ic_menu_height(const ic_menu_t *m);
+void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
+                  const ic_menu_t *m);
+int ic_menu_hit(const ic_menu_t *m, int x, int y, int mx, int my);
+
+void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                    const char *title, const char *body);
+
+void ic_slider_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t track,
+                    int value, int vmin, int vmax);
+int ic_slider_hit(ic_rect_t track, int mx, int my);
+int ic_slider_value_from_x(ic_rect_t track, int vmin, int vmax, int mx);
+
 /* ============================ app skeleton =========================== */
 /* Runs the standard GUI app loop: opens a window, polls the event queue,
  * calls on_event() for every event (return 0 to exit), and calls on_draw()

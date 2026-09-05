@@ -11,16 +11,28 @@
 #include "libicda.h"
 
 #define DEMO_W 560
-#define DEMO_H 420
+#define DEMO_H 640
 
 typedef struct {
     int btn_hover;
     int btn_pressed;
     int btn_was_down;
     int clicks;
+    int right_clicks;
+    int right_was_down;
+    int slider_val;
     int last_x;
     int last_y;
 } demo_state_t;
+
+static ic_rect_t demo_slider_rect(void) {
+    ic_rect_t r;
+    r.x = 20;
+    r.y = 556;
+    r.w = 300;
+    r.h = 28;
+    return r;
+}
 
 static ic_rect_t demo_btn_rect(void) {
     ic_rect_t r;
@@ -41,12 +53,25 @@ static int demo_event(void *ud, const gui_msg_t *msg) {
             ic_rect_t r = demo_btn_rect();
             int over = ic_hit_rect(msg->mouse.x, msg->mouse.y, r);
             int down = (msg->mouse.buttons & GUI_BTN_LEFT) != 0;
+            int rdown = (msg->mouse.buttons & GUI_BTN_RIGHT) != 0;
             st->btn_hover = over;
             st->btn_pressed = over && down;
             if (down && !st->btn_was_down && over) {
                 st->clicks++;   /* count on the press edge */
             }
             st->btn_was_down = down;
+            if (rdown && !st->right_was_down) {
+                st->right_clicks++;   /* right press edge, anywhere */
+            }
+            st->right_was_down = rdown;
+            /* Slider drag with the left button held. */
+            {
+                ic_rect_t sr = demo_slider_rect();
+                if (down && ic_slider_hit(sr, msg->mouse.x, msg->mouse.y)) {
+                    st->slider_val = ic_slider_value_from_x(
+                        sr, 0, 100, msg->mouse.x);
+                }
+            }
         }
     }
 
@@ -90,6 +115,9 @@ static void demo_draw(void *ud) {
     ic_uint_to_str((uint64_t)st->clicks, buf, sizeof(buf));
     ic_text(&c, 190, 26, "clicks: ", t->text, 0x00F4F7FC);
     ic_text(&c, 190 + ic_text_width("clicks: "), 26, buf, t->accent, 0x00F4F7FC);
+    ic_uint_to_str((uint64_t)st->right_clicks, buf, sizeof(buf));
+    ic_text(&c, 290, 26, "right: ", t->text, 0x00F4F7FC);
+    ic_text(&c, 290 + ic_text_width("right: "), 26, buf, t->accent, 0x00F4F7FC);
 
     /* Mouse position */
     ic_uint_to_str((uint64_t)st->last_x, buf, sizeof(buf));
@@ -98,6 +126,26 @@ static void demo_draw(void *ud) {
     ic_uint_to_str((uint64_t)st->last_y, buf, sizeof(buf));
     ic_text(&c, 120, 340, "  y: ", t->text_muted, 0x00F4F7FC);
     ic_text(&c, 120 + ic_text_width("  y: "), 340, buf, t->text, 0x00F4F7FC);
+
+    /* Widget showcase: popup menu, dialog, slider */
+    ic_text(&c, 20, 420, "Widgets", t->text_muted, 0x00F4F7FC);
+    {
+        static const char *items[] = { "New window", "Open...", "Save as..." };
+        ic_menu_t menu;
+        ic_rect_t sr;
+        menu.items[0] = items[0];
+        menu.items[1] = items[1];
+        menu.items[2] = items[2];
+        menu.count = 3;
+        menu.selected = 1;
+        ic_menu_draw(&c, t, 20, 444, &menu);
+        ic_dialog_draw(&c, t, (ic_rect_t){180, 444, 360, 120},
+                       "Properties", "demo.app 6,216 bytes");
+        sr = demo_slider_rect();
+        ic_slider_draw(&c, t, sr, st->slider_val, 0, 100);
+        ic_uint_to_str((uint64_t)st->slider_val, buf, sizeof(buf));
+        ic_text(&c, 330, 560, buf, t->accent, 0x00F4F7FC);
+    }
 
     /* The builtin icon set, drawn at several sizes */
     {
@@ -131,6 +179,9 @@ int main(int argc, char **argv) {
     st.btn_pressed = 0;
     st.btn_was_down = 0;
     st.clicks = 0;
+    st.right_clicks = 0;
+    st.right_was_down = 0;
+    st.slider_val = 30;
     st.last_x = 0;
     st.last_y = 0;
     return ic_run_app("ICDA Demo", DEMO_W, DEMO_H, demo_event, demo_draw, &st);

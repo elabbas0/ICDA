@@ -433,10 +433,13 @@ void kernel_main(void *multiboot_info) {
          * boot (no flag) is unaffected. Physical/cmdline access
          * already implies full control, so this adds no privilege. */
         if (boot_cmdline_has_flag(multiboot_info, "icda.test=nptest") ||
-            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")) {
+            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx") ||
+            boot_cmdline_has_flag(multiboot_info, "icda.test=demo")) {
             const char *test_path =
                 boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")
                 ? "/bin/nptestlx.elf"
+                : boot_cmdline_has_flag(multiboot_info, "icda.test=demo")
+                ? "/apps/gui_demo.app"
                 : "/apps/nptest.app";
             /* Mirror the console to serial for the duration so every
              * PASS/FAIL line lands in the serial log (the mirror is
