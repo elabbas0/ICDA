@@ -98,6 +98,13 @@ legacy no-op path (backward-compatible with `sys_call0` callers whose
 | 68 | SYS_POWER | power |
 | 69 | SYS_PROC_STATS | proc |
 
+**Post-freeze append-only:** `syscall_gpu_info_t` (kernel) and
+`icda_gpu_info_t` (userspace) gained a `needs_present` uint32_t field
+appended after `flip_active`.  It is 1 when the primary GPU device's
+`present()` does real DMA work (e.g. virtio-gpu TRANSFER+FLUSH), 0 for
+the firmware fbdev.  The field is filled by `/dev/fb0` gpu_query and is
+a pure append — no existing fields moved or resized.
+
 `/dev` nodes (all `VFS_NODE_FILE`, discoverable via `ls /dev`):
 `/dev/console`, `/dev/input`, `/dev/fb0`. Dispatch goes through the
 `devops` registry (`kernel/dev/devops.c`); the VFS nodes mirror it for

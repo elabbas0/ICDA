@@ -12,6 +12,8 @@
 #include "drivers/input/mouse.h"
 #include "drivers/pci/pci.h"
 #include "drivers/net/e1000.h"
+#include "drivers/net/virtio_net.h"
+#include "drivers/display/virtio_gpu.h"
 #include "drivers/serial/serial.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
@@ -281,6 +283,18 @@ void kernel_main(void *multiboot_info) {
         console_write("intel e1000 unavailable err=", CONSOLE_STYLE_WARN);
         console_write_dec64((uint64_t)net_last_error(), CONSOLE_STYLE_WARN);
         console_write("\n", CONSOLE_STYLE_WARN);
+    }
+
+    /* virtio-gpu: only when no multiboot framebuffer is available.
+     * Must run AFTER pci_init so PCI devices are enumerated. */
+    if (!fb_available()) {
+        bootstage_set(1201, "virtio-gpu");
+        if (virtio_gpu_init() == 0) {
+            boot_line("display", "virtio-gpu online");
+        } else {
+            boot_prefix("display");
+            console_write("virtio-gpu unavailable\n", CONSOLE_STYLE_WARN);
+        }
     }
 
     bootstage_set(121, "hda");

@@ -105,6 +105,7 @@ int gpu_init(void *multiboot_info) {
     fbdev.fb_size = size;
     fbdev.hw_cursor = 0;
     fbdev.present_supported = 1;
+    fbdev.needs_present = 0;  /* fbdev present is a no-op */
     fbdev.present = fbdev_present;
     fbdev.set_cursor = fbdev_set_cursor;
     fbdev.priv = NULL;

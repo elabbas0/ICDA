@@ -49,6 +49,10 @@ void fb_set_cursor(int x, int y);
 void fb_get_cursor(int *x_out, int *y_out);
 int  fb_available();
 
+// Adopt a new physical framebuffer (e.g. from virtio-gpu).  Updates all
+// fb_* globals so fb_print / fb_phys_addr / devnodes work immediately.
+void fb_adopt(uint64_t phys, uint32_t pitch, int width, int height, int bpp);
+
 // screen dimensions (set after fb_init)
 extern int fb_width;
 extern int fb_height;

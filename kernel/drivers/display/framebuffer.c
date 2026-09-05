@@ -2,6 +2,7 @@
 #include "font.h"
 #include "../device.h"
 #include "../../cpu/multiboot2.h"
+#include "../../memory/vmm.h"
 #include <stdint.h>
 
 // internal state
@@ -172,6 +173,22 @@ int fb_init(void* multiboot_info) {
 
 int fb_available() {
     return fb_ready;
+}
+
+/* Adopt a new physical framebuffer (e.g. virtio-gpu backing).
+ * Called after a paravirtualised display is initialised so that all
+ * fb_print / fb_phys_addr / fb_phys_size / devnodes claim-map code
+ * sees the new buffer without reinitialising the console. */
+void fb_adopt(uint64_t phys, uint32_t pitch_val, int width, int height, int bpp_val) {
+    fb_phys       = phys;
+    fb_addr       = (volatile uint32_t *)(PHYS_TO_VIRT(phys));
+    fb_pitch      = pitch_val;
+    fb_bpp        = (uint32_t)bpp_val;
+    fb_width      = width;
+    fb_height     = height;
+    fb_bgr_order  = 0;      /* 32-bit native XRGB8888 */
+    fb_hhdm       = 1;      /* already mapped through HHDM */
+    fb_ready      = 1;
 }
 
 // return the raw physical address of the framebuffer (0 if not ready)

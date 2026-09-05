@@ -253,6 +253,7 @@ typedef struct {
     uint32_t hw_cursor;
     uint32_t present_supported;
     uint32_t flip_active;  /* 1 when tear-free page flipping is active */
+    uint32_t needs_present; /* append-only ABI: 1 when present() does real DMA work */
 } icda_gpu_info_t;
 
 typedef struct {

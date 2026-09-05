@@ -227,6 +227,7 @@ static int dev_gpu_query(void *out) {
     info->hw_cursor = dev->hw_cursor ? 1U : 0U;
     info->present_supported = dev->present_supported ? 1U : 0U;
     info->flip_active = flip_active() ? 1U : 0U;
+    info->needs_present = dev->needs_present ? 1U : 0U;
     return 0;
 }
 

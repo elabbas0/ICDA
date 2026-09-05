@@ -38,6 +38,7 @@ typedef struct gpu_device {
     /* Capabilities */
     int         hw_cursor;      /* device has a hardware cursor plane */
     int         present_supported;
+    int         needs_present;  /* 1 when present() does real DMA work (e.g. virtio-gpu) */
 
     /* Driver ops */
     int (*present)(struct gpu_device *dev);              /* commit frame */

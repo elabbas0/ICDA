@@ -2310,6 +2310,9 @@ int main(int argc, char **argv) {
      * CRTC on page 0, Y_OFFSET=0).  After the first present the
      * two counters stay in lock-step. */
     wm_flip_page = gpu_info.flip_active ? 1 : 0;
+    /* do_present: virtio-gpu always needs explicit TRANSFER+FLUSH;
+     * fbdev needs it only when flip mode is active. */
+    int do_present = gpu_info.flip_active || gpu_info.needs_present;
 
     w = fb_info.width;
     h = fb_info.height;
@@ -2617,9 +2620,13 @@ int main(int argc, char **argv) {
                                     prev_mouse_x, prev_mouse_y);
                     /* Single present per frame commit (after composite
                      * and cursor draw).  WAIT_VBLANK = one sched_yield
-                     * (no vsync IRQ on Bochs/QEMU). */
-                    if (gpu_info.flip_active) {
+                     * (no vsync IRQ on Bochs/QEMU).
+                     * do_present covers virtio-gpu (needs explicit
+                     * TRANSFER+FLUSH) and flip mode alike. */
+                    if (do_present) {
                         icda_gpu_present_flags(1);
+                    }
+                    if (gpu_info.flip_active) {
                         wm_flip_page ^= 1;
                         real_fb = saved_fb;
                     }
@@ -2633,8 +2640,10 @@ int main(int argc, char **argv) {
                     }
                     composite_cursor_only(w, h, mouse_x, mouse_y,
                                           prev_mouse_x, prev_mouse_y);
-                    if (gpu_info.flip_active) {
+                    if (do_present) {
                         icda_gpu_present_flags(1);
+                    }
+                    if (gpu_info.flip_active) {
                         wm_flip_page ^= 1;
                         real_fb = saved_fb;
                     }
