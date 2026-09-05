@@ -252,6 +252,7 @@ typedef struct {
     uint32_t mode_count;
     uint32_t hw_cursor;
     uint32_t present_supported;
+    uint32_t flip_active;  /* 1 when tear-free page flipping is active */
 } icda_gpu_info_t;
 
 typedef struct {
@@ -262,7 +263,10 @@ typedef struct {
 
 /* GPU device layer (DRM/KMS-shaped general GPU driver) */
 static inline uint64_t icda_gpu_query(icda_gpu_info_t *out) { return sys_call1(SYS_GPU_QUERY, (uint64_t)(uintptr_t)out); }
-static inline uint64_t icda_gpu_present(void) { return sys_call0(SYS_GPU_PRESENT); }
+/* Legacy present (flags=0, no vblank wait): equivalent to the old no-arg call. */
+static inline uint64_t icda_gpu_present(void) { return sys_call1(SYS_GPU_PRESENT, 0); }
+/* Present with flags: bit0 = WAIT_VBLANK (single sched_yield, never spin). */
+static inline uint64_t icda_gpu_present_flags(uint64_t flags) { return sys_call1(SYS_GPU_PRESENT, flags); }
 static inline uint64_t icda_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) { return sys_call5(SYS_GPU_CURSOR, (uint64_t)x, (uint64_t)y, (uint64_t)(uintptr_t)image, (uint64_t)w, (uint64_t)h); }
 
 /* Power: 0 = shutdown, 1 = reboot.  Does not return. */

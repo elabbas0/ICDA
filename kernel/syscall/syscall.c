@@ -680,12 +680,21 @@ static uint64_t sys_gpu_query(syscall_gpu_info_t *out) {
     return dfb->gpu_query(out) == 0 ? 0 : (uint64_t)-1;
 }
 
-static uint64_t sys_gpu_present(void) {
+static uint64_t sys_gpu_present(uint64_t flags) {
     const dev_calls_t *dfb = dev_fb();
     if (!dfb || !dfb->gpu_present) {
         return (uint64_t)-1;
     }
-    return dfb->gpu_present() == 0 ? 0 : (uint64_t)-1;
+    if (dfb->gpu_present() != 0) {
+        return (uint64_t)-1;
+    }
+    /* WAIT_VBLANK (bit 0): single sched_yield, never spin.
+     * Non-blocking: no vsync IRQ on Bochs/QEMU, so we yield once
+     * to let the scheduler run and give the CRTC time to scan. */
+    if (flags & 1) {
+        sched_yield();
+    }
+    return 0;
 }
 
 static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) {
@@ -1820,7 +1829,9 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
         case SYS_GPU_QUERY:
             return sys_gpu_query((syscall_gpu_info_t *)(uintptr_t)regs->rdi);
         case SYS_GPU_PRESENT:
-            return sys_gpu_present();
+            /* Mask to valid flag bits: sys_call0 does not set rdi,
+             * so garbage must be zeroed.  flags=0 = legacy no-op. */
+            return sys_gpu_present(regs->rdi & 0xFF);
         case SYS_GPU_CURSOR:
             return sys_gpu_cursor((int)regs->rdi, (int)regs->rsi,
                                   (const uint32_t *)(uintptr_t)regs->rdx,

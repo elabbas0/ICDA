@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "framebuffer.h"
+#include "flip.h"
 #include "../device.h"
 #include "../../memory/pmm.h"
 #include "../../memory/vmm.h"
@@ -108,6 +109,15 @@ int gpu_init(void *multiboot_info) {
     fbdev.set_cursor = fbdev_set_cursor;
     fbdev.priv = NULL;
     fbdev.next = NULL;
+
+    /* Probe for Bochs VBE page flipping.  On success, double the
+     * reported fb_size so devnodes.c maps two frames and the WM can
+     * blit into the back buffer.  On ANY failure flip_active stays
+     * false (flip_available = 0) and the legacy blit path is used. */
+    if (flip_probe(phys, pitch, (uint32_t)h, bpp, 0) == 0) {
+        fb_set_double_frame(1);
+        fbdev.fb_size = fb_phys_size();
+    }
 
     return gpu_register_device(&fbdev);
 }

@@ -15,6 +15,11 @@ static int                fb_hhdm   = 0;
  * decided from the VBE color masks at init. All 24-bit writers below
  * honor this; 32-bit native writes are unaffected. */
 static int                fb_bgr_order = 0;
+/* When flip page-flipping is active the compositor needs a 2-frame
+ * mapping; fb_phys_size() doubles accordingly.  The kernel console
+ * (fb_addr, fb_width, fb_height) is unaffected — it only touches
+ * the first frame. */
+static int                fb_double_frame = 0;
 
 // cursor position in characters
 static int cursor_x = 0;
@@ -174,9 +179,15 @@ uint64_t fb_phys_addr(void) {
     return fb_ready ? fb_phys : 0;
 }
 
+// Enable/disable double-frame mode for page-flipping compositor.
+void fb_set_double_frame(int enable) {
+    if (fb_ready) fb_double_frame = enable;
+}
+
 // return the size of the framebuffer in bytes
 uint64_t fb_phys_size(void) {
-    return fb_ready ? (uint64_t)fb_pitch * (uint64_t)fb_height : 0;
+    uint64_t sz = fb_ready ? (uint64_t)fb_pitch * (uint64_t)fb_height : 0;
+    return fb_double_frame ? sz * 2 : sz;
 }
 
 int fb_bpp_value(void) {

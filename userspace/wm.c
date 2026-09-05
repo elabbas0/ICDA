@@ -67,8 +67,16 @@ static int start_menu_open = 0;
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static icda_fb_info_t fb_info;
+static icda_gpu_info_t gpu_info;
 static uint32_t *real_fb = NULL;
 static const ic_theme_t *theme;
+
+/* Page-flipping state: when gpu_info.flip_active the compositor blits
+ * into the back buffer (the page the CRTC is NOT scanning) and calls
+ * icda_gpu_present_flags(1) once per frame to atomically flip.  The
+ * real_fb pointer is temporarily remapped for each frame so ALL
+ * existing blit functions write to the correct page without edits. */
+static int wm_flip_page = 0;   /* toggles 0/1 after each present */
 
 /* Mouse position lives in file-scope state, not registers: the compiled
  * main loop has been observed losing its register-tracked coordinates
@@ -2294,6 +2302,15 @@ int main(int argc, char **argv) {
     if (!addr) return -1;
     real_fb = (uint32_t*)addr;
 
+    /* Query the GPU device: detect tear-free page flipping. */
+    if (icda_gpu_query(&gpu_info) != 0) {
+        gpu_info.flip_active = 0;
+    }
+    /* WM starts writing to page 1 (the kernel initialises with
+     * CRTC on page 0, Y_OFFSET=0).  After the first present the
+     * two counters stay in lock-step. */
+    wm_flip_page = gpu_info.flip_active ? 1 : 0;
+
     w = fb_info.width;
     h = fb_info.height;
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
@@ -2566,6 +2583,18 @@ int main(int argc, char **argv) {
                     mark_dirty_win(&windows[i]);
                 }
             }
+            /* Flip mode: full composite every frame.  The back page
+             * may hold stale content from a previous frame that the
+             * dirty-rect path would not repaint, so force a full
+             * rebuild and never take the cursor-only micro-path.
+             * Gated on actual activity so idle stays idle. */
+            if (gpu_info.flip_active &&
+                (need_redraw || animating || dragging_win_idx != -1 ||
+                 dirty_count > 0 || (mouse_moved &&
+                  (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)))) {
+                dirty_full = 1;
+                need_redraw = 1;
+            }
             /* Composite at most once per tick - the vsync pacing point:
              * the frame is presented to the screen at the tick boundary
              * (like waiting on vblank), so repaints never tear mid-frame
@@ -2575,13 +2604,40 @@ int main(int argc, char **argv) {
             if (now != last_composite_tick) {
                 if (need_redraw || animating || dragging_win_idx != -1 ||
                     dirty_full || dirty_count > 0) {
+                    /* Remap real_fb → back buffer so blit_to_screen /
+                     * blit_region / draw_cursor_at write the off-screen
+                     * page.  The CRTC is scanning the other page, so
+                     * tearing is structurally impossible. */
+                    uint32_t *saved_fb = real_fb;
+                    if (gpu_info.flip_active) {
+                        real_fb = (uint32_t *)((uint8_t *)saved_fb +
+                            (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+                    }
                     composite_dirty(w, h, mouse_x, mouse_y,
                                     prev_mouse_x, prev_mouse_y);
+                    /* Single present per frame commit (after composite
+                     * and cursor draw).  WAIT_VBLANK = one sched_yield
+                     * (no vsync IRQ on Bochs/QEMU). */
+                    if (gpu_info.flip_active) {
+                        icda_gpu_present_flags(1);
+                        wm_flip_page ^= 1;
+                        real_fb = saved_fb;
+                    }
                     last_composite_tick = now;
                 } else if (mouse_moved &&
                            (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    uint32_t *saved_fb = real_fb;
+                    if (gpu_info.flip_active) {
+                        real_fb = (uint32_t *)((uint8_t *)saved_fb +
+                            (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+                    }
                     composite_cursor_only(w, h, mouse_x, mouse_y,
                                           prev_mouse_x, prev_mouse_y);
+                    if (gpu_info.flip_active) {
+                        icda_gpu_present_flags(1);
+                        wm_flip_page ^= 1;
+                        real_fb = saved_fb;
+                    }
                     last_composite_tick = now;
                 }
             }

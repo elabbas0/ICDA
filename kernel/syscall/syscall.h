@@ -141,6 +141,7 @@ typedef struct {
     uint32_t mode_count;
     uint32_t hw_cursor;  /* device has a hardware cursor plane */
     uint32_t present_supported;
+    uint32_t flip_active; /* 1 when tear-free page flipping is active */
 } syscall_gpu_info_t;
 
 typedef struct {

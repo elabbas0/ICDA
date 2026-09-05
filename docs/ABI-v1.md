@@ -87,6 +87,13 @@ Call table (number — name — rough area):
 | 64 | SYS_GUI_AVAILABLE | display (/dev/fb0) |
 | 65 | SYS_GPU_QUERY | display (/dev/fb0) |
 | 66 | SYS_GPU_PRESENT | display (/dev/fb0) |
+
+**Clarification (post-freeze, no renumber):** `SYS_GPU_PRESENT` accepts
+an optional flags word in `rdi` (first argument).  `flags = 0` is the
+legacy no-op path (backward-compatible with `sys_call0` callers whose
+`rdi` is undefined — the kernel masks to 8 bits).  Bit 0 is
+`WAIT_VBLANK`: a single `sched_yield` after the flip, never a spin-wait
+(no vsync IRQ on Bochs/QEMU).  Upper bits are reserved and must be 0.
 | 67 | SYS_GPU_CURSOR | display (/dev/fb0) |
 | 68 | SYS_POWER | power |
 | 69 | SYS_PROC_STATS | proc |

@@ -4,6 +4,7 @@
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 #include "../drivers/display/gpu.h"
+#include "../drivers/display/flip.h"
 #include "../drivers/display/vga.h"
 #include "../drivers/input/input.h"
 #include "../drivers/input/mouse.h"
@@ -184,8 +185,7 @@ static uint64_t dev_fb_claim_map(void *info) {
         fb->virt_addr = fb_virt + page_offset;
         fb->width     = fb_width;
         fb->height    = fb_height;
-        fb->pitch     = (fb_height > 0)
-                        ? (uint32_t)(fb_size / (uint64_t)fb_height) : 0;
+        fb->pitch     = fb_pitch_value();
         /* Report the real pixel format.  The window manager blits
          * into this mapping, so it must know whether it is 32bpp
          * (typical on real GPUs) or 24bpp (QEMU/GRUB fallbacks). */
@@ -226,6 +226,7 @@ static int dev_gpu_query(void *out) {
     info->mode_count = dev->mode_count;
     info->hw_cursor = dev->hw_cursor ? 1U : 0U;
     info->present_supported = dev->present_supported ? 1U : 0U;
+    info->flip_active = flip_active() ? 1U : 0U;
     return 0;
 }
 

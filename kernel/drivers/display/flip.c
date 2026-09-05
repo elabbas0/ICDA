@@ -10,6 +10,12 @@
  *
  * On real hardware without Bochs VBE, the probe fails and the system
  * falls back to direct-to-FB compositing (current behaviour).
+ *
+ * Double-buffer layout in VRAM (requires VIRT_HEIGHT = 2 * yres):
+ *   Page 0: offset 0            (initial front, shown by default)
+ *   Page 1: offset frame_bytes  (initial back)
+ * flip_page tracks which page the CRTC is currently scanning.
+ * flip_back_buffer() returns the CPU-write target (the other page).
  */
 #include "flip.h"
 #include "../../memory/vmm.h"
@@ -43,7 +49,10 @@ static int flip_available = 0;
 static uint32_t flip_frame_bytes = 0;   /* one frame: pitch * height */
 static uint32_t flip_vram_size = 0;
 static uint64_t flip_fb_phys = 0;       /* from Multiboot2 */
-static uint8_t *flip_back_view = 0;     /* kernel vaddr of the back page */
+static uint8_t *flip_page0_view = 0;    /* kernel vaddr of page 0 */
+static uint8_t *flip_page1_view = 0;    /* kernel vaddr of page 1 */
+static int flip_page = 0;               /* 0 = CRTC shows page 0 */
+static uint16_t flip_height = 0;        /* single-frame height for Y_OFFSET */
 
 static inline void outw(uint16_t port, uint16_t val) {
     __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
@@ -80,29 +89,54 @@ int flip_probe(uint64_t fb_phys, uint32_t pitch, uint32_t height,
         return -1;
     }
 
-    /* QEMU's std VGA always has >= 16MB VRAM; the VRAM_SIZE register
-     * returns unreliable values in some versions so we don't use it. */
-    flip_vram_size = 16U * 1024U * 1024U;
+    /* Query VRAM size from the Bochs register (returns 64KB units).
+     * Fall back to 16 MB when the register returns zero (some QEMU
+     * versions do not implement it). */
+    vram16 = bochs_read(VBE_DISPI_INDEX_VRAM_SIZE);
+    if (vram16 >= 256) {            /* >= 256 * 64KB = 16 MB */
+        flip_vram_size = (uint32_t)vram16 * 64U * 1024U;
+    } else {
+        flip_vram_size = 16U * 1024U * 1024U;
+    }
 
     flip_frame_bytes = pitch * height;
+    flip_height = (uint16_t)height;
 
     /* Need at least 2 frames of video memory for page flipping */
     if (flip_vram_size < flip_frame_bytes * 2) {
         serial_write("flip: not enough VRAM for 2 frames\n");
+        flip_available = 0;
         return -1;
     }
 
-    /* The back page starts right after the visible frame, page-aligned.
-     * Map it into kernel space via the physical-memory high half (HHDM):
-     * the kernel already maps all physical memory at PHYS_TO_VIRT(phys),
-     * so no extra page table entries are needed. */
-    {
-        uint64_t back_phys = fb_phys + flip_frame_bytes;
-        flip_back_view = (uint8_t *)((uint64_t)(back_phys) + PHYSICAL_BASE);
+    /* Map both pages into kernel space via HHDM */
+    flip_page0_view = (uint8_t *)((uint64_t)(fb_phys) + PHYSICAL_BASE);
+    flip_page1_view = (uint8_t *)((uint64_t)(fb_phys + flip_frame_bytes) + PHYSICAL_BASE);
+
+
+
+    /* Configure virtual framebuffer: width >= physical (needed for
+     * Y-offset) and height = 2 * yres so the CRTC can scan either page. */
+    bochs_write(VBE_DISPI_INDEX_VIRT_WIDTH, (uint16_t)(pitch / (bpp / 8)));
+    bochs_write(VBE_DISPI_INDEX_VIRT_HEIGHT, (uint16_t)(height * 2));
+
+
+
+    /* Hardening: read VIRT_HEIGHT back. Cores that ignore the write
+     * (verified: QEMU std VGA returns a VRAM-derived constant whether
+     * enabled or disabled) cannot scan a second page, so fall back to
+     * the legacy direct-blit path instead of freezing on page 0. */
+    if (bochs_read(VBE_DISPI_INDEX_VIRT_HEIGHT) != (uint16_t)(height * 2)) {
+        serial_write("flip: VIRT_HEIGHT unsupported, using direct blit\n");
+        bochs_write(VBE_DISPI_INDEX_VIRT_HEIGHT, height);
+        bochs_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+        flip_available = 0;
+        return -1;
     }
 
-    /* Make sure virtual width >= physical width (needed for offset) */
-    bochs_write(VBE_DISPI_INDEX_VIRT_WIDTH, (uint16_t)(pitch / (bpp / 8)));
+    /* Start with Y_OFFSET = 0 (page 0 is the front). */
+    bochs_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+    flip_page = 0;
 
     flip_available = 1;
     serial_write("flip: Bochs VBE page flipping enabled\n");
@@ -114,22 +148,25 @@ int flip_probe(uint64_t fb_phys, uint32_t pitch, uint32_t height,
  * here, then calls flip_swap() to present it. */
 uint8_t *flip_back_buffer(void) {
     if (!flip_available) return 0;
-    return flip_back_view;
+    /* Return the page that the CRTC is NOT currently scanning. */
+    return (flip_page == 0) ? flip_page1_view : flip_page0_view;
 }
 
 /* Atomic display swap: the CRTC starts scanning out from the back
- * page on the next refresh cycle.  Zero copies, zero tearing. */
+ * page on the next refresh cycle.  Zero copies, zero tearing.
+ * Alternates Y_OFFSET between 0 and frame_height to ping-pong
+ * between the two pages. */
 void flip_swap(void) {
-    uint16_t y_off;
     if (!flip_available) return;
-    y_off = (uint16_t)(flip_frame_bytes / (bochs_read(VBE_DISPI_INDEX_VIRT_WIDTH) * 4));
-    bochs_write(VBE_DISPI_INDEX_Y_OFFSET, y_off);
-    /* After the swap, the "back" page is now the old front page.
-     * The next frame is drawn into what is now the off-screen page.
-     * Since we always draw into flip_back_view (which points at
-     * fb_phys + frame_bytes), and Y_OFFSET toggles between 0 and
-     * frame_bytes/pitch, we need to alternate.  For simplicity with
-     * only two pages, we flip Y between 0 and the frame height. */
+    if (flip_page == 0) {
+        /* Currently showing page 0; flip to page 1. */
+        bochs_write(VBE_DISPI_INDEX_Y_OFFSET, flip_height);
+        flip_page = 1;
+    } else {
+        /* Currently showing page 1; flip back to page 0. */
+        bochs_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+        flip_page = 0;
+    }
 }
 
 /* Check if page flipping is active. */
