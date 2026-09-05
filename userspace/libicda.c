@@ -920,7 +920,6 @@ void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
                     const char *title, const char *body) {
     if (!c || !t) return;
     if (r.w <= 0 || r.h <= 0) return;
-    ic_draw_shadow(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, IC_SHADOW_COLOR);
     ic_rect_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel);
     ic_outline_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel_edge);
     if (title) {

@@ -563,7 +563,6 @@ static void draw_dialog(void) {
     c.px = gui_pixel_buffer();
     c.w = gui_window_width();
     c.h = gui_window_height();
-    ic_draw_shadow(&c, x, y, 390, 150, 8, IC_SHADOW_COLOR);
     ic_rect_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x001E293B);
     ic_outline_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x00334155);
     ic_rect_r(&c, x + 1, y + 1, 388, 34, IC_RADIUS_BUTTON, 0x000F172A);
