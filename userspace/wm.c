@@ -103,7 +103,10 @@ static uint8_t mouse_buttons = 0;
  * 1920x1080 frame on every event (which is what made real hardware
  * crawl).  A pure mouse move still takes the tiny cursor-only path. */
 #define MAX_DIRTY 32
-#define SHADOW_MARGIN 2
+/* Shadow band: body extends 1 px beyond frame (libicda.c:1129),
+ * painted falloff reaches IC_SHADOW_RADIUS - 1 = 7 px past the body.
+ * 1 + 7 = 8 px total; +2 safety = 10.                          */
+#define SHADOW_MARGIN 10
 typedef struct { int x, y, w, h; } dirty_rect_t;
 static dirty_rect_t dirty_rects[MAX_DIRTY];
 static int dirty_count = 0;
