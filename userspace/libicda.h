@@ -4,13 +4,21 @@
  * This is the "proper userland" layer between applications and the raw
  * int 0x80 syscall ABI (see kernel/syscall/syscall.h and icda_sys.h).
  * Applications written against this header get:
+ *   - memory helpers          (ic_memcpy, ic_memmove, ic_memset, ...)
  *   - string helpers          (ic_strlen, ic_strcat, ic_uint_to_str, ...)
+ *   - extended string helpers (ic_strnlen, ic_strncpy, ic_strlcat, ...)
+ *   - character classification (ic_is_digit, ic_is_space, ic_is_alpha)
+ *   - UTF-8 helpers           (ic_utf8_len, ic_utf8_valid)
+ *   - bounded formatting      (ic_snprintf_u64, ic_snprintf_hex, ic_ato_u64)
+ *   - arena allocator         (ic_arena_t — caller-provided buffer, zero-alloc)
+ *   - ring buffer             (ic_ring_u8_t — caller-provided buffer)
  *   - a drawing canvas        (ic_canvas_t + ic_rect/ic_text/ic_gradient_*)
  *   - icons                   (ic_icon_t, .icn format, builtin set)
  *   - a UI theme              (ic_theme_t)
  *   - window chrome           (title bar, minimize/close buttons, hit tests)
  *   - stateless widgets       (ic_draw_button + ic_button_state)
  *   - an app skeleton         (ic_run_app: open window + event loop)
+ *   - version information     (ic_version.h, included below)
  *
  * Every app is a plain C program:
  *
@@ -24,11 +32,35 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "ic_version.h"
 #include "icda_sys.h"
 #include "gui.h"      /* gui_open_window / gui_pixel_buffer / gui_flush ... */
 #include "gui_proto.h"
 
-/* ============================== strings ============================== */
+/* ================================ memory ============================== */
+
+/* Safe memory primitives.  All functions are NULL-safe: if both pointers
+ * are NULL the operation succeeds silently; if only one is NULL the
+ * function returns without writing.  All sizes are in bytes. */
+
+/* Copy n bytes from src to dst.  Overlapping regions are NOT handled
+ * safely — use ic_memmove for overlapping copies.  dst may be NULL only
+ * if n is 0. */
+void ic_memcpy(void *dst, const void *src, uint64_t n);
+
+/* Copy n bytes from src to dst, safe for overlapping regions. */
+void ic_memmove(void *dst, const void *src, uint64_t n);
+
+/* Set n bytes at dst to value (only the low byte is used). */
+void ic_memset(void *dst, int value, uint64_t n);
+
+/* Compare n bytes.  Returns <0, 0, or >0 like memcmp. */
+int ic_memcmp(const void *a, const void *b, uint64_t n);
+
+/* Zero n bytes at dst. */
+void ic_memzero(void *dst, uint64_t n);
+
+/* ================================ strings ============================== */
 
 uint64_t ic_strlen(const char *s);
 int      ic_strcmp(const char *a, const char *b);
@@ -39,6 +71,115 @@ int      ic_strprefix(const char *s, const char *prefix);
 char     ic_lower(char c);
 void     ic_uint_to_str(uint64_t v, char *out, uint64_t cap);
 int      ic_parse_uint(const char *s, uint64_t *out);
+
+/* =========================== extended strings ========================== */
+
+/* Return the length of s, but never scan past cap bytes. */
+uint64_t ic_strnlen(const char *s, uint64_t cap);
+
+/* Copy at most n characters from src to dst, NUL-terminate if cap allows.
+ * Returns pointer to dst.  If src is NULL, dst is zero-filled (up to cap). */
+char *ic_strncpy(char *dst, const char *src, uint64_t n, uint64_t cap);
+
+/* Append src to dst (finding the NUL in dst first).  NUL-terminates if
+ * cap allows.  Returns total length that would have been written
+ * (excluding NUL) — like strlcat.  If cap is 0, returns src length. */
+uint64_t ic_strlcat(char *dst, const char *src, uint64_t cap);
+
+/* Format val as a decimal string into buf, NUL-terminate (if cap > 0).
+ * Returns number of characters written (excluding the NUL). */
+uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val);
+
+/* Format val as a lowercase hex string into buf, NUL-terminate.
+ * Returns number of characters written (excluding the NUL). */
+uint64_t ic_snprintf_hex(char *buf, uint64_t cap, uint64_t val);
+
+/* Parse a decimal string to uint64_t.  Returns 1 on success, 0 on
+ * failure (empty string, non-digit character, or overflow clamped to
+ * UINT64_MAX). */
+int ic_ato_u64(const char *s, uint64_t *out);
+
+/* ========================= character classification ==================== */
+
+int ic_is_digit(char c);
+int ic_is_space(char c);
+int ic_is_alpha(char c);
+
+/* ================================ UTF-8 ================================ */
+
+/* Count the number of Unicode codepoints in s (NUL-terminated). */
+uint64_t ic_utf8_len(const char *s);
+
+/* Validate s as well-formed UTF-8.  Returns 1 if valid, 0 if not.
+ * An empty string is considered valid.  Rejects overlong encodings,
+ * surrogate halves, and codepoints above U+10FFFF. */
+int ic_utf8_valid(const char *s);
+
+/* ============================ arena allocator ========================== */
+
+/* A bump/arena allocator over a caller-provided buffer.  No kernel
+ * calls, no dynamic memory.  Individual frees are not supported;
+ * use ic_arena_reset to reclaim the entire buffer. */
+
+#define IC_ARENA_ALIGN_MAX 64
+
+typedef struct {
+    uint8_t  *buf;    /* base of the caller-owned buffer (may NOT be NULL) */
+    uint64_t  cap;    /* total capacity in bytes */
+    uint64_t  offset; /* next free byte (bump pointer) */
+} ic_arena_t;
+
+/* Initialise the arena over the given buffer.  buf may be NULL only if
+ * cap is 0 (creating a permanently-full arena).  Returns 0 on success. */
+int ic_arena_init(ic_arena_t *a, uint8_t *buf, uint64_t cap);
+
+/* Allocate `size` bytes aligned to `align` (must be power of 2, >= 1).
+ * Returns a pointer into the arena buffer, or NULL if there is not
+ * enough room.  Never fails for size==0 (returns NULL by convention). */
+void *ic_arena_alloc(ic_arena_t *a, uint64_t size, uint64_t align);
+
+/* Reset the bump pointer — logically frees everything. */
+void ic_arena_reset(ic_arena_t *a);
+
+/* Bytes used so far. */
+uint64_t ic_arena_used(const ic_arena_t *a);
+
+/* Bytes remaining. */
+uint64_t ic_arena_remaining(const ic_arena_t *a);
+
+/* ============================= ring buffer ============================= */
+
+/* A single-byte ring buffer (FIFO) over a caller-provided buffer.
+ * The buffer capacity must be > 0 and is the maximum number of bytes
+ * that can be stored (one slot is wasted to distinguish full from
+ * empty).  So for a buffer of `cap` usable bytes the ring can hold
+ * at most `cap - 1` bytes. */
+
+typedef struct {
+    uint8_t  *buf;   /* base of the caller-owned buffer (may NOT be NULL) */
+    uint64_t  cap;   /* usable capacity (ring stores cap-1 bytes max) */
+    uint64_t  head;  /* read index */
+    uint64_t  tail;  /* write index */
+} ic_ring_u8_t;
+
+/* Initialise the ring over the given buffer.  cap must be >= 2.
+ * Returns 0 on success, -1 on invalid parameters. */
+int ic_ring_u8_init(ic_ring_u8_t *r, uint8_t *buf, uint64_t cap);
+
+/* Push one byte.  Returns 0 on success, -1 if full. */
+int ic_ring_u8_push(ic_ring_u8_t *r, uint8_t byte);
+
+/* Pop one byte.  Returns 0 on success, -1 if empty. */
+int ic_ring_u8_pop(ic_ring_u8_t *r, uint8_t *byte_out);
+
+/* Number of bytes currently stored. */
+uint64_t ic_ring_u8_count(const ic_ring_u8_t *r);
+
+/* Free slots available for pushing. */
+uint64_t ic_ring_u8_free_cap(const ic_ring_u8_t *r);
+
+/* Empty the ring (reset head/tail/count to initial state). */
+void ic_ring_u8_reset(ic_ring_u8_t *r);
 
 /* ============================== canvas =============================== */
 /* A 32bpp (0xAARRGGBB) pixel surface. The WM and GUI apps both draw

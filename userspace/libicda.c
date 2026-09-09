@@ -2,6 +2,59 @@
 #include "font.h"
 #include "icon_data.h"
 
+/* ================================ memory ============================== */
+
+void ic_memcpy(void *dst, const void *src, uint64_t n) {
+    uint8_t *d;
+    const uint8_t *s;
+    uint64_t i;
+    if (!dst || !src || n == 0) return;
+    d = (uint8_t *)dst;
+    s = (const uint8_t *)src;
+    for (i = 0; i < n; i++) d[i] = s[i];
+}
+
+void ic_memmove(void *dst, const void *src, uint64_t n) {
+    uint8_t *d;
+    const uint8_t *s;
+    uint64_t i;
+    if (!dst || !src || n == 0) return;
+    d = (uint8_t *)dst;
+    s = (const uint8_t *)src;
+    if ((uintptr_t)d < (uintptr_t)s) {
+        for (i = 0; i < n; i++) d[i] = s[i];
+    } else {
+        i = n;
+        while (i > 0) { i--; d[i] = s[i]; }
+    }
+}
+
+void ic_memset(void *dst, int value, uint64_t n) {
+    uint8_t *d;
+    uint64_t i;
+    if (!dst || n == 0) return;
+    d = (uint8_t *)dst;
+    for (i = 0; i < n; i++) d[i] = (uint8_t)(unsigned char)value;
+}
+
+int ic_memcmp(const void *a, const void *b, uint64_t n) {
+    const uint8_t *x;
+    const uint8_t *y;
+    uint64_t i;
+    if (n == 0) return 0;
+    if (!a || !b) return (!a && !b) ? 0 : (!a ? -1 : 1);
+    x = (const uint8_t *)a;
+    y = (const uint8_t *)b;
+    for (i = 0; i < n; i++) {
+        if (x[i] != y[i]) return (int)x[i] - (int)y[i];
+    }
+    return 0;
+}
+
+void ic_memzero(void *dst, uint64_t n) {
+    ic_memset(dst, 0, n);
+}
+
 /* ============================== strings ============================== */
 
 uint64_t ic_strlen(const char *s) {
@@ -39,7 +92,7 @@ char *ic_strcpy(char *dst, const char *src, uint64_t cap) {
 }
 
 char *ic_strcat(char *dst, const char *src, uint64_t cap) {
-    uint64_t at = ic_strlen(dst);
+    uint64_t at = ic_strnlen(dst, cap);
     uint64_t i = 0;
     if (!dst || cap == 0 || at >= cap) return dst;
     while (src && src[i] && at + 1 < cap) {
@@ -90,26 +143,342 @@ int ic_parse_uint(const char *s, uint64_t *out) {
 
     if (!s || !*s || !out) return 0;
     while (s[i]) {
+        uint64_t d;
         if (s[i] < '0' || s[i] > '9') return 0;
-        v = v * 10 + (uint64_t)(s[i] - '0');
+        d = (uint64_t)(s[i] - '0');
+        if (v > UINT64_MAX / 10 || (v == UINT64_MAX / 10 && d > 5)) return 0;
+        v = v * 10 + d;
         i++;
     }
     *out = v;
     return 1;
 }
 
+/* =========================== extended strings ========================== */
+
+uint64_t ic_strnlen(const char *s, uint64_t cap) {
+    uint64_t n = 0;
+    if (!s || cap == 0) return 0;
+    while (n < cap && s[n]) n++;
+    return n;
+}
+
+char *ic_strncpy(char *dst, const char *src, uint64_t n, uint64_t cap) {
+    uint64_t i = 0;
+    if (!dst || cap == 0) return dst;
+    if (!src) { dst[0] = 0; return dst; }
+    while (i < n && src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    if (i < cap) dst[i] = 0;
+    return dst;
+}
+
+uint64_t ic_strlcat(char *dst, const char *src, uint64_t cap) {
+    uint64_t dlen;
+    uint64_t i = 0;
+    uint64_t total;
+
+    if (!src) return 0;
+    if (!dst) return ic_strlen(src);
+    dlen = ic_strnlen(dst, cap);
+    total = dlen + ic_strlen(src);
+    if (cap == 0) return total;
+    i = 0;
+    while (src[i] && dlen + 1 < cap) {
+        dst[dlen++] = src[i++];
+    }
+    if (dlen < cap) dst[dlen] = 0;
+    return total;
+}
+
+uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val) {
+    char tmp[32];
+    uint64_t len = 0;
+    uint64_t i = 0;
+
+    if (cap == 0) {
+        /* Still need to compute how many chars we would write. */
+        if (val == 0) return 1;
+        while (val) { len++; val /= 10; }
+        return len;
+    }
+    if (!buf) return 0;
+
+    if (val == 0) {
+        if (cap == 1) { buf[0] = 0; return 1; }
+        buf[0] = '0';
+        buf[1] = 0;
+        return 1;
+    }
+    while (val && len < sizeof(tmp)) {
+        tmp[len++] = (char)('0' + (val % 10));
+        val /= 10;
+    }
+    /* len is the number of significant digits; write them in forward order. */
+    i = 0;
+    while (i < len && i + 1 < cap) {
+        buf[i] = tmp[len - 1 - i];
+        i++;
+    }
+    if (i < cap) buf[i] = 0;
+    return len;
+}
+
+uint64_t ic_snprintf_hex(char *buf, uint64_t cap, uint64_t val) {
+    static const char hexdigits[] = "0123456789abcdef";
+    char tmp[16];  /* 64-bit hex fits in 16 chars */
+    uint64_t len = 0;
+    uint64_t i;
+
+    if (cap == 0) {
+        if (val == 0) return 1;
+        while (val) { len++; val >>= 4; }
+        return len;
+    }
+    if (!buf) return 0;
+
+    if (val == 0) {
+        if (cap == 1) { buf[0] = 0; return 1; }
+        buf[0] = '0';
+        buf[1] = 0;
+        return 1;
+    }
+    while (val && len < sizeof(tmp)) {
+        tmp[len++] = hexdigits[val & 0x0F];
+        val >>= 4;
+    }
+    i = 0;
+    while (i < len && i + 1 < cap) {
+        buf[i] = tmp[len - 1 - i];
+        i++;
+    }
+    if (i < cap) buf[i] = 0;
+    return len;
+}
+
+int ic_ato_u64(const char *s, uint64_t *out) {
+    uint64_t v = 0;
+    uint64_t i = 0;
+
+    if (!s || !*s || !out) return 0;
+    while (s[i]) {
+        uint64_t d;
+        if (s[i] < '0' || s[i] > '9') return 0;
+        d = (uint64_t)(s[i] - '0');
+        /* Check for overflow: v > MAX/10, or v == MAX/10 and digit > MAX%10 (5). */
+        if (v > UINT64_MAX / 10 || (v == UINT64_MAX / 10 && d > 5)) {
+            v = UINT64_MAX;
+            /* consume remaining digits */
+            i++;
+            while (s[i] >= '0' && s[i] <= '9') i++;
+            *out = v;
+            return 1;
+        }
+        v = v * 10 + d;
+        i++;
+    }
+    *out = v;
+    return 1;
+}
+
+/* ========================= character classification ==================== */
+
+int ic_is_digit(char c) {
+    unsigned char uc = (unsigned char)c;
+    return uc >= '0' && uc <= '9';
+}
+
+int ic_is_space(char c) {
+    unsigned char uc = (unsigned char)c;
+    return uc == ' ' || uc == '\t' || uc == '\n' ||
+           uc == '\r' || uc == '\f' || uc == '\v';
+}
+
+int ic_is_alpha(char c) {
+    unsigned char uc = (unsigned char)c;
+    return (uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z');
+}
+
+/* ================================ UTF-8 ================================ */
+
+uint64_t ic_utf8_len(const char *s) {
+    uint64_t count = 0;
+    uint64_t i = 0;
+
+    if (!s) return 0;
+    while (s[i]) {
+        unsigned char b = (unsigned char)s[i];
+        /* A codepoint leader is any byte that does NOT start with 10xxxxxx. */
+        if ((b & 0xC0) != 0x80) count++;
+        i++;
+    }
+    return count;
+}
+
+int ic_utf8_valid(const char *s) {
+    uint64_t i = 0;
+
+    if (!s) return 1; /* NULL is "empty" */
+    while (s[i]) {
+        unsigned char b = (unsigned char)s[i];
+        uint64_t need;
+        uint32_t cp;
+        uint64_t j;
+
+        if (b < 0x80) {
+            /* ASCII — always valid. */
+            i++;
+            continue;
+        } else if ((b & 0xE0) == 0xC0) {
+            need = 2; cp = b & 0x1F;
+        } else if ((b & 0xF0) == 0xE0) {
+            need = 3; cp = b & 0x0F;
+        } else if ((b & 0xF8) == 0xF0) {
+            need = 4; cp = b & 0x07;
+        } else {
+            return 0; /* invalid leader byte */
+        }
+
+        /* Collect continuation bytes. */
+        for (j = 1; j < need; j++) {
+            unsigned char c2;
+            if (s[i + j] == 0) return 0; /* truncated */
+            c2 = (unsigned char)s[i + j];
+            if ((c2 & 0xC0) != 0x80) return 0; /* not a continuation */
+            cp = (cp << 6) | (c2 & 0x3F);
+        }
+
+        /* Reject overlong encodings. */
+        if (need == 2 && cp < 0x80) return 0;
+        if (need == 3 && cp < 0x800) return 0;
+        if (need == 4 && cp < 0x10000) return 0;
+
+        /* Reject surrogate halves (U+D800..U+DFFF). */
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+
+        /* Reject codepoints above U+10FFFF. */
+        if (cp > 0x10FFFF) return 0;
+
+        i += need;
+    }
+    return 1;
+}
+
+/* ============================ arena allocator ========================== */
+
+int ic_arena_init(ic_arena_t *a, uint8_t *buf, uint64_t cap) {
+    if (!a) return -1;
+    if (!buf && cap > 0) return -1;
+    a->buf    = buf;
+    a->cap    = cap;
+    a->offset = 0;
+    return 0;
+}
+
+void *ic_arena_alloc(ic_arena_t *a, uint64_t size, uint64_t align) {
+    uint64_t pad;
+    void *ptr;
+
+    if (!a || !a->buf || size == 0 || align == 0) return NULL;
+    /* align must be a power of two and within IC_ARENA_ALIGN_MAX */
+    if (align & (align - 1)) return NULL;
+    if (align > IC_ARENA_ALIGN_MAX) return NULL;
+    /* Sanity: bump pointer must not have overrun capacity. */
+    if (a->offset > a->cap) return NULL;
+
+    /* Align the bump pointer up to the requested alignment. */
+    pad = (align - (a->offset % align)) % align;
+    /* Stepwise overflow check: pad must fit, then size must fit in remaining. */
+    if (pad > a->cap - a->offset) return NULL;
+    if (size > a->cap - a->offset - pad) return NULL;
+
+    ptr = a->buf + a->offset + pad;
+    a->offset = a->offset + pad + size;
+    return ptr;
+}
+
+void ic_arena_reset(ic_arena_t *a) {
+    if (!a) return;
+    a->offset = 0;
+}
+
+uint64_t ic_arena_used(const ic_arena_t *a) {
+    if (!a) return 0;
+    return a->offset;
+}
+
+uint64_t ic_arena_remaining(const ic_arena_t *a) {
+    if (!a || a->offset >= a->cap) return 0;
+    return a->cap - a->offset;
+}
+
+/* ============================= ring buffer ============================= */
+
+int ic_ring_u8_init(ic_ring_u8_t *r, uint8_t *buf, uint64_t cap) {
+    if (!r) return -1;
+    if (!buf || cap < 2) return -1;
+    r->buf  = buf;
+    r->cap  = cap;
+    r->head = 0;
+    r->tail = 0;
+    return 0;
+}
+
+int ic_ring_u8_push(ic_ring_u8_t *r, uint8_t byte) {
+    uint64_t next;
+    if (!r || !r->buf) return -1;
+    if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return -1;
+    next = (r->tail + 1) % r->cap;
+    if (next == r->head) return -1; /* full */
+    r->buf[r->tail] = byte;
+    r->tail = next;
+    return 0;
+}
+
+int ic_ring_u8_pop(ic_ring_u8_t *r, uint8_t *byte_out) {
+    if (!r || !r->buf || !byte_out) return -1;
+    if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return -1;
+    if (r->head == r->tail) return -1; /* empty */
+    *byte_out = r->buf[r->head];
+    r->head = (r->head + 1) % r->cap;
+    return 0;
+}
+
+uint64_t ic_ring_u8_count(const ic_ring_u8_t *r) {
+    if (!r) return 0;
+    if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return 0;
+    if (r->tail >= r->head) return r->tail - r->head;
+    return r->cap - r->head + r->tail;
+}
+
+uint64_t ic_ring_u8_free_cap(const ic_ring_u8_t *r) {
+    if (!r) return 0;
+    if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return 0;
+    return r->cap - 1 - ic_ring_u8_count(r);
+}
+
+void ic_ring_u8_reset(ic_ring_u8_t *r) {
+    if (!r) return;
+    r->head = 0;
+    r->tail = 0;
+}
+
 /* ============================== canvas =============================== */
 
 uint32_t ic_blend(uint32_t a, uint32_t b, int n, int d) {
-    int ar = (int)((a >> 16) & 0xFF);
-    int ag = (int)((a >> 8) & 0xFF);
-    int ab = (int)(a & 0xFF);
-    int br = (int)((b >> 16) & 0xFF);
-    int bg = (int)((b >> 8) & 0xFF);
-    int bb = (int)(b & 0xFF);
-    int r = ar + ((br - ar) * n) / d;
-    int g = ag + ((bg - ag) * n) / d;
-    int bl = ab + ((bb - ab) * n) / d;
+    int ar, ag, ab, br, bg, bb, r, g, bl;
+    if (d == 0) return a;
+    ar = (int)((a >> 16) & 0xFF);
+    ag = (int)((a >> 8) & 0xFF);
+    ab = (int)(a & 0xFF);
+    br = (int)((b >> 16) & 0xFF);
+    bg = (int)((b >> 8) & 0xFF);
+    bb = (int)(b & 0xFF);
+    r = ar + ((br - ar) * n) / d;
+    g = ag + ((bg - ag) * n) / d;
+    bl = ab + ((bb - ab) * n) / d;
     return (uint32_t)((r << 16) | (g << 8) | bl);
 }
 
