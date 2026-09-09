@@ -85,6 +85,7 @@ static int editor_top_row = 0;
 static uint64_t last_click_tick = 0;
 static int last_click_item = -1;
 static int key_seq_state = 0;
+static int last_blink_state = 0;   /* selection blink phase tracker */
 
 /* ---- context-menu BSS (ported from wm.c ctx pattern) ---- */
 #define CTX_MAX_ITEMS 10
@@ -1285,12 +1286,17 @@ int main(int argc, char **argv) {
                 return 0;
             }
         }
-        /* Redraw immediately on input; otherwise only when the selection
-         * blink flips (every 8 ticks).  Repainting the whole window at a
-         * fixed 20fps made the WM composite full frames even when the
-         * explorer sat idle on a laptop. */
-        if (changed || (icda_ticks() % 8) == 0) {
-            draw_all();
+        /* Redraw only on input or when the selection-blink phase
+         * actually changes (every ~8 ticks).  The old ticks%8 check
+         * fired every 8 ticks regardless of blink phase, forcing the
+         * WM to composite a full Explorer frame even when idle. */
+        {
+            int blink = (int)((icda_ticks() / 8) & 1);
+            int blink_changed = (blink != last_blink_state);
+            last_blink_state = blink;
+            if (changed || blink_changed) {
+                draw_all();
+            }
         }
         icda_sleep(1);
     }

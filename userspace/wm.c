@@ -16,6 +16,7 @@
 #define TASKBAR_H 42
 #define CURSOR_W 19
 #define CURSOR_H 30
+#define CURSOR_SAVE_DIM 48   /* max icon cursor dimension for save/restore */
 
 #define WM_ANIM_NONE        0
 #define WM_ANIM_OPEN        1
@@ -66,6 +67,7 @@ static int start_menu_open = 0;
  * tiles), pre-rendered once and copied out as the base of every frame. */
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
+static uint32_t cursor_scene_save[CURSOR_SAVE_DIM * CURSOR_SAVE_DIM];
 static icda_fb_info_t fb_info;
 static icda_gpu_info_t gpu_info;
 static uint32_t *real_fb = NULL;
@@ -122,6 +124,14 @@ static int dirty_rects_intersect(const dirty_rect_t *a, const dirty_rect_t *b) {
     return a->x < b->x + b->w && b->x < a->x + a->w &&
            a->y < b->y + b->h && b->y < a->y + a->h;
 }
+
+/* ---- frame diagnostics ---------------------------------------------------
+ * Cheap static counters updated in the main loop after each composite.
+ * No output — serial_write is kernel-only.  Counters can be exposed
+ * through existing channels (e.g. taskman proc stats) if needed. */
+static unsigned long wm_diag_composite_count = 0;
+static unsigned long wm_diag_max_frame_ticks = 0;
+static unsigned long wm_diag_mouse_events = 0;
 
 static void mark_dirty(int x, int y, int w, int h) {
     dirty_rect_t r;
@@ -192,10 +202,12 @@ static int cursor_point_in_poly(int x, int y) {
 static int64_t cursor_seg_dist2(int x,int y,int ax,int ay,int bx,int by){
     int dx=bx-ax, dy=by-ay;
     int64_t len2=(int64_t)dx*dx+(int64_t)dy*dy;
-    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
-    int64_t t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
+    int64_t t;
     int64_t cx,cy;
-    if(t<0) t=0; if(t>len2) t=len2;
+    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
+    t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
+    if(t<0) t=0;
+    if(t>len2) t=len2;
     cx=ax+t*dx/len2; cy=ay+t*dy/len2;
     return (int64_t)(x-cx)*(x-cx)+(int64_t)(y-cy)*(y-cy);
 }
@@ -231,9 +243,6 @@ static void build_cursor_sprite(void){
 static void clear_msg(gui_msg_t *msg) {
     for (int i = 0; i < 64; i++) ((uint8_t*)msg)[i] = 0;
 }
-
-/* Native-format pixel write to the real framebuffer (see definition below). */
-static void fb_write_px(int x, int y, uint32_t color);
 
 static int cursor_icon_dims(const ic_icon_t **icon_out, int *w_out, int *h_out) {
     const ic_icon_t *icon = ic_icon_builtin("cursor");
@@ -335,20 +344,63 @@ static uint32_t blend_over(uint32_t dst, uint32_t src, int alpha) {
            ((sb * (uint32_t)alpha + db * (uint32_t)inv) / 255);
 }
 
-/* Cursor is blitted straight onto the real framebuffer, above the scene
- * buffer, so a mouse move never rebuilds the frame underneath. */
-static void draw_cursor_at(int w, int h, int mx, int my) {
-    const ic_icon_t *icon;
-    int dw;
-    int dh;
+/* ---- cursor-backbuffer path (eliminates flicker) --------------------
+ * Instead of drawing the cursor directly onto the visible framebuffer
+ * (which causes progressive visible writes / flicker), these functions
+ * render the cursor into back_buffer, blit the affected rectangle once,
+ * then restore back_buffer to its scene-only state.
+ *
+ * draw_cursor_into_bb: saves the scene pixels under the cursor into
+ *   cursor_scene_save, then composites the cursor into back_buffer.
+ * restore_cursor_scene: copies cursor_scene_save back to back_buffer,
+ *   undoing the cursor pixels so the scene buffer stays clean. */
+static void draw_cursor_into_bb(int w, int h, int mx, int my) {
+    const ic_icon_t *icon = NULL;
+    int dw = CURSOR_W;
+    int dh = CURSOR_H;
+    int sx0, sy0, cw, ch;
 
     if (cursor_icon_dims(&icon, &dw, &dh)) {
-        for (int dy = 0; dy < dh; dy++) {
+        /* icon cursor dimensions already set */
+    } else {
+        icon = NULL;
+        dw = CURSOR_W;
+        dh = CURSOR_H;
+    }
+    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
+    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
+
+    /* Clip to screen bounds. */
+    sx0 = 0;
+    sy0 = 0;
+    if (mx < 0) { sx0 = -mx; }
+    if (my < 0) { sy0 = -my; }
+    cw = dw - sx0;
+    ch = dh - sy0;
+    if (mx + sx0 + cw > w) cw = w - mx - sx0;
+    if (my + sy0 + ch > h) ch = h - my - sy0;
+    if (cw <= 0 || ch <= 0) return;
+
+    /* Save scene under visible cursor area. */
+    {
+        int screen_x = mx + sx0;
+        int screen_y = my + sy0;
+        if (screen_x < 0) screen_x = 0;
+        if (screen_y < 0) screen_y = 0;
+        for (int y = 0; y < ch; y++) {
+            copy_pixels(&cursor_scene_save[y * cw],
+                        &back_buffer[(screen_y + y) * w + screen_x], cw);
+        }
+    }
+
+    /* Draw cursor pixels into back_buffer. */
+    if (icon) {
+        for (int dy = sy0; dy < sy0 + ch && dy < dh; dy++) {
             int py = my + dy;
             int sy = (int)((uint64_t)dy * icon->h / dh);
             if (py < 0 || py >= h) continue;
             if (sy >= icon->h) sy = icon->h - 1;
-            for (int dx = 0; dx < dw; dx++) {
+            for (int dx = sx0; dx < sx0 + cw && dx < dw; dx++) {
                 int px = mx + dx;
                 int sx = (int)((uint64_t)dx * icon->w / dw);
                 const uint8_t *p;
@@ -360,12 +412,14 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
                 if (p[3] == 0) continue;
                 src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
                 dst = back_buffer[py * w + px];
-                fb_write_px(px, py, p[3] == 255 ? src : blend_over(dst, src, p[3]));
+                back_buffer[py * w + px] =
+                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
             }
         }
         return;
     }
 
+    /* Built-in cursor. */
     for (int cy = 0; cy < CURSOR_H; cy++) {
         int py = my + cy;
         if (py < 0 || py >= h) continue;
@@ -375,10 +429,49 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
             if (px < 0 || px >= w) continue;
             if (p[3] == 0) continue;
             {
-                uint32_t src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+                uint32_t src = ((uint32_t)p[0] << 16) |
+                               ((uint32_t)p[1] << 8) | p[2];
                 uint32_t dst = back_buffer[py * w + px];
-                fb_write_px(px, py, p[3] == 255 ? src : blend_over(dst, src, p[3]));
+                back_buffer[py * w + px] =
+                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
             }
+        }
+    }
+}
+
+static void restore_cursor_scene(int w, int h, int mx, int my) {
+    const ic_icon_t *icon = NULL;
+    int dw = CURSOR_W;
+    int dh = CURSOR_H;
+    int sx0, sy0, cw, ch;
+
+    if (cursor_icon_dims(&icon, &dw, &dh)) {
+        /* icon cursor dimensions already set */
+    } else {
+        dw = CURSOR_W;
+        dh = CURSOR_H;
+    }
+    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
+    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
+
+    sx0 = 0;
+    sy0 = 0;
+    if (mx < 0) { sx0 = -mx; }
+    if (my < 0) { sy0 = -my; }
+    cw = dw - sx0;
+    ch = dh - sy0;
+    if (mx + sx0 + cw > w) cw = w - mx - sx0;
+    if (my + sy0 + ch > h) ch = h - my - sy0;
+    if (cw <= 0 || ch <= 0) return;
+
+    {
+        int screen_x = mx + sx0;
+        int screen_y = my + sy0;
+        if (screen_x < 0) screen_x = 0;
+        if (screen_y < 0) screen_y = 0;
+        for (int y = 0; y < ch; y++) {
+            copy_pixels(&back_buffer[(screen_y + y) * w + screen_x],
+                        &cursor_scene_save[y * cw], cw);
         }
     }
 }
@@ -1918,32 +2011,6 @@ static uint32_t fb_pitch_pixels(void) {
     return fb_info.pitch ? fb_info.pitch / 4 : (uint32_t)fb_info.width;
 }
 
-/* Write one pixel to the real framebuffer in its native format.  32bpp is
- * the fast path (real GPUs); 24bpp is what GRUB/QEMU hand out in
- * fallback modes - the scene buffer is 32bpp ARGB, so blitting it as-is
- * would both mangle colors and, worse, walk past the end of the mapped
- * region (pitch 2400 vs 3200 bytes/row). */
-static void fb_write_px(int x, int y, uint32_t color) {
-    /* Hard-clamp against the kernel-reported mapping (BSS state, never
-     * disturbed); a garbage coordinate here writes past the mapping and
-     * panics the kernel. */
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x >= (int)fb_info.width) x = (int)fb_info.width - 1;
-    if (y >= (int)fb_info.height) y = (int)fb_info.height - 1;
-    if (fb_info.bpp == 32) {
-        real_fb[y * fb_pitch_pixels() + x] = color;
-    } else {
-        /* 24-bit wire order is B,G,R (VBE masks: red at bit 16), not
-         * R,G,B — writing RGB shows every color R/B-swapped. The 32-bit
-         * path stays native. */
-        uint8_t *p = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch + (uint64_t)x * 3;
-        p[0] = (uint8_t)color;
-        p[1] = (uint8_t)(color >> 8);
-        p[2] = (uint8_t)(color >> 16);
-    }
-}
-
 /* 24-bit wire order is B,G,R (VBE color masks report red at bit 16,
  * i.e. blue in byte 0). Writing R,G,B shows the whole desktop R/B
  * swapped; 32-bit blits are unaffected (native uint32 order). */
@@ -1980,57 +2047,14 @@ static void blit_to_screen(int w, int h) {
     }
 }
 
-/* Restore the cursor area of the real framebuffer from the scene buffer.
- * Called before any full/dirty composite so a stale cursor from the
- * previous frame cannot ghost on screen when the cursor sits outside
- * the damaged rectangles. */
-static void restore_cursor_area(int mx, int my) {
-    int sw = (int)fb_info.width;
-    int sh = (int)fb_info.height;
-    int cw, ch, x0, y0, x1, y1;
-
-    if (sw <= 0 || sh <= 0) return;
-    cursor_dims(&cw, &ch);
-    if (mx < 0) mx = 0; else if (mx >= sw) mx = sw - 1;
-    if (my < 0) my = 0; else if (my >= sh) my = sh - 1;
-
-    x0 = mx;
-    y0 = my;
-    x1 = mx + cw + 2;
-    y1 = my + ch + 2;
-    if (x1 > sw) x1 = sw;
-    if (y1 > sh) y1 = sh;
-    if (x1 <= x0 || y1 <= y0) return;
-
-    if (fb_info.bpp == 32) {
-        uint32_t pitch = fb_pitch_pixels();
-        for (int y = y0; y < y1; y++) {
-            copy_pixels(real_fb + y * pitch + x0, back_buffer + y * sw + x0, x1 - x0);
-        }
-    } else {
-        for (int y = y0; y < y1; y++) {
-            uint8_t *dst = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch;
-            const uint32_t *src = back_buffer + (uint64_t)y * sw;
-            for (int x = x0; x < x1; x++) {
-                uint32_t c = src[x];
-                uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)c;
-                p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)(c >> 16);
-            }
-        }
-    }
-}
-
 static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     /* Trust fb_info for the copy bounds too: desktop_layer is sized to
      * the back buffer, and a corrupted w/h would copy past it. */
     if (w > (int)fb_info.width) w = (int)fb_info.width;
     if (h > (int)fb_info.height) h = (int)fb_info.height;
     if (w <= 0 || h <= 0) return;
-    /* Erase the previous frame's cursor from the real framebuffer before
-     * the full rebuild, or it ghosts on screen. */
-    restore_cursor_area(mouse_x, mouse_y);
+    /* Full rebuild into back_buffer.  No need to erase the old cursor
+     * from real_fb — the single blit below overwrites the entire frame. */
     copy_pixels(back_buffer, desktop_layer, w * h);
     for (int i = 0; i < num_windows; i++) {
         int idx = z_order[i];
@@ -2039,8 +2063,12 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     draw_taskbar(w, h);
     draw_start_menu(w, h, mouse_x, mouse_y);
     draw_desktop_overlays(0, 0, w, h);
+    /* Draw cursor into back_buffer (saves scene under cursor). */
+    draw_cursor_into_bb(w, h, mouse_x, mouse_y);
+    /* Single blit: scene + cursor → real framebuffer. */
     blit_to_screen(w, h);
-    draw_cursor_at(w, h, mouse_x, mouse_y);
+    /* Restore back_buffer to scene-only (remove cursor pixels). */
+    restore_cursor_scene(w, h, mouse_x, mouse_y);
 }
 
 /* Blit one rectangle of the scene buffer to the real framebuffer. */
@@ -2067,6 +2095,10 @@ static void blit_region(int x, int y, int rw, int rh, int w) {
 static int rect_hit(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
 }
+
+/* Forward declaration (defined below, used by composite_dirty). */
+static void cursor_bbox(int mx, int my, int pmx, int pmy,
+                        int *ox, int *oy, int *ow, int *oh);
 
 /* Rebuild only the damaged rectangles: restore them from the wallpaper
  * layer, redraw the windows/taskbar/menu that intersect them, and blit
@@ -2121,16 +2153,20 @@ static void composite_dirty(int w, int h, int mx, int my, int pmx, int pmy) {
         blit_region(d->x, d->y, rw, rh, w);
     }
 
-    /* Erase the OLD cursor position AFTER dirty-rect blits (which may
-     * have naturally overwritten parts of it) but BEFORE drawing the
-     * new cursor.  This eliminates both ghost cursors and the flash
-     * that occurred when erasing at the top of the function. */
-    restore_cursor_area(pmx, pmy);
-    if (mx != pmx || my != pmy)
-        restore_cursor_area(mx, my);
-
     dirty_count = 0;
-    draw_cursor_at(w, h, mx, my);
+
+    /* Draw cursor into back_buffer (saves scene under cursor), then
+     * blit the cursor bbox to real_fb in a single write.  This
+     * replaces the old two-step (restore_cursor_area + draw_cursor_at)
+     * which caused progressive visible writes / flicker on real HW. */
+    draw_cursor_into_bb(w, h, mx, my);
+    {
+        int cx0, cy0, cbw, cbh;
+        cursor_bbox(mx, my, pmx, pmy, &cx0, &cy0, &cbw, &cbh);
+        if (cbw > 0 && cbh > 0)
+            blit_region(cx0, cy0, cbw, cbh, w);
+    }
+    restore_cursor_scene(w, h, mx, my);
 }
 
 /* Mouse moved and nothing else changed: erase the old pointer from the
@@ -2173,25 +2209,12 @@ static void composite_cursor_only(int w, int h, int mx, int my, int pmx, int pmy
     if (y0 + bh > sh) bh = sh - y0;
     if (bw <= 0 || bh <= 0) return;
 
-    if (fb_info.bpp == 32) {
-        uint32_t pitch = fb_pitch_pixels();
-        for (int y = y0; y < y0 + bh; y++) {
-            copy_pixels(real_fb + y * pitch + x0, back_buffer + y * sw + x0, bw);
-        }
-    } else {
-        for (int y = y0; y < y0 + bh; y++) {
-            uint8_t *dst = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch;
-            const uint32_t *src = back_buffer + (uint64_t)y * sw;
-            for (int x = x0; x < x0 + bw; x++) {
-                uint32_t c = src[x];
-                uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)c;
-                p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)(c >> 16);
-            }
-        }
-    }
-    draw_cursor_at(sw, sh, mx, my);
+    /* Draw cursor into back_buffer (saves scene under cursor). */
+    draw_cursor_into_bb(sw, sh, mx, my);
+    /* Single blit of the cursor bbox to real framebuffer. */
+    blit_region(x0, y0, bw, bh, sw);
+    /* Restore back_buffer to scene-only. */
+    restore_cursor_scene(sw, sh, mx, my);
 }
 
 /* Right-button press/release edges for client windows. Deliberately
@@ -2371,19 +2394,16 @@ int main(int argc, char **argv) {
         }
 
         {
-            /* Drain every queued mouse event in one pass and handle each in
-             * order.  Reading a single event per loop pass let the kernel
-             * ring buffer back up while a frame composited, so the cursor
-             * trailed the hand and kept gliding after the mouse stopped.
-             * Processing the whole batch keeps press/release edges (clicks)
-             * and drags correct while tracking the live position, and only
-             * the final composite runs once the batch is consumed. */
+            /* Drain every queued mouse event in one pass.  Click/release
+             * edges are detected per-event (missed edges = lost clicks);
+             * motion processing (desk_track_motion, client forwarding,
+             * drag compositing) runs ONCE on the final position so N
+             * queued moves cost one composite. */
             icda_mouse_event_t mev;
             while (icda_input_read_mouse(&mev) == 0) {
-                int prev_mx = mouse_x;
-                int prev_my = mouse_y;
                 uint8_t prev_btn = mouse_buttons;
                 mouse_moved = 1;
+                wm_diag_mouse_events++;
                 mouse_x = mev.abs_x;
                 mouse_y = mev.abs_y;
                 mouse_buttons = mev.buttons;
@@ -2391,15 +2411,6 @@ int main(int argc, char **argv) {
                 if (mouse_y < 0) mouse_y = 0;
                 if (mouse_x >= w) mouse_x = w - 1;
                 if (mouse_y >= h) mouse_y = h - 1;
-                /* Icon-drag / rubber-band tracking lives out of line
-                 * (same register-safety rule as the right-edge path). */
-                desk_track_motion(mouse_x, mouse_y, mouse_buttons);
-                /* Open menus/dialogs need scene repaints (not just the
-                 * cursor path) so hover highlights track the pointer. */
-                if ((ctx_open || props_open) &&
-                    (mouse_x != prev_mx || mouse_y != prev_my)) {
-                    need_redraw = 1;
-                }
 
                 {
                     int left_clicked = (mouse_buttons & 1) && !(prev_btn & 1);
@@ -2501,41 +2512,65 @@ int main(int argc, char **argv) {
                     } else if (left_released) {
                         dragging_win_idx = -1;
                         desk_left_release(mouse_x, mouse_y);
-                    } else if (dragging_win_idx != -1) {
-                        need_redraw = 1;
-                        wm_window_t *win = &windows[dragging_win_idx];
-                        if (mouse_x != prev_mx || mouse_y != prev_my) {
-                            mark_dirty_win(win);
-                            win->x = mouse_x - drag_off_x;
-                            win->y = mouse_y - drag_off_y;
-                            clamp_window(win, w, h);
-                            mark_dirty_win(win);
-                        }
-                    } else if (focused_window_idx != -1 && (mouse_x != prev_mx || mouse_y != prev_my)) {
-                        wm_window_t *win = &windows[focused_window_idx];
-                        if (win->valid && !win->minimized) {
-                            ic_window_t iw;
-                            iw.x = win->x;
-                            iw.y = win->y;
-                            iw.w = win->w;
-                            iw.h = win->h;
-                            iw.focused = 0;
-                            iw.minimized = 0;
-                            iw.anim = 0;
-                            iw.title = win->title;
-                            iw.hover_close = 0;
-                            iw.hover_min = 0;
-                            iw.hover_max = 0;
-                            if (ic_hit_client(&iw, mouse_x, mouse_y)) {
-                                gui_msg_t motion_msg;
-                                clear_msg(&motion_msg);
-                                motion_msg.type = GUI_MSG_MOUSE_EVENT;
-                                motion_msg.window_id = win->id;
-                                motion_msg.mouse.x = mouse_x - win->x;
-                                motion_msg.mouse.y = mouse_y - win->y;
-                                motion_msg.mouse.buttons = mouse_buttons;
-                                send_maybe(win->app_queue_handle, &motion_msg);
-                            }
+                    }
+                    /* Motion processing (drag, hover, client forwarding)
+                     * is deferred to after the batch — runs once on the
+                     * final position so N queued moves cost one composite. */
+                }
+            }
+
+            /* ---- post-batch motion coalescing ----
+             * desk_track_motion, window drag compositing, and client
+             * motion forwarding run once on the final accumulated
+             * position so N queued moves cost one composite. */
+            if (mouse_moved) {
+                desk_track_motion(mouse_x, mouse_y, mouse_buttons);
+
+                /* Open menus/dialogs need scene repaints so hover
+                 * highlights track the pointer. */
+                if ((ctx_open || props_open) &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    need_redraw = 1;
+                }
+
+                /* Window title drag (coalesced: one composite per tick). */
+                if (dragging_win_idx != -1 &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    wm_window_t *win = &windows[dragging_win_idx];
+                    need_redraw = 1;
+                    mark_dirty_win(win);
+                    win->x = mouse_x - drag_off_x;
+                    win->y = mouse_y - drag_off_y;
+                    clamp_window(win, w, h);
+                    mark_dirty_win(win);
+                }
+
+                /* Forward motion to focused client window. */
+                if (dragging_win_idx == -1 && focused_window_idx != -1 &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    wm_window_t *win = &windows[focused_window_idx];
+                    if (win->valid && !win->minimized) {
+                        ic_window_t iw;
+                        iw.x = win->x;
+                        iw.y = win->y;
+                        iw.w = win->w;
+                        iw.h = win->h;
+                        iw.focused = 0;
+                        iw.minimized = 0;
+                        iw.anim = 0;
+                        iw.title = win->title;
+                        iw.hover_close = 0;
+                        iw.hover_min = 0;
+                        iw.hover_max = 0;
+                        if (ic_hit_client(&iw, mouse_x, mouse_y)) {
+                            gui_msg_t motion_msg;
+                            clear_msg(&motion_msg);
+                            motion_msg.type = GUI_MSG_MOUSE_EVENT;
+                            motion_msg.window_id = win->id;
+                            motion_msg.mouse.x = mouse_x - win->x;
+                            motion_msg.mouse.y = mouse_y - win->y;
+                            motion_msg.mouse.buttons = mouse_buttons;
+                            send_maybe(win->app_queue_handle, &motion_msg);
                         }
                     }
                 }
@@ -2590,9 +2625,12 @@ int main(int argc, char **argv) {
              * may hold stale content from a previous frame that the
              * dirty-rect path would not repaint, so force a full
              * rebuild and never take the cursor-only micro-path.
-             * Gated on actual activity so idle stays idle. */
+             * Gated on actual activity so idle stays idle.
+             * NOTE: dragging_win_idx no longer forces dirty_full —
+             * the dirty rects from mark_dirty_win are sufficient and
+             * avoid the full-screen cost during hold+drag. */
             if (gpu_info.flip_active &&
-                (need_redraw || animating || dragging_win_idx != -1 ||
+                (need_redraw || animating ||
                  dirty_count > 0 || (mouse_moved &&
                   (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)))) {
                 dirty_full = 1;
@@ -2616,19 +2654,28 @@ int main(int argc, char **argv) {
                         real_fb = (uint32_t *)((uint8_t *)saved_fb +
                             (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
                     }
-                    composite_dirty(w, h, mouse_x, mouse_y,
-                                    prev_mouse_x, prev_mouse_y);
-                    /* Single present per frame commit (after composite
-                     * and cursor draw).  WAIT_VBLANK = one sched_yield
-                     * (no vsync IRQ on Bochs/QEMU).
-                     * do_present covers virtio-gpu (needs explicit
-                     * TRANSFER+FLUSH) and flip mode alike. */
-                    if (do_present) {
-                        icda_gpu_present_flags(1);
-                    }
-                    if (gpu_info.flip_active) {
-                        wm_flip_page ^= 1;
-                        real_fb = saved_fb;
+                    {
+                        unsigned long t0 = (unsigned long)icda_ticks();
+                        composite_dirty(w, h, mouse_x, mouse_y,
+                                        prev_mouse_x, prev_mouse_y);
+                        /* Single present per frame commit (after composite
+                         * and cursor draw).  WAIT_VBLANK = one sched_yield
+                         * (no vsync IRQ on Bochs/QEMU).
+                         * do_present covers virtio-gpu (needs explicit
+                         * TRANSFER+FLUSH) and flip mode alike. */
+                        if (do_present) {
+                            icda_gpu_present_flags(1);
+                        }
+                        if (gpu_info.flip_active) {
+                            wm_flip_page ^= 1;
+                            real_fb = saved_fb;
+                        }
+                        {
+                            unsigned long elapsed = (unsigned long)icda_ticks() - t0;
+                            wm_diag_composite_count++;
+                            if (elapsed > wm_diag_max_frame_ticks)
+                                wm_diag_max_frame_ticks = elapsed;
+                        }
                     }
                     last_composite_tick = now;
                 } else if (mouse_moved &&
