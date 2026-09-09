@@ -7,7 +7,9 @@ DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IM
 SGDISK ?= /usr/sbin/sgdisk
 SHELL_AUTOTEST ?= 0
 SERIAL_SHELL_MIRROR ?= 0
-AUDIO_WAVS := $(wildcard userspace/*.wav)
+# Only git-tracked UI sounds are baked into the kernel. Large media
+# (userspace/*.wav gitignored, e.g. ilove.wav) stays out: use Releases/LFS.
+AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody.wav userspace/hava_clip.wav)
 ICON_ICOS := $(wildcard resources/icons/*.ico)
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
@@ -390,7 +392,7 @@ kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm &: Makefile $(AUDIO_WA
 	@touch kernel/fs/.audio_assets.externs.tmp kernel/fs/.audio_assets.entries.tmp
 	@printf 'bits 64\n\nsection .rodata\n' > kernel/proc/audio_assets.asm
 	@count=0; \
-	for f in userspace/*.wav; do \
+	for f in $(AUDIO_WAVS); do \
 		if [ ! -f "$$f" ]; then continue; fi; \
 		base=$$(basename "$$f"); \
 		sym=$$(printf '%s' "$$base" | sed 's/[^A-Za-z0-9]/_/g'); \
