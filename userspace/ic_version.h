@@ -18,7 +18,7 @@
 
 #define IC_VERSION_MAJOR  1
 #define IC_VERSION_MINOR  3
-#define IC_VERSION_PATCH  0
+#define IC_VERSION_PATCH  1
 
 /* Pack into a single uint32_t:  (major << 24) | (minor << 8) | patch       *
  * Range: major 0-255, minor 0-255, patch 0-255.                            *
@@ -28,7 +28,7 @@
      ((uint32_t)IC_VERSION_MINOR <<  8) | \
      ((uint32_t)IC_VERSION_PATCH))
 
-#define IC_VERSION_STRING "1.3.0"
+#define IC_VERSION_STRING "1.3.1"
 
 /* ---- human-readable banner (for -v flags / logging) --------------------- */
 

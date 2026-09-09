@@ -1045,6 +1045,55 @@ const ic_theme_t *ic_theme_default(void) {
 
 /* =========================== window chrome =========================== */
 
+/* ---- single-pixel helper (private to chrome glyphs) ---- */
+static void ic_px(ic_canvas_t *c, int x, int y, uint32_t color) {
+    if (!c || !c->px || x < 0 || y < 0 || x >= c->w || y >= c->h) return;
+    c->px[y * c->w + x] = color;
+}
+
+/* ---- vector caption-button glyphs (1.3.1) ---- */
+/* All glyphs target the 18×16 button rect (IC_BTN_W × IC_BTN_H) with
+ * ≥3 px padding on every side.  (bx,by) is the button top-left. */
+
+/* Minimize: 2 px-thick horizontal bar, centered in the button. */
+static void ic_caption_min(ic_canvas_t *c, int bx, int by, uint32_t color) {
+    /* 8 px wide, 2 px tall, centred: bx+5..bx+12, by+7..by+8 */
+    ic_rect(c, bx + 5, by + 7, 8, 2, color);
+}
+
+/* Maximize: 2 px-thick outline rect, 8×8, centred in the button.
+ * Outer rect: bx+5..bx+12, by+4..by+11  (8×8)                      */
+static void ic_caption_max(ic_canvas_t *c, int bx, int by, uint32_t color) {
+    /* top edge  (2 px thick) */
+    ic_rect(c, bx + 5, by + 4,  8, 2, color);
+    /* bottom edge */
+    ic_rect(c, bx + 5, by + 10, 8, 2, color);
+    /* left edge (between top/bottom, already drawn by corners) */
+    ic_rect(c, bx + 5, by + 6,  2, 4, color);
+    /* right edge */
+    ic_rect(c, bx + 11, by + 6, 2, 4, color);
+}
+
+/* Close: 2 px-thick X, 8×8, centred in the button.
+ * Two diagonals, each drawn as a pair of adjacent 1-px lines for
+ * consistent thickness without floating-point math.                */
+static void ic_caption_close(ic_canvas_t *c, int bx, int by, uint32_t color) {
+    int i;
+    /* 8×8 area: bx+5..bx+12, by+4..by+11  */
+    for (i = 0; i < 8; i++) {
+        /* \ diagonal (top-left → bottom-right) */
+        ic_px(c, bx + 5 + i, by + 4 + i, color);
+        /* / diagonal (top-right → bottom-left) */
+        ic_px(c, bx + 12 - i, by + 4 + i, color);
+    }
+    /* 2nd pixel of each diagonal for thickness: shift right on \,
+     * shift left on /, skip the very last row (would overflow).      */
+    for (i = 0; i < 7; i++) {
+        ic_px(c, bx + 6 + i, by + 4 + i, color);   /* \ +1 col */
+        ic_px(c, bx + 11 - i, by + 4 + i, color);   /* / −1 col */
+    }
+}
+
 void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
                     const ic_icon_t *icon_close, const ic_icon_t *icon_min,
                     const ic_icon_t *icon_max) {
@@ -1087,37 +1136,28 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
     ic_vline(c, wx + win->w, wy, win->h + 1, border);
     ic_hline(c, wx - 1, wy + win->h, win->w + 2, border);
 
+    /* ---- caption-button glyphs (vector, 1.3.1) ----
+     * icon_close / icon_min / icon_max are legacy builtins passed by
+     * the WM; caption buttons now draw vector glyphs unconditionally
+     * because the built-in .ico set is placeholder data.  The three
+     * icon parameters are kept for ABI compatibility and are unused. */
+    (void)icon_close; (void)icon_min; (void)icon_max;
+
     if (win->hover_max) {
         ic_rect_r(c, max_x, max_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, t->accent);
     }
-    if (icon_max && ic_icon_valid(icon_max)) {
-        ic_icon_draw(c, max_x + 3, max_y + 3, 12, 10, icon_max);
-    } else {
-        ic_outline(c, max_x + 5, max_y + 4, 8, 7, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
-    }
+    ic_caption_max(c, max_x, max_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
 
     if (win->hover_min) {
         ic_rect_r(c, min_x, min_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, t->accent);
     }
-    if (icon_min && ic_icon_valid(icon_min)) {
-        ic_icon_draw(c, min_x + 3, min_y + 3, 12, 10, icon_min);
-    } else {
-        ic_rect(c, min_x + 5, min_y + 14, 8, 2, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
-    }
+    ic_caption_min(c, min_x, min_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
 
     if (win->hover_close) {
         ic_rect_r(c, cls_x, cls_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, 0x00EF4444);
-        if (icon_close && ic_icon_valid(icon_close)) {
-            ic_icon_draw(c, cls_x + 3, cls_y + 3, 12, 10, icon_close);
-        } else {
-            ic_text(c, cls_x + 5, cls_y + 1, "x", 0x00FFFFFF, 0x00EF4444);
-        }
+        ic_caption_close(c, cls_x, cls_y, 0x00FFFFFF);
     } else {
-        if (icon_close && ic_icon_valid(icon_close)) {
-            ic_icon_draw(c, cls_x + 3, cls_y + 3, 12, 10, icon_close);
-        } else {
-            ic_text(c, cls_x + 5, cls_y + 1, "x", win->focused ? 0x00E2E8F0 : 0x0094A3B8, title_bg);
-        }
+        ic_caption_close(c, cls_x, cls_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
     }
 }
 
