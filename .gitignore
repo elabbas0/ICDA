@@ -113,3 +113,7 @@ qemu-hda-*.wav
 .opencode/package.json
 .opencode/package-lock.json
 .opencode/bun.lock
+
+# AI-agent IDE config (opencode)
+/.opencode/
+/opencode.json
