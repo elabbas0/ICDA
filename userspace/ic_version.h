@@ -17,7 +17,7 @@
 /* ---- current release --------------------------------------------------- */
 
 #define IC_VERSION_MAJOR  1
-#define IC_VERSION_MINOR  1
+#define IC_VERSION_MINOR  2
 #define IC_VERSION_PATCH  0
 
 /* Pack into a single uint32_t:  (major << 24) | (minor << 8) | patch       *
@@ -27,7 +27,7 @@
      ((uint32_t)IC_VERSION_MINOR <<  8) | \
      ((uint32_t)IC_VERSION_PATCH))
 
-#define IC_VERSION_STRING "1.1.0"
+#define IC_VERSION_STRING "1.2.0"
 
 /* ---- human-readable banner (for -v flags / logging) --------------------- */
 

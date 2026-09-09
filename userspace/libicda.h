@@ -18,6 +18,9 @@
  *   - window chrome           (title bar, minimize/close buttons, hit tests)
  *   - stateless widgets       (ic_draw_button + ic_button_state)
  *   - an app skeleton         (ic_run_app: open window + event loop)
+ *   - file/dir/path helpers   (ic_read_file_b, ic_path_join, ic_dir_next, ...)
+ *   - process/ipc RAII        (ic_spawn_b, ic_shm_t, ic_msg_send_b, ...)
+ *   - shared HTTP fetch       (ic_url_split, ic_http_fetch_to_file, ...)
  *   - version information     (ic_version.h, included below)
  *
  * Every app is a plain C program:
@@ -372,5 +375,158 @@ typedef void (*ic_draw_fn)(void *ud);
 
 int ic_run_app(const char *title, int w, int h,
                ic_event_fn on_event, ic_draw_fn on_draw, void *ud);
+
+/* ================================ ic_io ================================ */
+/* Errno codes — mirror kernel/syscall/syscall.h so userspace code does
+ * not need kernel headers.  Returns from ic_*_b functions are 0 on
+ * success or negative errno (e.g. -U_ENOENT). */
+#ifndef U_ENOENT
+#define U_ENOENT  2   /* no such file or directory */
+#define U_EBADF   9   /* bad file descriptor */
+#define U_ENOMEM  12  /* out of memory / buffer too small */
+#define U_EACCES  13  /* permission denied */
+#define U_EFAULT  14  /* bad address */
+#define U_EINVAL  22  /* invalid argument */
+#endif
+
+/* File, directory, and path helpers — thin wrappers over icda_sys.h
+ * syscalls with NULL checks, capacity validation, and NUL-termination.
+ * All functions return 0 on success or a negative errno on failure. */
+
+/* Read an entire file into buf (up to cap bytes).  Returns 0 on success.
+ * On success buf is NUL-terminated (kernel guarantee).  len_out (optional)
+ * receives the number of bytes read (excluding the NUL).  Returns negative
+ * errno on failure: -U_ENOENT (not found), -U_EFAULT (bad path/buf). */
+int ic_read_file_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out);
+
+/* Write len bytes from buf to path.  Returns 0 on success, negative errno
+ * on failure.  buf may be NULL only when len is 0. */
+int ic_write_file_b(const char *path, const char *buf, uint64_t len);
+
+/* Stat a path.  Returns 0 on success, negative errno on failure.
+ * out must be non-NULL. */
+int ic_stat_b(const char *path, icda_stat_t *out);
+
+/* Get current working directory into buf (up to cap bytes).
+ * Returns 0 on success, negative errno on failure. */
+int ic_getcwd_b(char *buf, uint64_t cap);
+
+/* Create directory at path.  Returns 0 on success, negative errno. */
+int ic_mkdir_b(const char *path);
+
+/* Create (touch) a file at path.  Returns 0 on success, negative errno. */
+int ic_create_b(const char *path);
+
+/* Join two path components with a single '/' separator.
+ * If a ends with '/' or b starts with '/', no duplicate separator.
+ * If both, the leading '/' from b is skipped.  Returns 0 on success
+ * (result NUL-terminated in dst), -U_ENOMEM if result exceeds cap. */
+int ic_path_join(char *dst, uint64_t cap, const char *a, const char *b);
+
+/* Normalize src into dst: resolve '.'  '..'  '//'  trailing '/'.
+ * '..' never escapes root (clamped).  Returns 0 on success (NUL-terminated),
+ * -U_ENOMEM if the result would exceed cap (dst left empty). */
+int ic_path_normalize(char *dst, uint64_t cap, const char *src);
+
+/* List directory entries into buf.  Returns 0 on success.
+ * Buffer format: NUL/newline-separated entries, directories get trailing '/'.
+ * len_out (optional) receives bytes written. */
+int ic_list_dir_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out);
+
+/* Directory iterator — walks NUL/newline-separated entries produced by
+ * ic_list_dir_b().  Usage:
+ *   ic_dir_cursor_t cur;
+ *   ic_dir_cursor_init(&cur, buf, len);
+ *   const char *name; uint64_t nlen; int is_dir;
+ *   while (ic_dir_next(&cur, &name, &nlen, &is_dir)) { ... } */
+typedef struct {
+    const char *buf;
+    uint64_t    len;
+    uint64_t    pos;
+} ic_dir_cursor_t;
+
+void ic_dir_cursor_init(ic_dir_cursor_t *cur, const char *buf, uint64_t len);
+int  ic_dir_next(ic_dir_cursor_t *cur, const char **name_out,
+                 uint64_t *name_len_out, int *is_dir_out);
+
+/* ================================ ic_app ================================ */
+/* Process, timer, and IPC helpers — thin wrappers over icda_sys.h
+ * syscalls with NULL checks and RAII-style resource management. */
+
+/* Spawn a process.  Returns pid on success, (uint64_t)-errno on failure. */
+uint64_t ic_spawn_b(const char *path);
+
+/* Spawn with argument string.  args may be NULL (treated as ""). */
+uint64_t ic_spawn_args_b(const char *path, const char *args);
+
+/* Wait for a child process.  Returns exit code on success, negative errno. */
+int ic_wait_b(uint64_t pid);
+
+/* Sleep for the given number of scheduler ticks. */
+void ic_sleep_ticks(uint64_t ticks);
+
+/* Return current tick count. */
+uint64_t ic_ticks_b(void);
+
+/* Yield the CPU to the scheduler. */
+void ic_yield_b(void);
+
+/* Exit the current process.  Does not return. */
+_Noreturn void ic_exit_b(uint64_t code);
+
+/* Shared memory RAII wrapper — create + map on acquire, unmap + close on
+ * release.  Double-release is safe (checks .valid). */
+typedef struct {
+    uint64_t handle;
+    uint64_t addr;
+    uint64_t size;
+    int      valid;
+} ic_shm_t;
+
+/* Acquire shared memory of the given size.  Returns 0 on success. */
+int  ic_shm_acquire(uint64_t size, ic_shm_t *out);
+
+/* Release shared memory (unmap + close).  Safe to call twice. */
+void ic_shm_release(ic_shm_t *t);
+
+/* Message queue helpers — all handle-checked.  Messages are 64 bytes
+ * (gui_msg_t shape).  Caller must pass a pointer to a full 64-byte
+ * gui_msg_t (kernel asserts the message is exactly 64 bytes). */
+uint64_t ic_msg_open_b(const char *name);
+int      ic_msg_send_b(uint64_t handle, const void *msg);
+int      ic_msg_recv_b(uint64_t handle, void *out, int block);
+int      ic_msg_poll_b(uint64_t handle);
+
+/* ================================ ic_http ================================ */
+/* Shared HTTP fetch logic — deduplicates browser/curl URL parsing and
+ * download patterns.  Resolves host (IPv4 literal or DNS), fetches via
+ * kernel HTTP(S), and reads the result into a caller buffer or file. */
+
+/* Parse a URL into its components.  Supports http:// and https://.
+ * Default ports: 80 (HTTP), 443 (HTTPS).  Returns 0 on success,
+ * -1 on format error.  All output params required. */
+int ic_url_split(const char *url, char *host_out, uint64_t host_cap,
+                 uint16_t *port_out, char *path_out, uint64_t path_cap,
+                 int *use_tls_out);
+
+/* Resolve a hostname to IPv4.  Tries IPv4 literal first, then DNS.
+ * Returns 0 on success, negative errno on failure. */
+int ic_dns_b(const char *host, uint32_t *ipv4_out);
+
+/* Fetch a URL to a VFS file.  dns + http/https_get_ipv4 wrapper.
+ * Returns 0 on success, negative errno on failure.
+ * bytes_out (optional) receives the response size.
+ * NOTE: kernel NET_HTTP_CAP is 512KB; responses larger than that
+ * will be truncated by the kernel. */
+int ic_http_fetch_to_file(const char *host, uint16_t port, int use_tls,
+                          const char *path, const char *out_path,
+                          uint64_t *bytes_out);
+
+/* Fetch a URL into a caller-provided memory buffer.  Uses a scratch
+ * VFS path for the intermediate file (default "/tmp/.ic_fetch" when
+ * scratch_path is NULL).  Returns 0 on success, negative errno.
+ * len_out (optional) receives bytes read into buf (never exceeds cap). */
+int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
+                      uint64_t *len_out, const char *scratch_path);
 
 #endif /* USERSPACE_LIBICDA_H */

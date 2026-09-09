@@ -18,7 +18,7 @@ CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
 # Userspace (the whole GUI stack - WM compositing, libicda drawing, apps)
 # runs optimized: at -O0 the 1920x1080 compositing math made real hardware
 # crawl, which read as "1 fps".  Kernel stays -O0 (boot path is short).
-USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-pie -no-pie -mcmodel=large \
+USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -Wpedantic -Wno-unused-command-line-argument -fno-pie -no-pie -mcmodel=large \
              -fno-asynchronous-unwind-tables -fno-stack-protector \
              -mno-mmx -mno-sse -mno-sse2 -Iuserspace
 

@@ -1386,3 +1386,466 @@ int ic_run_app(const char *title, int w, int h,
         icda_sleep(1);
     }
 }
+
+/* ================================ ic_io ================================ */
+
+int ic_read_file_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out) {
+    uint64_t rc;
+    if (!path || !buf || cap == 0) {
+        if (len_out) *len_out = 0;
+        return -U_EINVAL;
+    }
+    rc = icda_read_file(path, buf, cap);
+    if ((long)rc < 0) {
+        if (len_out) *len_out = 0;
+        return (int)(long)rc;
+    }
+    if (len_out) *len_out = rc;
+    return 0;
+}
+
+int ic_write_file_b(const char *path, const char *buf, uint64_t len) {
+    uint64_t rc;
+    if (!path) return -U_EINVAL;
+    if (len == 0) return 0;
+    if (!buf) return -U_EINVAL;
+    rc = icda_write_file(path, buf, len);
+    if ((long)rc < 0) return (int)(long)rc;
+    return 0;
+}
+
+int ic_stat_b(const char *path, icda_stat_t *out) {
+    uint64_t rc;
+    if (!path || !out) return -U_EINVAL;
+    rc = icda_stat(path, out);
+    if ((long)rc < 0) return (int)(long)rc;
+    return 0;
+}
+
+int ic_getcwd_b(char *buf, uint64_t cap) {
+    uint64_t rc;
+    if (!buf || cap == 0) return -U_EINVAL;
+    rc = icda_getcwd(buf, cap);
+    if ((long)rc < 0) return (int)(long)rc;
+    return 0;
+}
+
+int ic_mkdir_b(const char *path) {
+    uint64_t rc;
+    if (!path) return -U_EINVAL;
+    rc = icda_mkdir(path);
+    if ((long)rc < 0) return (int)(long)rc;
+    return 0;
+}
+
+int ic_create_b(const char *path) {
+    uint64_t rc;
+    if (!path) return -U_EINVAL;
+    rc = icda_create(path);
+    if ((long)rc < 0) return (int)(long)rc;
+    return 0;
+}
+
+int ic_path_join(char *dst, uint64_t cap, const char *a, const char *b) {
+    uint64_t alen, blen, need;
+    uint64_t bstart = 0;
+    int need_sep = 0;
+    uint64_t pos;
+
+    if (!dst || cap == 0) return -U_EINVAL;
+    dst[0] = 0;
+
+    alen = a ? ic_strlen(a) : 0;
+    blen = b ? ic_strlen(b) : 0;
+
+    if (alen == 0 && blen == 0) return 0;
+    if (alen == 0) {
+        need = blen;
+        if (need + 1 > cap) { dst[0] = 0; return -U_ENOMEM; }
+        ic_memcpy(dst, b, blen);
+        dst[blen] = 0;
+        return 0;
+    }
+    if (blen == 0) {
+        need = alen;
+        if (need + 1 > cap) { dst[0] = 0; return -U_ENOMEM; }
+        ic_memcpy(dst, a, alen);
+        dst[alen] = 0;
+        return 0;
+    }
+
+    if (a[alen - 1] == '/' && b[0] == '/') {
+        bstart = 1;
+    } else if (a[alen - 1] != '/' && b[0] != '/') {
+        need_sep = 1;
+    }
+
+    need = alen + (uint64_t)need_sep + (blen - bstart);
+    if (need + 1 > cap) {
+        dst[0] = 0;
+        return -U_ENOMEM;
+    }
+
+    ic_memcpy(dst, a, alen);
+    pos = alen;
+    if (need_sep) {
+        dst[pos++] = '/';
+    }
+    ic_memcpy(dst + pos, b + bstart, blen - bstart);
+    pos += blen - bstart;
+    dst[pos] = 0;
+    return 0;
+}
+
+int ic_path_normalize(char *dst, uint64_t cap, const char *src) {
+    uint64_t di = 0;
+    uint64_t si = 0;
+    int is_abs;
+
+    if (!dst || cap == 0) return -U_ENOMEM;
+    dst[0] = 0;
+    if (!src || !*src) return 0;
+
+    is_abs = (src[0] == '/');
+    if (is_abs) {
+        dst[0] = '/';
+        di = 1;
+        si = 1;
+    }
+
+    for (;;) {
+        uint64_t comp_start, comp_len;
+
+        while (src[si] == '/') si++;
+        if (!src[si]) break;
+
+        comp_start = si;
+        while (src[si] && src[si] != '/') si++;
+        comp_len = si - comp_start;
+
+        if (comp_len == 1 && src[comp_start] == '.') {
+            continue;
+        }
+        if (comp_len == 2 && src[comp_start] == '.' && src[comp_start + 1] == '.') {
+            if (di > (uint64_t)(is_abs ? 1 : 0)) {
+                di--;
+                while (di > (uint64_t)(is_abs ? 1 : 0) && dst[di - 1] != '/') {
+                    di--;
+                }
+            }
+            continue;
+        }
+
+        if (di > 0 && !(di == 1 && dst[0] == '/')) {
+            if (di >= cap) { dst[0] = 0; return -U_ENOMEM; }
+            dst[di++] = '/';
+        }
+        if (di + comp_len >= cap) { dst[0] = 0; return -U_ENOMEM; }
+        ic_memcpy(dst + di, src + comp_start, comp_len);
+        di += comp_len;
+    }
+
+    dst[di] = 0;
+    return 0;
+}
+
+int ic_list_dir_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out) {
+    uint64_t rc;
+    if (!path || !buf || cap == 0) {
+        if (len_out) *len_out = 0;
+        return -U_EINVAL;
+    }
+    rc = icda_list_dir(path, buf, cap);
+    if ((long)rc < 0) {
+        if (len_out) *len_out = 0;
+        return (int)(long)rc;
+    }
+    if (len_out) *len_out = rc;
+    return 0;
+}
+
+void ic_dir_cursor_init(ic_dir_cursor_t *cur, const char *buf, uint64_t len) {
+    if (!cur) return;
+    cur->buf = buf;
+    cur->len = buf ? len : 0;
+    cur->pos = 0;
+}
+
+int ic_dir_next(ic_dir_cursor_t *cur, const char **name_out,
+                uint64_t *name_len_out, int *is_dir_out) {
+    uint64_t start, end, i;
+
+    if (!cur || !cur->buf || cur->pos >= cur->len) {
+        if (name_out) *name_out = (const char *)0;
+        if (name_len_out) *name_len_out = 0;
+        if (is_dir_out) *is_dir_out = 0;
+        return 0;
+    }
+
+    start = cur->pos;
+    i = start;
+    while (i < cur->len && cur->buf[i] != '\n' && cur->buf[i] != '\0') {
+        i++;
+    }
+    end = i;
+
+    if (i < cur->len && cur->buf[i] == '\n') {
+        cur->pos = i + 1;
+    } else {
+        cur->pos = i;
+    }
+
+    if (end <= start) {
+        if (name_out) *name_out = (const char *)0;
+        if (name_len_out) *name_len_out = 0;
+        if (is_dir_out) *is_dir_out = 0;
+        return 0;
+    }
+
+    if (name_out) *name_out = cur->buf + start;
+    if (name_len_out) *name_len_out = end - start;
+    if (is_dir_out) *is_dir_out = (cur->buf[end - 1] == '/');
+    return 1;
+}
+
+/* ================================ ic_app ================================ */
+
+uint64_t ic_spawn_b(const char *path) {
+    if (!path || !*path) return (uint64_t)(-((long)U_EINVAL));
+    return icda_spawn(path);
+}
+
+uint64_t ic_spawn_args_b(const char *path, const char *args) {
+    if (!path || !*path) return (uint64_t)(-((long)U_EINVAL));
+    if (!args) args = "";
+    return icda_spawn_args(path, args);
+}
+
+int ic_wait_b(uint64_t pid) {
+    return (int)icda_waitpid(pid);
+}
+
+void ic_sleep_ticks(uint64_t ticks) {
+    icda_sleep(ticks);
+}
+
+uint64_t ic_ticks_b(void) {
+    return icda_ticks();
+}
+
+void ic_yield_b(void) {
+    icda_yield();
+}
+
+_Noreturn void ic_exit_b(uint64_t code) {
+    icda_exit(code);
+    for (;;) {}
+}
+
+int ic_shm_acquire(uint64_t size, ic_shm_t *out) {
+    uint64_t handle, addr;
+
+    if (!out || size == 0) return -U_EINVAL;
+    out->handle = 0;
+    out->addr   = 0;
+    out->size   = 0;
+    out->valid  = 0;
+
+    handle = icda_shm_create(size);
+    if ((long)handle < 0) return (int)(long)handle;
+
+    addr = icda_shm_map(handle);
+    if ((long)addr < 0) {
+        icda_shm_close(handle);
+        return (int)(long)addr;
+    }
+
+    out->handle = handle;
+    out->addr   = addr;
+    out->size   = size;
+    out->valid  = 1;
+    return 0;
+}
+
+void ic_shm_release(ic_shm_t *t) {
+    if (!t || !t->valid) return;
+    t->valid = 0;
+    icda_shm_unmap(t->handle);
+    icda_shm_close(t->handle);
+    t->handle = 0;
+    t->addr   = 0;
+    t->size   = 0;
+}
+
+uint64_t ic_msg_open_b(const char *name) {
+    if (!name || !*name) return (uint64_t)(-((long)U_EINVAL));
+    return icda_msg_open(name);
+}
+
+int ic_msg_send_b(uint64_t handle, const void *msg) {
+    if (!msg) return -U_EINVAL;
+    return icda_msg_send(handle, msg);
+}
+
+int ic_msg_recv_b(uint64_t handle, void *out, int block) {
+    if (!out) return -U_EINVAL;
+    return icda_msg_recv(handle, out, block);
+}
+
+int ic_msg_poll_b(uint64_t handle) {
+    return icda_msg_poll(handle);
+}
+
+/* ================================ ic_http ================================ */
+
+static int ic_try_parse_ipv4(const char *host, uint32_t *ip_out) {
+    const char *p = host;
+    uint32_t octets[4];
+    int o;
+    uint32_t v;
+
+    if (!host || !*host || !ip_out) return -1;
+
+    for (o = 0; o < 4; o++) {
+        v = 0;
+        if (*p < '0' || *p > '9') return -1;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10U + (uint32_t)(*p - '0');
+            if (v > 255U) return -1;
+            p++;
+        }
+        octets[o] = v;
+        if (o < 3) {
+            if (*p != '.') return -1;
+            p++;
+        }
+    }
+    if (*p != 0) return -1;
+    *ip_out = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
+    return 0;
+}
+
+int ic_url_split(const char *url, char *host_out, uint64_t host_cap,
+                 uint16_t *port_out, char *path_out, uint64_t path_cap,
+                 int *use_tls_out) {
+    const char *host;
+    uint64_t host_len = 0;
+    uint64_t path_len = 0;
+    uint16_t port = 80;
+    int use_tls = 0;
+
+    if (!url || !host_out || host_cap == 0 || !port_out ||
+        !path_out || path_cap == 0 || !use_tls_out) {
+        return -1;
+    }
+    host_out[0] = 0;
+    path_out[0] = 0;
+
+    if (ic_strprefix(url, "https://")) {
+        host = url + 8;
+        port = 443;
+        use_tls = 1;
+    } else if (ic_strprefix(url, "http://")) {
+        host = url + 7;
+    } else {
+        return -1;
+    }
+
+    while (host[host_len] && host[host_len] != ':' && host[host_len] != '/') {
+        if (host_len + 1 >= host_cap) return -1;
+        host_out[host_len] = host[host_len];
+        host_len++;
+    }
+    if (host_len == 0) return -1;
+    host_out[host_len] = 0;
+    host += host_len;
+
+    if (*host == ':') {
+        uint32_t port_value = 0;
+        host++;
+        if (*host < '0' || *host > '9') return -1;
+        while (*host >= '0' && *host <= '9') {
+            port_value = port_value * 10U + (uint32_t)(*host - '0');
+            if (port_value > 65535U) return -1;
+            host++;
+        }
+        if (port_value == 0) return -1;
+        port = (uint16_t)port_value;
+    }
+
+    if (*host == 0) {
+        ic_strcpy(path_out, "/", path_cap);
+    } else {
+        if (*host != '/') return -1;
+        while (host[path_len] && path_len + 1 < path_cap) {
+            path_out[path_len] = host[path_len];
+            path_len++;
+        }
+        if (host[path_len] != 0) {
+            host_out[0] = path_out[0] = 0;
+            return -1;
+        }
+        path_out[path_len] = 0;
+    }
+
+    *port_out = port;
+    *use_tls_out = use_tls;
+    return 0;
+}
+
+int ic_dns_b(const char *host, uint32_t *ipv4_out) {
+    long rc;
+    if (!host || !*host || !ipv4_out) return -U_EINVAL;
+
+    if (ic_try_parse_ipv4(host, ipv4_out) == 0) return 0;
+
+    rc = (long)icda_dns_resolve(host, ipv4_out);
+    return (int)rc;
+}
+
+int ic_http_fetch_to_file(const char *host, uint16_t port, int use_tls,
+                          const char *path, const char *out_path,
+                          uint64_t *bytes_out) {
+    uint32_t ip = 0;
+    long rc;
+
+    if (!host || !*host || !path || !*path || !out_path) return -U_EINVAL;
+    if (bytes_out) *bytes_out = 0;
+
+    rc = (long)ic_dns_b(host, &ip);
+    if (rc < 0) return (int)rc;
+
+    if (use_tls) {
+        rc = (long)icda_https_get_ipv4(ip, port, host, path, out_path, bytes_out);
+    } else {
+        rc = (long)icda_http_get_ipv4(ip, port, host, path, out_path, bytes_out);
+    }
+    return (int)rc;
+}
+
+int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
+                      uint64_t *len_out, const char *scratch_path) {
+    char host[128];
+    char path[256];
+    uint16_t port = 80;
+    int use_tls = 0;
+    const char *sp;
+    int rc;
+
+    if (!url || !buf || cap == 0) {
+        if (len_out) *len_out = 0;
+        return -U_EINVAL;
+    }
+    if (len_out) *len_out = 0;
+
+    sp = scratch_path ? scratch_path : "/tmp/.ic_fetch";
+
+    rc = ic_url_split(url, host, sizeof(host), &port, path, sizeof(path), &use_tls);
+    if (rc < 0) return rc;
+
+    rc = ic_http_fetch_to_file(host, port, use_tls, path, sp, (uint64_t *)0);
+    if (rc < 0) return rc;
+
+    rc = ic_read_file_b(sp, buf, cap, len_out);
+    return rc;
+}
