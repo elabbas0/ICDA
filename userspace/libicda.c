@@ -1,5 +1,6 @@
 #include "libicda.h"
 #include "font.h"
+#include "font_atlas.h"
 #include "icon_data.h"
 
 /* ================================ memory ============================== */
@@ -1848,4 +1849,502 @@ int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
 
     rc = ic_read_file_b(sp, buf, cap, len_out);
     return rc;
+}
+
+/* ============================ gui2 layout ============================== */
+
+int ic_layout_row(ic_rect_t parent, int pad, int gap,
+                  const int *widths, int count,
+                  ic_rect_t *out, int out_cap) {
+    int i, total_fixed = 0, flex_count = 0, flex_w, x, remaining;
+    if (!out || out_cap <= 0) return -U_ENOMEM;
+    if (!widths || count <= 0) return 0;
+    if (count > out_cap) return -U_ENOMEM;
+
+    for (i = 0; i < count; i++) {
+        if (widths[i] < 0) flex_count++;
+        else total_fixed += widths[i];
+    }
+
+    remaining = parent.w - 2 * pad - total_fixed - (count > 1 ? gap * (count - 1) : 0);
+    if (flex_count > 0) {
+        flex_w = remaining / flex_count;
+        if (flex_w < 0) flex_w = 0;
+    } else {
+        flex_w = 0;
+    }
+
+    x = parent.x + pad;
+    for (i = 0; i < count; i++) {
+        int cw = widths[i] < 0 ? flex_w : widths[i];
+        out[i].x = x;
+        out[i].y = parent.y + pad;
+        out[i].w = cw;
+        out[i].h = parent.h - 2 * pad;
+        x += cw;
+        if (i + 1 < count) x += gap;
+    }
+    return 0;
+}
+
+int ic_layout_col(ic_rect_t parent, int pad, int gap,
+                  const int *heights, int count,
+                  ic_rect_t *out, int out_cap) {
+    int i, total_fixed = 0, flex_count = 0, flex_h, y, remaining;
+    if (!out || out_cap <= 0) return -U_ENOMEM;
+    if (!heights || count <= 0) return 0;
+    if (count > out_cap) return -U_ENOMEM;
+
+    for (i = 0; i < count; i++) {
+        if (heights[i] < 0) flex_count++;
+        else total_fixed += heights[i];
+    }
+
+    remaining = parent.h - 2 * pad - total_fixed - (count > 1 ? gap * (count - 1) : 0);
+    if (flex_count > 0) {
+        flex_h = remaining / flex_count;
+        if (flex_h < 0) flex_h = 0;
+    } else {
+        flex_h = 0;
+    }
+
+    y = parent.y + pad;
+    for (i = 0; i < count; i++) {
+        int ch = heights[i] < 0 ? flex_h : heights[i];
+        out[i].x = parent.x + pad;
+        out[i].y = y;
+        out[i].w = parent.w - 2 * pad;
+        out[i].h = ch;
+        y += ch;
+        if (i + 1 < count) y += gap;
+    }
+    return 0;
+}
+
+/* ============================ gui2 scroll ============================= */
+
+void ic_scroll_clamp(ic_scroll_t *s) {
+    int max_off;
+    if (!s) return;
+    max_off = s->content_h - s->view_h;
+    if (max_off < 0) max_off = 0;
+    if (s->offset < 0) s->offset = 0;
+    if (s->offset > max_off) s->offset = max_off;
+}
+
+void ic_scrollbar_draw(ic_canvas_t *c, ic_rect_t track,
+                       const ic_theme_t *t, const ic_scroll_t *s) {
+    int thumb_h, thumb_y;
+    if (!c || !t || !s) return;
+    if (s->content_h <= 0 || s->view_h <= 0) return;
+    if (s->content_h <= s->view_h) return;
+    if (track.w < 4 || track.h < 8) return;
+
+    /* Track background */
+    ic_rect_r(c, track.x, track.y, track.w, track.h, 4, t->surface_hover);
+
+    /* Thumb */
+    thumb_h = (int)((long)s->view_h * track.h / s->content_h);
+    if (thumb_h < 16) thumb_h = 16;
+    if (thumb_h > track.h) thumb_h = track.h;
+
+    {
+        int range = s->content_h - s->view_h;
+        if (range <= 0) range = 1;
+        thumb_y = track.y + (int)((long)s->offset * (track.h - thumb_h) / range);
+    }
+
+    ic_rect_r(c, track.x, thumb_y, track.w, thumb_h, 4, t->text_muted);
+    ic_outline_r(c, track.x, thumb_y, track.w, thumb_h, 4, t->border);
+}
+
+int ic_scroll_hit(ic_rect_t track, int mx, int my, ic_scroll_t *s) {
+    int max_off, thumb_h;
+    if (!s) return 0;
+    if (mx < track.x || mx >= track.x + track.w) return 0;
+    if (my < track.y || my >= track.y + track.h) return 0;
+    if (s->content_h <= 0 || s->view_h <= 0) return 0;
+
+    max_off = s->content_h - s->view_h;
+    if (max_off <= 0) return 0;
+
+    thumb_h = (int)((long)s->view_h * track.h / s->content_h);
+    if (thumb_h < 16) thumb_h = 16;
+
+    {
+        int track_range = track.h - thumb_h;
+        if (track_range <= 0) track_range = 1;
+        s->offset = (int)((long)(my - track.y - thumb_h / 2) * max_off / track_range);
+    }
+    ic_scroll_clamp(s);
+    return 1;
+}
+
+/* ============================ gui2 widgets ============================ */
+
+void ic_textfield_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                       const char *buf, uint64_t buf_cap,
+                       uint64_t cursor_pos, int focused,
+                       const char *placeholder) {
+    uint32_t border;
+    uint64_t len;
+    if (!c || !t) return;
+
+    border = focused ? t->accent : t->border;
+
+    /* Background + border */
+    ic_rect_r(c, r.x, r.y, r.w, r.h, 6, t->surface);
+    ic_outline_r(c, r.x, r.y, r.w, r.h, 6, border);
+
+    /* Inner highlight when focused */
+    if (focused) {
+        ic_rect_r(c, r.x + 1, r.y + 1, r.w - 2, r.h - 2, 5, t->surface);
+    }
+
+    len = buf ? ic_strnlen(buf, buf_cap) : 0;
+
+    /* Text or placeholder */
+    if (len == 0 && placeholder) {
+        ic_text_clip(c, r.x + 8, r.y + (r.h - FONT_HEIGHT) / 2,
+                     placeholder, t->text_muted,
+                     focused ? t->surface : t->surface, r.w - 16);
+    } else if (buf && len > 0) {
+        ic_text_clip(c, r.x + 8, r.y + (r.h - FONT_HEIGHT) / 2,
+                     buf, t->text, t->surface, r.w - 16);
+    }
+
+    /* Block cursor when focused */
+    if (focused && cursor_pos <= len) {
+        int cx = r.x + 8 + (int)cursor_pos * FONT_CELL_WIDTH;
+        int cy = r.y + (r.h - FONT_HEIGHT) / 2;
+        if (cx >= r.x + 2 && cx + 2 <= r.x + r.w - 2) {
+            ic_rect(c, cx, cy, 2, FONT_HEIGHT, t->accent);
+        }
+    }
+}
+
+int ic_textfield_insert(char *buf, uint64_t cap,
+                        uint64_t *len_io, uint64_t *cursor_io, char ch) {
+    uint64_t len, cursor, i;
+    if (!buf || !len_io || !cursor_io || cap == 0) return -1;
+    len = *len_io;
+    cursor = *cursor_io;
+    if (len >= cap - 1 || cursor > len) return -1;
+
+    /* Shift bytes right */
+    for (i = len; i > cursor; i--) {
+        buf[i] = buf[i - 1];
+    }
+    buf[cursor] = ch;
+    *len_io = len + 1;
+    *cursor_io = cursor + 1;
+    buf[len + 1] = 0;
+    return 0;
+}
+
+int ic_textfield_backspace(char *buf, uint64_t cap,
+                           uint64_t *len_io, uint64_t *cursor_io) {
+    uint64_t len, cursor, i;
+    if (!buf || !len_io || !cursor_io) return -1;
+    len = *len_io;
+    cursor = *cursor_io;
+    if (len >= cap) return -1;
+    if (cursor == 0 || cursor > len) return -1;
+
+    /* Shift bytes left */
+    for (i = cursor; i < len; i++) {
+        buf[i] = buf[i + 1];
+    }
+    *len_io = len - 1;
+    *cursor_io = cursor - 1;
+    return 0;
+}
+
+void ic_listview_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                      int row_h, int count, int selected,
+                      const ic_scroll_t *scroll,
+                      ic_listview_label_fn get_label, void *ud) {
+    int first_row, last_row, i, ry, scroll_off;
+    if (!c || !t || row_h <= 0) return;
+
+    /* Background */
+    ic_rect(c, r.x, r.y, r.w, r.h, t->surface);
+
+    if (count <= 0 || !get_label) return;
+
+    scroll_off = scroll ? scroll->offset : 0;
+    if (scroll_off < 0) scroll_off = 0;
+
+    /* Visible row range */
+    first_row = scroll_off / row_h;
+    if (first_row < 0) first_row = 0;
+    last_row = first_row + (r.h + row_h - 1) / row_h;
+    if (last_row >= count) last_row = count - 1;
+
+    for (i = first_row; i <= last_row; i++) {
+        const char *label;
+        ry = r.y + i * row_h - scroll_off;
+        if (ry + row_h <= r.y || ry >= r.y + r.h) continue;
+
+        if (i == selected) {
+            ic_rect(c, r.x, ry, r.w, row_h, t->accent);
+        }
+
+        label = get_label(i, ud);
+        if (label) {
+            ic_text_clip(c, r.x + 8, ry + (row_h - FONT_HEIGHT) / 2,
+                         label,
+                         i == selected ? t->text_on_accent : t->text,
+                         i == selected ? t->accent : t->surface,
+                         r.w - 16);
+        }
+    }
+}
+
+int ic_listview_hit(ic_rect_t r, int row_h, int count,
+                    const ic_scroll_t *scroll, int mx, int my) {
+    int row, scroll_off;
+    if (mx < r.x || mx >= r.x + r.w) return -1;
+    if (my < r.y || my >= r.y + r.h) return -1;
+    if (row_h <= 0 || count <= 0) return -1;
+
+    scroll_off = scroll ? scroll->offset : 0;
+    if (scroll_off < 0) scroll_off = 0;
+    row = (my - r.y + scroll_off) / row_h;
+    if (row < 0 || row >= count) return -1;
+    return row;
+}
+
+/* =========================== gui2 text wrap =========================== */
+
+int ic_text_measure_wrap(const char *s, int max_px, int *lines_out) {
+    int max_chars, lines, col, first_word;
+    const char *p;
+
+    if (!s || max_px <= 0) { if (lines_out) *lines_out = 0; return 0; }
+
+    max_chars = max_px / FONT_CELL_WIDTH;
+    if (max_chars < 1) max_chars = 1;
+
+    p = s;
+    lines = 1;
+    col = 0;
+    first_word = 1;
+
+    while (*p) {
+        int wlen;
+
+        while (*p == ' ') p++;
+
+        if (*p == '\n') {
+            col = 0;
+            lines++;
+            first_word = 1;
+            p++;
+            continue;
+        }
+
+        if (!*p) break;
+
+        wlen = 0;
+        while (*p && *p != ' ' && *p != '\n') { wlen++; p++; }
+
+        {
+            int needed = (first_word ? 0 : 1) + wlen;
+            if (col + needed > max_chars) {
+                /* For words wider than a row the chunking loop below
+                   counts every additional row; only count the normal
+                   wrap here for words that fit on the next line.        */
+                if (wlen <= max_chars) lines++;
+                col = 0;
+                first_word = 1;
+            }
+        }
+
+        if (!first_word) col++;
+        first_word = 0;
+
+        /* Chunk long words across rows exactly like ic_text_draw_wrap. */
+        {
+            while (wlen > 0) {
+                int avail = max_chars - col;
+                int take = wlen;
+                if (take > avail) take = avail;
+                col += take;
+                wlen -= take;
+                if (wlen > 0) {
+                    lines++;
+                    col = 0;
+                }
+            }
+        }
+    }
+
+    if (lines_out) *lines_out = lines;
+    return lines;
+}
+
+void ic_text_draw_wrap(ic_canvas_t *c, int x, int y, int max_px,
+                       const char *s, uint32_t fg, uint32_t bg,
+                       int max_rows) {
+    int max_chars, col, row, first_word;
+    const char *p;
+
+    if (!c || !s || max_px <= 0 || max_rows <= 0) return;
+
+    max_chars = max_px / FONT_CELL_WIDTH;
+    if (max_chars < 1) max_chars = 1;
+
+    p = s;
+    col = 0;
+    row = 0;
+    first_word = 1;
+
+    while (*p && row < max_rows) {
+        int wlen;
+        const char *wp;
+
+        while (*p == ' ') p++;
+
+        if (*p == '\n') {
+            col = 0;
+            row++;
+            first_word = 1;
+            p++;
+            continue;
+        }
+
+        if (!*p) break;
+
+        /* Measure word */
+        wp = p;
+        wlen = 0;
+        while (*p && *p != ' ' && *p != '\n') { wlen++; p++; }
+
+        /* Does word (+ optional preceding space) fit? */
+        {
+            int needed = (first_word ? 0 : 1) + wlen;
+            if (col + needed > max_chars) {
+                row++;
+                col = 0;
+                first_word = 1;
+                if (row >= max_rows) break;
+            }
+        }
+
+        /* Draw space before word (if not first on line) */
+        if (!first_word) {
+            int py = y + row * FONT_CELL_HEIGHT;
+            if (py >= 0 && py + FONT_CELL_HEIGHT <= c->h &&
+                x + col * FONT_CELL_WIDTH >= 0 &&
+                x + col * FONT_CELL_WIDTH < c->w) {
+                font_draw_char(c->px, c->w, c->h, c->w,
+                               x + col * FONT_CELL_WIDTH, py,
+                               ' ', fg, bg);
+            }
+            col++;
+        }
+        first_word = 0;
+
+        /* Draw word, chunking across rows when wider than remaining space */
+        {
+            int j = 0;
+            while (j < wlen && row < max_rows) {
+                int avail = max_chars - col;
+                int draw_len = wlen - j;
+                if (draw_len > avail) draw_len = avail;
+                if (draw_len < 1) { draw_len = 0; }
+                {
+                    int k;
+                    for (k = 0; k < draw_len; k++) {
+                        int py = y + row * FONT_CELL_HEIGHT;
+                        int px = x + col * FONT_CELL_WIDTH;
+                        if (py >= 0 && py + FONT_CELL_HEIGHT <= c->h &&
+                            px >= 0 && px < c->w) {
+                            font_draw_char(c->px, c->w, c->h, c->w,
+                                           px, py, wp[j + k], fg, bg);
+                        }
+                        col++;
+                    }
+                }
+                j += draw_len;
+                if (j < wlen) {
+                    row++;
+                    col = 0;
+                    first_word = 1;
+                }
+            }
+        }
+    }
+}
+
+/* ============================ font atlas ============================== */
+
+const ic_atlas_font_t *ic_font_default(void) {
+    return &ic_font_regular;
+}
+
+int ic_font_text_width(const ic_atlas_font_t *font, const char *s) {
+    int width = 0;
+    uint64_t i;
+    if (!font || !s) return 0;
+    for (i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 32 || c > 126) c = 63; /* '?' */
+        width += font->glyphs[c - 32].advance;
+    }
+    return width;
+}
+
+void ic_font_draw(ic_canvas_t *c, int x, int y, const char *s,
+                  uint32_t fg_rgb, const ic_atlas_font_t *font) {
+    int cx = x;
+    uint64_t i;
+    uint32_t fg_r, fg_g, fg_b;
+    uint64_t alpha_size;
+
+    if (!c || !font || !s) return;
+
+    fg_r = (fg_rgb >> 16) & 0xFF;
+    fg_g = (fg_rgb >> 8) & 0xFF;
+    fg_b = fg_rgb & 0xFF;
+
+    /* Total alpha buffer size: last glyph (char 126) end offset */
+    alpha_size = (uint64_t)font->glyphs[94].data_offset +
+                 (uint64_t)font->glyphs[94].w * (uint64_t)font->glyphs[94].h;
+
+    for (i = 0; s[i]; i++) {
+        unsigned char c2 = (unsigned char)s[i];
+        const ic_glyph_t *g;
+        int gx, gy;
+
+        if (c2 < 32 || c2 > 126) c2 = 63; /* '?' */
+        g = &font->glyphs[c2 - 32];
+
+        if (g->w <= 0 || g->h <= 0) { cx += g->advance; continue; }
+
+        for (gy = 0; gy < g->h; gy++) {
+            int py = y + g->off_y + gy;
+            if (py < 0 || py >= c->h) continue;
+            for (gx = 0; gx < g->w; gx++) {
+                int px = cx + g->off_x + gx;
+                unsigned char a;
+                uint32_t color;
+                uint64_t idx;
+                if (px < 0 || px >= c->w) continue;
+                idx = g->data_offset + (uint64_t)gy * g->w + gx;
+                if (idx >= alpha_size) continue;
+                a = font->alpha[idx];
+                if (a == 0) continue;
+                color = ((uint32_t)a << 24) | (fg_r << 16) | (fg_g << 8) | fg_b;
+                ic_blend_px(c, px, py, color);
+            }
+        }
+        cx += g->advance;
+    }
+}
+
+int ic_font_line_height(const ic_atlas_font_t *font) {
+    if (!font) return 0;
+    return (int)font->line_height;
 }

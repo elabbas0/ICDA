@@ -39,6 +39,7 @@
 #include "icda_sys.h"
 #include "gui.h"      /* gui_open_window / gui_pixel_buffer / gui_flush ... */
 #include "gui_proto.h"
+#include "font_atlas.h" /* ic_atlas_font_t, ic_glyph_t — promoted in 1.3 */
 
 /* ================================ memory ============================== */
 
@@ -528,5 +529,114 @@ int ic_http_fetch_to_file(const char *host, uint16_t port, int use_tls,
  * len_out (optional) receives bytes read into buf (never exceeds cap). */
 int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
                       uint64_t *len_out, const char *scratch_path);
+
+/* ============================ gui2 layout ============================== */
+/* Stateless row/column layout helpers.  Pure compute — no drawing.
+ * Given a parent rect, per-child pixel widths (or -1 for flex), gap
+ * between children, and outer padding, fills out[] with child rects.
+ * Returns 0 on success, -U_ENOMEM if count exceeds out_cap. */
+
+int ic_layout_row(ic_rect_t parent, int pad, int gap,
+                  const int *widths, int count,
+                  ic_rect_t *out, int out_cap);
+
+int ic_layout_col(ic_rect_t parent, int pad, int gap,
+                  const int *heights, int count,
+                  ic_rect_t *out, int out_cap);
+
+/* ============================ gui2 scroll ============================= */
+/* Minimal vertical scroll state + helpers.  Caller owns the struct
+ * and redraws after any mutation. */
+
+typedef struct {
+    int offset;    /* current scroll position in pixels */
+    int content_h; /* total content height in pixels */
+    int view_h;    /* visible viewport height in pixels */
+} ic_scroll_t;
+
+/* Clamp offset into [0, max(0, content_h − view_h)]. */
+void ic_scroll_clamp(ic_scroll_t *s);
+
+/* Draw a vertical scrollbar thumb inside track.  No-op when content
+ * fits the viewport.  track.w is the scrollbar width (≥ 6 recommended). */
+void ic_scrollbar_draw(ic_canvas_t *c, ic_rect_t track,
+                       const ic_theme_t *t, const ic_scroll_t *s);
+
+/* Hit-test the scrollbar track for a click/drag.  On hit, updates
+ * s->offset proportionally and returns 1.  Returns 0 on miss. */
+int ic_scroll_hit(ic_rect_t track, int mx, int my, ic_scroll_t *s);
+
+/* ============================ gui2 widgets ============================ */
+
+/* Text field — bordered box, clipped text, block cursor when focused.
+ * buf is the editing buffer; buf_cap its total capacity.
+ * cursor_pos is a byte offset into buf.  placeholder is drawn when
+ * buf is empty (may be NULL). */
+void ic_textfield_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                       const char *buf, uint64_t buf_cap,
+                       uint64_t cursor_pos, int focused,
+                       const char *placeholder);
+
+/* Insert one byte at cursor.  Returns 0 on success, −1 if full or
+ * cursor out of range.  Updates *len_io and *cursor_io. */
+int ic_textfield_insert(char *buf, uint64_t cap,
+                        uint64_t *len_io, uint64_t *cursor_io, char ch);
+
+/* Delete one byte before cursor.  Returns 0 on success, −1 if
+ * cursor is at 0.  Updates *len_io and *cursor_io. */
+int ic_textfield_backspace(char *buf, uint64_t cap,
+                           uint64_t *len_io, uint64_t *cursor_io);
+
+/* List view — visible rows only, highlight selected row.
+ * get_label(i, ud) returns the label for row i (or NULL to skip). */
+typedef const char *(*ic_listview_label_fn)(int index, void *ud);
+
+void ic_listview_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                      int row_h, int count, int selected,
+                      const ic_scroll_t *scroll,
+                      ic_listview_label_fn get_label, void *ud);
+
+/* Hit-test a click in a list view.  Returns row index or −1. */
+int ic_listview_hit(ic_rect_t r, int row_h, int count,
+                    const ic_scroll_t *scroll, int mx, int my);
+
+/* =========================== gui2 text wrap =========================== */
+/* Word-wrap helpers for the 8px monospace font.
+ * "Word-wrap on spaces": break at the last space that fits the line.
+ * Hard-break long words at max_px when no space is available. */
+
+/* Count the number of visual lines the string needs when wrapped to
+ * max_px pixels wide.  Returns total line count. */
+int ic_text_measure_wrap(const char *s, int max_px, int *lines_out);
+
+/* Draw s with word-wrapping at max_px width, starting at (x, y).
+ * Draws at most max_rows visual lines.  No buffer overflow — draw
+ * only, never writes past the canvas. */
+void ic_text_draw_wrap(ic_canvas_t *c, int x, int y, int max_px,
+                       const char *s, uint32_t fg, uint32_t bg,
+                       int max_rows);
+
+/* ============================ font atlas ============================== */
+/* Proportional anti-aliased font from the generated atlas
+ * (font_atlas.h — build output, promoted in 1.3).  NULL-safe: every
+ * function returns 0 / no-op when font is NULL.  Out-of-range chars
+ * (< 32 or > 126) render as '?' (glyph 63). */
+
+/* Default (regular) face from the atlas.  Never returns NULL. */
+const ic_atlas_font_t *ic_font_default(void);
+
+/* Pixel width of s rendered in the given font.  0 if font is NULL
+ * or s is NULL. */
+int ic_font_text_width(const ic_atlas_font_t *font, const char *s);
+
+/* Draw s at (x, y) with alpha-blended glyphs.  fg_rgb is the
+ * foreground colour (0x00RRGGBB); the glyph alpha from the atlas is
+ * used for blending.  Clipped to canvas bounds.  No-op if font or
+ * canvas is NULL. */
+void ic_font_draw(ic_canvas_t *c, int x, int y, const char *s,
+                  uint32_t fg_rgb, const ic_atlas_font_t *font);
+
+/* Line height of the given font in pixels.  0 if font is NULL. */
+int ic_font_line_height(const ic_atlas_font_t *font);
 
 #endif /* USERSPACE_LIBICDA_H */
