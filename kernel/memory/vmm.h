@@ -67,6 +67,12 @@ typedef struct {
 #define VMM_NX       PTE_NX
 #define VMM_GLOBAL   PTE_GLOBAL
 
+// Software-only flag: write-combining (WC) via PAT MSR.
+// Translated to the correct hardware bit in map_huge_page (2M: bit 12)
+// and vmm_map_page (4K: bit 7) — the PAT bit position differs per level
+// per SDM Vol.3A, 4.9.  Requires pat_init_wc() to have set PAT slot 4 = WC.
+#define VMM_WC       (1ULL << 59)
+
 // common flag combinations
 #define VMM_FLAGS_KERNEL_RW  (VMM_PRESENT | VMM_WRITE | VMM_GLOBAL)
 #define VMM_FLAGS_KERNEL_RO  (VMM_PRESENT | VMM_GLOBAL)

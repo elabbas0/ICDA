@@ -2,6 +2,7 @@
 
 #include "../drivers/display/font.h"
 #include "../drivers/display/framebuffer.h"
+#include "version.h"
 
 static int splash_on = 0;
 
@@ -91,9 +92,21 @@ void splash_init(void) {
 
     fb_clear(splash_bg);
 
-    /* Wordmark + tagline, vertically balanced around the upper third. */
+    /* Wordmark + tagline + version, vertically balanced around the upper third. */
     splash_wordmark("ICDA", w / 2, h / 2 - 190, 8);
     splash_text_center("operating system", w / 2, h / 2 - 40, splash_muted);
+    /* Show "v" + ICDA_VERSION_STRING centered below the tagline.
+     * Bounds-safe: strlen("v" ICDA_VERSION_STRING) <= 16. */
+    {
+        char ver[24];
+        int vi = 0;
+        const char *prefix = "v";
+        const char *p;
+        for (p = prefix; *p && vi < 23; p++) ver[vi++] = *p;
+        for (p = ICDA_VERSION_STRING; *p && vi < 23; p++) ver[vi++] = *p;
+        ver[vi] = '\0';
+        splash_text_center(ver, w / 2, h / 2 - 10, splash_muted);
+    }
 
     /* Progress bar track. */
     bar_w = w / 2;

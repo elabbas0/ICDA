@@ -133,6 +133,10 @@ static unsigned long wm_diag_composite_count = 0;
 static unsigned long wm_diag_max_frame_ticks = 0;
 static unsigned long wm_diag_mouse_events = 0;
 
+/* F12 debug overlay: opaque info box drawn at top-left of every frame
+ * when wm_debug_overlay is set.  Toggled by the 0x80 F12 sentinel. */
+static int wm_debug_overlay = 0;
+
 static void mark_dirty(int x, int y, int w, int h) {
     dirty_rect_t r;
     int sw = (int)fb_info.width;
@@ -2011,6 +2015,85 @@ static uint32_t fb_pitch_pixels(void) {
     return fb_info.pitch ? fb_info.pitch / 4 : (uint32_t)fb_info.width;
 }
 
+/* ---- F12 debug overlay -------------------------------------------------
+ * Draws an opaque info box at top-left showing framebuffer dimensions,
+ * present mode, composite count, max frame ticks, and mouse events.
+ * Zero cost when wm_debug_overlay is off (guarded by the static flag). */
+#define DEBUG_BOX_W 328
+#define DEBUG_BOX_H 86
+
+static void draw_debug_overlay(int w, int h) {
+    ic_canvas_t c;
+    int bx, by;
+    char line[64];
+    int pos;
+    const char *s;
+    int i;
+
+    if (!wm_debug_overlay) return;
+    if (w <= 0 || h <= 0) return;
+
+    c = bb_canvas(w, h);
+    bx = 8;
+    by = 8;
+
+    /* Opaque dark box */
+    ic_rect_r(&c, bx, by, DEBUG_BOX_W, DEBUG_BOX_H, 6, 0x00101820);
+    ic_outline_r(&c, bx, by, DEBUG_BOX_W, DEBUG_BOX_H, 6, 0x0038BDF8);
+
+    /* Line 1: fb WxH @ bpp */
+    pos = 0;
+    line[pos++] = 'f'; line[pos++] = 'b'; line[pos++] = ' ';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.width, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 'x';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.height, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = ' '; line[pos++] = '@'; line[pos++] = ' ';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.bpp, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 'b'; line[pos++] = 'p'; line[pos++] = 'p'; line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 8, line, 0x00F1F5F9, 0x00101820);
+
+    /* Line 2: present mode from gpu_info */
+    pos = 0;
+    s = gpu_info.flip_active ? "flip" : (gpu_info.needs_present ? "present" : "fbdev");
+    line[pos++] = 'p'; line[pos++] = 'r'; line[pos++] = 'e'; line[pos++] = 's';
+    line[pos++] = 'e'; line[pos++] = 'n'; line[pos++] = 't'; line[pos++] = ' ';
+    line[pos++] = '='; line[pos++] = ' ';
+    while (*s && pos < 60) line[pos++] = *s++;
+    if (gpu_info.present_supported) {
+        line[pos++] = ' '; line[pos++] = '(';
+        line[pos++] = 'o'; line[pos++] = 'k'; line[pos++] = ')';
+    }
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 22, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 3: composite count + max frame ticks */
+    pos = 0;
+    line[pos++] = 'f'; line[pos++] = 'r'; line[pos++] = 'a'; line[pos++] = 'm';
+    line[pos++] = 'e'; line[pos++] = 's'; line[pos++] = ' ';
+    line[pos++] = '='; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_composite_count, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos++] = ' '; line[pos++] = 'm'; line[pos++] = 'a'; line[pos++] = 'x'; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_max_frame_ticks, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 't'; line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 36, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 4: mouse events */
+    pos = 0;
+    line[pos++] = 'm'; line[pos++] = 'o'; line[pos++] = 'u'; line[pos++] = 's';
+    line[pos++] = 'e'; line[pos++] = ' '; line[pos++] = '='; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_mouse_events, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 50, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 5: WM version */
+    pos = 0;
+    line[pos++] = 'I'; line[pos++] = 'C'; line[pos++] = 'D'; line[pos++] = 'A'; line[pos++] = ' ';
+    s = IC_VERSION_STRING;
+    while (*s && pos < 58) line[pos++] = *s++;
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 64, line, 0x0038BDF8, 0x00101820);
+}
+
 /* 24-bit wire order is B,G,R (VBE color masks report red at bit 16,
  * i.e. blue in byte 0). Writing R,G,B shows the whole desktop R/B
  * swapped; 32-bit blits are unaffected (native uint32 order). */
@@ -2063,6 +2146,9 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     draw_taskbar(w, h);
     draw_start_menu(w, h, mouse_x, mouse_y);
     draw_desktop_overlays(0, 0, w, h);
+    /* Debug overlay: opaque box at top-left, drawn after scene
+     * and before cursor (cursor saves/restores over it). */
+    draw_debug_overlay(w, h);
     /* Draw cursor into back_buffer (saves scene under cursor). */
     draw_cursor_into_bb(w, h, mouse_x, mouse_y);
     /* Single blit: scene + cursor → real framebuffer. */
@@ -2154,6 +2240,13 @@ static void composite_dirty(int w, int h, int mx, int my, int pmx, int pmy) {
     }
 
     dirty_count = 0;
+
+    /* Debug overlay: opaque box at top-left, after scene rebuild
+     * and before cursor (zero-cost when off). */
+    if (wm_debug_overlay) {
+        draw_debug_overlay(w, h);
+        blit_region(0, 0, DEBUG_BOX_W, DEBUG_BOX_H, w);
+    }
 
     /* Draw cursor into back_buffer (saves scene under cursor), then
      * blit the cursor bbox to real_fb in a single write.  This
@@ -2581,9 +2674,14 @@ int main(int argc, char **argv) {
             long key = icda_read_char_timeout(1);
             if (key >= 0) {
                 need_redraw = 1;
+                /* F12 sentinel (0x80): toggle the debug overlay.
+                 * Swallowed, never forwarded to any window. */
+                if (key == 0x80) {
+                    wm_debug_overlay = !wm_debug_overlay;
+                    mark_dirty_full();
                 /* Esc dismisses menus/dialogs (Enter dismisses the
                  * Properties dialog too); swallowed, never forwarded. */
-                if ((ctx_open || props_open) &&
+                } else if ((ctx_open || props_open) &&
                     (key == 27 || (props_open && key == 13))) {
                     ctx_close();
                     props_close();

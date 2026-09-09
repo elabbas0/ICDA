@@ -1,37 +1,20 @@
 /*
- * ic_version.h - ICDA library version information (self-contained).
+ * ic_version.h - ICDA library version information.
  *
- * Version scheme: MAJOR.MINOR.PATCH (semantic-style)
- *   MAJOR  — ABI-breaking overhaul (kernel/userspace contract changes)
- *   MINOR  — big feature update, append-only, no breakage
- *   PATCH  — hotfix / bugfix only
- *
- * This header is public API.  Any file may #include "ic_version.h"
- * without pulling in the rest of libicda.
+ * Single source of truth: version.h (root).  This header aliases the
+ * IC_VERSION_* names so existing userspace code keeps compiling.
  */
 #ifndef USERSPACE_IC_VERSION_H
 #define USERSPACE_IC_VERSION_H
 
-#include <stdint.h>
+#include "version.h"   /* ICDA_VERSION_* definitions (root, -I. covers it) */
 
-/* ---- current release --------------------------------------------------- */
-
-#define IC_VERSION_MAJOR  1
-#define IC_VERSION_MINOR  3
-#define IC_VERSION_PATCH  2
-
-/* Pack into a single uint32_t:  (major << 24) | (minor << 8) | patch       *
- * Range: major 0-255, minor 0-255, patch 0-255.                            *
- * Note: minor << 8 leaves bits 16–23 zero (reserved for future use).       */
-#define IC_VERSION_U32 \
-    (((uint32_t)IC_VERSION_MAJOR << 24) | \
-     ((uint32_t)IC_VERSION_MINOR <<  8) | \
-     ((uint32_t)IC_VERSION_PATCH))
-
-#define IC_VERSION_STRING "1.3.2"
-
-/* ---- human-readable banner (for -v flags / logging) --------------------- */
-
-#define IC_VERSION_BANNER "ICDA " IC_VERSION_STRING " (libicda)"
+/* Alias IC_VERSION_* -> ICDA_VERSION_* (keep existing names/signatures). */
+#define IC_VERSION_MAJOR   ICDA_VERSION_MAJOR
+#define IC_VERSION_MINOR   ICDA_VERSION_MINOR
+#define IC_VERSION_PATCH   ICDA_VERSION_PATCH
+#define IC_VERSION_U32     ICDA_VERSION_U32
+#define IC_VERSION_STRING  ICDA_VERSION_STRING
+#define IC_VERSION_BANNER  ICDA_VERSION_BANNER
 
 #endif /* USERSPACE_IC_VERSION_H */

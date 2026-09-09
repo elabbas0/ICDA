@@ -458,6 +458,12 @@ void tty_poll(void) {
         return;
     }
 
+    /* Drop the F12 sentinel (0x80): the WM owns it; console/VT
+     * never sees it. */
+    if (c == 0x80) {
+        return;
+    }
+
     tty_hide_cursor();
 
     if (c == '\b') {

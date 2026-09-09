@@ -40,6 +40,7 @@
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
+#include "cpu/pat.h"
 
 #include "memory/pf.h"
 #include "memory/heap.h"
@@ -222,6 +223,11 @@ void kernel_main(void *multiboot_info) {
     console_write(" total=", CONSOLE_STYLE_MUTED);
     console_write_dec64(pmm_total_frames(), CONSOLE_STYLE_INFO);
     console_write(" frames\n", CONSOLE_STYLE_INFO);
+
+    /* Program PAT MSR slot 4 to Write-Combining for framebuffer.
+     * Must run before vmm_init() which maps the fb through this slot.
+     * CPUID-gated: silently skips if PAT is not supported. */
+    pat_init_wc();
 
     if (vmm_init(fb_phys_addr(), fb_phys_size()) != 0) {
         boot_halt("memory", "virtual memory manager failed to map kernel space");

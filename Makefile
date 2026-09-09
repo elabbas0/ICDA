@@ -13,7 +13,7 @@ AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody
 ICON_ICOS := $(wildcard resources/icons/*.ico)
 
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
-         -fno-asynchronous-unwind-tables -Ikernel -fno-stack-protector \
+         -fno-asynchronous-unwind-tables -Ikernel -I. -fno-stack-protector \
          -mno-mmx -mno-sse -mno-sse2 \
          -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR)
 
@@ -22,11 +22,11 @@ CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
 # crawl, which read as "1 fps".  Kernel stays -O0 (boot path is short).
 USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -Wpedantic -Wno-unused-command-line-argument -fno-pie -no-pie -mcmodel=large \
              -fno-asynchronous-unwind-tables -fno-stack-protector \
-             -mno-mmx -mno-sse -mno-sse2 -Iuserspace
+             -mno-mmx -mno-sse -mno-sse2 -Iuserspace -I.
 
-all: kernel.iso kernel-usb.img
+all: kernel.iso kernel-usb.img usb-sync
 
-kernel.o: kernel/kernel.c Makefile
+kernel.o: kernel/kernel.c Makefile kernel/cpu/pat.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel.o
 
 device.o: kernel/drivers/device.c kernel/drivers/device.h
@@ -128,7 +128,7 @@ msgq.o: kernel/ipc/msgq.c kernel/ipc/msgq.h kernel/proc/sched.h
 devops.o: kernel/dev/devops.c kernel/dev/devops.h
 	$(CC) $(CFLAGS) -c kernel/dev/devops.c -o devops.o
 
-devnodes.o: kernel/dev/devnodes.c kernel/dev/devops.h kernel/drivers/console/console.h kernel/drivers/display/framebuffer.h kernel/drivers/display/gpu.h kernel/drivers/display/vga.h kernel/drivers/input/input.h kernel/drivers/input/mouse.h kernel/fs/vfs.h kernel/memory/vmm.h kernel/proc/sched.h kernel/syscall/syscall.h
+devnodes.o: kernel/dev/devnodes.c kernel/dev/devops.h kernel/drivers/console/console.h kernel/drivers/display/framebuffer.h kernel/drivers/display/gpu.h kernel/drivers/display/vga.h kernel/drivers/input/input.h kernel/drivers/input/mouse.h kernel/fs/vfs.h kernel/memory/vmm.h kernel/cpu/pat.h kernel/proc/sched.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/dev/devnodes.c -o devnodes.o
 
 nvme.o: kernel/drivers/storage/nvme.c kernel/drivers/storage/nvme.h kernel/drivers/pci/pci.h \
@@ -220,6 +220,10 @@ pic.o: kernel/cpu/pic.c
 lapic.o: kernel/cpu/lapic.c kernel/cpu/lapic.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/cpu/lapic.c -o lapic.o
 
+pat.o: kernel/cpu/pat.c kernel/cpu/pat.h kernel/drivers/serial/serial.h \
+       kernel/drivers/console/console.h
+	$(CC) $(CFLAGS) -c kernel/cpu/pat.c -o pat.o
+
 ioapic.o: kernel/cpu/ioapic.c kernel/cpu/ioapic.h kernel/firmware/acpi.h kernel/memory/vmm.h
 	$(CC) $(CFLAGS) -c kernel/cpu/ioapic.c -o ioapic.o
 
@@ -238,7 +242,7 @@ bootstage.o: kernel/diag/bootstage.c kernel/diag/bootstage.h \
 	$(CC) $(CFLAGS) -c kernel/diag/bootstage.c -o bootstage.o
 
 splash.o: kernel/diag/splash.c kernel/diag/splash.h \
-          kernel/drivers/display/framebuffer.h kernel/drivers/display/font.h
+          kernel/drivers/display/framebuffer.h kernel/drivers/display/font.h version.h
 	$(CC) $(CFLAGS) -c kernel/diag/splash.c -o splash.o
 
 gdt_flush.o: kernel/cpu/gdt_flush.asm
@@ -254,7 +258,7 @@ heap.o: kernel/memory/heap.c kernel/memory/heap.h kernel/memory/pmm.h kernel/mem
 	$(CC) $(CFLAGS) -c kernel/memory/heap.c -o heap.o
 
 vmm.o: kernel/memory/vmm.c kernel/memory/vmm.h kernel/memory/pmm.h \
-       kernel/cpu/multiboot2.h kernel/drivers/display/framebuffer.h
+       kernel/cpu/multiboot2.h kernel/cpu/pat.h kernel/drivers/display/framebuffer.h
 	$(CC) $(CFLAGS) -c kernel/memory/vmm.c -o vmm.o
 
 pf.o: kernel/memory/pf.c kernel/memory/pf.h kernel/memory/vmm.h \
@@ -328,15 +332,18 @@ shell.o: userspace/shell.c userspace/icda_sys.h Makefile
 	$(CC) $(USR_CFLAGS) -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
 
-audioplay.o: userspace/audioplay.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
+audioplay.o: userspace/audioplay.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h \
+             userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/audioplay.c -o /tmp/icda-audioplay.o
 	cp -f /tmp/icda-audioplay.o audioplay.o
 
-editor.o: userspace/editor.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
+editor.o: userspace/editor.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h \
+          userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/editor.c -o /tmp/icda-editor.o
 	cp -f /tmp/icda-editor.o editor.o
 
-diskman.o: userspace/diskman.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
+diskman.o: userspace/diskman.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h \
+           userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/diskman.c -o /tmp/icda-diskman.o
 	cp -f /tmp/icda-diskman.o diskman.o
 
@@ -358,7 +365,8 @@ userspace/taskman.app: crt0.o taskman.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-taskman.app crt0.o taskman.o gui.o libicda.o
 	cp -f /tmp/icda-taskman.app userspace/taskman.app
 
-taskman.o: userspace/taskman.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/font.h userspace/icda_sys.h
+taskman.o: userspace/taskman.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/font.h userspace/icda_sys.h \
+           userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/taskman.c -o /tmp/icda-taskman.o
 	cp -f /tmp/icda-taskman.o taskman.o
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-diskman.app crt0.o diskman.o gui.o libicda.o
@@ -368,7 +376,8 @@ browser_start.o: userspace/browser_start.asm
 	$(ASM) -f elf64 userspace/browser_start.asm -o /tmp/icda-browser_start.o
 	cp -f /tmp/icda-browser_start.o browser_start.o
 
-browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h
+browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h \
+           userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/browser.c -o /tmp/icda-browser.o
 	cp -f /tmp/icda-browser.o browser.o
 
@@ -500,11 +509,13 @@ crt0.o: userspace/crt0.asm
 	$(ASM) -f elf64 userspace/crt0.asm -o /tmp/icda-crt0.o
 	cp -f /tmp/icda-crt0.o crt0.o
 
-libicda.o: userspace/libicda.c userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h
+libicda.o: userspace/libicda.c userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+           userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/libicda.c -o /tmp/icda-libicda.o
 	cp -f /tmp/icda-libicda.o libicda.o
 
-gui_demo.o: userspace/gui_demo.c userspace/libicda.h userspace/icda_sys.h
+gui_demo.o: userspace/gui_demo.c userspace/libicda.h userspace/icda_sys.h \
+            userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/gui_demo.c -o /tmp/icda-gui_demo.o
 	cp -f /tmp/icda-gui_demo.o gui_demo.o
 
@@ -512,7 +523,8 @@ userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
 	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
 
-wm.o: userspace/wm.c userspace/gui_proto.h userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h
+wm.o: userspace/wm.c userspace/gui_proto.h userspace/libicda.h userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+      userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o
 
@@ -520,7 +532,8 @@ userspace/wm.app: crt0.o wm.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o gui.o libicda.o
 	cp -f /tmp/icda-wm.app userspace/wm.app
 
-desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/font.h userspace/icda_sys.h
+desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/font.h userspace/icda_sys.h \
+           userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/desktop.c -o /tmp/icda-desktop.o
 	cp -f /tmp/icda-desktop.o desktop.o
 
@@ -528,7 +541,8 @@ userspace/desktop.app: crt0.o desktop.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-desktop.app crt0.o desktop.o gui.o libicda.o
 	cp -f /tmp/icda-desktop.app userspace/desktop.app
 
-terminal.o: userspace/terminal.c userspace/gui.h userspace/libicda.h userspace/icda_sys.h
+terminal.o: userspace/terminal.c userspace/gui.h userspace/libicda.h userspace/icda_sys.h \
+            userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/terminal.c -o /tmp/icda-terminal.o
 	cp -f /tmp/icda-terminal.o terminal.o
 
@@ -539,21 +553,21 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app userspace/taskman.app userspace/browser.app userspace/nptest.app userspace/nptestlx.elf userspace/init.app
 	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o power.o vt.o \
-	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
+	      gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o power.o vt.o \
-	      gdt.o idt.o isr.o pic.o lapic.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
+	      gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
 
@@ -632,4 +646,19 @@ docker-qemu-uefi-headless: docker-image
 docker-smoke: docker-image
 	$(DOCKER_RUN) make qemu-smoke
 
-.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke
+# Ventoy test stick: if a mounted Ventoy USB already carries a kernel.iso,
+# every full build replaces it with the fresh one (old file deleted first).
+# No-op when the stick is absent. Use `make usb-sync` to run it alone.
+VENTOY_ISO := $(firstword $(wildcard /run/media/*/Ventoy/kernel.iso /media/*/Ventoy/kernel.iso))
+
+usb-sync: kernel.iso
+ifeq ($(strip $(VENTOY_ISO)),)
+	@echo "usb-sync: no Ventoy USB with kernel.iso present, skipping"
+else
+	rm -f "$(VENTOY_ISO)"
+	cp kernel.iso "$(VENTOY_ISO).tmp"
+	mv -f "$(VENTOY_ISO).tmp" "$(VENTOY_ISO)"
+	@echo "usb-sync: installed kernel.iso -> $(VENTOY_ISO)"
+endif
+
+.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync

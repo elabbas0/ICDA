@@ -10,6 +10,7 @@
 #include "../drivers/input/mouse.h"
 #include "../fs/vfs.h"
 #include "../memory/vmm.h"
+#include "../cpu/pat.h"
 #include "../proc/sched.h"
 #include "../syscall/syscall.h"
 
@@ -173,11 +174,22 @@ static uint64_t dev_fb_claim_map(void *info) {
     page_offset = fb_phys & 0xFFFULL;
     fb_phys_aligned = fb_phys & ~0xFFFULL;
     pages = (fb_size + page_offset + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+
     for (pi = 0; pi < pages; pi++) {
+        /* Device framebuffer: WC (PAT-based) when available for fast
+         * pixel blits, UC (PCD+PWT) safe fallback otherwise.
+         * No VMM_NX: EFER.NXE is not set in boot.asm, so PTE bit 63
+         * is a reserved-bit #PF (ERR=RSVD) on any userspace touch. */
+        uint64_t page_flags = pat_wc_available()
+            ? (VMM_FLAGS_USER_RW | VMM_WC)
+            : (VMM_FLAGS_USER_RW | PTE_NO_CACHE | PTE_WRITE_THRU);
         if (vmm_map_page(fproc->addr_space,
                          fb_virt + pi * PAGE_SIZE_4K,
                          fb_phys_aligned + pi * PAGE_SIZE_4K,
-                         VMM_FLAGS_USER_RW) != 0) {
+                         page_flags) != 0) {
+            /* Unwind already-mapped pages on mid-loop failure. */
+            vmm_unmap_range(fproc->addr_space, fb_virt,
+                            pi * PAGE_SIZE_4K, 0);
             return (uint64_t)-1;
         }
     }
