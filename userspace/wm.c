@@ -1307,7 +1307,7 @@ static void desk_paint_cell(desk_icon_t *d) {
     if (icon) {
         ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
-    ic_text_clip(&c, x + 4, y + 60, d->label, 0x00FFFFFF, label_bg, 66);
+    ic_text_font(&c, x + 4, y + 58, d->label, 0x00FFFFFF, label_bg, 66, NULL, 1);
     mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
 }
 
@@ -1319,7 +1319,7 @@ static void draw_desktop_icon_layer(int w, int h, int x, int y,
     if (icon) {
         ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
-    ic_text_clip(&c, x + 4, y + 60, label, 0x00FFFFFF, label_bg, 66);
+    ic_text_font(&c, x + 4, y + 58, label, 0x00FFFFFF, label_bg, 66, NULL, 1);
 }
 
 static void build_desktop_layer(void) {
@@ -1336,8 +1336,63 @@ static void build_desktop_layer(void) {
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
     if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
     ic_canvas_t c = layer_canvas(w, h);
+    /* Base vertical gradient. */
     for (int y = 0; y < h; y++) {
         ic_rect(&c, 0, y, w, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, h));
+    }
+    /* Aurora glows: soft radial discs, pre-rendered once into the layer
+     * (zero per-frame cost). */
+    {
+        static const struct { int cx100, cy100, rad, r, g, b, amt; } glows[] = {
+            { 22, 30, 340,  56, 189, 248, 70 },   /* electric blue, upper left */
+            { 78, 62, 420,  45, 212, 191, 52 },   /* teal, lower right */
+            { 62, 22, 300, 167, 139, 250, 40 },   /* violet, upper right */
+        };
+        for (unsigned gi = 0; gi < sizeof(glows) / sizeof(glows[0]); gi++) {
+            int gx = w * glows[gi].cx100 / 100;
+            int gy = h * glows[gi].cy100 / 100;
+            int gr = glows[gi].rad;
+            int y0 = gy - gr < 0 ? 0 : gy - gr;
+            int y1 = gy + gr > h ? h : gy + gr;
+            int x0 = gx - gr < 0 ? 0 : gx - gr;
+            int x1 = gx + gr > w ? w : gx + gr;
+            for (int y = y0; y < y1; y++) {
+                for (int x = x0; x < x1; x++) {
+                    int dx = x - gx, dy = y - gy;
+                    long d2 = (long)dx * dx + (long)dy * dy;
+                    long r2 = (long)gr * gr;
+                    if (d2 < r2) {
+                        /* Quadratic falloff in 8.8 fixed point:
+                         * k = 256*(1 - d2/r2), a = k*k/256 * amt/256. */
+                        long k = (r2 - d2) * 256 / r2;
+                        long a = k * k / 256 * (long)glows[gi].amt / 256;
+                        uint32_t dst = c.px[y * w + x];
+                        c.px[y * w + x] = ic_blend(
+                            dst,
+                            ((uint32_t)glows[gi].r << 16) |
+                            ((uint32_t)glows[gi].g << 8) |
+                            (uint32_t)glows[gi].b,
+                            (int)a, 256);
+                    }
+                }
+            }
+        }
+    }
+    /* Vignette: darken toward the corners (integer math, no sqrt). */
+    for (int y = 0; y < h; y++) {
+        long ny = (long)(2 * y - h);
+        for (int x = 0; x < w; x += 2) {
+            long nx = (long)(2 * x - w);
+            long q = (nx * nx) / ((long)w * w) + (ny * ny) / ((long)h * h);
+            /* q in [0..2]; darken up to ~18% at corners: a = q*23/256. */
+            long a = q * 23 > 46 ? 46 : q * 23;
+            if (a > 0) {
+                for (int k = 0; k < 2 && x + k < w; k++) {
+                    uint32_t dst = c.px[y * w + x + k];
+                    c.px[y * w + x + k] = ic_blend(dst, 0x00000000, (int)a, 256);
+                }
+            }
+        }
     }
     {
         int i;
@@ -1361,7 +1416,7 @@ static void draw_start_button(int w, int h, int active) {
     ic_rect_r(&c, 6, y, 94, 30, IC_RADIUS_BUTTON, fill);
     if (!active) ic_outline_r(&c, 6,y,94,30,IC_RADIUS_BUTTON,0x00334155);
     if (icon) ic_icon_draw(&c, 12, y + 4, 22, 22, icon);
-    ic_text(&c, 40, y + 7, "Start", fg, fill);
+    ic_text_font(&c, 40, y + 6, "Start", fg, fill, 52, NULL, 0);
 }
 
 static const char *window_icon_name(const char *title) {
@@ -1382,8 +1437,13 @@ static void draw_taskbar(int w, int h) {
     int y = h - TASKBAR_H;
     int tx = 112;
     icda_audio_info_t audio;
-    ic_rect(&c, 0, y, w, TASKBAR_H, theme->taskbar_top);
-    ic_hline(&c, 0, y, w, 0x00334155);
+    /* Fake glass: vertical gradient (8% lighter at top) + highlight line. */
+    for (int yy = 0; yy < TASKBAR_H; yy++) {
+        ic_rect(&c, 0, y + yy, w, 1,
+                ic_blend(ic_blend(theme->taskbar_bottom, 0x00F1F5F9, 1, 12),
+                         theme->taskbar_bottom, yy, TASKBAR_H));
+    }
+    ic_hline(&c, 0, y, w, 0x003F4C63);
     draw_start_button(w, h, start_menu_open);
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
@@ -1399,14 +1459,14 @@ static void draw_taskbar(int w, int h) {
             if (focused) ic_rect(&c, tx+16, y+30, 104, 2, 0x00FFFFFF);
             icon = ic_icon_builtin(window_icon_name(win->title));
             if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
-            ic_text_clip(&c, tx + 30, y + 13, win->title, fg, fill, 100);
+            ic_text_font(&c, tx + 30, y + 11, win->title, fg, fill, 100, NULL, 0);
             if (win->minimized) ic_rect(&c, tx + 122, y + 26, 8, 2, fg);
         }
         tx += 142;
     }
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x0094A3B8, theme->taskbar_top, 56);
-        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00F1F5F9, theme->taskbar_top, 104);
+        ic_text_font(&c, w - 176, y + 12, "Audio:", 0x0094A3B8, theme->taskbar_top, 56, NULL, 0);
+        ic_text_font(&c, w - 120, y + 12, audio.name, 0x00F1F5F9, theme->taskbar_top, 104, NULL, 0);
     } else {
         char clk[16];
         uint64_t t = icda_ticks();
@@ -1422,7 +1482,7 @@ static void draw_taskbar(int w, int h) {
         ic_strcat(clk,":",sizeof(clk));
         if (mins<10) ic_strcat(clk,"0",sizeof(clk));
         ic_strcat(clk,mbuf,sizeof(clk));
-        ic_text_clip(&c, w - 68, y+14, clk, 0x00F1F5F9, theme->taskbar_top, 48);
+        ic_text_font(&c, w - 68, y + 12, clk, 0x00F1F5F9, theme->taskbar_top, 48, NULL, 0);
         ic_rect_r(&c, w-108, y+18, 4,4,2, 0x0038BDF8);
         ic_rect_r(&c, w-100, y+18, 4,4,2, 0x0094A3B8);
         ic_rect_r(&c, w-92, y+18, 4,4,2, 0x00475569);
@@ -1437,7 +1497,7 @@ static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
     uint32_t fg = hover ? theme->text_on_accent : 0x00F1F5F9;
     ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
     if (icon) ic_icon_draw(&c, x + 6, y + 4, 22, 22, icon);
-    ic_text(&c, x + 34, y + 7, label, fg, fill);
+    ic_text_font(&c, x + 34, y + 6, label, fg, fill, 180, NULL, 0);
 }
 
 /* Start menu layout: apps at the top, system actions (task manager +
@@ -1454,7 +1514,7 @@ static void draw_start_menu(int w, int h, int mx, int my) {
     if (!start_menu_open) return;
     ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x001E293B);
     ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x00334155);
-    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00F1F5F9, 0x001E293B);
+    ic_text_font(&c, x + 16, y + 11, "ICDA Desktop", 0x00F1F5F9, 0x001E293B, 200, NULL, 0);
     ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, 0x00334155);
 
     draw_start_row(w, h, x + 12, y + 56, 246, START_ROW_H, "folder", "Explorer",

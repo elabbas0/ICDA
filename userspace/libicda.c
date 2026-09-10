@@ -734,6 +734,38 @@ void ic_text_clip(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint
     }
 }
 
+/* Proportional atlas sibling of ic_text_clip: fills the background
+ * rect, then draws as many whole glyphs as fit in max_px. Falls back
+ * to the bitmap font when the atlas face is NULL. */
+void ic_text_font(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg,
+                  uint32_t bg, int max_px, const ic_atlas_font_t *font,
+                  int fill_bg) {
+    const ic_atlas_font_t *f = font ? font : &ic_font_regular;
+    int cx = x;
+    uint64_t i = 0;
+
+    if (!ic_canvas_sane(c) || !s || max_px <= 0) return;
+    while (s[i]) {
+        unsigned char c2 = (unsigned char)s[i];
+        const ic_glyph_t *g;
+        if (c2 < 32 || c2 > 126) c2 = 63;
+        g = &f->glyphs[c2 - 32];
+        if (cx + g->advance > x + max_px) break;
+        cx += g->advance;
+        i++;
+    }
+    if (cx > x && fill_bg) ic_rect(c, x, y, cx - x, (int)f->line_height, bg);
+    {
+        /* Draw the fitting prefix through a bounded copy. Titles and
+         * labels are short; the stack buffer covers them all. */
+        char buf[256];
+        uint64_t n = i < sizeof(buf) - 1 ? i : sizeof(buf) - 1;
+        for (uint64_t k = 0; k < n; k++) buf[k] = s[k];
+        buf[n] = 0;
+        ic_font_draw(c, x, y, buf, fg, f);
+    }
+}
+
 /* =============================== icons =============================== */
 
 #define ICON_MAGIC0 'I'
@@ -1128,10 +1160,16 @@ void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
 
     ic_draw_shadow(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, win->h + IC_TITLE_H + 2, IC_SHADOW_RADIUS, IC_SHADOW_COLOR);
     ic_rect_r(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, IC_TITLE_H + 2, IC_RADIUS_WINDOW, border);
-    ic_rect_r(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H, IC_RADIUS_WINDOW - 1, title_bg);
+    /* Fake glass: vertical gradient + top highlight line over the base. */
+    ic_gradient_v(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H,
+                  win->focused ? t->title_top_active : t->title_top,
+                  win->focused ? t->title_bottom_active : t->title_bottom);
+    ic_hline(c, wx + IC_RADIUS_WINDOW, wy - IC_TITLE_H + 1,
+             win->w - IC_RADIUS_WINDOW * 2,
+             win->focused ? 0x0050667A : 0x0023344D);
     if (win->focused) ic_hline(c, wx + IC_RADIUS_WINDOW, wy - 1, win->w - IC_RADIUS_WINDOW*2, t->accent);
-    ic_text_clip(c, wx + 12, wy - IC_TITLE_H + 7, win->title, title_fg, title_bg,
-                 win->w > 104 ? win->w - 104 : win->w);
+    ic_text_font(c, wx + 12, wy - IC_TITLE_H + 6, win->title, title_fg, title_bg,
+                 win->w > 104 ? win->w - 104 : win->w, NULL, 0);
     ic_vline(c, wx - 1, wy, win->h + 1, border);
     ic_vline(c, wx + win->w, wy, win->h + 1, border);
     ic_hline(c, wx - 1, wy + win->h, win->w + 2, border);

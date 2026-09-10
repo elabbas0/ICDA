@@ -198,13 +198,12 @@ static int hit_rect(int mx, int my, int x, int y, int w, int h) {
 }
 
 static void draw_text_clip(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
-    int cx = x;
+    ic_canvas_t c;
     if (max_px <= 0) return;
-    while (text && *text && cx + FONT_CELL_WIDTH <= x + max_px) {
-        gui_draw_char(cx, y, *text, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        text++;
-    }
+    c.px = gui_pixel_buffer();
+    c.w = gui_window_width();
+    c.h = gui_window_height();
+    ic_text_font(&c, x, y, text, fg, bg, max_px, NULL, 1);
 }
 
 static void draw_panel(int x, int y, int w, int h, uint32_t fill, uint32_t edge) {

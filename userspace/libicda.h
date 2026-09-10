@@ -211,6 +211,13 @@ uint32_t ic_blend(uint32_t a, uint32_t b, int n, int d);
 void     ic_blend_px(ic_canvas_t *c, int x, int y, uint32_t color);
 void     ic_text(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg);
 void     ic_text_clip(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg, int max_px);
+/* Proportional-atlas sibling of ic_text_clip (clipped whole glyphs).
+ * NULL font selects the default face. fill_bg!=0 paints the bg rect
+ * behind the fitted text first (for flat surfaces); 0 draws bare
+ * glyphs (for gradients). */
+void     ic_text_font(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg,
+                      uint32_t bg, int max_px, const ic_atlas_font_t *font,
+                      int fill_bg);
 int      ic_text_width(const char *s);
 
 /* =============================== icons =============================== */
