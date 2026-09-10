@@ -1249,13 +1249,81 @@ static int desk_hit(int idx, int mx, int my) {
                                            DESK_HIT_W, DESK_HIT_H});
 }
 
+/* Paint wallpaper (base gradient + aurora glows + vignette) over a
+ * rectangle of the desktop layer. Full-screen builds and partial
+ * cell/erase repaints share it, so partial repaints never leave flat
+ * marks on the aurora (1.4.1). fw/fh are the full layer dimensions
+ * (glow/vignette geometry is screen-relative); the canvas must span
+ * fw wide. */
+static void paint_wallpaper_rect(ic_canvas_t *c, int fw, int fh,
+                                 int rx, int ry, int rw, int rh) {
+    static const struct { int cx100, cy100, rad, r, g, b, amt; } glows[] = {
+        { 22, 30, 340,  56, 189, 248, 70 },   /* electric blue, upper left */
+        { 78, 62, 420,  45, 212, 191, 52 },   /* teal, lower right */
+        { 62, 22, 300, 167, 139, 250, 40 },   /* violet, upper right */
+    };
+    int x, y;
+    unsigned gi;
+
+    if (!c || !c->px || fw <= 0 || fh <= 0) return;
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > fw) rw = fw - rx;
+    if (ry + rh > fh) rh = fh - ry;
+    if (rw <= 0 || rh <= 0) return;
+
+    for (y = ry; y < ry + rh; y++) {
+        ic_rect(c, rx, y, rw, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, fh));
+    }
+    for (gi = 0; gi < sizeof(glows) / sizeof(glows[0]); gi++) {
+        int gx = fw * glows[gi].cx100 / 100;
+        int gy = fh * glows[gi].cy100 / 100;
+        int gr = glows[gi].rad;
+        int gy0 = gy - gr < ry ? ry : gy - gr;
+        int gy1 = gy + gr > ry + rh ? ry + rh : gy + gr;
+        int gx0 = gx - gr < rx ? rx : gx - gr;
+        int gx1 = gx + gr > rx + rw ? rx + rw : gx + gr;
+        for (y = gy0; y < gy1; y++) {
+            for (x = gx0; x < gx1; x++) {
+                int dx = x - gx, dy = y - gy;
+                long d2 = (long)dx * dx + (long)dy * dy;
+                long r2 = (long)gr * gr;
+                if (d2 < r2) {
+                    long k = (r2 - d2) * 256 / r2;
+                    long a = k * k / 256 * (long)glows[gi].amt / 256;
+                    uint32_t dst = c->px[y * fw + x];
+                    c->px[y * fw + x] = ic_blend(
+                        dst,
+                        ((uint32_t)glows[gi].r << 16) |
+                        ((uint32_t)glows[gi].g << 8) |
+                        (uint32_t)glows[gi].b,
+                        (int)a, 256);
+                }
+            }
+        }
+    }
+    for (y = ry; y < ry + rh; y++) {
+        long ny = (long)(2 * y - fh);
+        for (x = rx; x < rx + rw; x += 2) {
+            long nx = (long)(2 * x - fw);
+            long q = (nx * nx) / ((long)fw * fw) + (ny * ny) / ((long)fh * fh);
+            long a = q * 23 > 46 ? 46 : q * 23;
+            if (a > 0) {
+                for (int k = 0; k < 2 && x + k < rx + rw; k++) {
+                    uint32_t dst = c->px[y * fw + x + k];
+                    c->px[y * fw + x + k] = ic_blend(dst, 0x00000000, (int)a, 256);
+                }
+            }
+        }
+    }
+}
+
 /* Repaint the wallpaper gradient over a raw rectangle (used to erase
  * a vacated icon cell). */
 static void desk_erase_rect(int x, int y, int w, int h) {
     int fw = (int)fb_info.width;
     int fh = (int)fb_info.height;
     ic_canvas_t c;
-    int i;
 
     if (fw <= 0 || fh <= 0) return;
     if (x < 0) { w += x; x = 0; }
@@ -1264,10 +1332,7 @@ static void desk_erase_rect(int x, int y, int w, int h) {
     if (y + h > fh) y = fh - y;
     if (w <= 0 || h <= 0) return;
     c = layer_canvas(fw, fh);
-    for (i = 0; i < h; i++) {
-        ic_rect(&c, x, y + i, w, 1,
-                ic_blend(WALL_TOP, WALL_BOTTOM, y + i, fh));
-    }
+    paint_wallpaper_rect(&c, fw, fh, x, y, w, h);
     mark_dirty(x - 2, y - 2, w + 4, h + 4);
 }
 
@@ -1281,33 +1346,28 @@ static void desk_paint_cell(desk_icon_t *d) {
     int y = desk_icon_y(d);
     ic_canvas_t c;
     const ic_icon_t *icon;
-    uint32_t label_bg;
-    int i;
 
     if (w <= 0 || h <= 0) return;
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
     if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
     c = layer_canvas(w, h);
-    for (i = 0; i < DESK_CELL_H + 8 && y + i < h; i++) {
-        if (y + i < 0) continue;
-        ic_rect(&c, x, y + i, DESK_CELL_W, 1,
-                ic_blend(WALL_TOP, WALL_BOTTOM, y + i, h));
-    }
+    paint_wallpaper_rect(&c, w, h, x, y, DESK_CELL_W, DESK_CELL_H + 8);
     if (!d->pinned) {
         mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
         return;
     }
     icon = ic_icon_builtin(d->icon);
-    label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
     if (d->selected) {
         ic_rect_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0023344D);
         ic_outline_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0038BDF8);
-        label_bg = 0x0023344D;
     }
     if (icon) {
         ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
-    ic_text_font(&c, x + 4, y + 58, d->label, 0x00FFFFFF, label_bg, 66, NULL, 1);
+    /* Floating label: shadow pass then face, no bg box (the box was a
+     * flat-gradient patch on the aurora). */
+    ic_text_font(&c, x + 5, y + 59, d->label, 0x000F172A, 0, 66, NULL, 0);
+    ic_text_font(&c, x + 4, y + 58, d->label, 0x00FFFFFF, 0, 66, NULL, 0);
     mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
 }
 
@@ -1315,11 +1375,11 @@ static void draw_desktop_icon_layer(int w, int h, int x, int y,
                                     const char *label, const char *icon_name) {
     ic_canvas_t c = layer_canvas(w, h);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    uint32_t label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
     if (icon) {
         ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
-    ic_text_font(&c, x + 4, y + 58, label, 0x00FFFFFF, label_bg, 66, NULL, 1);
+    ic_text_font(&c, x + 5, y + 59, label, 0x000F172A, 0, 66, NULL, 0);
+    ic_text_font(&c, x + 4, y + 58, label, 0x00FFFFFF, 0, 66, NULL, 0);
 }
 
 static void build_desktop_layer(void) {
@@ -1336,64 +1396,7 @@ static void build_desktop_layer(void) {
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
     if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
     ic_canvas_t c = layer_canvas(w, h);
-    /* Base vertical gradient. */
-    for (int y = 0; y < h; y++) {
-        ic_rect(&c, 0, y, w, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, h));
-    }
-    /* Aurora glows: soft radial discs, pre-rendered once into the layer
-     * (zero per-frame cost). */
-    {
-        static const struct { int cx100, cy100, rad, r, g, b, amt; } glows[] = {
-            { 22, 30, 340,  56, 189, 248, 70 },   /* electric blue, upper left */
-            { 78, 62, 420,  45, 212, 191, 52 },   /* teal, lower right */
-            { 62, 22, 300, 167, 139, 250, 40 },   /* violet, upper right */
-        };
-        for (unsigned gi = 0; gi < sizeof(glows) / sizeof(glows[0]); gi++) {
-            int gx = w * glows[gi].cx100 / 100;
-            int gy = h * glows[gi].cy100 / 100;
-            int gr = glows[gi].rad;
-            int y0 = gy - gr < 0 ? 0 : gy - gr;
-            int y1 = gy + gr > h ? h : gy + gr;
-            int x0 = gx - gr < 0 ? 0 : gx - gr;
-            int x1 = gx + gr > w ? w : gx + gr;
-            for (int y = y0; y < y1; y++) {
-                for (int x = x0; x < x1; x++) {
-                    int dx = x - gx, dy = y - gy;
-                    long d2 = (long)dx * dx + (long)dy * dy;
-                    long r2 = (long)gr * gr;
-                    if (d2 < r2) {
-                        /* Quadratic falloff in 8.8 fixed point:
-                         * k = 256*(1 - d2/r2), a = k*k/256 * amt/256. */
-                        long k = (r2 - d2) * 256 / r2;
-                        long a = k * k / 256 * (long)glows[gi].amt / 256;
-                        uint32_t dst = c.px[y * w + x];
-                        c.px[y * w + x] = ic_blend(
-                            dst,
-                            ((uint32_t)glows[gi].r << 16) |
-                            ((uint32_t)glows[gi].g << 8) |
-                            (uint32_t)glows[gi].b,
-                            (int)a, 256);
-                    }
-                }
-            }
-        }
-    }
-    /* Vignette: darken toward the corners (integer math, no sqrt). */
-    for (int y = 0; y < h; y++) {
-        long ny = (long)(2 * y - h);
-        for (int x = 0; x < w; x += 2) {
-            long nx = (long)(2 * x - w);
-            long q = (nx * nx) / ((long)w * w) + (ny * ny) / ((long)h * h);
-            /* q in [0..2]; darken up to ~18% at corners: a = q*23/256. */
-            long a = q * 23 > 46 ? 46 : q * 23;
-            if (a > 0) {
-                for (int k = 0; k < 2 && x + k < w; k++) {
-                    uint32_t dst = c.px[y * w + x + k];
-                    c.px[y * w + x + k] = ic_blend(dst, 0x00000000, (int)a, 256);
-                }
-            }
-        }
-    }
+    paint_wallpaper_rect(&c, w, h, 0, 0, w, h);
     {
         int i;
         desk_init_registry();
