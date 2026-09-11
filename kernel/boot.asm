@@ -211,9 +211,13 @@ _start:
     or eax, 1 << 8
     wrmsr
 
-    ; enable paging
+    ; enable paging. WP (bit 16) is set alongside PG so supervisor
+    ; writes honor read-only PTEs too: with WP clear, the kernel could
+    ; silently write user pages mapped read-only (e.g. mprotect'd
+    ; regions), defeating W^X. All copy_to_user paths probe writability
+    ; first (uaccess.h), so legitimate flows never trip this.
     mov eax, cr0
-    or eax, 1 << 31
+    or eax, (1 << 31) | (1 << 16)
     mov cr0, eax
 
     ; load GDT and far jump to 64-bit

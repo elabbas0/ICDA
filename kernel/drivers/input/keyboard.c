@@ -52,6 +52,7 @@ static int ctrl_down = 0;
 static int alt_down = 0;
 static int caps_lock = 0;
 static int extended_prefix = 0;
+static int f12_down = 0;
 static kernel_device_t keyboard_device;
 
 static int keyboard_device_has_char(void *context) {
@@ -208,6 +209,22 @@ static void keyboard_handle_scancode(uint8_t scancode) {
         return;
     }
 
+    /* F12 (make 0x58): emit 0x80 sentinel ONCE per press.  The WM
+     * intercepts it; the console/tty never sees it.  Release (0xD8)
+     * clears the flag so the next press fires again. */
+    if (scancode == 0x58) {
+        if (!f12_down) {
+            f12_down = 1;
+            queue_push((char)0x80);
+            sched_wake_input_waiters();
+        }
+        return;
+    }
+    if (scancode == 0xD8) {
+        f12_down = 0;
+        return;
+    }
+
     if (scancode == 0x3A) {
         caps_lock = !caps_lock;
         return;
@@ -248,6 +265,7 @@ void keyboard_init(void) {
     alt_down = 0;
     caps_lock = 0;
     extended_prefix = 0;
+    f12_down = 0;
 
     while ((inb(KEYBOARD_STATUS_PORT) & 0x01) && !(inb(KEYBOARD_STATUS_PORT) & 0x20)) {
         (void)inb(KEYBOARD_DATA_PORT);

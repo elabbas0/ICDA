@@ -1,5 +1,12 @@
 bits 64
 
+; CI_IMAGE selects the test-image extras (gui_demo, nptest, nptestlx).
+; The Makefile passes -DCI_IMAGE=0 for production, =1 for CI.
+; Production builds embed product apps only.
+%ifndef CI_IMAGE
+%define CI_IMAGE 0
+%endif
+
 section .rodata
 global userprog_hello_start
 global userprog_hello_end
@@ -27,12 +34,24 @@ global userprog_desktop_start
 global userprog_desktop_end
 global userprog_terminal_start
 global userprog_terminal_end
+%if CI_IMAGE != 0
 global userprog_gui_demo_start
 global userprog_gui_demo_end
+%endif
 global userprog_taskman_start
 global userprog_taskman_end
 global userprog_browser_start
 global userprog_browser_end
+global userprog_settings_start
+global userprog_settings_end
+%if CI_IMAGE != 0
+global userprog_nptest_start
+global userprog_nptest_end
+global userprog_nptestlx_start
+global userprog_nptestlx_end
+%endif
+global userprog_init_start
+global userprog_init_end
 
 userprog_hello_start:
     incbin "userspace/hello.icx"
@@ -86,9 +105,11 @@ userprog_terminal_start:
     incbin "userspace/terminal.app"
 userprog_terminal_end:
 
+%if CI_IMAGE != 0
 userprog_gui_demo_start:
     incbin "userspace/gui_demo.app"
 userprog_gui_demo_end:
+%endif
 
 userprog_taskman_start:
     incbin "userspace/taskman.app"
@@ -97,5 +118,23 @@ userprog_taskman_end:
 userprog_browser_start:
     incbin "userspace/browser.app"
 userprog_browser_end:
+
+userprog_settings_start:
+    incbin "userspace/settings.app"
+userprog_settings_end:
+
+%if CI_IMAGE != 0
+userprog_nptest_start:
+    incbin "userspace/nptest.app"
+userprog_nptest_end:
+
+userprog_nptestlx_start:
+    incbin "userspace/nptestlx.elf"
+userprog_nptestlx_end:
+%endif
+
+userprog_init_start:
+    incbin "userspace/init.app"
+userprog_init_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

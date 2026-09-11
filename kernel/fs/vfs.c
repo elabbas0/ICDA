@@ -417,6 +417,53 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     return vfs_sync();
 }
 
+int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
+                      uint64_t size) {
+    uint64_t new_end;
+    char *next;
+    uint64_t i;
+
+    if (!node || node->type != VFS_NODE_FILE || node->readonly) {
+        return -1;
+    }
+    if (!data && size != 0) {
+        return -1;
+    }
+    new_end = off + size;
+    if (new_end < off) {
+        return -1;
+    }
+    if (new_end <= node->size) {
+        /* In-place overwrite inside the existing buffer. */
+        for (i = 0; i < size; i++) {
+            node->data[off + i] = data[i];
+        }
+        node->modified = vfs_tick++;
+        return vfs_sync();
+    }
+    next = (char *)kmalloc((size_t)(new_end + 1));
+    if (!next) {
+        return -1;
+    }
+    for (i = 0; i < node->size; i++) {
+        next[i] = node->data ? node->data[i] : 0;
+    }
+    for (; i < off; i++) {
+        next[i] = 0;
+    }
+    for (i = 0; i < size; i++) {
+        next[off + i] = data[i];
+    }
+    next[new_end] = '\0';
+    if (node->data) {
+        kfree(node->data);
+    }
+    node->data = next;
+    node->size = new_end;
+    node->modified = vfs_tick++;
+    return vfs_sync();
+}
+
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
     char leaf[64];
     vfs_node_t *parent;

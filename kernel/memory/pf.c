@@ -7,6 +7,7 @@
 #include "../drivers/serial/serial.h"
 #include "../proc/sched.h"
 #include "../proc/process.h"
+#include "../fs/fd.h"
 
 // scheduler hook 
 // the page fault handler needs the address space of the currently running process so it can map the new page into the right PML4.
@@ -241,10 +242,13 @@ static void page_fault_handler(struct registers *regs) {
         process_t *proc = sched_current_process();
         thread_t *thread = sched_current_thread();
         if (proc && proc->kind == PROCESS_USER && thread) {
+            fd_proc_exit(proc);
             pf_serial_dump(regs, cr2);
             serial_write("  user process killed\n");
             proc->state = PROCESS_EXITED;
-            proc->exit_code = (uint64_t)-14;
+            /* SIGSEGV analog (-11).  Deliberately distinct from the
+             * U_EFAULT (-14) syscall error in syscall.h. */
+            proc->exit_code = (uint64_t)-11;
             thread->state = THREAD_ZOMBIE;
             thread->block_reason = THREAD_BLOCK_NONE;
             thread->wake_tick = 0;

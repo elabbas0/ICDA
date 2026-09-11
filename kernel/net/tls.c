@@ -471,10 +471,19 @@ static int tls13_handshake(tls_conn_t *conn) {
                     break;
                 }
                 got_finished = 1;
-            } else if (ht == TLS_HANDSHAKE_ENCRYPTED_EXTENSIONS ||
-                       ht == TLS_HANDSHAKE_CERTIFICATE ||
+            } else if (ht == TLS_HANDSHAKE_ENCRYPTED_EXTENSIONS) {
+                /* Stateless extensions need no verification. */
+            } else if (ht == TLS_HANDSHAKE_CERTIFICATE ||
                        ht == TLS_HANDSHAKE_CERTIFICATE_VERIFY) {
-                /* Certificate contents are not verified (no CA trust store). */
+                /* P0 fail-closed: there is no CA trust store and no
+                 * signature verification, so accepting any certificate
+                 * would be a silent MITM. Refuse the handshake until a
+                 * CA bundle + x509 verify path lands. Every legitimate
+                 * server sends these messages, so this disables HTTPS
+                 * entirely for now — by design, loudly. */
+                tls_log("FAIL-CLOSED: server certificate cannot be verified (no CA store), refusing TLS");
+                rc_fail = 1;
+                break;
             } else if (ht == TLS_HANDSHAKE_CERTIFICATE_REQUEST) {
                 tls_log("client cert requested, unsupported");
                 rc_fail = 1;
@@ -1081,7 +1090,19 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                         }
                         tls_log("got server hello");
                     } else if (ht == TLS_HANDSHAKE_CERTIFICATE) {
-                        tls_log("got certificate");
+                        /* P0 fail-closed (TLS 1.2 path): the certificate
+                         * is parsed below but never verified against any
+                         * trust store — accepting it would be a silent
+                         * MITM. Refuse until CA verification lands. */
+                        tls_log("FAIL-CLOSED: server certificate cannot be verified (no CA store), refusing TLS");
+                        kfree(payload);
+                        kfree(conn);
+                        return -1;
+#if 0
+                        /* P0: cert parsing preserved for the future CA
+                         * verification work. Unreachable while
+                         * fail-closed above. */
+                        {
                         int cert_list_len = r24(hs_data);
                         (void)cert_list_len;
                         int offset = 3;
@@ -1098,6 +1119,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                                 tls_log("rsa key extracted from cert");
                             }
                         }
+                        }
+#endif
                     } else if (ht == TLS_HANDSHAKE_SERVER_HELLO_DONE) {
                         tls_log("server hello done");
                         server_done = 1;

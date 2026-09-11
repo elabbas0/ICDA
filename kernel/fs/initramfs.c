@@ -13,6 +13,12 @@
 #define INITRAMFS_INCLUDE_ICON_ASSETS 1
 #endif
 
+/* CI test-image extras (nptest/nptestlx/gui_demo). Default off:
+ * `make` builds the production image; CI builds with CI_IMAGE=1. */
+#ifndef CI_IMAGE
+#define CI_IMAGE 0
+#endif
+
 extern const char userprog_hello_start[];
 extern const char userprog_hello_end[];
 extern const char userprog_pid_start[];
@@ -41,12 +47,24 @@ extern const char userprog_desktop_start[];
 extern const char userprog_desktop_end[];
 extern const char userprog_terminal_start[];
 extern const char userprog_terminal_end[];
+#if CI_IMAGE
 extern const char userprog_gui_demo_start[];
 extern const char userprog_gui_demo_end[];
+#endif
 extern const char userprog_taskman_start[];
 extern const char userprog_taskman_end[];
 extern const char userprog_browser_start[];
 extern const char userprog_browser_end[];
+extern const char userprog_settings_start[];
+extern const char userprog_settings_end[];
+#if CI_IMAGE
+extern const char userprog_nptest_start[];
+extern const char userprog_nptest_end[];
+extern const char userprog_nptestlx_start[];
+extern const char userprog_nptestlx_end[];
+#endif
+extern const char userprog_init_start[];
+extern const char userprog_init_end[];
 static const char motd_txt[] =
     "welcome to icda\n"
     "\n"
@@ -78,12 +96,11 @@ static const char commands_txt[] =
     "  edit <path>    open the text editor\n";
 
 static const char roadmap_txt[] =
-    "roadmap:\n"
-    "  1. initramfs-backed shell path\n"
-    "  2. process + address-space split\n"
-    "  3. syscalls and user mode\n"
-    "  4. program loading\n"
-    "  5. richer subsystems for hybrid runtime goals\n";
+    "things to try:\n"
+    "  - keep notes and files in /home (writable; run sync to persist)\n"
+    "  - explore /apps for the installed programs\n"
+    "  - read /usr/share/commands.txt for shell commands\n"
+    "  - open the desktop, terminal, editor, and browser from the menu\n";
 
 static const char files_txt[] =
     "mounted roots:\n"
@@ -93,12 +110,6 @@ static const char files_txt[] =
     "  /usr/share terminal docs\n"
     "  /home     default writable user area\n"
     "  /volumes  detected filesystem mounts\n";
-
-static const char demo_sh[] =
-    "#!/usr/bin/env bash\n"
-    "echo script mode online\n"
-    "pwd\n"
-    "write /home/script-ok done\n";
 
 static initramfs_file_t initramfs_files[] = {
     { "/etc/motd.txt", motd_txt, sizeof(motd_txt) - 1 },
@@ -116,50 +127,70 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/hello.elf", 0, 0 },
     { "/bin/pid.elf", 0, 0 },
     { "/bin/argc.elf", 0, 0 },
-    { "/bin/demo.sh", demo_sh, sizeof(demo_sh) - 1 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
     { "/apps/terminal.app", 0, 0 },
+#if CI_IMAGE
     { "/apps/gui_demo.app", 0, 0 },
+#endif
     { "/apps/taskman.app", 0, 0 },
-    { "/apps/browser.app", 0, 0 }
+    { "/apps/browser.app", 0, 0 },
+    { "/apps/settings.app", 0, 0 },
+#if CI_IMAGE
+    { "/apps/nptest.app", 0, 0 },
+    { "/bin/nptestlx.elf", 0, 0 },
+#endif
+    { "/sbin/init.app", 0, 0 }
 };
 
+/* Seed one blob entry and advance the cursor. Keeps initramfs_init
+ * correct when CI_IMAGE entries are compiled out. */
+static void initramfs_seed_at(uint64_t *cursor, const char *start, const char *end) {
+    uint64_t n;
+
+    if (!cursor || !start || !end || end < start) {
+        return;
+    }
+    n = *cursor;
+    if (n >= sizeof(initramfs_files) / sizeof(initramfs_files[0])) {
+        return;
+    }
+    initramfs_files[n].data = start;
+    initramfs_files[n].size = (uint64_t)(end - start);
+    *cursor = n + 1;
+}
+
 int initramfs_init(void) {
-    initramfs_files[4].data = userprog_hello_start;
-    initramfs_files[4].size = (uint64_t)(userprog_hello_end - userprog_hello_start);
-    initramfs_files[5].data = userprog_pid_start;
-    initramfs_files[5].size = (uint64_t)(userprog_pid_end - userprog_pid_start);
-    initramfs_files[6].data = userprog_ticker_start;
-    initramfs_files[6].size = (uint64_t)(userprog_ticker_end - userprog_ticker_start);
-    initramfs_files[7].data = usershell_start;
-    initramfs_files[7].size = (uint64_t)(usershell_end - usershell_start);
-    initramfs_files[8].data = userprog_audioplay_start;
-    initramfs_files[8].size = (uint64_t)(userprog_audioplay_end - userprog_audioplay_start);
-    initramfs_files[9].data = userprog_editor_start;
-    initramfs_files[9].size = (uint64_t)(userprog_editor_end - userprog_editor_start);
-    initramfs_files[10].data = userprog_diskman_start;
-    initramfs_files[10].size = (uint64_t)(userprog_diskman_end - userprog_diskman_start);
-    initramfs_files[11].data = userprog_curl_start;
-    initramfs_files[11].size = (uint64_t)(userprog_curl_end - userprog_curl_start);
-    initramfs_files[12].data = userprog_hello_elf_start;
-    initramfs_files[12].size = (uint64_t)(userprog_hello_elf_end - userprog_hello_elf_start);
-    initramfs_files[13].data = userprog_pid_elf_start;
-    initramfs_files[13].size = (uint64_t)(userprog_pid_elf_end - userprog_pid_elf_start);
-    initramfs_files[14].data = userprog_argc_elf_start;
-    initramfs_files[14].size = (uint64_t)(userprog_argc_elf_end - userprog_argc_elf_start);
-    initramfs_files[16].data = userprog_wm_start;
-    initramfs_files[16].size = (uint64_t)(userprog_wm_end - userprog_wm_start);
-    initramfs_files[17].data = userprog_desktop_start;
-    initramfs_files[17].size = (uint64_t)(userprog_desktop_end - userprog_desktop_start);
-    initramfs_files[18].data = userprog_terminal_start;
-    initramfs_files[18].size = (uint64_t)(userprog_terminal_end - userprog_terminal_start);
-    initramfs_files[19].data = userprog_gui_demo_start;
-    initramfs_files[19].size = (uint64_t)(userprog_gui_demo_end - userprog_gui_demo_start);
-    initramfs_files[20].data = userprog_taskman_start;
-    initramfs_files[20].size = (uint64_t)(userprog_taskman_end - userprog_taskman_start);
-    initramfs_files[21].data = userprog_browser_start;
-    initramfs_files[21].size = (uint64_t)(userprog_browser_end - userprog_browser_start);
+    /* Cursor walks the table in order, so gated-out entries cannot
+     * desynchronize the blob assignments. Production entries first,
+     * then the CI-only test apps in table order. */
+    uint64_t n = 4;
+
+    initramfs_seed_at(&n, userprog_hello_start, userprog_hello_end);
+    initramfs_seed_at(&n, userprog_pid_start, userprog_pid_end);
+    initramfs_seed_at(&n, userprog_ticker_start, userprog_ticker_end);
+    initramfs_seed_at(&n, usershell_start, usershell_end);
+    initramfs_seed_at(&n, userprog_audioplay_start, userprog_audioplay_end);
+    initramfs_seed_at(&n, userprog_editor_start, userprog_editor_end);
+    initramfs_seed_at(&n, userprog_diskman_start, userprog_diskman_end);
+    initramfs_seed_at(&n, userprog_curl_start, userprog_curl_end);
+    initramfs_seed_at(&n, userprog_hello_elf_start, userprog_hello_elf_end);
+    initramfs_seed_at(&n, userprog_pid_elf_start, userprog_pid_elf_end);
+    initramfs_seed_at(&n, userprog_argc_elf_start, userprog_argc_elf_end);
+    initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
+    initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);
+    initramfs_seed_at(&n, userprog_terminal_start, userprog_terminal_end);
+#if CI_IMAGE
+    initramfs_seed_at(&n, userprog_gui_demo_start, userprog_gui_demo_end);
+#endif
+    initramfs_seed_at(&n, userprog_taskman_start, userprog_taskman_end);
+    initramfs_seed_at(&n, userprog_browser_start, userprog_browser_end);
+    initramfs_seed_at(&n, userprog_settings_start, userprog_settings_end);
+#if CI_IMAGE
+    initramfs_seed_at(&n, userprog_nptest_start, userprog_nptest_end);
+    initramfs_seed_at(&n, userprog_nptestlx_start, userprog_nptestlx_end);
+#endif
+    initramfs_seed_at(&n, userprog_init_start, userprog_init_end);
     return 0;
 }
 

@@ -2,6 +2,7 @@
 
 #include "../pci/pci.h"
 #include "../console/console.h"
+#include "../serial/serial.h"
 #include "../../memory/vmm.h"
 
 #define HDA_CLASS_CODE         0x04
@@ -103,6 +104,17 @@ static uint8_t hda_dac = 0;
 static int hda_present = 0;
 static int hda_error = 0;
 static int hda_generic_fallback = 0;
+
+/* Slice C no-hang guarantee: every terminal audio failure logs exactly
+ * one serial line and returns an error. No path spins forever, executes
+ * cli/hlt, or panics - the system keeps running with audio disabled.
+ * (Per-verb timeouts live in wait_mask16/wait_mask32/hda_exec_verb;
+ * per-chunk write errors propagate to the playback layer, which logs.) */
+static int hda_fail(int code, const char *msg) {
+    hda_error = code;
+    serial_write(msg);
+    return -1;
+}
 
 static uint16_t hda_format_for_rate(uint16_t sample_rate);
 
@@ -783,37 +795,32 @@ int hda_init(void) {
     hda_generic_fallback = 0;
     hda_pci = pci_find_class(HDA_CLASS_CODE, HDA_SUBCLASS);
     if (!hda_pci) {
-        hda_error = 1;
-        return -1;
+        /* No HDA hardware (headless/VM without audio): skip init cleanly. */
+        return hda_fail(1, "hda: no pci audio device, skipping\n");
     }
 
     if (pci_enable_memory_busmaster(hda_pci) != 0) {
-        hda_error = 2;
-        return -1;
+        return hda_fail(2, "hda: pci enable failed, skipping\n");
     }
 
     bar0 = pci_read_config32(hda_pci, 0x10);
     if ((bar0 & 0xFFFFFFF0U) == 0) {
-        hda_error = 3;
-        return -1;
+        return hda_fail(3, "hda: invalid bar0, skipping\n");
     }
 
     hda_mmio = (volatile uint8_t *)vmm_map_physical((uint64_t)(bar0 & 0xFFFFFFF0U), HDA_MMIO_MAP_BYTES, VMM_FLAGS_KERNEL_RW);
     if (!hda_mmio) {
-        hda_error = 4;
-        return -1;
+        return hda_fail(4, "hda: mmio map failed, skipping\n");
     }
 
     gctl = mmio_read32(HDA_REG_GCTL);
     mmio_write32(HDA_REG_GCTL, gctl & ~HDA_GCTL_CRST);
     if (wait_mask32(HDA_REG_GCTL, HDA_GCTL_CRST, 0) != 0) {
-        hda_error = 5;
-        return -1;
+        return hda_fail(5, "hda: controller reset timeout, skipping\n");
     }
     mmio_write32(HDA_REG_GCTL, gctl | HDA_GCTL_CRST);
     if (wait_mask32(HDA_REG_GCTL, HDA_GCTL_CRST, HDA_GCTL_CRST) != 0) {
-        hda_error = 6;
-        return -1;
+        return hda_fail(6, "hda: controller bring-up timeout, skipping\n");
     }
 
     mmio_write32(HDA_REG_INTCTL, 0);
@@ -829,8 +836,7 @@ int hda_init(void) {
         }
     }
     if ((statests & 0x7FFFU) == 0) {
-        hda_error = 7;
-        return -1;
+        return hda_fail(7, "hda: no codec reported, skipping\n");
     }
     mmio_write16(HDA_REG_STATESTS, statests);
 
@@ -842,8 +848,7 @@ int hda_init(void) {
     }
 
     if (hda_codec == 0xFFU || hda_codec > 14) {
-        hda_error = 8;
-        return -1;
+        return hda_fail(8, "hda: no usable codec, skipping\n");
     }
 
     if (hda_wait_for_codec_graph() != 0) {
@@ -869,15 +874,14 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
     uint8_t ctl2;
 
     if (!hda_present) {
-        return -1;
+        return hda_fail(9, "hda: stream start without device\n");
     }
     if (buffer_len == 0 || buffer_len > HDA_RING_BYTES) {
-        return -1;
+        return hda_fail(9, "hda: bad stream buffer length\n");
     }
 
     if (hda_configure_codec_path(sample_rate) != 0) {
-        hda_error = 10;
-        return -1;
+        return hda_fail(10, "hda: codec configure failed, playback disabled\n");
     }
 
     hda_buffer_len = buffer_len;
@@ -887,8 +891,7 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
 
     hda_build_bdl(hda_buffer_len);
     if (hda_reset_stream() != 0) {
-        hda_error = 11;
-        return -1;
+        return hda_fail(11, "hda: stream reset timeout, playback disabled\n");
     }
 
     mmio_write32(hda_stream_base + 0x18U, (uint32_t)(bdl_phys & 0xFFFFFFFFU));
@@ -934,28 +937,28 @@ void hda_stop_playback(void) {
     mmio_write8(hda_stream_base + 0x03U, 0x1CU);
 }
 
-uint32_t hda_debug_lpi_b(void) {
+uint32_t hda_diag_lpi_b(void) {
     if (!hda_present || !hda_stream_base) {
         return 0;
     }
     return mmio_read32(hda_stream_base + 0x04U);
 }
 
-uint8_t hda_debug_status(void) {
+uint8_t hda_diag_status(void) {
     if (!hda_present || !hda_stream_base) {
         return 0;
     }
     return mmio_read8(hda_stream_base + 0x03U);
 }
 
-uint8_t hda_debug_ctl0(void) {
+uint8_t hda_diag_ctl0(void) {
     if (!hda_present || !hda_stream_base) {
         return 0;
     }
     return mmio_read8(hda_stream_base + 0x00U);
 }
 
-uint8_t hda_debug_ctl2(void) {
+uint8_t hda_diag_ctl2(void) {
     if (!hda_present || !hda_stream_base) {
         return 0;
     }

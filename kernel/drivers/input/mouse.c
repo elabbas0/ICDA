@@ -137,9 +137,36 @@ void mouse_set_screen(int w, int h) {
 void mouse_irq(struct registers *regs) {
     (void)regs;
     static uint64_t irq_cnt = 0;
+    static uint64_t last_diag_tsc = 0;
     irq_cnt++;
-    if ((irq_cnt % 200) == 0) {
-        serial_write("mouse irq\n");
+    /* Rate-limited diagnostic: at most once per ~500ms (5M TSC ticks
+     * at ~10MHz).  Replaces the old per-200-IRQ spam that flooded
+     * the serial port during heavy compositing. */
+    {
+        uint32_t lo, hi;
+        uint64_t now;
+        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        now = ((uint64_t)hi << 32) | lo;
+        if (now - last_diag_tsc > 5000000) {
+            last_diag_tsc = now;
+            serial_write("mouse: irq cnt=");
+            /* Minimal u64→decimal (no printf in kernel). */
+            {
+                char buf[21]; int n = 0; uint64_t v = irq_cnt;
+                if (v == 0) { buf[n++] = '0'; }
+                else { while (v && n < 20) { buf[n++] = (char)('0' + v % 10); v /= 10; } }
+                for (int i = n - 1; i >= 0; i--) serial_write_char(buf[i]);
+            }
+            serial_write(" qdepth=");
+            {
+                uint32_t depth = (mouse_buf_head + MOUSE_BUF_CAP - mouse_buf_tail) % MOUSE_BUF_CAP;
+                char buf[21]; int n = 0; uint64_t v = depth;
+                if (v == 0) { buf[n++] = '0'; }
+                else { while (v && n < 20) { buf[n++] = (char)('0' + v % 10); v /= 10; } }
+                for (int i = n - 1; i >= 0; i--) serial_write_char(buf[i]);
+            }
+            serial_write("\n");
+        }
     }
     /* Drain every byte currently in the output buffer. One IRQ12 can
      * cover several bytes (the PIC may coalesce edges under load), and
@@ -149,7 +176,9 @@ void mouse_irq(struct registers *regs) {
      * QEMU, so always check the status port first. */
     for (int guard = 0; guard < 64; guard++) {
         uint8_t status = inb(PS2_STATUS);
-        // Real HW: some PS/2 controllers (AUX) don't set bit 5 reliably after Explorer's heavy Papirus composite starves the PIC → just check OBF. We're in IRQ12, so it's mouse.
+        /* Real HW: some PS/2 controllers (AUX) don't reliably set
+         * status bit 5 under heavy IRQ load — only check OBF.
+         * We are in IRQ12 so the data port is mouse. */
         if (!(status & PS2_STATUS_OUTPUT_FULL)) {
             break;
         }
@@ -190,7 +219,7 @@ void mouse_irq(struct registers *regs) {
             uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
             int overflow = (next == mouse_buf_tail);
             if (overflow) {
-                // Real HW: WM compositing Papirus after Explorer open is heavy → keep newest
+                // Real HW: ring overflow under heavy composite — keep newest event
                 mouse_buf_tail = (mouse_buf_tail + 1) % MOUSE_BUF_CAP;
                 static uint64_t last_warn = 0;
                 uint64_t now = 0;

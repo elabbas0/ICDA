@@ -47,7 +47,15 @@ void vt_tick(void) {
     vt_active = target;
 
     /* Wipe the screen so the next app starts clean.  The GUI repaints
-     * everything itself and the text shell clears again on startup. */
+     * everything itself and the text shell clears again on startup.
+     * GUI VT: mute fb text + black out so pre-WM writes stay
+     * serial-only until the WM claims fb. Text VT: unmute so the
+     * console is visible. */
+    if (target == VT_GUI) {
+        console_mute_fb(1);
+    } else {
+        console_mute_fb(0);
+    }
     console_clear();
 
     /* Force-exit every user process (the foreground app and whatever it

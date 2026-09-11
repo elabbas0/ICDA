@@ -1,4 +1,5 @@
 #include "icda_sys.h"
+#include "settings_store.h"
 
 #include <stdint.h>
 
@@ -154,9 +155,17 @@ static void shell_play_wav_path(const char *path) {
     char fallback[SHELL_LINE_CAP];
     char cwd[80];
     const char *resolved = path;
+    icda_settings_t audio_opt;
 
     if (!path || !*path) {
         icda_write("usage: play <path>\n");
+        return;
+    }
+
+    /* Slice C master mute: skip audio paths when disabled. */
+    icda_settings_load(&audio_opt);
+    if (!audio_opt.audio) {
+        icda_write("audio disabled (enable in Settings)\n");
         return;
     }
 

@@ -9,6 +9,7 @@
  */
 #include "libicda.h"
 #include "gui_proto.h"
+#include "settings_store.h"
 
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
@@ -16,6 +17,7 @@
 #define TASKBAR_H 42
 #define CURSOR_W 19
 #define CURSOR_H 30
+#define CURSOR_SAVE_DIM 48   /* max icon cursor dimension for save/restore */
 
 #define WM_ANIM_NONE        0
 #define WM_ANIM_OPEN        1
@@ -23,6 +25,7 @@
 #define WM_ANIM_RESTORE     3
 #define WM_ANIM_MAXIMIZE    4
 #define WM_ANIM_UNMAXIMIZE  5
+#define WM_ANIM_CLOSE       6
 
 typedef struct {
     int      valid;
@@ -36,6 +39,7 @@ typedef struct {
     int      h;
     int      minimized;
     int      maximized;
+    int      closing;
     int      anim;
     int      anim_kind;
     int      anim_from_x;
@@ -66,9 +70,18 @@ static int start_menu_open = 0;
  * tiles), pre-rendered once and copied out as the base of every frame. */
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
+static uint32_t cursor_scene_save[CURSOR_SAVE_DIM * CURSOR_SAVE_DIM];
 static icda_fb_info_t fb_info;
+static icda_gpu_info_t gpu_info;
 static uint32_t *real_fb = NULL;
 static const ic_theme_t *theme;
+
+/* Page-flipping state: when gpu_info.flip_active the compositor blits
+ * into the back buffer (the page the CRTC is NOT scanning) and calls
+ * icda_gpu_present_flags(1) once per frame to atomically flip.  The
+ * real_fb pointer is temporarily remapped for each frame so ALL
+ * existing blit functions write to the correct page without edits. */
+static int wm_flip_page = 0;   /* toggles 0/1 after each present */
 
 /* Mouse position lives in file-scope state, not registers: the compiled
  * main loop has been observed losing its register-tracked coordinates
@@ -82,6 +95,20 @@ static int prev_mouse_x = -1;
 static int prev_mouse_y = -1;
 static uint8_t mouse_buttons = 0;
 
+/* Slice C system settings (persisted in /cfg/icda-settings, defaults
+ * all-on). Loaded at startup and re-read periodically so the Settings
+ * app applies live without a reboot. vsync gates tick-paced vs
+ * immediate present; animations gates all window anims (instant path
+ * when off); boot_anim gates WM-side transition fades (the kernel
+ * splash runs pre-VFS so it cannot read the file yet); audio is read
+ * by the audio clients before playing. */
+static icda_settings_t wm_settings;
+static uint64_t settings_last_reload = 0;
+
+static void settings_reload(void) {
+    icda_settings_load(&wm_settings);
+}
+
 /* ---- damage tracking -------------------------------------------------
  *
  * Compositors repaint only what changed.  Every mutation of the scene
@@ -93,7 +120,10 @@ static uint8_t mouse_buttons = 0;
  * 1920x1080 frame on every event (which is what made real hardware
  * crawl).  A pure mouse move still takes the tiny cursor-only path. */
 #define MAX_DIRTY 32
-#define SHADOW_MARGIN 2
+/* Shadow band: body extends 1 px beyond frame (libicda.c:1129),
+ * painted falloff reaches IC_SHADOW_RADIUS - 1 = 7 px past the body.
+ * 1 + 7 = 8 px total; +2 safety = 10.                          */
+#define SHADOW_MARGIN 10
 typedef struct { int x, y, w, h; } dirty_rect_t;
 static dirty_rect_t dirty_rects[MAX_DIRTY];
 static int dirty_count = 0;
@@ -114,6 +144,18 @@ static int dirty_rects_intersect(const dirty_rect_t *a, const dirty_rect_t *b) {
     return a->x < b->x + b->w && b->x < a->x + a->w &&
            a->y < b->y + b->h && b->y < a->y + a->h;
 }
+
+/* ---- frame diagnostics ---------------------------------------------------
+ * Cheap static counters updated in the main loop after each composite.
+ * No output — serial_write is kernel-only.  Counters can be exposed
+ * through existing channels (e.g. taskman proc stats) if needed. */
+static unsigned long wm_diag_composite_count = 0;
+static unsigned long wm_diag_max_frame_ticks = 0;
+static unsigned long wm_diag_mouse_events = 0;
+
+/* F12 debug overlay: opaque info box drawn at top-left of every frame
+ * when wm_debug_overlay is set.  Toggled by the 0x80 F12 sentinel. */
+static int wm_debug_overlay = 0;
 
 static void mark_dirty(int x, int y, int w, int h) {
     dirty_rect_t r;
@@ -166,6 +208,9 @@ static void mark_dirty_full(void) {
     dirty_count = 0;
 }
 
+/* Slice B power overlay (defined after the blit helpers). action: 0 off, 1 reboot. */
+static void wm_power_sequence(int action, int w, int h);
+
 /* Windows-style AA arrow, 19×30, hotspot 0,0 */
 typedef struct { int n; int x[8]; int y[8]; } cursor_poly_t;
 static const cursor_poly_t cursor_outline = {7, {0,0,5,9,14,10,18}, {0,26,21,29,27,18,18}};
@@ -184,10 +229,12 @@ static int cursor_point_in_poly(int x, int y) {
 static int64_t cursor_seg_dist2(int x,int y,int ax,int ay,int bx,int by){
     int dx=bx-ax, dy=by-ay;
     int64_t len2=(int64_t)dx*dx+(int64_t)dy*dy;
-    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
-    int64_t t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
+    int64_t t;
     int64_t cx,cy;
-    if(t<0) t=0; if(t>len2) t=len2;
+    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
+    t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
+    if(t<0) t=0;
+    if(t>len2) t=len2;
     cx=ax+t*dx/len2; cy=ay+t*dy/len2;
     return (int64_t)(x-cx)*(x-cx)+(int64_t)(y-cy)*(y-cy);
 }
@@ -223,9 +270,6 @@ static void build_cursor_sprite(void){
 static void clear_msg(gui_msg_t *msg) {
     for (int i = 0; i < 64; i++) ((uint8_t*)msg)[i] = 0;
 }
-
-/* Native-format pixel write to the real framebuffer (see definition below). */
-static void fb_write_px(int x, int y, uint32_t color);
 
 static int cursor_icon_dims(const ic_icon_t **icon_out, int *w_out, int *h_out) {
     const ic_icon_t *icon = ic_icon_builtin("cursor");
@@ -314,6 +358,24 @@ static void copy_pixels_dim(uint32_t *dst, const uint32_t *src, int count) {
     }
 }
 
+/* Slice B fade helper: scale src toward black by num/den (bounds-checked,
+ * den>0 required). OPEN fades num from DIM_NUM*DEN..DEN*DEN up to full
+ * brightness; CLOSE fades down to 0 (black). Row-copy speed, no per-pixel
+ * alpha buffer needed. */
+static void copy_pixels_fade(uint32_t *dst, const uint32_t *src, int count,
+                              int num, int den) {
+    if (!dst || !src || count <= 0 || den <= 0) return;
+    if (num < 0) num = 0;
+    if (num > den) num = den;
+    for (int i = 0; i < count; i++) {
+        uint32_t c = src[i];
+        uint32_t r = ((c >> 16) & 0xFF) * (uint32_t)num / (uint32_t)den;
+        uint32_t g = ((c >> 8) & 0xFF) * (uint32_t)num / (uint32_t)den;
+        uint32_t b = (c & 0xFF) * (uint32_t)num / (uint32_t)den;
+        dst[i] = (r << 16) | (g << 8) | b;
+    }
+}
+
 static uint32_t blend_over(uint32_t dst, uint32_t src, int alpha) {
     uint32_t dr = (dst >> 16) & 0xFF;
     uint32_t dg = (dst >> 8) & 0xFF;
@@ -327,20 +389,63 @@ static uint32_t blend_over(uint32_t dst, uint32_t src, int alpha) {
            ((sb * (uint32_t)alpha + db * (uint32_t)inv) / 255);
 }
 
-/* Cursor is blitted straight onto the real framebuffer, above the scene
- * buffer, so a mouse move never rebuilds the frame underneath. */
-static void draw_cursor_at(int w, int h, int mx, int my) {
-    const ic_icon_t *icon;
-    int dw;
-    int dh;
+/* ---- cursor-backbuffer path (eliminates flicker) --------------------
+ * Instead of drawing the cursor directly onto the visible framebuffer
+ * (which causes progressive visible writes / flicker), these functions
+ * render the cursor into back_buffer, blit the affected rectangle once,
+ * then restore back_buffer to its scene-only state.
+ *
+ * draw_cursor_into_bb: saves the scene pixels under the cursor into
+ *   cursor_scene_save, then composites the cursor into back_buffer.
+ * restore_cursor_scene: copies cursor_scene_save back to back_buffer,
+ *   undoing the cursor pixels so the scene buffer stays clean. */
+static void draw_cursor_into_bb(int w, int h, int mx, int my) {
+    const ic_icon_t *icon = NULL;
+    int dw = CURSOR_W;
+    int dh = CURSOR_H;
+    int sx0, sy0, cw, ch;
 
     if (cursor_icon_dims(&icon, &dw, &dh)) {
-        for (int dy = 0; dy < dh; dy++) {
+        /* icon cursor dimensions already set */
+    } else {
+        icon = NULL;
+        dw = CURSOR_W;
+        dh = CURSOR_H;
+    }
+    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
+    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
+
+    /* Clip to screen bounds. */
+    sx0 = 0;
+    sy0 = 0;
+    if (mx < 0) { sx0 = -mx; }
+    if (my < 0) { sy0 = -my; }
+    cw = dw - sx0;
+    ch = dh - sy0;
+    if (mx + sx0 + cw > w) cw = w - mx - sx0;
+    if (my + sy0 + ch > h) ch = h - my - sy0;
+    if (cw <= 0 || ch <= 0) return;
+
+    /* Save scene under visible cursor area. */
+    {
+        int screen_x = mx + sx0;
+        int screen_y = my + sy0;
+        if (screen_x < 0) screen_x = 0;
+        if (screen_y < 0) screen_y = 0;
+        for (int y = 0; y < ch; y++) {
+            copy_pixels(&cursor_scene_save[y * cw],
+                        &back_buffer[(screen_y + y) * w + screen_x], cw);
+        }
+    }
+
+    /* Draw cursor pixels into back_buffer. */
+    if (icon) {
+        for (int dy = sy0; dy < sy0 + ch && dy < dh; dy++) {
             int py = my + dy;
             int sy = (int)((uint64_t)dy * icon->h / dh);
             if (py < 0 || py >= h) continue;
             if (sy >= icon->h) sy = icon->h - 1;
-            for (int dx = 0; dx < dw; dx++) {
+            for (int dx = sx0; dx < sx0 + cw && dx < dw; dx++) {
                 int px = mx + dx;
                 int sx = (int)((uint64_t)dx * icon->w / dw);
                 const uint8_t *p;
@@ -352,12 +457,14 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
                 if (p[3] == 0) continue;
                 src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
                 dst = back_buffer[py * w + px];
-                fb_write_px(px, py, p[3] == 255 ? src : blend_over(dst, src, p[3]));
+                back_buffer[py * w + px] =
+                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
             }
         }
         return;
     }
 
+    /* Built-in cursor. */
     for (int cy = 0; cy < CURSOR_H; cy++) {
         int py = my + cy;
         if (py < 0 || py >= h) continue;
@@ -367,10 +474,49 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
             if (px < 0 || px >= w) continue;
             if (p[3] == 0) continue;
             {
-                uint32_t src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+                uint32_t src = ((uint32_t)p[0] << 16) |
+                               ((uint32_t)p[1] << 8) | p[2];
                 uint32_t dst = back_buffer[py * w + px];
-                fb_write_px(px, py, p[3] == 255 ? src : blend_over(dst, src, p[3]));
+                back_buffer[py * w + px] =
+                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
             }
+        }
+    }
+}
+
+static void restore_cursor_scene(int w, int h, int mx, int my) {
+    const ic_icon_t *icon = NULL;
+    int dw = CURSOR_W;
+    int dh = CURSOR_H;
+    int sx0, sy0, cw, ch;
+
+    if (cursor_icon_dims(&icon, &dw, &dh)) {
+        /* icon cursor dimensions already set */
+    } else {
+        dw = CURSOR_W;
+        dh = CURSOR_H;
+    }
+    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
+    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
+
+    sx0 = 0;
+    sy0 = 0;
+    if (mx < 0) { sx0 = -mx; }
+    if (my < 0) { sy0 = -my; }
+    cw = dw - sx0;
+    ch = dh - sy0;
+    if (mx + sx0 + cw > w) cw = w - mx - sx0;
+    if (my + sy0 + ch > h) ch = h - my - sy0;
+    if (cw <= 0 || ch <= 0) return;
+
+    {
+        int screen_x = mx + sx0;
+        int screen_y = my + sy0;
+        if (screen_x < 0) screen_x = 0;
+        if (screen_y < 0) screen_y = 0;
+        for (int y = 0; y < ch; y++) {
+            copy_pixels(&back_buffer[(screen_y + y) * w + screen_x],
+                        &cursor_scene_save[y * cw], cw);
         }
     }
 }
@@ -381,15 +527,898 @@ static void draw_cursor_at(int w, int h, int mx, int my) {
 /* Modern flat wallpaper: a calm blue vertical gradient, rendered once
  * into desktop_layer.  No per-pixel hills or per-row re-blends at
  * runtime - this is the base every frame is copied from. */
+/* ---- desktop icon grid (step 3) ------------------------------------
+ * Icons live in a registry, not hardcoded call sites. Positions come
+ * from grid cells so drag/reorder only changes data. All state is
+ * file-scope BSS (see the note at mouse_x): locals in the hot paths
+ * have been observed corrupted by the generated code. */
+#define DESK_MAX_ICONS 12
+#define DESK_CELL_W 96
+#define DESK_CELL_H 90
+#define DESK_GRID_X0 22
+#define DESK_GRID_Y0 64
+#define DESK_HIT_W 74
+#define DESK_HIT_H 74
+#define DESK_DBLCLICK_TICKS 50
+
+typedef struct {
+    const char *label;
+    const char *icon;
+    const char *path;
+    int pinned;     /* shown on the desktop */
+    int cell_x;     /* grid cell */
+    int cell_y;
+    int selected;
+} desk_icon_t;
+
+static desk_icon_t desk_icons[DESK_MAX_ICONS];
+static int desk_icon_count = 0;
+static uint64_t desk_last_click_tick = 0;
+static int desk_last_click_icon = -1;
+
+static void desk_add(const char *label, const char *icon, const char *path,
+                     int pinned, int cx, int cy) {
+    desk_icon_t *d;
+    if (desk_icon_count >= DESK_MAX_ICONS) return;
+    d = &desk_icons[desk_icon_count++];
+    d->label = label;
+    d->icon = icon;
+    d->path = path;
+    d->pinned = pinned;
+    d->cell_x = cx;
+    d->cell_y = cy;
+    d->selected = 0;
+}
+
+static void desk_init_registry(void) {
+    desk_icon_count = 0;
+    desk_add("Explorer", "folder", "/apps/desktop.app", 1, 0, 0);
+    desk_add("Terminal", "terminal", "/apps/terminal.app", 1, 0, 1);
+    desk_add("Music", "music", "/apps/audioplay.app", 1, 0, 2);
+    desk_add("Browser", "app", "/apps/browser.app", 1, 0, 3);
+    desk_add("Editor", "editor", "/apps/editor.app", 0, 0, 0);
+    desk_add("Task Manager", "gear", "/apps/taskman.app", 0, 0, 0);
+    desk_add("Settings", "gear", "/apps/settings.app", 0, 0, 0);
+}
+
+static int desk_icon_x(desk_icon_t *d) {
+    return DESK_GRID_X0 + d->cell_x * DESK_CELL_W;
+}
+
+static int desk_icon_y(desk_icon_t *d) {
+    return DESK_GRID_Y0 + d->cell_y * DESK_CELL_H;
+}
+
+/* ---- drag + rubber-band state (step 3b, all BSS) ---- */
+static int desk_drag_icon = -1;   /* press-armed icon, -1 none */
+static int desk_dragging = 0;     /* threshold passed, ghost follows */
+static int desk_press_x = 0;
+static int desk_press_y = 0;
+static int desk_grab_dx = 0;      /* cursor offset inside the cell */
+static int desk_grab_dy = 0;
+static int desk_ghost_x = 0;
+static int desk_ghost_y = 0;
+static int desk_press_desktop = 0;/* press began on desktop, not a window */
+
+static void desk_paint_cell(desk_icon_t *d);
+static void desk_erase_rect(int x, int y, int w, int h);
+static void build_desktop_layer(void);
+static void desk_save(void);
+static void desk_load(void);
+static int rubber_armed = 0;      /* press began on empty desktop */
+static int rubber_active = 0;
+static int rubber_x0 = 0;
+static int rubber_y0 = 0;
+static int rubber_x1 = 0;
+static int rubber_y1 = 0;
+
+#define DESK_DRAG_THRESH_PX 8
+
+static void desk_snap_cell(int x, int y, int *cx, int *cy) {
+    int h = (int)fb_info.height;
+    int max_cy;
+    *cx = (x < DESK_GRID_X0) ? 0 : (x - DESK_GRID_X0 + DESK_CELL_W / 2) / DESK_CELL_W;
+    *cy = (y < DESK_GRID_Y0) ? 0 : (y - DESK_GRID_Y0 + DESK_CELL_H / 2) / DESK_CELL_H;
+    if (*cx < 0) *cx = 0;
+    if (*cy < 0) *cy = 0;
+    if (*cx > 8) *cx = 8;
+    max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+    if (max_cy < 0) max_cy = 0;
+    if (*cy > max_cy) *cy = max_cy;
+}
+
+/* Motion with the left button held (called per mouse event, out of
+ * line to protect the hot loop's registers). Starts icon drags and
+ * rubber-bands past the movement threshold. */
+static void desk_track_motion(int mx, int my, uint8_t buttons) {
+    int dx;
+    int dy;
+
+    if (!(buttons & 1)) return;
+    if (!desk_press_desktop) return;
+    dx = mx - desk_press_x;
+    dy = my - desk_press_y;
+    if (!desk_dragging && desk_drag_icon >= 0 &&
+        dx * dx + dy * dy > DESK_DRAG_THRESH_PX * DESK_DRAG_THRESH_PX) {
+        desk_dragging = 1;
+        mark_dirty_full();
+    }
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_ghost_x = mx - desk_grab_dx;
+        desk_ghost_y = my - desk_grab_dy;
+        mark_dirty_full();
+        return;
+    }
+    if (!rubber_active && rubber_armed &&
+        dx * dx + dy * dy > DESK_DRAG_THRESH_PX * DESK_DRAG_THRESH_PX) {
+        rubber_active = 1;
+        rubber_x0 = desk_press_x;
+        rubber_y0 = desk_press_y;
+        mark_dirty_full();
+    }
+    if (rubber_active) {
+        rubber_x1 = mx;
+        rubber_y1 = my;
+        mark_dirty_full();
+    }
+}
+
+static int desk_rects_overlap(int ax, int ay, int aw, int ah,
+                              int bx, int by, int bw, int bh) {
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+
+/* ---- context menus + properties + persist (step 3c) ----
+ * Doctrine: context menus carry the full option set (Windows-style);
+ * topbars keep only quick actions (those move app by app, later).
+ * All state BSS; geometry clamped; modal-ish (clicks route here first
+ * while open). Persist is best-effort: /cfg survives only where the
+ * boot device persists (RAM-only on live ISO). */
+#define CTX_MAX_ITEMS 10
+#define CTX_LABEL_LEN 36
+
+enum {
+    CTX_OPEN = 1,
+    CTX_TOGGLE_PIN,
+    CTX_PROPS,
+    CTX_ARRANGE,
+    CTX_PIN_BASE = 16
+};
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_icon = -1;   /* target icon, -1 = desktop background */
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_MAX_ITEMS];
+static char ctx_labels[CTX_MAX_ITEMS][CTX_LABEL_LEN];
+static int props_open = 0;
+static int props_icon = -1;
+static char props_body[192];
+
+static void ctx_set_item(int idx, int action, const char *a, const char *b) {
+    int i = 0;
+    int j = 0;
+    if (idx < 0 || idx >= CTX_MAX_ITEMS) return;
+    ctx_actions[idx] = action;
+    while (a && a[i] && i < CTX_LABEL_LEN - 1) {
+        ctx_labels[idx][i] = a[i];
+        i++;
+    }
+    while (b && b[j] && i < CTX_LABEL_LEN - 1) {
+        ctx_labels[idx][i] = b[j];
+        i++;
+        j++;
+    }
+    ctx_labels[idx][i] = '\0';
+}
+
+/* Fill a stack menu struct from BSS (for draw + hit-test). */
+static int ctx_menu(ic_menu_t *m) {
+    int i;
+    if (!m) return 0;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++) {
+        m->items[i] = ctx_labels[i];
+    }
+    return ctx_nitems;
+}
+
+static void ctx_close(void) {
+    if (ctx_open) {
+        ctx_open = 0;
+        mark_dirty_full();
+    }
+}
+
+static void props_close(void) {
+    if (props_open) {
+        props_open = 0;
+        mark_dirty_full();
+    }
+}
+
+static void ctx_open_at(int x, int y, int icon) {
+    ic_menu_t m;
+    int fw = (int)fb_info.width;
+    int fh = (int)fb_info.height;
+    int mw;
+    int mh;
+    int i = 0;
+    int j;
+
+    ctx_icon = icon;
+    if (icon >= 0 && icon < desk_icon_count) {
+        ctx_set_item(i++, CTX_OPEN, "Open", 0);
+        ctx_set_item(i++, CTX_TOGGLE_PIN,
+                     desk_icons[icon].pinned ? "Unpin from desktop" : "Pin to desktop", 0);
+        ctx_set_item(i++, CTX_PROPS, "Properties", 0);
+    } else {
+        for (j = 0; j < desk_icon_count && i < CTX_MAX_ITEMS - 1; j++) {
+            if (!desk_icons[j].pinned) {
+                /* NOTE: pass the action through set_item — it owns
+                 * ctx_actions[idx]. A direct assignment here would be
+                 * clobbered (caught live: pin clicks silently died). */
+                ctx_set_item(i, CTX_PIN_BASE + j, "Pin ",
+                             desk_icons[j].label);
+                i++;
+            }
+        }
+        ctx_set_item(i++, CTX_ARRANGE, "Arrange icons", 0);
+    }
+    ctx_nitems = i;
+    if (ctx_nitems <= 0) return;
+    ctx_menu(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (fw <= 0 || fh <= 0) return;
+    if (x + mw > fw) x = fw - mw;
+    if (x < 0) x = 0;
+    if (y + mh > fh - TASKBAR_H) y = fh - TASKBAR_H - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
+    mark_dirty_full();
+}
+
+/* Tiny decimal printer (freestanding: no snprintf). */
+static void ctx_put_u64(char *dst, int cap, int *pos, uint64_t v) {
+    char tmp[20];
+    int n = 0;
+    int k;
+    if (!dst || !pos || *pos >= cap - 1) return;
+    if (v == 0) {
+        dst[(*pos)++] = '0';
+        dst[*pos] = '\0';
+        return;
+    }
+    while (v > 0 && n < 20) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = n - 1; k >= 0 && *pos < cap - 1; k--) {
+        dst[(*pos)++] = tmp[k];
+    }
+    dst[*pos] = '\0';
+}
+
+static void ctx_put_str(char *dst, int cap, int *pos, const char *s) {
+    int i = 0;
+    if (!dst || !pos || !s) return;
+    while (s[i] && *pos < cap - 1) {
+        dst[(*pos)++] = s[i++];
+    }
+    dst[*pos] = '\0';
+}
+
+static void props_open_for(int icon) {
+    desk_icon_t *d;
+    icda_stat_t st;
+    int have_size = 0;
+    int pos = 0;
+
+    if (icon < 0 || icon >= desk_icon_count) return;
+    d = &desk_icons[icon];
+    props_icon = icon;
+    props_body[0] = '\0';
+    ctx_put_str(props_body, sizeof(props_body), &pos, d->label);
+    ctx_put_str(props_body, sizeof(props_body), &pos, "  ");
+    ctx_put_str(props_body, sizeof(props_body), &pos, d->path);
+    if (icda_stat(d->path, &st) == 0) {
+        have_size = 1;
+    }
+    if (have_size) {
+        ctx_put_str(props_body, sizeof(props_body), &pos, "  ");
+        ctx_put_u64(props_body, sizeof(props_body), &pos, st.size);
+        ctx_put_str(props_body, sizeof(props_body), &pos, " bytes");
+    }
+    props_open = 1;
+    mark_dirty_full();
+}
+
+static void desk_arrange(void) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int cx = 0;
+    int cy = 0;
+    int i;
+
+    if (w <= 0 || h <= 0) return;
+    for (i = 0; i < desk_icon_count; i++) {
+        desk_icon_t *d = &desk_icons[i];
+        int max_cy;
+        if (!d->pinned) continue;
+        max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+        if (max_cy < 0) max_cy = 0;
+        if (cy > max_cy) {
+            cy = 0;
+            cx++;
+            if (cx > 8) cx = 8;
+        }
+        d->cell_x = cx;
+        d->cell_y = cy;
+        d->selected = 0;
+        cy++;
+    }
+    build_desktop_layer();
+    mark_dirty_full();
+}
+
+static int desk_free_cell(int *cx, int *cy) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int x;
+    int y;
+    int max_cy;
+    int i;
+
+    if (w <= 0 || h <= 0) return 0;
+    (void)w;
+    max_cy = (h - TASKBAR_H - (DESK_GRID_Y0 + DESK_CELL_H)) / DESK_CELL_H;
+    if (max_cy < 0) max_cy = 0;
+    for (y = 0; y <= max_cy; y++) {
+        for (x = 0; x <= 8; x++) {
+            int taken = 0;
+            for (i = 0; i < desk_icon_count; i++) {
+                if (desk_icons[i].pinned && desk_icons[i].cell_x == x &&
+                    desk_icons[i].cell_y == y) {
+                    taken = 1;
+                    break;
+                }
+            }
+            if (!taken) {
+                *cx = x;
+                *cy = y;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void desk_activate(int which) {
+    int a;
+
+    if (which < 0 || which >= ctx_nitems) {
+        ctx_close();
+        return;
+    }
+    a = ctx_actions[which];
+    if (a == CTX_OPEN && ctx_icon >= 0 && ctx_icon < desk_icon_count) {
+        icda_spawn(desk_icons[ctx_icon].path);
+        ctx_close();
+    } else if (a == CTX_TOGGLE_PIN && ctx_icon >= 0 &&
+               ctx_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[ctx_icon];
+        d->pinned = !d->pinned;
+        d->selected = 0;
+        if (d->pinned) {
+            int cx;
+            int cy;
+            if (desk_free_cell(&cx, &cy)) {
+                d->cell_x = cx;
+                d->cell_y = cy;
+            }
+            desk_paint_cell(d);
+        } else {
+            desk_erase_rect(DESK_GRID_X0 + d->cell_x * DESK_CELL_W,
+                            DESK_GRID_Y0 + d->cell_y * DESK_CELL_H,
+                            DESK_CELL_W, DESK_CELL_H + 8);
+        }
+        desk_save();
+        ctx_close();
+    } else if (a == CTX_PROPS && ctx_icon >= 0 &&
+               ctx_icon < desk_icon_count) {
+        props_open_for(ctx_icon);
+        ctx_close();
+    } else if (a == CTX_ARRANGE) {
+        desk_arrange();
+        desk_save();
+        ctx_close();
+    } else if (a >= CTX_PIN_BASE && a < CTX_PIN_BASE + DESK_MAX_ICONS) {
+        int j = a - CTX_PIN_BASE;
+        if (j >= 0 && j < desk_icon_count && !desk_icons[j].pinned) {
+            int cx;
+            int cy;
+            if (desk_free_cell(&cx, &cy)) {
+                desk_icons[j].pinned = 1;
+                desk_icons[j].cell_x = cx;
+                desk_icons[j].cell_y = cy;
+                desk_paint_cell(&desk_icons[j]);
+                desk_save();
+            }
+        }
+        ctx_close();
+    } else {
+        ctx_close();
+    }
+}
+
+/* ---- persist (best-effort; RAM-only on live ISO) ----
+ * /cfg/desktop.cfg lines: "1 <cx> <cy> <path>" pinned,
+ * "0 <path>" unpinned. Unknown paths and out-of-range cells are
+ * ignored on load; registry defaults stand in. */
+#define DESK_CFG_PATH "/cfg/desktop.cfg"
+
+static int desk_atoi(const char **p) {
+    int v = 0;
+    int neg = 0;
+    if (!p || !*p) return 0;
+    if (**p == '-') {
+        neg = 1;
+        (*p)++;
+    }
+    while (**p >= '0' && **p <= '9') {
+        v = v * 10 + (**p - '0');
+        (*p)++;
+    }
+    return neg ? -v : v;
+}
+
+static int desk_streq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+static void desk_put_u64(char *dst, int cap, int *pos, uint64_t v) {
+    char rev[20];
+    int r = 0;
+    int k;
+    if (!dst || !pos || *pos >= cap - 1) return;
+    if (v == 0) {
+        dst[(*pos)++] = '0';
+        dst[*pos] = '\0';
+        return;
+    }
+    while (v > 0 && r < 19) {
+        rev[r++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (k = r - 1; k >= 0 && *pos < cap - 1; k--) {
+        dst[(*pos)++] = rev[k];
+    }
+    dst[*pos] = '\0';
+}
+
+static void desk_save(void) {
+    char buf[512];
+    int pos = 0;
+    int i;
+
+    icda_mkdir("/cfg");
+    for (i = 0; i < desk_icon_count && pos < 430; i++) {
+        desk_icon_t *d = &desk_icons[i];
+        const char *p;
+        buf[pos++] = d->pinned ? '1' : '0';
+        buf[pos++] = ' ';
+        if (d->pinned) {
+            desk_put_u64(buf, (int)sizeof(buf), &pos,
+                         (uint64_t)(d->cell_x < 0 ? 0 : d->cell_x));
+            if (pos < 430) buf[pos++] = ' ';
+            desk_put_u64(buf, (int)sizeof(buf), &pos,
+                         (uint64_t)(d->cell_y < 0 ? 0 : d->cell_y));
+            if (pos < 430) buf[pos++] = ' ';
+        }
+        p = d->path;
+        while (p && *p && pos < 430) buf[pos++] = *p++;
+        if (pos < 511) buf[pos++] = '\n';
+    }
+    buf[pos < 512 ? pos : 511] = '\0';
+    if (pos > 0) {
+        icda_write_file(DESK_CFG_PATH, buf, (uint64_t)pos);
+    }
+}
+
+static void desk_load(void) {
+    char buf[512];
+    long n;
+    int p = 0;
+
+    n = (long)icda_read_file(DESK_CFG_PATH, buf, sizeof(buf) - 1);
+    if (n <= 0) return;
+    if (n > 511) n = 511;
+    buf[n] = '\0';
+    while (p < n) {
+        int pinned;
+        int cx = 0;
+        int cy = 0;
+        char path[96];
+        int k = 0;
+        int i;
+        if (buf[p] != '0' && buf[p] != '1') {
+            while (p < n && buf[p] != '\n') p++;
+            if (p < n) p++;
+            continue;
+        }
+        pinned = buf[p++] - '0';
+        if (p >= n || buf[p] != ' ') {
+            while (p < n && buf[p] != '\n') p++;
+            if (p < n) p++;
+            continue;
+        }
+        p++;
+        if (pinned) {
+            const char *q = buf + p;
+            cx = desk_atoi(&q);
+            if (*q != ' ') {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+            q++;
+            cy = desk_atoi(&q);
+            if (*q != ' ') {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+            q++;
+            p = (int)(q - buf);
+            if (cx < 0 || cx > 8 || cy < 0 || cy > 8) {
+                while (p < n && buf[p] != '\n') p++;
+                if (p < n) p++;
+                continue;
+            }
+        }
+        while (p < n && buf[p] != '\n' && k < 95) path[k++] = buf[p++];
+        path[k] = '\0';
+        if (p < n && buf[p] == '\n') p++;
+        if (k == 0) continue;
+        for (i = 0; i < desk_icon_count; i++) {
+            if (desk_streq(desk_icons[i].path, path)) {
+                desk_icons[i].pinned = pinned ? 1 : 0;
+                if (pinned) {
+                    desk_icons[i].cell_x = cx;
+                    desk_icons[i].cell_y = cy;
+                }
+                desk_icons[i].selected = 0;
+                break;
+            }
+        }
+    }
+}
+
+/* Left press routing while a menu/dialog is open. Returns 1 when the
+ * press was consumed (caller must skip normal handling). */
+static int ctx_press(int mx, int my) {
+    if (props_open) {
+        props_close();
+        return 1;
+    }
+    if (!ctx_open) return 0;
+    {
+        ic_menu_t m;
+        int hit;
+        ctx_menu(&m);
+        hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+        desk_activate(hit);
+    }
+    return 1;
+}
+
+/* Desktop overlays (rubber-band, drag ghost; menus/dialogs join in
+ * 3c). Drawn topmost from BSS state on every composite that covers
+ * them; callers force a full composite via mark_dirty_full on change.
+ * All coordinates are clamped to the given clip bounds (never trust
+ * unclamped drawing near the framebuffer edge). */
+static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    ic_canvas_t c;
+    const ic_theme_t *t;
+
+    if (w <= 0 || h <= 0) return;
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 > w) cx1 = w;
+    if (cy1 > h) cy1 = h;
+    if (cx1 <= cx0 || cy1 <= cy0) return;
+    c = bb_canvas(w, h);
+    t = ic_theme_default();
+    if (rubber_active) {
+        int x0 = rubber_x0 < rubber_x1 ? rubber_x0 : rubber_x1;
+        int y0 = rubber_y0 < rubber_y1 ? rubber_y0 : rubber_y1;
+        int x1 = rubber_x0 < rubber_x1 ? rubber_x1 : rubber_x0;
+        int y1 = rubber_y0 < rubber_y1 ? rubber_y1 : rubber_y0;
+        int i;
+        if (x0 < cx0) x0 = cx0;
+        if (y0 < cy0) y0 = cy0;
+        if (x1 >= cx1) x1 = cx1 - 1;
+        if (y1 >= cy1) y1 = cy1 - 1;
+        /* Fill + outline via clipped horizontal spans (ic_rect clips
+         * rows itself through the canvas bounds). */
+        for (i = x0; i <= x1; i += 1) {
+            if (i < 0 || i >= w) continue;
+            /* top/bottom edges */
+            if (y0 >= cy0 && y0 < cy1) {
+                ic_rect(&c, i, y0, 1, 1, t->accent);
+            }
+            if (y1 >= cy0 && y1 < cy1 && y1 != y0) {
+                ic_rect(&c, i, y1, 1, 1, t->accent);
+            }
+        }
+        {
+            int y;
+            for (y = y0; y <= y1; y++) {
+                if (y < cy0 || y >= cy1) continue;
+                if (x0 >= cx0 && x0 < cx1) ic_rect(&c, x0, y, 1, 1, t->accent);
+                if (x1 >= cx0 && x1 < cx1 && x1 != x0) {
+                    ic_rect(&c, x1, y, 1, 1, t->accent);
+                }
+            }
+        }
+    }
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[desk_drag_icon];
+        const ic_icon_t *icon = ic_icon_builtin(d->icon);
+        int gx = desk_ghost_x;
+        int gy = desk_ghost_y;
+        if (d->pinned) {
+            if (gx < cx0) gx = cx0;
+            if (gy < cy0) gy = cy0;
+            if (gx + 74 > cx1) gx = cx1 - 74;
+            if (gy + 82 > cy1) gy = cy1 - 82;
+            if (gx + 74 > 0 && gy + 82 > 0 && gx < w && gy < h) {
+                if (icon) {
+                    ic_icon_draw(&c, gx + 21, gy + 16, 32, 32, icon);
+                }
+                ic_outline_r(&c, gx, gy, 74, 82, 8, t->accent);
+            }
+        }
+    }
+    if (ctx_open && ctx_nitems > 0) {
+        ic_menu_t m;
+        /* Hover follows the live cursor (file-scope mouse_x/mouse_y);
+         * motion forces scene redraws while open (see batch loop). */
+        ctx_menu(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, mouse_x, mouse_y);
+        ic_menu_draw(&c, t, ctx_x, ctx_y, &m);
+    }
+    if (props_open && props_icon >= 0 && props_icon < desk_icon_count) {
+        ic_rect_t r;
+        r.w = 380;
+        r.h = 150;
+        r.x = (w - r.w) / 2;
+        r.y = (h - TASKBAR_H - r.h) / 2;
+        if (r.x < 0) r.x = 0;
+        if (r.y < 0) r.y = 0;
+        /* Clamp to the clip bounds (both screen and dirty rect). */
+        if (r.x < cx0) r.x = cx0;
+        if (r.y < cy0) r.y = cy0;
+        if (r.x + r.w > cx1) r.w = cx1 - r.x;
+        if (r.y + r.h > cy1) r.h = cy1 - r.y;
+        if (r.w > 0 && r.h > 0) {
+            ic_dialog_draw(&c, t, r, "Properties", props_body);
+        }
+    }
+}
+
+/* Left release: drop a drag (snap + swap) or finish a rubber-band
+ * (exclusive select). No-ops unless this press began on the desktop. */
+static void desk_left_release(int mx, int my) {
+    int i;
+
+    (void)mx;
+    (void)my;
+    if (!desk_press_desktop) return;
+    if (desk_dragging && desk_drag_icon >= 0 &&
+        desk_drag_icon < desk_icon_count) {
+        desk_icon_t *d = &desk_icons[desk_drag_icon];
+        int ocx = d->cell_x;
+        int ocy = d->cell_y;
+        int ncx;
+        int ncy;
+        desk_snap_cell(mx, my, &ncx, &ncy);
+        /* Erase the vacated cell first: painting only the destination
+         * leaves a ghost behind (caught live on first drag test). */
+        desk_erase_rect(DESK_GRID_X0 + ocx * DESK_CELL_W,
+                        DESK_GRID_Y0 + ocy * DESK_CELL_H,
+                        DESK_CELL_W, DESK_CELL_H + 8);
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *o = &desk_icons[i];
+            if (i != desk_drag_icon && o->pinned &&
+                o->cell_x == ncx && o->cell_y == ncy) {
+                o->cell_x = ocx;
+                o->cell_y = ocy;
+                desk_paint_cell(o);
+            }
+        }
+        d->cell_x = ncx;
+        d->cell_y = ncy;
+        desk_paint_cell(d);
+    } else if (rubber_active) {
+        int x0 = rubber_x0 < rubber_x1 ? rubber_x0 : rubber_x1;
+        int y0 = rubber_y0 < rubber_y1 ? rubber_y0 : rubber_y1;
+        int x1 = rubber_x0 < rubber_x1 ? rubber_x1 : rubber_x0;
+        int y1 = rubber_y0 < rubber_y1 ? rubber_y1 : rubber_y0;
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *d = &desk_icons[i];
+            int sel = 0;
+            if (d->pinned) {
+                sel = desk_rects_overlap(
+                    desk_icon_x(d), desk_icon_y(d), DESK_HIT_W, DESK_HIT_H,
+                    x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+            }
+            if (d->selected != sel) {
+                d->selected = sel;
+                desk_paint_cell(d);
+            }
+        }
+        desk_last_click_icon = -1;
+    }
+    desk_drag_icon = -1;
+    desk_dragging = 0;
+    desk_press_desktop = 0;
+    rubber_armed = 0;
+    rubber_active = 0;
+    mark_dirty_full();
+}
+
+static int desk_hit(int idx, int mx, int my) {
+    desk_icon_t *d;
+    if (idx < 0 || idx >= desk_icon_count) return 0;
+    d = &desk_icons[idx];
+    if (!d->pinned) return 0;
+    return ic_hit_rect(mx, my, (ic_rect_t){desk_icon_x(d), desk_icon_y(d),
+                                           DESK_HIT_W, DESK_HIT_H});
+}
+
+/* Paint wallpaper (base gradient + aurora glows + vignette) over a
+ * rectangle of the desktop layer. Full-screen builds and partial
+ * cell/erase repaints share it, so partial repaints never leave flat
+ * marks on the aurora (1.4.1). fw/fh are the full layer dimensions
+ * (glow/vignette geometry is screen-relative); the canvas must span
+ * fw wide. */
+static void paint_wallpaper_rect(ic_canvas_t *c, int fw, int fh,
+                                 int rx, int ry, int rw, int rh) {
+    static const struct { int cx100, cy100, rad, r, g, b, amt; } glows[] = {
+        { 22, 30, 340,  56, 189, 248, 70 },   /* electric blue, upper left */
+        { 78, 62, 420,  45, 212, 191, 52 },   /* teal, lower right */
+        { 62, 22, 300, 167, 139, 250, 40 },   /* violet, upper right */
+    };
+    int x, y;
+    unsigned gi;
+
+    if (!c || !c->px || fw <= 0 || fh <= 0) return;
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > fw) rw = fw - rx;
+    if (ry + rh > fh) rh = fh - ry;
+    if (rw <= 0 || rh <= 0) return;
+
+    for (y = ry; y < ry + rh; y++) {
+        ic_rect(c, rx, y, rw, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, fh));
+    }
+    for (gi = 0; gi < sizeof(glows) / sizeof(glows[0]); gi++) {
+        int gx = fw * glows[gi].cx100 / 100;
+        int gy = fh * glows[gi].cy100 / 100;
+        int gr = glows[gi].rad;
+        int gy0 = gy - gr < ry ? ry : gy - gr;
+        int gy1 = gy + gr > ry + rh ? ry + rh : gy + gr;
+        int gx0 = gx - gr < rx ? rx : gx - gr;
+        int gx1 = gx + gr > rx + rw ? rx + rw : gx + gr;
+        for (y = gy0; y < gy1; y++) {
+            for (x = gx0; x < gx1; x++) {
+                int dx = x - gx, dy = y - gy;
+                long d2 = (long)dx * dx + (long)dy * dy;
+                long r2 = (long)gr * gr;
+                if (d2 < r2) {
+                    long k = (r2 - d2) * 256 / r2;
+                    long a = k * k / 256 * (long)glows[gi].amt / 256;
+                    uint32_t dst = c->px[y * fw + x];
+                    c->px[y * fw + x] = ic_blend(
+                        dst,
+                        ((uint32_t)glows[gi].r << 16) |
+                        ((uint32_t)glows[gi].g << 8) |
+                        (uint32_t)glows[gi].b,
+                        (int)a, 256);
+                }
+            }
+        }
+    }
+    for (y = ry; y < ry + rh; y++) {
+        long ny = (long)(2 * y - fh);
+        for (x = rx; x < rx + rw; x += 2) {
+            long nx = (long)(2 * x - fw);
+            long q = (nx * nx) / ((long)fw * fw) + (ny * ny) / ((long)fh * fh);
+            long a = q * 23 > 46 ? 46 : q * 23;
+            if (a > 0) {
+                for (int k = 0; k < 2 && x + k < rx + rw; k++) {
+                    uint32_t dst = c->px[y * fw + x + k];
+                    c->px[y * fw + x + k] = ic_blend(dst, 0x00000000, (int)a, 256);
+                }
+            }
+        }
+    }
+}
+
+/* Repaint the wallpaper gradient over a raw rectangle (used to erase
+ * a vacated icon cell). */
+static void desk_erase_rect(int x, int y, int w, int h) {
+    int fw = (int)fb_info.width;
+    int fh = (int)fb_info.height;
+    ic_canvas_t c;
+
+    if (fw <= 0 || fh <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > fw) w = fw - x;
+    if (y + h > fh) y = fh - y;
+    if (w <= 0 || h <= 0) return;
+    c = layer_canvas(fw, fh);
+    paint_wallpaper_rect(&c, fw, fh, x, y, w, h);
+    mark_dirty(x - 2, y - 2, w + 4, h + 4);
+}
+
+/* Repaint one icon cell of the wallpaper layer (selection changes,
+ * moves) and mark it dirty. Dimensions come from BSS fb_info, never
+ * from parameters. */
+static void desk_paint_cell(desk_icon_t *d) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int x = desk_icon_x(d);
+    int y = desk_icon_y(d);
+    ic_canvas_t c;
+    const ic_icon_t *icon;
+
+    if (w <= 0 || h <= 0) return;
+    if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
+    if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
+    c = layer_canvas(w, h);
+    paint_wallpaper_rect(&c, w, h, x, y, DESK_CELL_W, DESK_CELL_H + 8);
+    if (!d->pinned) {
+        mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
+        return;
+    }
+    icon = ic_icon_builtin(d->icon);
+    if (d->selected) {
+        ic_rect_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0023344D);
+        ic_outline_r(&c, x, y, DESK_HIT_W, DESK_HIT_H + 8, 8, 0x0038BDF8);
+    }
+    if (icon) {
+        ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
+    }
+    /* Floating label: shadow pass then face, no bg box (the box was a
+     * flat-gradient patch on the aurora). */
+    ic_text_font(&c, x + 5, y + 59, d->label, 0x000F172A, 0, 66, NULL, 0);
+    ic_text_font(&c, x + 4, y + 58, d->label, 0x00FFFFFF, 0, 66, NULL, 0);
+    mark_dirty(x - 4, y - 4, DESK_CELL_W + 8, DESK_CELL_H + 16);
+}
+
 static void draw_desktop_icon_layer(int w, int h, int x, int y,
                                     const char *label, const char *icon_name) {
     ic_canvas_t c = layer_canvas(w, h);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    uint32_t label_bg = ic_blend(WALL_TOP, WALL_BOTTOM, y + 60, h);
     if (icon) {
-        ic_icon_draw(&c, x + 13, y + 8, 48, 48, icon);
+        ic_icon_draw(&c, x + 21, y + 16, 32, 32, icon);
     }
-    ic_text_clip(&c, x + 4, y + 60, label, 0x00FFFFFF, label_bg, 66);
+    ic_text_font(&c, x + 5, y + 59, label, 0x000F172A, 0, 66, NULL, 0);
+    ic_text_font(&c, x + 4, y + 58, label, 0x00FFFFFF, 0, 66, NULL, 0);
 }
 
 static void build_desktop_layer(void) {
@@ -406,13 +1435,18 @@ static void build_desktop_layer(void) {
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
     if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
     ic_canvas_t c = layer_canvas(w, h);
-    for (int y = 0; y < h; y++) {
-        ic_rect(&c, 0, y, w, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, h));
+    paint_wallpaper_rect(&c, w, h, 0, 0, w, h);
+    {
+        int i;
+        desk_init_registry();
+        desk_load();
+        for (i = 0; i < desk_icon_count; i++) {
+            desk_icon_t *d = &desk_icons[i];
+            if (!d->pinned) continue;
+            draw_desktop_icon_layer(w, h, desk_icon_x(d), desk_icon_y(d),
+                                    d->label, d->icon);
+        }
     }
-    draw_desktop_icon_layer(w, h, 22, 64, "Explorer", "folder");
-    draw_desktop_icon_layer(w, h, 22, 154, "Terminal", "terminal");
-    draw_desktop_icon_layer(w, h, 22, 244, "Music", "music");
-    draw_desktop_icon_layer(w, h, 22, 334, "Browser", "app");
 }
 
 static void draw_start_button(int w, int h, int active) {
@@ -424,7 +1458,7 @@ static void draw_start_button(int w, int h, int active) {
     ic_rect_r(&c, 6, y, 94, 30, IC_RADIUS_BUTTON, fill);
     if (!active) ic_outline_r(&c, 6,y,94,30,IC_RADIUS_BUTTON,0x00334155);
     if (icon) ic_icon_draw(&c, 12, y + 4, 22, 22, icon);
-    ic_text(&c, 40, y + 7, "Start", fg, fill);
+    ic_text_font(&c, 40, y + 6, "Start", fg, fill, 52, NULL, 0);
 }
 
 static const char *window_icon_name(const char *title) {
@@ -437,6 +1471,7 @@ static const char *window_icon_name(const char *title) {
     if (ic_strprefix(t, "editor") || ic_strprefix(t, "notepad")) return "editor";
     if (ic_strprefix(t, "icda demo")) return "app";
     if (ic_strprefix(t, "icda browser")) return "app";
+    if (ic_strprefix(t, "setting")) return "gear";
     return "app";
 }
 
@@ -445,8 +1480,13 @@ static void draw_taskbar(int w, int h) {
     int y = h - TASKBAR_H;
     int tx = 112;
     icda_audio_info_t audio;
-    ic_rect(&c, 0, y, w, TASKBAR_H, theme->taskbar_top);
-    ic_hline(&c, 0, y, w, 0x00334155);
+    /* Fake glass: vertical gradient (8% lighter at top) + highlight line. */
+    for (int yy = 0; yy < TASKBAR_H; yy++) {
+        ic_rect(&c, 0, y + yy, w, 1,
+                ic_blend(ic_blend(theme->taskbar_bottom, 0x00F1F5F9, 1, 12),
+                         theme->taskbar_bottom, yy, TASKBAR_H));
+    }
+    ic_hline(&c, 0, y, w, 0x003F4C63);
     draw_start_button(w, h, start_menu_open);
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
@@ -462,14 +1502,14 @@ static void draw_taskbar(int w, int h) {
             if (focused) ic_rect(&c, tx+16, y+30, 104, 2, 0x00FFFFFF);
             icon = ic_icon_builtin(window_icon_name(win->title));
             if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
-            ic_text_clip(&c, tx + 30, y + 13, win->title, fg, fill, 100);
+            ic_text_font(&c, tx + 30, y + 11, win->title, fg, fill, 100, NULL, 0);
             if (win->minimized) ic_rect(&c, tx + 122, y + 26, 8, 2, fg);
         }
         tx += 142;
     }
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        ic_text_clip(&c, w - 176, y + 14, "Audio:", 0x0094A3B8, theme->taskbar_top, 56);
-        ic_text_clip(&c, w - 120, y + 14, audio.name, 0x00F1F5F9, theme->taskbar_top, 104);
+        ic_text_font(&c, w - 176, y + 12, "Audio:", 0x0094A3B8, theme->taskbar_top, 56, NULL, 0);
+        ic_text_font(&c, w - 120, y + 12, audio.name, 0x00F1F5F9, theme->taskbar_top, 104, NULL, 0);
     } else {
         char clk[16];
         uint64_t t = icda_ticks();
@@ -485,7 +1525,7 @@ static void draw_taskbar(int w, int h) {
         ic_strcat(clk,":",sizeof(clk));
         if (mins<10) ic_strcat(clk,"0",sizeof(clk));
         ic_strcat(clk,mbuf,sizeof(clk));
-        ic_text_clip(&c, w - 68, y+14, clk, 0x00F1F5F9, theme->taskbar_top, 48);
+        ic_text_font(&c, w - 68, y + 12, clk, 0x00F1F5F9, theme->taskbar_top, 48, NULL, 0);
         ic_rect_r(&c, w-108, y+18, 4,4,2, 0x0038BDF8);
         ic_rect_r(&c, w-100, y+18, 4,4,2, 0x0094A3B8);
         ic_rect_r(&c, w-92, y+18, 4,4,2, 0x00475569);
@@ -500,13 +1540,14 @@ static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
     uint32_t fg = hover ? theme->text_on_accent : 0x00F1F5F9;
     ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
     if (icon) ic_icon_draw(&c, x + 6, y + 4, 22, 22, icon);
-    ic_text(&c, x + 34, y + 7, label, fg, fill);
+    ic_text_font(&c, x + 34, y + 6, label, fg, fill, 180, NULL, 0);
 }
 
-/* Start menu layout: apps at the top, system actions (task manager +
- * power) pinned at the bottom under a divider - the modern pattern. */
+/* Start menu layout: apps at the top, system actions (settings +
+ * task manager + power) pinned at the bottom under a divider - the
+ * modern pattern. */
 #define START_MENU_W 270
-#define START_MENU_H 384
+#define START_MENU_H 416
 #define START_ROW_H 30
 #define START_ROW_GAP 32
 
@@ -515,10 +1556,9 @@ static void draw_start_menu(int w, int h, int mx, int my) {
     int x = 6;
     int y = h - TASKBAR_H - START_MENU_H;
     if (!start_menu_open) return;
-    ic_draw_shadow(&c, x, y, START_MENU_W, START_MENU_H, 8, IC_SHADOW_COLOR);
     ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x001E293B);
     ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x00334155);
-    ic_text(&c, x + 16, y + 13, "ICDA Desktop", 0x00F1F5F9, 0x001E293B);
+    ic_text_font(&c, x + 16, y + 11, "ICDA Desktop", 0x00F1F5F9, 0x001E293B, 200, NULL, 0);
     ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, 0x00334155);
 
     draw_start_row(w, h, x + 12, y + 56, 246, START_ROW_H, "folder", "Explorer",
@@ -531,15 +1571,17 @@ static void draw_start_menu(int w, int h, int mx, int my) {
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 152, 246, START_ROW_H}));
     draw_start_row(w, h, x + 12, y + 184, 246, START_ROW_H, "app", "Browser",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 184, 246, START_ROW_H}));
+    draw_start_row(w, h, x + 12, y + 216, 246, START_ROW_H, "gear", "Settings",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 216, 246, START_ROW_H}));
 
     /* System section */
-    ic_hline(&c, x + 12, y + 224, START_MENU_W - 24, 0x003C4043);
-    draw_start_row(w, h, x + 12, y + 232, 246, START_ROW_H, "gear", "Task Manager",
-                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 232, 246, START_ROW_H}));
-    draw_start_row(w, h, x + 12, y + 264, 246, START_ROW_H, "gear", "Shutdown",
+    ic_hline(&c, x + 12, y + 256, START_MENU_W - 24, 0x003C4043);
+    draw_start_row(w, h, x + 12, y + 264, 246, START_ROW_H, "gear", "Task Manager",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, START_ROW_H}));
-    draw_start_row(w, h, x + 12, y + 296, 246, START_ROW_H, "gear", "Restart",
+    draw_start_row(w, h, x + 12, y + 296, 246, START_ROW_H, "gear", "Shutdown",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, START_ROW_H}));
+    draw_start_row(w, h, x + 12, y + 328, 246, START_ROW_H, "gear", "Restart",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 328, 246, START_ROW_H}));
 }
 
 /* ---- focus notifications ------------------------------------------------- */
@@ -610,7 +1652,8 @@ static void focus_top_visible(void) {
     int found = -1;
     for (int i = num_windows - 1; i >= 0; i--) {
         int idx = z_order[i];
-        if (windows[idx].valid && !windows[idx].minimized) {
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        if (windows[idx].valid && !windows[idx].minimized && !windows[idx].closing) {
             found = idx;
             break;
         }
@@ -663,6 +1706,45 @@ static void send_close_to_app(wm_window_t *win) {
     if (icda_msg_poll(win->app_queue_handle) > 32) return;
     icda_msg_send(win->app_queue_handle, &close_msg);
 }
+
+/* Slice B close fade: WM-driven, no app roundtrip. Marks the window
+ * closing and runs a fade-out over IC_ANIM_MAX ticks (the anim loop
+ * marks it dirty each tick); the main loop finalizes (shm unmap +
+ * remove) once anim completes, even if the app never responds.
+ * Slice C: with animations off the fade is skipped (anim starts at
+ * MAX) so the finalizer removes the window on the next pass. */
+static void start_close_fade(wm_window_t *win) {
+    if (!win || !win->valid || win->closing) return;
+    win->closing = 1;
+    win->anim_kind = WM_ANIM_CLOSE;
+    win->anim = wm_settings.animations ? 0 : IC_ANIM_MAX;
+    win->anim_from_x = win->x;
+    win->anim_from_y = win->y;
+    win->anim_from_w = win->w;
+    win->anim_from_h = win->h;
+    win->anim_to_x = win->x;
+    win->anim_to_y = win->y;
+    win->anim_to_w = win->w;
+    win->anim_to_h = win->h;
+    mark_dirty_win(win);
+}
+
+/* Finalize a close fade that has run to completion. Unmaps/closes the
+ * shm buffer and removes the window from z-order. Safe to call once. */
+static void finish_close_fade(int slot) {
+    wm_window_t *win;
+    if (slot < 0 || slot >= MAX_WINDOWS) return;
+    win = &windows[slot];
+    if (!win->valid) return;
+    mark_dirty_win(win);
+    icda_shm_unmap(win->shm_handle);
+    icda_shm_close(win->shm_handle);
+    win->valid = 0;
+    win->closing = 0;
+    win->anim_kind = WM_ANIM_NONE;
+    win->anim = 0;
+    remove_window(slot);
+}
 static int send_maybe(uint64_t q, gui_msg_t *m){
     if (icda_msg_poll(q) > 32) return -1;
     return icda_msg_send(q, m);
@@ -679,11 +1761,34 @@ static void clamp_window(wm_window_t *win, int w, int h) {
 
 /* Start a window geometry animation.  The window's current position/size
  * is the "from" rect; the target is the "to" rect.  The compositor
- * interpolates between them over IC_ANIM_MAX ticks. */
+ * interpolates between them over IC_ANIM_MAX ticks.
+ * Slice C: with animations off this snaps to the target rect instantly
+ * (no animation state), covering OPEN/MINIMIZE/RESTORE/MAXIMIZE/
+ * UNMAXIMIZE through the one choke point. */
 static void start_anim(wm_window_t *win, int kind,
                        int from_x, int from_y, int from_w, int from_h,
                        int to_x, int to_y, int to_w, int to_h) {
     if (!win || !win->valid) return;
+    if (!wm_settings.animations) {
+        /* MINIMIZE must not touch the geometry: the window is only
+         * hidden (minimized=1 by the caller) and RESTORE animates
+         * back from the taskbar to these same coordinates. */
+        if (kind != WM_ANIM_MINIMIZE) {
+            win->x = to_x;
+            win->y = to_y;
+            win->w = to_w;
+            win->h = to_h;
+        }
+        (void)kind;
+        (void)from_x;
+        (void)from_y;
+        (void)from_w;
+        (void)from_h;
+        win->anim_kind = WM_ANIM_NONE;
+        win->anim = 0;
+        mark_dirty_win(win);
+        return;
+    }
     win->anim_kind = kind;
     win->anim_from_x = from_x;
     win->anim_from_y = from_y;
@@ -815,6 +1920,7 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, int w, int h
                     win->y = 78 + (slot * 32) % range_y;
                     win->minimized = 0;
                     win->maximized = 0;
+                    win->closing = 0;
                     win->anim = 0;
                     win->anim_kind = WM_ANIM_NONE;
                     win->restore_x = win->x;
@@ -843,7 +1949,23 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, int w, int h
                     reply.open_ok.reply_queue = wm_queue;
                     icda_msg_send(win->app_queue_handle, &reply);
 
-                    mark_dirty_win(win);
+                    /* Slice B open animation: scale-up + fade-in over
+                     * IC_ANIM_MAX frames. From = 3/4-size rect centered
+                     * on the target; composite_window interpolates
+                     * geometry and brightens from dim to full. */
+                    {
+                        int from_w = win_w * 3 / 4;
+                        int from_h = win_h * 3 / 4;
+                        int from_x;
+                        int from_y;
+                        if (from_w < 1) from_w = 1;
+                        if (from_h < 1) from_h = 1;
+                        from_x = win->x + (win_w - from_w) / 2;
+                        from_y = win->y + (win_h - from_h) / 2;
+                        start_anim(win, WM_ANIM_OPEN,
+                                   from_x, from_y, from_w, from_h,
+                                   win->x, win->y, win_w, win_h);
+                    }
 
                     /* Notify focus only after the open handshake completes:
                      * the app is blocked in recv() waiting for OPEN_OK, so a
@@ -869,7 +1991,9 @@ static int handle_taskbar_click(int mx, int my, int w, int h) {
     }
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
-        if (windows[idx].valid && ic_hit_rect(mx, my, (ic_rect_t){tx, task_y + 7, 136, 28})) {
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        if (windows[idx].valid && !windows[idx].closing &&
+            ic_hit_rect(mx, my, (ic_rect_t){tx, task_y + 7, 136, 28})) {
             if (focused_window_idx == idx && !windows[idx].minimized) {
                 animate_minimize(&windows[idx], w, h);
                 windows[idx].minimized = 1;
@@ -906,31 +2030,79 @@ static int handle_start_menu_click(int mx, int my, int w, int h) {
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 120, 246, 30})) icda_spawn("/apps/diskman.app");
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 152, 246, 30})) icda_spawn("/apps/audioplay.app");
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 184, 246, 30})) icda_spawn("/apps/browser.app");
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 232, 246, 30})) icda_spawn("/apps/taskman.app");
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, 30})) icda_power(0);
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, 30})) icda_power(1);
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 216, 246, 30})) icda_spawn("/apps/settings.app");
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, 30})) icda_spawn("/apps/taskman.app");
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, 30})) {
+        start_menu_open = 0;
+        mark_dirty(x, y, START_MENU_W, START_MENU_H);
+        wm_power_sequence(0, w, h);
+        return 1;
+    } else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 328, 246, 30})) {
+        start_menu_open = 0;
+        mark_dirty(x, y, START_MENU_W, START_MENU_H);
+        wm_power_sequence(1, w, h);
+        return 1;
+    }
     start_menu_open = 0;
     mark_dirty(x, y, START_MENU_W, START_MENU_H);
     return 1;
 }
 
+/* Left-click on the desktop: select the icon under the cursor
+ * (exclusively), double-click opens it. Clicking empty space clears
+ * the selection. Returns 1 when an icon was hit (handled). */
 static int handle_desktop_icon_click(int mx, int my) {
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 64, 74, 74})) {
-        icda_spawn("/apps/desktop.app");
-        return 1;
+    int i;
+    int j;
+
+    for (i = 0; i < desk_icon_count; i++) {
+        if (desk_hit(i, mx, my)) {
+            uint64_t now = icda_ticks();
+            for (j = 0; j < desk_icon_count; j++) {
+                int sel = (j == i);
+                if (desk_icons[j].selected != sel) {
+                    desk_icons[j].selected = sel;
+                    desk_paint_cell(&desk_icons[j]);
+                }
+            }
+            if (desk_last_click_icon == i &&
+                now - desk_last_click_tick < DESK_DBLCLICK_TICKS) {
+                desk_last_click_icon = -1;
+                icda_spawn(desk_icons[i].path);
+            } else {
+                desk_last_click_icon = i;
+                desk_last_click_tick = now;
+            }
+            /* Arm a potential icon drag (3b); motion past the
+             * threshold converts it, release without motion keeps
+             * the click behavior above. */
+            desk_drag_icon = i;
+            desk_dragging = 0;
+            desk_press_x = mx;
+            desk_press_y = my;
+            desk_grab_dx = mx - desk_icon_x(&desk_icons[i]);
+            desk_grab_dy = my - desk_icon_y(&desk_icons[i]);
+            desk_press_desktop = 1;
+            rubber_armed = 0;
+            rubber_active = 0;
+            return 1;
+        }
     }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 154, 74, 74})) {
-        icda_spawn("/apps/terminal.app");
-        return 1;
+    for (j = 0; j < desk_icon_count; j++) {
+        if (desk_icons[j].selected) {
+            desk_icons[j].selected = 0;
+            desk_paint_cell(&desk_icons[j]);
+        }
     }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 244, 74, 74})) {
-        icda_spawn("/apps/audioplay.app");
-        return 1;
-    }
-    if (ic_hit_rect(mx, my, (ic_rect_t){22, 334, 74, 74})) {
-        icda_spawn("/apps/browser.app");
-        return 1;
-    }
+    desk_last_click_icon = -1;
+    /* Arm a potential rubber-band (3b) on empty desktop. */
+    desk_drag_icon = -1;
+    desk_dragging = 0;
+    desk_press_x = mx;
+    desk_press_y = my;
+    desk_press_desktop = 1;
+    rubber_armed = 1;
+    rubber_active = 0;
     return 0;
 }
 
@@ -943,7 +2115,15 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     int cw;
     int ch;
 
-    if (!win->valid || win->minimized) return;
+    if (!win || !win->valid) return;
+    /* Minimized windows are skipped, except a closing fade which must
+     * still tick to completion (WM-driven, no app roundtrip). */
+    if (win->minimized) {
+        if (win->anim_kind == WM_ANIM_CLOSE && win->anim < IC_ANIM_MAX) {
+            win->anim++;
+        }
+        return;
+    }
     active = focused_window_idx == idx;
 
     anim = win->anim;
@@ -987,8 +2167,64 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     }
 
     /* client pixels.  Unfocused windows are dimmed so the active one
-     * reads as the foreground (the same depth cue Windows/Linux use). */
-    if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+     * reads as the foreground (the same depth cue Windows/Linux use).
+     * Slice B: OPEN fades dim->full (scale-up + fade-in) and CLOSE
+     * fades full->black (fade-out), both WM-driven over IC_ANIM_MAX. */
+    if (win->anim_kind == WM_ANIM_OPEN && win->anim < IC_ANIM_MAX) {
+        int pct = DIM_NUM + (100 - DIM_NUM) * (anim + 1) / IC_ANIM_MAX;
+        if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+            for (int cy = 0; cy < ch; cy++) {
+                copy_pixels_fade(back_buffer + (wy + cy) * w + wx,
+                                 win->pixels + cy * win->w, cw, pct, 100);
+            }
+        } else {
+            for (int cy = 0; cy < ch; cy++) {
+                int py = wy + cy;
+                if (py < 0 || py >= h) continue;
+                for (int cx = 0; cx < cw; cx++) {
+                    int px = wx + cx;
+                    uint32_t src;
+                    uint32_t r;
+                    uint32_t g;
+                    uint32_t b;
+                    if (px < 0 || px >= w) continue;
+                    if (cy >= win->h || cx >= win->w) continue;
+                    src = win->pixels[cy * win->w + cx];
+                    r = ((src >> 16) & 0xFF) * (uint32_t)pct / 100U;
+                    g = ((src >> 8) & 0xFF) * (uint32_t)pct / 100U;
+                    b = (src & 0xFF) * (uint32_t)pct / 100U;
+                    back_buffer[py * w + px] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    } else if (win->anim_kind == WM_ANIM_CLOSE) {
+        int pct = 100 * (IC_ANIM_MAX - anim) / IC_ANIM_MAX;
+        if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+            for (int cy = 0; cy < ch; cy++) {
+                copy_pixels_fade(back_buffer + (wy + cy) * w + wx,
+                                 win->pixels + cy * win->w, cw, pct, 100);
+            }
+        } else {
+            for (int cy = 0; cy < ch; cy++) {
+                int py = wy + cy;
+                if (py < 0 || py >= h) continue;
+                for (int cx = 0; cx < cw; cx++) {
+                    int px = wx + cx;
+                    uint32_t src;
+                    uint32_t r;
+                    uint32_t g;
+                    uint32_t b;
+                    if (px < 0 || px >= w) continue;
+                    if (cy >= win->h || cx >= win->w) continue;
+                    src = win->pixels[cy * win->w + cx];
+                    r = ((src >> 16) & 0xFF) * (uint32_t)pct / 100U;
+                    g = ((src >> 8) & 0xFF) * (uint32_t)pct / 100U;
+                    b = (src & 0xFF) * (uint32_t)pct / 100U;
+                    back_buffer[py * w + px] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    } else if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
         /* Fully visible window: tight row copies instead of per-pixel
          * bounds checks - the hot path when windows sit on screen. */
         if (active) {
@@ -1024,9 +2260,15 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     }
 
     /* Advance the animation.  When it completes, snap the window to the
-     * target rect and clear the animation state. */
+     * target rect and clear the animation state. CLOSE is the exception:
+     * it holds at MAX so the main loop can finalize (shm unmap +
+     * remove) WM-side, even if the app never answers. */
     if (win->anim_kind != WM_ANIM_NONE) {
-        if (win->anim >= IC_ANIM_MAX) {
+        if (win->anim_kind == WM_ANIM_CLOSE) {
+            if (win->anim < IC_ANIM_MAX) {
+                win->anim++;
+            }
+        } else if (win->anim >= IC_ANIM_MAX) {
             win->x = win->anim_to_x;
             win->y = win->anim_to_y;
             win->w = win->anim_to_w;
@@ -1044,35 +2286,94 @@ static uint32_t fb_pitch_pixels(void) {
     return fb_info.pitch ? fb_info.pitch / 4 : (uint32_t)fb_info.width;
 }
 
-/* Write one pixel to the real framebuffer in its native format.  32bpp is
- * the fast path (real GPUs); 24bpp is what GRUB/QEMU hand out in
- * fallback modes - the scene buffer is 32bpp ARGB, so blitting it as-is
- * would both mangle colors and, worse, walk past the end of the mapped
- * region (pitch 2400 vs 3200 bytes/row). */
-static void fb_write_px(int x, int y, uint32_t color) {
-    /* Hard-clamp against the kernel-reported mapping (BSS state, never
-     * disturbed); a garbage coordinate here writes past the mapping and
-     * panics the kernel. */
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x >= (int)fb_info.width) x = (int)fb_info.width - 1;
-    if (y >= (int)fb_info.height) y = (int)fb_info.height - 1;
-    if (fb_info.bpp == 32) {
-        real_fb[y * fb_pitch_pixels() + x] = color;
-    } else {
-        uint8_t *p = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch + (uint64_t)x * 3;
-        p[0] = (uint8_t)(color >> 16);
-        p[1] = (uint8_t)(color >> 8);
-        p[2] = (uint8_t)color;
+/* ---- F12 debug overlay -------------------------------------------------
+ * Draws an opaque info box at top-left showing framebuffer dimensions,
+ * present mode, composite count, max frame ticks, and mouse events.
+ * Zero cost when wm_debug_overlay is off (guarded by the static flag). */
+#define DEBUG_BOX_W 328
+#define DEBUG_BOX_H 86
+
+static void draw_debug_overlay(int w, int h) {
+    ic_canvas_t c;
+    int bx, by;
+    char line[64];
+    int pos;
+    const char *s;
+    int i;
+
+    if (!wm_debug_overlay) return;
+    if (w <= 0 || h <= 0) return;
+
+    c = bb_canvas(w, h);
+    bx = 8;
+    by = 8;
+
+    /* Opaque dark box */
+    ic_rect_r(&c, bx, by, DEBUG_BOX_W, DEBUG_BOX_H, 6, 0x00101820);
+    ic_outline_r(&c, bx, by, DEBUG_BOX_W, DEBUG_BOX_H, 6, 0x0038BDF8);
+
+    /* Line 1: fb WxH @ bpp */
+    pos = 0;
+    line[pos++] = 'f'; line[pos++] = 'b'; line[pos++] = ' ';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.width, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 'x';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.height, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = ' '; line[pos++] = '@'; line[pos++] = ' ';
+    { char tmp[8]; ic_uint_to_str((unsigned)fb_info.bpp, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 60; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 'b'; line[pos++] = 'p'; line[pos++] = 'p'; line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 8, line, 0x00F1F5F9, 0x00101820);
+
+    /* Line 2: present mode from gpu_info */
+    pos = 0;
+    s = gpu_info.flip_active ? "flip" : (gpu_info.needs_present ? "present" : "fbdev");
+    line[pos++] = 'p'; line[pos++] = 'r'; line[pos++] = 'e'; line[pos++] = 's';
+    line[pos++] = 'e'; line[pos++] = 'n'; line[pos++] = 't'; line[pos++] = ' ';
+    line[pos++] = '='; line[pos++] = ' ';
+    while (*s && pos < 60) line[pos++] = *s++;
+    if (gpu_info.present_supported) {
+        line[pos++] = ' '; line[pos++] = '(';
+        line[pos++] = 'o'; line[pos++] = 'k'; line[pos++] = ')';
     }
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 22, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 3: composite count + max frame ticks */
+    pos = 0;
+    line[pos++] = 'f'; line[pos++] = 'r'; line[pos++] = 'a'; line[pos++] = 'm';
+    line[pos++] = 'e'; line[pos++] = 's'; line[pos++] = ' ';
+    line[pos++] = '='; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_composite_count, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos++] = ' '; line[pos++] = 'm'; line[pos++] = 'a'; line[pos++] = 'x'; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_max_frame_ticks, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos++] = 't'; line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 36, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 4: mouse events */
+    pos = 0;
+    line[pos++] = 'm'; line[pos++] = 'o'; line[pos++] = 'u'; line[pos++] = 's';
+    line[pos++] = 'e'; line[pos++] = ' '; line[pos++] = '='; line[pos++] = ' ';
+    { char tmp[20]; ic_uint_to_str(wm_diag_mouse_events, tmp, sizeof(tmp)); for (i = 0; tmp[i] && pos < 58; i++) line[pos++] = tmp[i]; }
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 50, line, 0x0094A3B8, 0x00101820);
+
+    /* Line 5: WM version */
+    pos = 0;
+    line[pos++] = 'I'; line[pos++] = 'C'; line[pos++] = 'D'; line[pos++] = 'A'; line[pos++] = ' ';
+    s = IC_VERSION_STRING;
+    while (*s && pos < 58) line[pos++] = *s++;
+    line[pos] = '\0';
+    ic_text(&c, bx + 10, by + 64, line, 0x0038BDF8, 0x00101820);
 }
 
+/* 24-bit wire order is B,G,R (VBE color masks report red at bit 16,
+ * i.e. blue in byte 0). Writing R,G,B shows the whole desktop R/B
+ * swapped; 32-bit blits are unaffected (native uint32 order). */
 static void blit_row_24(uint8_t *dst, const uint32_t *src, int count) {
     for (int i = 0; i < count; i++) {
         uint32_t c = src[i];
-        dst[i * 3 + 0] = (uint8_t)(c >> 16);
+        dst[i * 3 + 0] = (uint8_t)c;
         dst[i * 3 + 1] = (uint8_t)(c >> 8);
-        dst[i * 3 + 2] = (uint8_t)c;
+        dst[i * 3 + 2] = (uint8_t)(c >> 16);
     }
 }
 
@@ -1100,46 +2401,65 @@ static void blit_to_screen(int w, int h) {
     }
 }
 
-/* Restore the cursor area of the real framebuffer from the scene buffer.
- * Called before any full/dirty composite so a stale cursor from the
- * previous frame cannot ghost on screen when the cursor sits outside
- * the damaged rectangles. */
-static void restore_cursor_area(int mx, int my) {
+/* Slice B shutdown/reboot UX: fullscreen fade-to-black overlay with
+ * "Shutting down..." / "Restarting..." text, ~700ms (7 frames x 10
+ * ticks), then the power call. Best-effort present each frame; if the
+ * power syscall returns (it should not), fall through to the caller.
+ * Slice C: boot_anim off skips the fade (instant power call). This is
+ * the WM-owned transition animation; the kernel boot splash runs
+ * pre-VFS so it cannot honor the setting yet (see note at
+ * wm_settings). Present honors the vsync flag. */
+static void wm_power_sequence(int action, int w, int h) {
+    const char *msg = action == 1 ? "Restarting..." : "Shutting down...";
     int sw = (int)fb_info.width;
     int sh = (int)fb_info.height;
-    int cw, ch, x0, y0, x1, y1;
+    int steps = 7;
+    int s;
 
-    if (sw <= 0 || sh <= 0) return;
-    cursor_dims(&cw, &ch);
-    if (mx < 0) mx = 0; else if (mx >= sw) mx = sw - 1;
-    if (my < 0) my = 0; else if (my >= sh) my = sh - 1;
-
-    x0 = mx;
-    y0 = my;
-    x1 = mx + cw + 2;
-    y1 = my + ch + 2;
-    if (x1 > sw) x1 = sw;
-    if (y1 > sh) y1 = sh;
-    if (x1 <= x0 || y1 <= y0) return;
-
-    if (fb_info.bpp == 32) {
-        uint32_t pitch = fb_pitch_pixels();
-        for (int y = y0; y < y1; y++) {
-            copy_pixels(real_fb + y * pitch + x0, back_buffer + y * sw + x0, x1 - x0);
-        }
-    } else {
-        for (int y = y0; y < y1; y++) {
-            uint8_t *dst = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch;
-            const uint32_t *src = back_buffer + (uint64_t)y * sw;
-            for (int x = x0; x < x1; x++) {
-                uint32_t c = src[x];
-                uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)(c >> 16);
-                p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)c;
-            }
-        }
+    if (sw <= 0 || sh <= 0) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
     }
+    if (sw > BACK_BUFFER_WIDTH) sw = BACK_BUFFER_WIDTH;
+    if (sh > BACK_BUFFER_HEIGHT) sh = BACK_BUFFER_HEIGHT;
+    if (w > 0 && w < sw) sw = w;
+    if (h > 0 && h < sh) sh = h;
+    if (sw < 320 || sh < 240) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
+    }
+    (void)w;
+    (void)h;
+    start_menu_open = 0;
+    if (!wm_settings.boot_anim) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
+    }
+    for (s = 0; s < steps; s++) {
+        ic_canvas_t c = bb_canvas(sw, sh);
+        int total = sw * sh;
+        int tx = sw / 2 - 90;
+        int ty = sh / 2 - 10;
+        if (total < 0 || total > BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT) {
+            break;
+        }
+        /* Fade the current scene toward black (cumulative 3/4 per
+         * frame: ~13% brightness after 7 frames). */
+        for (int i = 0; i < total; i++) {
+            uint32_t col = back_buffer[i];
+            uint32_t r = ((col >> 16) & 0xFF) * 3U / 4U;
+            uint32_t g = ((col >> 8) & 0xFF) * 3U / 4U;
+            uint32_t b = (col & 0xFF) * 3U / 4U;
+            back_buffer[i] = (r << 16) | (g << 8) | b;
+        }
+        if (tx < 8) tx = 8;
+        if (ty < 8) ty = 8;
+        ic_text_font(&c, tx, ty, msg, 0x00F1F5F9, 0x00000000, 300, NULL, 1);
+        blit_to_screen(sw, sh);
+        icda_gpu_present_flags(wm_settings.vsync ? 1ULL : 0ULL);
+        icda_sleep(10);
+    }
+    icda_power(action == 1 ? 1U : 0U);
 }
 
 static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
@@ -1148,9 +2468,8 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     if (w > (int)fb_info.width) w = (int)fb_info.width;
     if (h > (int)fb_info.height) h = (int)fb_info.height;
     if (w <= 0 || h <= 0) return;
-    /* Erase the previous frame's cursor from the real framebuffer before
-     * the full rebuild, or it ghosts on screen. */
-    restore_cursor_area(mouse_x, mouse_y);
+    /* Full rebuild into back_buffer.  No need to erase the old cursor
+     * from real_fb — the single blit below overwrites the entire frame. */
     copy_pixels(back_buffer, desktop_layer, w * h);
     for (int i = 0; i < num_windows; i++) {
         int idx = z_order[i];
@@ -1158,8 +2477,16 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     }
     draw_taskbar(w, h);
     draw_start_menu(w, h, mouse_x, mouse_y);
+    draw_desktop_overlays(0, 0, w, h);
+    /* Debug overlay: opaque box at top-left, drawn after scene
+     * and before cursor (cursor saves/restores over it). */
+    draw_debug_overlay(w, h);
+    /* Draw cursor into back_buffer (saves scene under cursor). */
+    draw_cursor_into_bb(w, h, mouse_x, mouse_y);
+    /* Single blit: scene + cursor → real framebuffer. */
     blit_to_screen(w, h);
-    draw_cursor_at(w, h, mouse_x, mouse_y);
+    /* Restore back_buffer to scene-only (remove cursor pixels). */
+    restore_cursor_scene(w, h, mouse_x, mouse_y);
 }
 
 /* Blit one rectangle of the scene buffer to the real framebuffer. */
@@ -1186,6 +2513,10 @@ static void blit_region(int x, int y, int rw, int rh, int w) {
 static int rect_hit(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
 }
+
+/* Forward declaration (defined below, used by composite_dirty). */
+static void cursor_bbox(int mx, int my, int pmx, int pmy,
+                        int *ox, int *oy, int *ow, int *oh);
 
 /* Rebuild only the damaged rectangles: restore them from the wallpaper
  * layer, redraw the windows/taskbar/menu that intersect them, and blit
@@ -1232,21 +2563,35 @@ static void composite_dirty(int w, int h, int mx, int my, int pmx, int pmy) {
             rect_hit(d->x, d->y, rw, rh, 6, h - TASKBAR_H - START_MENU_H, START_MENU_W, START_MENU_H)) {
             draw_start_menu(w, h, mx, my);
         }
+        /* 3b. Desktop overlays (rubber-band, drag ghost, menus),
+         * clipped to this dirty rect. */
+        draw_desktop_overlays(d->x, d->y, d->x + rw, d->y + rh);
 
         /* 4. Blit the region to the real framebuffer. */
         blit_region(d->x, d->y, rw, rh, w);
     }
 
-    /* Erase the OLD cursor position AFTER dirty-rect blits (which may
-     * have naturally overwritten parts of it) but BEFORE drawing the
-     * new cursor.  This eliminates both ghost cursors and the flash
-     * that occurred when erasing at the top of the function. */
-    restore_cursor_area(pmx, pmy);
-    if (mx != pmx || my != pmy)
-        restore_cursor_area(mx, my);
-
     dirty_count = 0;
-    draw_cursor_at(w, h, mx, my);
+
+    /* Debug overlay: opaque box at top-left, after scene rebuild
+     * and before cursor (zero-cost when off). */
+    if (wm_debug_overlay) {
+        draw_debug_overlay(w, h);
+        blit_region(0, 0, DEBUG_BOX_W, DEBUG_BOX_H, w);
+    }
+
+    /* Draw cursor into back_buffer (saves scene under cursor), then
+     * blit the cursor bbox to real_fb in a single write.  This
+     * replaces the old two-step (restore_cursor_area + draw_cursor_at)
+     * which caused progressive visible writes / flicker on real HW. */
+    draw_cursor_into_bb(w, h, mx, my);
+    {
+        int cx0, cy0, cbw, cbh;
+        cursor_bbox(mx, my, pmx, pmy, &cx0, &cy0, &cbw, &cbh);
+        if (cbw > 0 && cbh > 0)
+            blit_region(cx0, cy0, cbw, cbh, w);
+    }
+    restore_cursor_scene(w, h, mx, my);
 }
 
 /* Mouse moved and nothing else changed: erase the old pointer from the
@@ -1289,25 +2634,96 @@ static void composite_cursor_only(int w, int h, int mx, int my, int pmx, int pmy
     if (y0 + bh > sh) bh = sh - y0;
     if (bw <= 0 || bh <= 0) return;
 
-    if (fb_info.bpp == 32) {
-        uint32_t pitch = fb_pitch_pixels();
-        for (int y = y0; y < y0 + bh; y++) {
-            copy_pixels(real_fb + y * pitch + x0, back_buffer + y * sw + x0, bw);
-        }
-    } else {
-        for (int y = y0; y < y0 + bh; y++) {
-            uint8_t *dst = (uint8_t *)real_fb + (uint64_t)y * fb_info.pitch;
-            const uint32_t *src = back_buffer + (uint64_t)y * sw;
-            for (int x = x0; x < x0 + bw; x++) {
-                uint32_t c = src[x];
-                uint8_t *p = dst + (uint64_t)x * 3;
-                p[0] = (uint8_t)(c >> 16);
-                p[1] = (uint8_t)(c >> 8);
-                p[2] = (uint8_t)c;
+    /* Draw cursor into back_buffer (saves scene under cursor). */
+    draw_cursor_into_bb(sw, sh, mx, my);
+    /* Single blit of the cursor bbox to real framebuffer. */
+    blit_region(x0, y0, bw, bh, sw);
+    /* Restore back_buffer to scene-only. */
+    restore_cursor_scene(sw, sh, mx, my);
+}
+
+/* Right-button press/release edges for client windows. Deliberately
+ * out of line (own stack frame, args by value): the hot mouse-batch
+ * loop below keeps register-tracked coordinates that must not be
+ * disturbed by extra calls inline (see the note at mouse_x). Desktop
+ * background right-clicks are ignored here; step 3 opens menus.
+ * Returns 1 when an event reached a client (caller marks redraw),
+ * -1 on a right-press over the desktop background (step 3: menu),
+ * 0 when no right edge is present. */
+static int handle_right_edge(uint8_t buttons, uint8_t prev_buttons,
+                             int mx, int my) {
+    int right_clicked = (buttons & 2) && !(prev_buttons & 2);
+    int right_released = !(buttons & 2) && (prev_buttons & 2);
+    int i;
+
+    if (!right_clicked && !right_released) {
+        return 0;
+    }
+    /* An open menu/dialog eats a new right PRESS entirely (dismiss).
+     * Releases never dismiss: the press that opened the menu would
+     * otherwise close it again on the way up. */
+    if (right_clicked && (ctx_open || props_open)) {
+        ctx_close();
+        props_close();
+        return 0;
+    }
+    for (i = num_windows - 1; i >= 0; i--) {
+        int idx = z_order[i];
+        wm_window_t *win;
+        ic_window_t iw;
+        gui_msg_t rmsg;
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        win = &windows[idx];
+        if (!win->valid || win->minimized || win->closing) continue;
+        iw.x = win->x;
+        iw.y = win->y;
+        iw.w = win->w;
+        iw.h = win->h;
+        iw.focused = 0;
+        iw.minimized = 0;
+        iw.anim = 0;
+        iw.title = win->title;
+        iw.hover_close = 0;
+        iw.hover_min = 0;
+        iw.hover_max = 0;
+        if (!ic_hit_client(&iw, mx, my)) continue;
+        bring_to_front(idx);
+        clear_msg(&rmsg);
+        rmsg.type = GUI_MSG_MOUSE_EVENT;
+        rmsg.window_id = win->id;
+        rmsg.mouse.x = mx - win->x;
+        rmsg.mouse.y = my - win->y;
+        rmsg.mouse.buttons = buttons;
+        send_maybe(win->app_queue_handle, &rmsg);
+        return 1;
+    }
+    /* Desktop background press: open the context menu (icon menu over
+     * an icon, desktop menu otherwise). Skip the taskbar strip and
+     * leave the start menu alone. */
+    if (right_clicked && !start_menu_open) {
+        int h = (int)fb_info.height;
+        if (my < h - TASKBAR_H) {
+            int icon = -1;
+            for (i = 0; i < desk_icon_count; i++) {
+                if (desk_hit(i, mx, my)) {
+                    icon = i;
+                    break;
+                }
             }
+            if (icon >= 0) {
+                int j;
+                for (j = 0; j < desk_icon_count; j++) {
+                    int sel = (j == icon);
+                    if (desk_icons[j].selected != sel) {
+                        desk_icons[j].selected = sel;
+                        desk_paint_cell(&desk_icons[j]);
+                    }
+                }
+            }
+            ctx_open_at(mx, my, icon);
         }
     }
-    draw_cursor_at(sw, sh, mx, my);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -1334,6 +2750,18 @@ int main(int argc, char **argv) {
     if (!addr) return -1;
     real_fb = (uint32_t*)addr;
 
+    /* Query the GPU device: detect tear-free page flipping. */
+    if (icda_gpu_query(&gpu_info) != 0) {
+        gpu_info.flip_active = 0;
+    }
+    /* WM starts writing to page 1 (the kernel initialises with
+     * CRTC on page 0, Y_OFFSET=0).  After the first present the
+     * two counters stay in lock-step. */
+    wm_flip_page = gpu_info.flip_active ? 1 : 0;
+    /* do_present: virtio-gpu always needs explicit TRANSFER+FLUSH;
+     * fbdev needs it only when flip mode is active. */
+    int do_present = gpu_info.flip_active || gpu_info.needs_present;
+
     w = fb_info.width;
     h = fb_info.height;
     if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
@@ -1348,6 +2776,12 @@ int main(int argc, char **argv) {
 
     mouse_x = w / 2;
     mouse_y = h / 2;
+
+    /* Slice C: system settings (vsync/animations/boot_anim/audio,
+     * all-on by default). Re-read periodically below so the Settings
+     * app applies live without a reboot. */
+    settings_reload();
+    settings_last_reload = icda_ticks();
 
     /* Pre-render the static wallpaper + desktop icons once; every frame
      * is copied out of this layer instead of recomputed.  The layer
@@ -1366,6 +2800,14 @@ int main(int argc, char **argv) {
         for (;;) {
         int need_redraw = 0;
         int mouse_moved = 0;
+        /* Live settings: pick up Settings-app saves (~1s cadence). */
+        {
+            uint64_t tick_now = icda_ticks();
+            if (tick_now - settings_last_reload >= 100) {
+                settings_last_reload = tick_now;
+                settings_reload();
+            }
+        }
         while (icda_msg_poll(wm_queue) > 0) {
             gui_msg_t msg;
             if (icda_msg_recv(wm_queue, &msg, 0) != 0) continue;
@@ -1376,11 +2818,12 @@ int main(int argc, char **argv) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
                     wm_window_t *win = &windows[slot];
-                    mark_dirty_win(win);
-                    icda_shm_unmap(win->shm_handle);
-                    icda_shm_close(win->shm_handle);
-                    win->valid = 0;
-                    remove_window(slot);
+                    /* WM-driven fade-out: start it and finalize after
+                     * IC_ANIM_MAX ticks, even if the app is slow. */
+                    if (!win->closing) {
+                        send_close_to_app(win);
+                        start_close_fade(win);
+                    }
                 }
             } else if (msg.type == GUI_MSG_FLUSH) {
                 int slot = find_window_by_id(msg.window_id);
@@ -1390,24 +2833,30 @@ int main(int argc, char **argv) {
             }
         }
 
+        /* Finalize close fades that ran to completion on a previous
+         * frame (WM-driven: shm unmap + remove even if the app never
+         * answered). Runs before input so a closing window never
+         * receives new events. */
+        for (int ci = 0; ci < MAX_WINDOWS; ci++) {
+            if (windows[ci].valid && windows[ci].closing &&
+                windows[ci].anim_kind == WM_ANIM_CLOSE &&
+                windows[ci].anim >= IC_ANIM_MAX) {
+                finish_close_fade(ci);
+                need_redraw = 1;
+            }
+        }
+
         {
-            /* Drain every queued mouse event in one pass and handle each in
-             * order.  Reading a single event per loop pass let the kernel
-             * ring buffer back up while a frame composited, so the cursor
-             * trailed the hand and kept gliding after the mouse stopped.
-             * Processing the whole batch keeps press/release edges (clicks)
-             * and drags correct while tracking the live position, and only
-             * the final composite runs once the batch is consumed. */
+            /* Drain every queued mouse event in one pass.  Click/release
+             * edges are detected per-event (missed edges = lost clicks);
+             * motion processing (desk_track_motion, client forwarding,
+             * drag compositing) runs ONCE on the final position so N
+             * queued moves cost one composite. */
             icda_mouse_event_t mev;
             while (icda_input_read_mouse(&mev) == 0) {
-                static uint64_t move_cnt = 0;
-                if ((++move_cnt % 50) == 0) {
-                    icda_write("WM mouse move\n");
-                }
-                int prev_mx = mouse_x;
-                int prev_my = mouse_y;
                 uint8_t prev_btn = mouse_buttons;
                 mouse_moved = 1;
+                wm_diag_mouse_events++;
                 mouse_x = mev.abs_x;
                 mouse_y = mev.abs_y;
                 mouse_buttons = mev.buttons;
@@ -1423,9 +2872,27 @@ int main(int argc, char **argv) {
                     if (left_clicked || left_released) {
                         need_redraw = 1;
                     }
+                    /* Right-button edges are handled out of line (see
+                     * handle_right_edge above): the main loop's
+                     * register-tracked coordinates must not be disturbed
+                     * by extra calls inline here. Desktop background
+                     * ignores right-clicks until step 3 (menus). */
+                    {
+                        int rr = handle_right_edge(mouse_buttons, prev_btn,
+                                                   mouse_x, mouse_y);
+                        if (rr == 1) {
+                            need_redraw = 1;
+                        }
+                        /* rr == -1: right-press over the desktop
+                         * background; step 3 opens the context menu. */
+                    }
                     if (left_clicked) {
                         int handled = 0;
-                        if (start_menu_open) handled = handle_start_menu_click(mouse_x, mouse_y, w, h);
+                        /* Open menus/dialogs consume presses first. */
+                        if (ctx_open || props_open) {
+                            handled = ctx_press(mouse_x, mouse_y);
+                        }
+                        if (!handled && start_menu_open) handled = handle_start_menu_click(mouse_x, mouse_y, w, h);
                         if (!handled && mouse_y >= h - TASKBAR_H) handled = handle_taskbar_click(mouse_x, mouse_y, w, h);
 
                         if (!handled) {
@@ -1437,7 +2904,7 @@ int main(int argc, char **argv) {
                                 wm_window_t *win = &windows[idx];
                                 ic_window_t iw;
 
-                                if (!win->valid || win->minimized) continue;
+                                if (!win->valid || win->minimized || win->closing) continue;
                                 iw.x = win->x;
                                 iw.y = win->y;
                                 iw.w = win->w;
@@ -1445,7 +2912,11 @@ int main(int argc, char **argv) {
                                 iw.title = win->title;
 
                                 if (ic_hit_close(&iw, mouse_x, mouse_y)) {
+                                    /* X-button: WM-driven fade-out, no app
+                                     * roundtrip; best-effort notify too. */
                                     send_close_to_app(win);
+                                    start_close_fade(win);
+                                    need_redraw = 1;
                                     hit = idx;
                                     break;
                                 }
@@ -1497,41 +2968,72 @@ int main(int argc, char **argv) {
                         }
                     } else if (left_released) {
                         dragging_win_idx = -1;
-                    } else if (dragging_win_idx != -1) {
-                        need_redraw = 1;
+                        desk_left_release(mouse_x, mouse_y);
+                    }
+                    /* Motion processing (drag, hover, client forwarding)
+                     * is deferred to after the batch — runs once on the
+                     * final position so N queued moves cost one composite. */
+                }
+            }
+
+            /* ---- post-batch motion coalescing ----
+             * desk_track_motion, window drag compositing, and client
+             * motion forwarding run once on the final accumulated
+             * position so N queued moves cost one composite. */
+            if (mouse_moved) {
+                desk_track_motion(mouse_x, mouse_y, mouse_buttons);
+
+                /* Open menus/dialogs need scene repaints so hover
+                 * highlights track the pointer. */
+                if ((ctx_open || props_open) &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    need_redraw = 1;
+                }
+
+                /* Window title drag (coalesced: one composite per tick). */
+                if (dragging_win_idx != -1 &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    if (dragging_win_idx < 0 || dragging_win_idx >= MAX_WINDOWS ||
+                        !windows[dragging_win_idx].valid ||
+                        windows[dragging_win_idx].closing) {
+                        dragging_win_idx = -1;
+                    } else {
                         wm_window_t *win = &windows[dragging_win_idx];
-                        if (mouse_x != prev_mx || mouse_y != prev_my) {
-                            mark_dirty_win(win);
-                            win->x = mouse_x - drag_off_x;
-                            win->y = mouse_y - drag_off_y;
-                            clamp_window(win, w, h);
-                            mark_dirty_win(win);
-                        }
-                    } else if (focused_window_idx != -1 && (mouse_x != prev_mx || mouse_y != prev_my)) {
-                        wm_window_t *win = &windows[focused_window_idx];
-                        if (win->valid && !win->minimized) {
-                            ic_window_t iw;
-                            iw.x = win->x;
-                            iw.y = win->y;
-                            iw.w = win->w;
-                            iw.h = win->h;
-                            iw.focused = 0;
-                            iw.minimized = 0;
-                            iw.anim = 0;
-                            iw.title = win->title;
-                            iw.hover_close = 0;
-                            iw.hover_min = 0;
-                            iw.hover_max = 0;
-                            if (ic_hit_client(&iw, mouse_x, mouse_y)) {
-                                gui_msg_t motion_msg;
-                                clear_msg(&motion_msg);
-                                motion_msg.type = GUI_MSG_MOUSE_EVENT;
-                                motion_msg.window_id = win->id;
-                                motion_msg.mouse.x = mouse_x - win->x;
-                                motion_msg.mouse.y = mouse_y - win->y;
-                                motion_msg.mouse.buttons = mouse_buttons;
-                                send_maybe(win->app_queue_handle, &motion_msg);
-                            }
+                        need_redraw = 1;
+                        mark_dirty_win(win);
+                        win->x = mouse_x - drag_off_x;
+                        win->y = mouse_y - drag_off_y;
+                        clamp_window(win, w, h);
+                        mark_dirty_win(win);
+                    }
+                }
+
+                /* Forward motion to focused client window. */
+                if (dragging_win_idx == -1 && focused_window_idx != -1 &&
+                    (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    wm_window_t *win = &windows[focused_window_idx];
+                    if (win->valid && !win->minimized && !win->closing) {
+                        ic_window_t iw;
+                        iw.x = win->x;
+                        iw.y = win->y;
+                        iw.w = win->w;
+                        iw.h = win->h;
+                        iw.focused = 0;
+                        iw.minimized = 0;
+                        iw.anim = 0;
+                        iw.title = win->title;
+                        iw.hover_close = 0;
+                        iw.hover_min = 0;
+                        iw.hover_max = 0;
+                        if (ic_hit_client(&iw, mouse_x, mouse_y)) {
+                            gui_msg_t motion_msg;
+                            clear_msg(&motion_msg);
+                            motion_msg.type = GUI_MSG_MOUSE_EVENT;
+                            motion_msg.window_id = win->id;
+                            motion_msg.mouse.x = mouse_x - win->x;
+                            motion_msg.mouse.y = mouse_y - win->y;
+                            motion_msg.mouse.buttons = mouse_buttons;
+                            send_maybe(win->app_queue_handle, &motion_msg);
                         }
                     }
                 }
@@ -1542,9 +3044,20 @@ int main(int argc, char **argv) {
             long key = icda_read_char_timeout(1);
             if (key >= 0) {
                 need_redraw = 1;
-                if (focused_window_idx != -1) {
+                /* F12 sentinel (0x80): toggle the debug overlay.
+                 * Swallowed, never forwarded to any window. */
+                if (key == 0x80) {
+                    wm_debug_overlay = !wm_debug_overlay;
+                    mark_dirty_full();
+                /* Esc dismisses menus/dialogs (Enter dismisses the
+                 * Properties dialog too); swallowed, never forwarded. */
+                } else if ((ctx_open || props_open) &&
+                    (key == 27 || (props_open && key == 13))) {
+                    ctx_close();
+                    props_close();
+                } else if (focused_window_idx != -1) {
                     wm_window_t *win = &windows[focused_window_idx];
-                    if (win->valid && !win->minimized) {
+                    if (win->valid && !win->minimized && !win->closing) {
                         gui_msg_t kmsg;
                         clear_msg(&kmsg);
                         kmsg.type = GUI_MSG_KEY_EVENT;
@@ -1568,42 +3081,105 @@ int main(int argc, char **argv) {
         {
             uint64_t now = icda_ticks();
             int animating = 0;
-            for (int i = 0; i < num_windows; i++) {
+            /* Slice B: scan all slots (not just num_windows) so OPEN /
+             * CLOSE fades always tick even with sparse slots. */
+            for (int i = 0; i < MAX_WINDOWS; i++) {
                 if (windows[i].valid &&
                     (windows[i].anim < IC_ANIM_MAX ||
                      windows[i].anim_kind != WM_ANIM_NONE)) {
                     animating = 1;
                     mark_dirty_win(&windows[i]);
                 }
+                /* Minimized close fades never reach composite_window
+                 * (dirty path skips minimized), so tick them here
+                 * WM-side; the finalizer pass removes them at MAX. */
+                if (windows[i].valid && windows[i].closing &&
+                    windows[i].minimized &&
+                    windows[i].anim_kind == WM_ANIM_CLOSE &&
+                    windows[i].anim < IC_ANIM_MAX) {
+                    windows[i].anim++;
+                    animating = 1;
+                    mark_dirty_win(&windows[i]);
+                }
             }
-            /* Composite at most once per tick - the vsync pacing point:
-             * the frame is presented to the screen at the tick boundary
-             * (like waiting on vblank), so repaints never tear mid-frame
-             * and the display can never run faster than the panel.
-             * Full rebuild only for the initial frame or screen-wide
-             * damage; everything else goes through the dirty-rect path. */
-            if (now != last_composite_tick) {
+            /* Flip mode: full composite every frame.  The back page
+             * may hold stale content from a previous frame that the
+             * dirty-rect path would not repaint, so force a full
+             * rebuild and never take the cursor-only micro-path.
+             * Gated on actual activity so idle stays idle.
+             * NOTE: dragging_win_idx no longer forces dirty_full —
+             * the dirty rects from mark_dirty_win are sufficient and
+             * avoid the full-screen cost during hold+drag. */
+            if (gpu_info.flip_active &&
+                (need_redraw || animating ||
+                 dirty_count > 0 || (mouse_moved &&
+                  (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)))) {
+                dirty_full = 1;
+                need_redraw = 1;
+            }
+            /* Composite with the Slice C vsync toggle: ON = at most
+             * once per tick (paced, tear-free-ish via the existing
+             * flip/double-buffer); OFF = immediate present with no
+             * tick gate. Present flags follow the same toggle
+             * (WAIT_VBLANK = one sched_yield, never a spin). */
+            uint64_t pflags = wm_settings.vsync ? 1ULL : 0ULL;
+            if (!wm_settings.vsync || now != last_composite_tick) {
                 if (need_redraw || animating || dragging_win_idx != -1 ||
                     dirty_full || dirty_count > 0) {
-                    composite_dirty(w, h, mouse_x, mouse_y,
-                                    prev_mouse_x, prev_mouse_y);
+                    /* Remap real_fb → back buffer so blit_to_screen /
+                     * blit_region / draw_cursor_at write the off-screen
+                     * page.  The CRTC is scanning the other page, so
+                     * tearing is structurally impossible. */
+                    uint32_t *saved_fb = real_fb;
+                    if (gpu_info.flip_active) {
+                        real_fb = (uint32_t *)((uint8_t *)saved_fb +
+                            (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+                    }
+                    {
+                        unsigned long t0 = (unsigned long)icda_ticks();
+                        composite_dirty(w, h, mouse_x, mouse_y,
+                                        prev_mouse_x, prev_mouse_y);
+                        /* Single present per frame commit (after composite
+                         * and cursor draw).  WAIT_VBLANK = one sched_yield
+                         * (no vsync IRQ on Bochs/QEMU).
+                         * do_present covers virtio-gpu (needs explicit
+                         * TRANSFER+FLUSH) and flip mode alike. */
+                        if (do_present) {
+                            icda_gpu_present_flags(pflags);
+                        }
+                        if (gpu_info.flip_active) {
+                            wm_flip_page ^= 1;
+                            real_fb = saved_fb;
+                        }
+                        {
+                            unsigned long elapsed = (unsigned long)icda_ticks() - t0;
+                            wm_diag_composite_count++;
+                            if (elapsed > wm_diag_max_frame_ticks)
+                                wm_diag_max_frame_ticks = elapsed;
+                        }
+                    }
                     last_composite_tick = now;
                 } else if (mouse_moved &&
                            (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
+                    uint32_t *saved_fb = real_fb;
+                    if (gpu_info.flip_active) {
+                        real_fb = (uint32_t *)((uint8_t *)saved_fb +
+                            (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+                    }
                     composite_cursor_only(w, h, mouse_x, mouse_y,
                                           prev_mouse_x, prev_mouse_y);
+                    if (do_present) {
+                        icda_gpu_present_flags(pflags);
+                    }
+                    if (gpu_info.flip_active) {
+                        wm_flip_page ^= 1;
+                        real_fb = saved_fb;
+                    }
                     last_composite_tick = now;
                 }
             }
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
-            {
-                static uint64_t last_hb = 0;
-                if (now - last_hb > 200) {
-                    last_hb = now;
-                    icda_write("WM HB\n");
-                }
-            }
         }
 
         /* Event-driven pacing: the icda_read_char_timeout(1) above is the

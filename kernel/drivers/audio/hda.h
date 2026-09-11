@@ -10,9 +10,9 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len);
 int hda_stream_run(void);
 int hda_stream_write(uint32_t offset, const uint8_t *samples, uint32_t length);
 void hda_stop_playback(void);
-uint32_t hda_debug_lpi_b(void);
-uint8_t hda_debug_status(void);
-uint8_t hda_debug_ctl0(void);
-uint8_t hda_debug_ctl2(void);
+uint32_t hda_diag_lpi_b(void);
+uint8_t hda_diag_status(void);
+uint8_t hda_diag_ctl0(void);
+uint8_t hda_diag_ctl2(void);
 
 #endif

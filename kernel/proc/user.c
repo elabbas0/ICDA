@@ -4,14 +4,12 @@
 #include "sched.h"
 #include "../cpu/gdt.h"
 #include "../drivers/console/console.h"
+#include "../fs/fd.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pf.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
-
-extern uint8_t user_demo_start[];
-extern uint8_t user_demo_end[];
 
 static uint64_t user_exit_code = 0;
 
@@ -327,6 +325,7 @@ void user_request_exit_to_kernel(uint64_t code) {
     thread_t *thread = sched_current_thread();
     process_t *proc = sched_current_process();
     if (proc) {
+        fd_proc_exit(proc);
         proc->state = PROCESS_EXITED;
         proc->exit_code = code;
     }
@@ -644,6 +643,20 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
         return -1;
     }
 
+    /* External identity (B3: before READY, so no gate ever observes a
+     * half-set identity). Children inherit; the PID1 image is re-rooted
+     * to uid 0 / session leader with a fresh monotonic token. */
+    if (current_proc) {
+        user_proc->ex_uid = current_proc->ex_uid;
+        user_proc->ex_token = current_proc->ex_token;
+        user_proc->ex_session_leader = 0;
+    }
+    if (cstr_eq(path, "/sbin/init.app")) {
+        user_proc->ex_uid = 0;
+        user_proc->ex_session_leader = 1;
+        user_proc->ex_token = sched_ticks() ? (uint64_t)sched_ticks() : 1;
+    }
+
     user_proc->state = PROCESS_READY;
     if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
         user_proc->linux_personality = 1;
@@ -795,25 +808,4 @@ int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {
     }
     child->state = PROCESS_REAPED;
     return 0;
-}
-
-int user_run_demo(void) {
-    process_t *user_proc;
-    uint64_t blob_size;
-    uint64_t entry_rip = 0;
-    thread_t *thread;
-
-    user_proc = proc_create_empty(PROCESS_USER);
-    if (!user_proc) {
-        return -1;
-    }
-    blob_size = (uint64_t)(user_demo_end - user_demo_start);
-    if (user_load_image(user_proc, user_demo_start, blob_size, &entry_rip) != 0) {
-        return -1;
-    }
-    thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
-    if (!thread) {
-        return -1;
-    }
-    return user_wait_pid(user_proc->pid, &user_exit_code);
 }

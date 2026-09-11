@@ -26,6 +26,7 @@ void sched_wake_input_waiters(void);
 int sched_suspend_process(uint64_t pid);
 int sched_resume_process(uint64_t pid);
 int sched_kill_process(uint64_t pid, uint64_t exit_code);
+void sched_reap_orphans(void);
 
 /* IRQ-context safe: marks the current user process (and every other user
  * process) exited so user_run_path() returns and the boot loop can start

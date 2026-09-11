@@ -4,6 +4,7 @@
 #include "../memory/vmm.h"
 #include "../memory/pf.h"
 #include "../cpu/gdt.h"
+#include "../fs/fd.h"
 #include "../fs/vfs.h"
 #include "../drivers/console/console.h"
 
@@ -593,6 +594,25 @@ int sched_resume_process(uint64_t pid) {
     return 0;
 }
 
+/* Reap EXITED processes nobody will ever wait on: children whose
+ * parent is gone or already dead (B2 — e.g. init's VT-app child after
+ * a VT switch force-exits the whole tree and the kernel reaps only
+ * init). Live parents still reap their own children; this touches
+ * only orphans. */
+void sched_reap_orphans(void) {
+    process_t *p = process_list;
+
+    while (p) {
+        process_t *next = p->next_all;
+        if (p->state == PROCESS_EXITED &&
+            (!p->parent || p->parent->state == PROCESS_EXITED ||
+             p->parent->state == PROCESS_REAPED)) {
+            p->state = PROCESS_REAPED;
+        }
+        p = next;
+    }
+}
+
 int sched_kill_process(uint64_t pid, uint64_t exit_code) {
     process_t *actor = sched_current_process();
     process_t *target = sched_find_process(pid);
@@ -613,6 +633,7 @@ int sched_kill_process(uint64_t pid, uint64_t exit_code) {
         return -1;
     }
 
+    fd_proc_exit(target);
     target->state = PROCESS_EXITED;
     target->exit_code = exit_code;
     thread->block_reason = THREAD_BLOCK_NONE;
@@ -646,6 +667,7 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
         thread_t *t = p->main_thread;
         if (p->kind == PROCESS_USER &&
             p->state != PROCESS_EXITED && p->state != PROCESS_REAPED && t) {
+            fd_proc_exit(p);
             p->state = PROCESS_EXITED;
             p->exit_code = exit_code;
             t->block_reason = THREAD_BLOCK_NONE;

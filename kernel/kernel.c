@@ -12,6 +12,8 @@
 #include "drivers/input/mouse.h"
 #include "drivers/pci/pci.h"
 #include "drivers/net/e1000.h"
+#include "drivers/net/virtio_net.h"
+#include "drivers/display/virtio_gpu.h"
 #include "drivers/serial/serial.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
@@ -31,12 +33,14 @@
 #include "syscall/syscall.h"
 #include "tty/tty.h"
 #include "vt/vt.h"
+#include "dev/devops.h"
 #include "cpu/multiboot2.h"
 
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
+#include "cpu/pat.h"
 
 #include "memory/pf.h"
 #include "memory/heap.h"
@@ -49,6 +53,13 @@
 
 #ifndef SERIAL_SHELL_MIRROR
 #define SERIAL_SHELL_MIRROR 0
+#endif
+
+/* CI-only boot self-test facility (default off). Build with
+ * CI_SELFTEST=1 for the CI test image; production builds skip the
+ * icda.test=* command-line hook entirely. */
+#ifndef CI_SELFTEST
+#define CI_SELFTEST 0
 #endif
 
 #define PIT_BASE_FREQUENCY 1193182U
@@ -220,6 +231,11 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(pmm_total_frames(), CONSOLE_STYLE_INFO);
     console_write(" frames\n", CONSOLE_STYLE_INFO);
 
+    /* Program PAT MSR slot 4 to Write-Combining for framebuffer.
+     * Must run before vmm_init() which maps the fb through this slot.
+     * CPUID-gated: silently skips if PAT is not supported. */
+    pat_init_wc();
+
     if (vmm_init(fb_phys_addr(), fb_phys_size()) != 0) {
         boot_halt("memory", "virtual memory manager failed to map kernel space");
     }
@@ -280,6 +296,18 @@ void kernel_main(void *multiboot_info) {
         console_write("intel e1000 unavailable err=", CONSOLE_STYLE_WARN);
         console_write_dec64((uint64_t)net_last_error(), CONSOLE_STYLE_WARN);
         console_write("\n", CONSOLE_STYLE_WARN);
+    }
+
+    /* virtio-gpu: only when no multiboot framebuffer is available.
+     * Must run AFTER pci_init so PCI devices are enumerated. */
+    if (!fb_available()) {
+        bootstage_set(1201, "virtio-gpu");
+        if (virtio_gpu_init() == 0) {
+            boot_line("display", "virtio-gpu online");
+        } else {
+            boot_prefix("display");
+            console_write("virtio-gpu unavailable\n", CONSOLE_STYLE_WARN);
+        }
     }
 
     bootstage_set(121, "hda");
@@ -401,6 +429,15 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(20, "mounts");
     boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");
 
+    /* /dev nodes + ops registry for the syscall gate. Log-only on
+     * failure: handlers NULL-check the tables and fail closed, so a
+     * failed populate degrades syscalls instead of halting boot. */
+    if (dev_populate() != 0) {
+        boot_line("devices", "/dev populate failed, device syscalls will fail closed");
+    } else {
+        boot_line("devices", "/dev console/input/fb0 online");
+    }
+
     syscall_init();
     bootstage_set(21, "syscall");
     boot_line("syscall", "int 0x80 dispatcher armed");
@@ -414,33 +451,106 @@ void kernel_main(void *multiboot_info) {
         splash_finish();
         if (has_fb) {
             console_clear();
+            /* Any stray console writes between here and the WM's first
+             * wallpaper present must land on black, never as TTY text:
+             * clear explicitly and, on the GUI VT, mute fb text
+             * (serial-only) until the WM claims fb (which re-mutes).
+             * Text VTs stay unmuted so the shell stays visible. */
+            fb_clear(FB_BLACK);
+            if (vt_is_gui()) {
+                console_mute_fb(1);
+            }
         }
         bootstage_set(22, "shell");
+#if CI_SELFTEST
+        /* Boot self-test facility (CI + bring-up debugging). With
+         * `icda.test=nptest` (or `=nptestlx`) on the kernel command
+         * line, run that test app first and report its exit code on
+         * the serial line, then continue booting normally. Default
+         * boot (no flag) is unaffected. Physical/cmdline access
+         * already implies full control, so this adds no privilege. */
+        if (boot_cmdline_has_flag(multiboot_info, "icda.test=nptest") ||
+            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")) {
+            const char *test_path =
+                boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")
+                ? "/bin/nptestlx.elf"
+                : "/apps/nptest.app";
+            /* Mirror the console to serial for the duration so every
+             * PASS/FAIL line lands in the serial log (the mirror is
+             * otherwise off once the framebuffer is up). Note:
+             * user_run_path returns spawn/wait status (0/-1), NOT the
+             * app's exit code — that comes from user_last_exit_code. */
+            int test_st;
+            int test_rc;
+            console_set_serial_mirror(1);
+            test_st = user_run_path(test_path);
+            console_set_serial_mirror(0);
+            test_rc = (test_st == 0) ? (int)user_last_exit_code() : 9999;
+            uint64_t rcv = (uint64_t)(int64_t)test_rc;
+            int rci = 0;
+            char rcb[20];
+            serial_write("[nptest] exit rc=");
+            if (rcv == 0) {
+                serial_write("0");
+            } else {
+                while (rcv > 0 && rci < 20) {
+                    rcb[rci++] = (char)('0' + (rcv % 10));
+                    rcv /= 10;
+                }
+                while (rci > 0) {
+                    char c[2];
+                    rci--;
+                    c[0] = rcb[rci];
+                    c[1] = '\0';
+                    serial_write(c);
+                }
+            }
+            serial_write(test_rc == 0 ? " NPTEST DONE ALL-PASS\n"
+                                      : " NPTEST DONE FAILURES\n");
+        }
+#endif
         int shell_failures = 0;
         for (;;) {
-            /* The active virtual terminal decides what runs: the desktop
-             * (WM) on F1, a full-screen text shell on F2+.  A VT switch
-             * force-exits the foreground app, which lands us back here to
-             * restart with the app for the newly selected VT. */
-            int shell_rc = user_run_path(vt_app_path());
+            /* PID1 supervision (P0 step 2): the kernel runs init, init
+             * runs the VT app (desktop on F1, text shell on F2+). A VT
+             * switch force-exits the foreground tree, which lands us
+             * back here to restart with the app for the new VT.
+             * user_wait_pid reports status; the code comes from the
+             * out-param (B1) — nonzero init exit means failure. */
+            uint64_t init_pid = 0;
+            uint64_t init_code = 0;
+            int shell_rc;
+            if (user_spawn_path_args("/sbin/init.app",
+                                     vt_is_gui() ? "gui" : "text",
+                                     &init_pid) != 0) {
+                boot_line("init", "/sbin/init.app missing, direct-spawn fallback");
+                shell_rc = user_run_path(vt_app_path());
+            } else if (user_wait_pid(init_pid, &init_code) != 0) {
+                shell_rc = -1;
+            } else {
+                /* Reap init's orphans (B2): only init itself is waited
+                 * on, so its force-exited children would leak. */
+                sched_reap_orphans();
+                shell_rc = (init_code == 0) ? 0 : -1;
+            }
             if (shell_rc < 0 && vt_is_gui()) {
                 shell_rc = user_run_path("/apps/shell.app");
             }
             if (shell_rc < 0) {
                 shell_failures++;
                 if (shell_failures < 3) {
-                    boot_line("shell", "userspace shell failed to start, retrying");
+                    boot_line("init", "supervised tree failed to start, retrying");
                     continue;
                 }
-                boot_line("shell", "userspace shell failed repeatedly, entering recovery console");
+                boot_line("init", "supervised tree failed repeatedly, entering recovery console");
                 if (tty_init() != 0) {
                     console_write("\n", CONSOLE_STYLE_INFO);
                     boot_halt("tty", "recovery console failed to start");
                 }
                 break;
             }
-            boot_prefix("shell");
-            console_write("userspace shell exited rc=", CONSOLE_STYLE_INFO);
+            boot_prefix("init");
+            console_write("init supervised tree exited rc=", CONSOLE_STYLE_INFO);
             console_write_dec64((uint64_t)shell_rc, CONSOLE_STYLE_INFO);
             console_write(", restarting\n", CONSOLE_STYLE_INFO);
         }

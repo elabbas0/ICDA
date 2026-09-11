@@ -4,13 +4,24 @@
  * This is the "proper userland" layer between applications and the raw
  * int 0x80 syscall ABI (see kernel/syscall/syscall.h and icda_sys.h).
  * Applications written against this header get:
+ *   - memory helpers          (ic_memcpy, ic_memmove, ic_memset, ...)
  *   - string helpers          (ic_strlen, ic_strcat, ic_uint_to_str, ...)
+ *   - extended string helpers (ic_strnlen, ic_strncpy, ic_strlcat, ...)
+ *   - character classification (ic_is_digit, ic_is_space, ic_is_alpha)
+ *   - UTF-8 helpers           (ic_utf8_len, ic_utf8_valid)
+ *   - bounded formatting      (ic_snprintf_u64, ic_snprintf_hex, ic_ato_u64)
+ *   - arena allocator         (ic_arena_t — caller-provided buffer, zero-alloc)
+ *   - ring buffer             (ic_ring_u8_t — caller-provided buffer)
  *   - a drawing canvas        (ic_canvas_t + ic_rect/ic_text/ic_gradient_*)
  *   - icons                   (ic_icon_t, .icn format, builtin set)
  *   - a UI theme              (ic_theme_t)
  *   - window chrome           (title bar, minimize/close buttons, hit tests)
  *   - stateless widgets       (ic_draw_button + ic_button_state)
  *   - an app skeleton         (ic_run_app: open window + event loop)
+ *   - file/dir/path helpers   (ic_read_file_b, ic_path_join, ic_dir_next, ...)
+ *   - process/ipc RAII        (ic_spawn_b, ic_shm_t, ic_msg_send_b, ...)
+ *   - shared HTTP fetch       (ic_url_split, ic_http_fetch_to_file, ...)
+ *   - version information     (ic_version.h, included below)
  *
  * Every app is a plain C program:
  *
@@ -24,11 +35,36 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "ic_version.h"
 #include "icda_sys.h"
 #include "gui.h"      /* gui_open_window / gui_pixel_buffer / gui_flush ... */
 #include "gui_proto.h"
+#include "font_atlas.h" /* ic_atlas_font_t, ic_glyph_t — promoted in 1.3 */
 
-/* ============================== strings ============================== */
+/* ================================ memory ============================== */
+
+/* Safe memory primitives.  All functions are NULL-safe: if both pointers
+ * are NULL the operation succeeds silently; if only one is NULL the
+ * function returns without writing.  All sizes are in bytes. */
+
+/* Copy n bytes from src to dst.  Overlapping regions are NOT handled
+ * safely — use ic_memmove for overlapping copies.  dst may be NULL only
+ * if n is 0. */
+void ic_memcpy(void *dst, const void *src, uint64_t n);
+
+/* Copy n bytes from src to dst, safe for overlapping regions. */
+void ic_memmove(void *dst, const void *src, uint64_t n);
+
+/* Set n bytes at dst to value (only the low byte is used). */
+void ic_memset(void *dst, int value, uint64_t n);
+
+/* Compare n bytes.  Returns <0, 0, or >0 like memcmp. */
+int ic_memcmp(const void *a, const void *b, uint64_t n);
+
+/* Zero n bytes at dst. */
+void ic_memzero(void *dst, uint64_t n);
+
+/* ================================ strings ============================== */
 
 uint64_t ic_strlen(const char *s);
 int      ic_strcmp(const char *a, const char *b);
@@ -39,6 +75,115 @@ int      ic_strprefix(const char *s, const char *prefix);
 char     ic_lower(char c);
 void     ic_uint_to_str(uint64_t v, char *out, uint64_t cap);
 int      ic_parse_uint(const char *s, uint64_t *out);
+
+/* =========================== extended strings ========================== */
+
+/* Return the length of s, but never scan past cap bytes. */
+uint64_t ic_strnlen(const char *s, uint64_t cap);
+
+/* Copy at most n characters from src to dst, NUL-terminate if cap allows.
+ * Returns pointer to dst.  If src is NULL, dst is zero-filled (up to cap). */
+char *ic_strncpy(char *dst, const char *src, uint64_t n, uint64_t cap);
+
+/* Append src to dst (finding the NUL in dst first).  NUL-terminates if
+ * cap allows.  Returns total length that would have been written
+ * (excluding NUL) — like strlcat.  If cap is 0, returns src length. */
+uint64_t ic_strlcat(char *dst, const char *src, uint64_t cap);
+
+/* Format val as a decimal string into buf, NUL-terminate (if cap > 0).
+ * Returns number of characters written (excluding the NUL). */
+uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val);
+
+/* Format val as a lowercase hex string into buf, NUL-terminate.
+ * Returns number of characters written (excluding the NUL). */
+uint64_t ic_snprintf_hex(char *buf, uint64_t cap, uint64_t val);
+
+/* Parse a decimal string to uint64_t.  Returns 1 on success, 0 on
+ * failure (empty string, non-digit character, or overflow clamped to
+ * UINT64_MAX). */
+int ic_ato_u64(const char *s, uint64_t *out);
+
+/* ========================= character classification ==================== */
+
+int ic_is_digit(char c);
+int ic_is_space(char c);
+int ic_is_alpha(char c);
+
+/* ================================ UTF-8 ================================ */
+
+/* Count the number of Unicode codepoints in s (NUL-terminated). */
+uint64_t ic_utf8_len(const char *s);
+
+/* Validate s as well-formed UTF-8.  Returns 1 if valid, 0 if not.
+ * An empty string is considered valid.  Rejects overlong encodings,
+ * surrogate halves, and codepoints above U+10FFFF. */
+int ic_utf8_valid(const char *s);
+
+/* ============================ arena allocator ========================== */
+
+/* A bump/arena allocator over a caller-provided buffer.  No kernel
+ * calls, no dynamic memory.  Individual frees are not supported;
+ * use ic_arena_reset to reclaim the entire buffer. */
+
+#define IC_ARENA_ALIGN_MAX 64
+
+typedef struct {
+    uint8_t  *buf;    /* base of the caller-owned buffer (may NOT be NULL) */
+    uint64_t  cap;    /* total capacity in bytes */
+    uint64_t  offset; /* next free byte (bump pointer) */
+} ic_arena_t;
+
+/* Initialise the arena over the given buffer.  buf may be NULL only if
+ * cap is 0 (creating a permanently-full arena).  Returns 0 on success. */
+int ic_arena_init(ic_arena_t *a, uint8_t *buf, uint64_t cap);
+
+/* Allocate `size` bytes aligned to `align` (must be power of 2, >= 1).
+ * Returns a pointer into the arena buffer, or NULL if there is not
+ * enough room.  Never fails for size==0 (returns NULL by convention). */
+void *ic_arena_alloc(ic_arena_t *a, uint64_t size, uint64_t align);
+
+/* Reset the bump pointer — logically frees everything. */
+void ic_arena_reset(ic_arena_t *a);
+
+/* Bytes used so far. */
+uint64_t ic_arena_used(const ic_arena_t *a);
+
+/* Bytes remaining. */
+uint64_t ic_arena_remaining(const ic_arena_t *a);
+
+/* ============================= ring buffer ============================= */
+
+/* A single-byte ring buffer (FIFO) over a caller-provided buffer.
+ * The buffer capacity must be > 0 and is the maximum number of bytes
+ * that can be stored (one slot is wasted to distinguish full from
+ * empty).  So for a buffer of `cap` usable bytes the ring can hold
+ * at most `cap - 1` bytes. */
+
+typedef struct {
+    uint8_t  *buf;   /* base of the caller-owned buffer (may NOT be NULL) */
+    uint64_t  cap;   /* usable capacity (ring stores cap-1 bytes max) */
+    uint64_t  head;  /* read index */
+    uint64_t  tail;  /* write index */
+} ic_ring_u8_t;
+
+/* Initialise the ring over the given buffer.  cap must be >= 2.
+ * Returns 0 on success, -1 on invalid parameters. */
+int ic_ring_u8_init(ic_ring_u8_t *r, uint8_t *buf, uint64_t cap);
+
+/* Push one byte.  Returns 0 on success, -1 if full. */
+int ic_ring_u8_push(ic_ring_u8_t *r, uint8_t byte);
+
+/* Pop one byte.  Returns 0 on success, -1 if empty. */
+int ic_ring_u8_pop(ic_ring_u8_t *r, uint8_t *byte_out);
+
+/* Number of bytes currently stored. */
+uint64_t ic_ring_u8_count(const ic_ring_u8_t *r);
+
+/* Free slots available for pushing. */
+uint64_t ic_ring_u8_free_cap(const ic_ring_u8_t *r);
+
+/* Empty the ring (reset head/tail/count to initial state). */
+void ic_ring_u8_reset(ic_ring_u8_t *r);
 
 /* ============================== canvas =============================== */
 /* A 32bpp (0xAARRGGBB) pixel surface. The WM and GUI apps both draw
@@ -66,6 +211,13 @@ uint32_t ic_blend(uint32_t a, uint32_t b, int n, int d);
 void     ic_blend_px(ic_canvas_t *c, int x, int y, uint32_t color);
 void     ic_text(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg);
 void     ic_text_clip(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg, int max_px);
+/* Proportional-atlas sibling of ic_text_clip (clipped whole glyphs).
+ * NULL font selects the default face. fill_bg!=0 paints the bg rect
+ * behind the fitted text first (for flat surfaces); 0 draws bare
+ * glyphs (for gradients). */
+void     ic_text_font(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg,
+                      uint32_t bg, int max_px, const ic_atlas_font_t *font,
+                      int fill_bg);
 int      ic_text_width(const char *s);
 
 /* =============================== icons =============================== */
@@ -195,6 +347,32 @@ void ic_draw_button(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
                     const char *label, ic_btn_state_t state);
 ic_btn_state_t ic_button_state(int enabled, int hover, int pressed);
 
+/* ============================ menu / dialog / slider ================= */
+/* Stateless primitives (hit-testing kept separate, like buttons): the
+ * caller owns open/close/value state and redraws on change. */
+#define IC_MENU_MAX_ITEMS 12
+
+typedef struct {
+    const char *items[IC_MENU_MAX_ITEMS];
+    int count;
+    int selected;   /* highlighted index, -1 for none */
+} ic_menu_t;
+
+int ic_menu_row_h(void);
+int ic_menu_width(const ic_menu_t *m);
+int ic_menu_height(const ic_menu_t *m);
+void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
+                  const ic_menu_t *m);
+int ic_menu_hit(const ic_menu_t *m, int x, int y, int mx, int my);
+
+void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                    const char *title, const char *body);
+
+void ic_slider_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t track,
+                    int value, int vmin, int vmax);
+int ic_slider_hit(ic_rect_t track, int mx, int my);
+int ic_slider_value_from_x(ic_rect_t track, int vmin, int vmax, int mx);
+
 /* ============================ app skeleton =========================== */
 /* Runs the standard GUI app loop: opens a window, polls the event queue,
  * calls on_event() for every event (return 0 to exit), and calls on_draw()
@@ -205,5 +383,267 @@ typedef void (*ic_draw_fn)(void *ud);
 
 int ic_run_app(const char *title, int w, int h,
                ic_event_fn on_event, ic_draw_fn on_draw, void *ud);
+
+/* ================================ ic_io ================================ */
+/* Errno codes — mirror kernel/syscall/syscall.h so userspace code does
+ * not need kernel headers.  Returns from ic_*_b functions are 0 on
+ * success or negative errno (e.g. -U_ENOENT). */
+#ifndef U_ENOENT
+#define U_ENOENT  2   /* no such file or directory */
+#define U_EBADF   9   /* bad file descriptor */
+#define U_ENOMEM  12  /* out of memory / buffer too small */
+#define U_EACCES  13  /* permission denied */
+#define U_EFAULT  14  /* bad address */
+#define U_EINVAL  22  /* invalid argument */
+#endif
+
+/* File, directory, and path helpers — thin wrappers over icda_sys.h
+ * syscalls with NULL checks, capacity validation, and NUL-termination.
+ * All functions return 0 on success or a negative errno on failure. */
+
+/* Read an entire file into buf (up to cap bytes).  Returns 0 on success.
+ * On success buf is NUL-terminated (kernel guarantee).  len_out (optional)
+ * receives the number of bytes read (excluding the NUL).  Returns negative
+ * errno on failure: -U_ENOENT (not found), -U_EFAULT (bad path/buf). */
+int ic_read_file_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out);
+
+/* Write len bytes from buf to path.  Returns 0 on success, negative errno
+ * on failure.  buf may be NULL only when len is 0. */
+int ic_write_file_b(const char *path, const char *buf, uint64_t len);
+
+/* Stat a path.  Returns 0 on success, negative errno on failure.
+ * out must be non-NULL. */
+int ic_stat_b(const char *path, icda_stat_t *out);
+
+/* Get current working directory into buf (up to cap bytes).
+ * Returns 0 on success, negative errno on failure. */
+int ic_getcwd_b(char *buf, uint64_t cap);
+
+/* Create directory at path.  Returns 0 on success, negative errno. */
+int ic_mkdir_b(const char *path);
+
+/* Create (touch) a file at path.  Returns 0 on success, negative errno. */
+int ic_create_b(const char *path);
+
+/* Join two path components with a single '/' separator.
+ * If a ends with '/' or b starts with '/', no duplicate separator.
+ * If both, the leading '/' from b is skipped.  Returns 0 on success
+ * (result NUL-terminated in dst), -U_ENOMEM if result exceeds cap. */
+int ic_path_join(char *dst, uint64_t cap, const char *a, const char *b);
+
+/* Normalize src into dst: resolve '.'  '..'  '//'  trailing '/'.
+ * '..' never escapes root (clamped).  Returns 0 on success (NUL-terminated),
+ * -U_ENOMEM if the result would exceed cap (dst left empty). */
+int ic_path_normalize(char *dst, uint64_t cap, const char *src);
+
+/* List directory entries into buf.  Returns 0 on success.
+ * Buffer format: NUL/newline-separated entries, directories get trailing '/'.
+ * len_out (optional) receives bytes written. */
+int ic_list_dir_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out);
+
+/* Directory iterator — walks NUL/newline-separated entries produced by
+ * ic_list_dir_b().  Usage:
+ *   ic_dir_cursor_t cur;
+ *   ic_dir_cursor_init(&cur, buf, len);
+ *   const char *name; uint64_t nlen; int is_dir;
+ *   while (ic_dir_next(&cur, &name, &nlen, &is_dir)) { ... } */
+typedef struct {
+    const char *buf;
+    uint64_t    len;
+    uint64_t    pos;
+} ic_dir_cursor_t;
+
+void ic_dir_cursor_init(ic_dir_cursor_t *cur, const char *buf, uint64_t len);
+int  ic_dir_next(ic_dir_cursor_t *cur, const char **name_out,
+                 uint64_t *name_len_out, int *is_dir_out);
+
+/* ================================ ic_app ================================ */
+/* Process, timer, and IPC helpers — thin wrappers over icda_sys.h
+ * syscalls with NULL checks and RAII-style resource management. */
+
+/* Spawn a process.  Returns pid on success, (uint64_t)-errno on failure. */
+uint64_t ic_spawn_b(const char *path);
+
+/* Spawn with argument string.  args may be NULL (treated as ""). */
+uint64_t ic_spawn_args_b(const char *path, const char *args);
+
+/* Wait for a child process.  Returns exit code on success, negative errno. */
+int ic_wait_b(uint64_t pid);
+
+/* Sleep for the given number of scheduler ticks. */
+void ic_sleep_ticks(uint64_t ticks);
+
+/* Return current tick count. */
+uint64_t ic_ticks_b(void);
+
+/* Yield the CPU to the scheduler. */
+void ic_yield_b(void);
+
+/* Exit the current process.  Does not return. */
+_Noreturn void ic_exit_b(uint64_t code);
+
+/* Shared memory RAII wrapper — create + map on acquire, unmap + close on
+ * release.  Double-release is safe (checks .valid). */
+typedef struct {
+    uint64_t handle;
+    uint64_t addr;
+    uint64_t size;
+    int      valid;
+} ic_shm_t;
+
+/* Acquire shared memory of the given size.  Returns 0 on success. */
+int  ic_shm_acquire(uint64_t size, ic_shm_t *out);
+
+/* Release shared memory (unmap + close).  Safe to call twice. */
+void ic_shm_release(ic_shm_t *t);
+
+/* Message queue helpers — all handle-checked.  Messages are 64 bytes
+ * (gui_msg_t shape).  Caller must pass a pointer to a full 64-byte
+ * gui_msg_t (kernel asserts the message is exactly 64 bytes). */
+uint64_t ic_msg_open_b(const char *name);
+int      ic_msg_send_b(uint64_t handle, const void *msg);
+int      ic_msg_recv_b(uint64_t handle, void *out, int block);
+int      ic_msg_poll_b(uint64_t handle);
+
+/* ================================ ic_http ================================ */
+/* Shared HTTP fetch logic — deduplicates browser/curl URL parsing and
+ * download patterns.  Resolves host (IPv4 literal or DNS), fetches via
+ * kernel HTTP(S), and reads the result into a caller buffer or file. */
+
+/* Parse a URL into its components.  Supports http:// and https://.
+ * Default ports: 80 (HTTP), 443 (HTTPS).  Returns 0 on success,
+ * -1 on format error.  All output params required. */
+int ic_url_split(const char *url, char *host_out, uint64_t host_cap,
+                 uint16_t *port_out, char *path_out, uint64_t path_cap,
+                 int *use_tls_out);
+
+/* Resolve a hostname to IPv4.  Tries IPv4 literal first, then DNS.
+ * Returns 0 on success, negative errno on failure. */
+int ic_dns_b(const char *host, uint32_t *ipv4_out);
+
+/* Fetch a URL to a VFS file.  dns + http/https_get_ipv4 wrapper.
+ * Returns 0 on success, negative errno on failure.
+ * bytes_out (optional) receives the response size.
+ * NOTE: kernel NET_HTTP_CAP is 512KB; responses larger than that
+ * will be truncated by the kernel. */
+int ic_http_fetch_to_file(const char *host, uint16_t port, int use_tls,
+                          const char *path, const char *out_path,
+                          uint64_t *bytes_out);
+
+/* Fetch a URL into a caller-provided memory buffer.  Uses a scratch
+ * VFS path for the intermediate file (default "/tmp/.ic_fetch" when
+ * scratch_path is NULL).  Returns 0 on success, negative errno.
+ * len_out (optional) receives bytes read into buf (never exceeds cap). */
+int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
+                      uint64_t *len_out, const char *scratch_path);
+
+/* ============================ gui2 layout ============================== */
+/* Stateless row/column layout helpers.  Pure compute — no drawing.
+ * Given a parent rect, per-child pixel widths (or -1 for flex), gap
+ * between children, and outer padding, fills out[] with child rects.
+ * Returns 0 on success, -U_ENOMEM if count exceeds out_cap. */
+
+int ic_layout_row(ic_rect_t parent, int pad, int gap,
+                  const int *widths, int count,
+                  ic_rect_t *out, int out_cap);
+
+int ic_layout_col(ic_rect_t parent, int pad, int gap,
+                  const int *heights, int count,
+                  ic_rect_t *out, int out_cap);
+
+/* ============================ gui2 scroll ============================= */
+/* Minimal vertical scroll state + helpers.  Caller owns the struct
+ * and redraws after any mutation. */
+
+typedef struct {
+    int offset;    /* current scroll position in pixels */
+    int content_h; /* total content height in pixels */
+    int view_h;    /* visible viewport height in pixels */
+} ic_scroll_t;
+
+/* Clamp offset into [0, max(0, content_h − view_h)]. */
+void ic_scroll_clamp(ic_scroll_t *s);
+
+/* Draw a vertical scrollbar thumb inside track.  No-op when content
+ * fits the viewport.  track.w is the scrollbar width (≥ 6 recommended). */
+void ic_scrollbar_draw(ic_canvas_t *c, ic_rect_t track,
+                       const ic_theme_t *t, const ic_scroll_t *s);
+
+/* Hit-test the scrollbar track for a click/drag.  On hit, updates
+ * s->offset proportionally and returns 1.  Returns 0 on miss. */
+int ic_scroll_hit(ic_rect_t track, int mx, int my, ic_scroll_t *s);
+
+/* ============================ gui2 widgets ============================ */
+
+/* Text field — bordered box, clipped text, block cursor when focused.
+ * buf is the editing buffer; buf_cap its total capacity.
+ * cursor_pos is a byte offset into buf.  placeholder is drawn when
+ * buf is empty (may be NULL). */
+void ic_textfield_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                       const char *buf, uint64_t buf_cap,
+                       uint64_t cursor_pos, int focused,
+                       const char *placeholder);
+
+/* Insert one byte at cursor.  Returns 0 on success, −1 if full or
+ * cursor out of range.  Updates *len_io and *cursor_io. */
+int ic_textfield_insert(char *buf, uint64_t cap,
+                        uint64_t *len_io, uint64_t *cursor_io, char ch);
+
+/* Delete one byte before cursor.  Returns 0 on success, −1 if
+ * cursor is at 0.  Updates *len_io and *cursor_io. */
+int ic_textfield_backspace(char *buf, uint64_t cap,
+                           uint64_t *len_io, uint64_t *cursor_io);
+
+/* List view — visible rows only, highlight selected row.
+ * get_label(i, ud) returns the label for row i (or NULL to skip). */
+typedef const char *(*ic_listview_label_fn)(int index, void *ud);
+
+void ic_listview_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                      int row_h, int count, int selected,
+                      const ic_scroll_t *scroll,
+                      ic_listview_label_fn get_label, void *ud);
+
+/* Hit-test a click in a list view.  Returns row index or −1. */
+int ic_listview_hit(ic_rect_t r, int row_h, int count,
+                    const ic_scroll_t *scroll, int mx, int my);
+
+/* =========================== gui2 text wrap =========================== */
+/* Word-wrap helpers for the 8px monospace font.
+ * "Word-wrap on spaces": break at the last space that fits the line.
+ * Hard-break long words at max_px when no space is available. */
+
+/* Count the number of visual lines the string needs when wrapped to
+ * max_px pixels wide.  Returns total line count. */
+int ic_text_measure_wrap(const char *s, int max_px, int *lines_out);
+
+/* Draw s with word-wrapping at max_px width, starting at (x, y).
+ * Draws at most max_rows visual lines.  No buffer overflow — draw
+ * only, never writes past the canvas. */
+void ic_text_draw_wrap(ic_canvas_t *c, int x, int y, int max_px,
+                       const char *s, uint32_t fg, uint32_t bg,
+                       int max_rows);
+
+/* ============================ font atlas ============================== */
+/* Proportional anti-aliased font from the generated atlas
+ * (font_atlas.h — build output, promoted in 1.3).  NULL-safe: every
+ * function returns 0 / no-op when font is NULL.  Out-of-range chars
+ * (< 32 or > 126) render as '?' (glyph 63). */
+
+/* Default (regular) face from the atlas.  Never returns NULL. */
+const ic_atlas_font_t *ic_font_default(void);
+
+/* Pixel width of s rendered in the given font.  0 if font is NULL
+ * or s is NULL. */
+int ic_font_text_width(const ic_atlas_font_t *font, const char *s);
+
+/* Draw s at (x, y) with alpha-blended glyphs.  fg_rgb is the
+ * foreground colour (0x00RRGGBB); the glyph alpha from the atlas is
+ * used for blending.  Clipped to canvas bounds.  No-op if font or
+ * canvas is NULL. */
+void ic_font_draw(ic_canvas_t *c, int x, int y, const char *s,
+                  uint32_t fg_rgb, const ic_atlas_font_t *font);
+
+/* Line height of the given font in pixels.  0 if font is NULL. */
+int ic_font_line_height(const ic_atlas_font_t *font);
 
 #endif /* USERSPACE_LIBICDA_H */

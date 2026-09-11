@@ -67,6 +67,12 @@ typedef struct {
 #define VMM_NX       PTE_NX
 #define VMM_GLOBAL   PTE_GLOBAL
 
+// Software-only flag: write-combining (WC) via PAT MSR.
+// Translated to the correct hardware bit in map_huge_page (2M: bit 12)
+// and vmm_map_page (4K: bit 7) — the PAT bit position differs per level
+// per SDM Vol.3A, 4.9.  Requires pat_init_wc() to have set PAT slot 4 = WC.
+#define VMM_WC       (1ULL << 59)
+
 // common flag combinations
 #define VMM_FLAGS_KERNEL_RW  (VMM_PRESENT | VMM_WRITE | VMM_GLOBAL)
 #define VMM_FLAGS_KERNEL_RO  (VMM_PRESENT | VMM_GLOBAL)
@@ -90,6 +96,9 @@ void vmm_unmap_range(addr_space_t *as, uint64_t virt, uint64_t size, int free_ph
 
 // walk page tables and return the physical address for virt, or 0 if unmapped
 uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt);
+
+// 1 when virt is present and writable (PTE R/W) in user half, else 0
+int vmm_page_writable(addr_space_t *as, uint64_t virt);
 
 // allocate a new user address space with kernel mappings inherited; NULL on fail
 addr_space_t *vmm_create_address_space(void);

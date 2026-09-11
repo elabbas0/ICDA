@@ -30,6 +30,9 @@ uint32_t fb_pitch_value(void);
 // remap fb_addr through the HHDM after vmm_init; must be called once after paging is live
 void fb_remap(uint64_t physical_base);
 void fb_clear(uint32_t color);
+// Enable double-frame mode: fb_phys_size() returns 2x when enabled.
+// The kernel console (fb_addr, fb_width, fb_height) is unaffected.
+void fb_set_double_frame(int enable);
 void fb_put_pixel(int x, int y, uint32_t color);
 void fb_fill_rect(int x, int y, int w, int h, uint32_t color);
 void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg);
@@ -45,6 +48,10 @@ void fb_backspace(uint32_t bg);
 void fb_set_cursor(int x, int y);
 void fb_get_cursor(int *x_out, int *y_out);
 int  fb_available();
+
+// Adopt a new physical framebuffer (e.g. from virtio-gpu).  Updates all
+// fb_* globals so fb_print / fb_phys_addr / devnodes work immediately.
+void fb_adopt(uint64_t phys, uint32_t pitch, int width, int height, int bpp);
 
 // screen dimensions (set after fb_init)
 extern int fb_width;

@@ -60,178 +60,31 @@ static char status[64];
 static int addr_cursor = 0;
 static int addr_active = 0;
 
+/* ---- context-menu BSS (desktop.c pattern) ---- */
+#define CTX_BR_MAX  5
+#define CTX_BR_LBL  32
+
+enum { CTX_BR_BACK = 1, CTX_BR_FWD, CTX_BR_REFRESH, CTX_BR_ADDR };
+
+static int ctx_open = 0;
+static int ctx_x = 0;
+static int ctx_y = 0;
+static int ctx_nitems = 0;
+static int ctx_actions[CTX_BR_MAX];
+static char ctx_labels[CTX_BR_MAX][CTX_BR_LBL];
+static int prev_right = 0;
+static int prev_left = 0;
+static int last_mouse_x = 0;
+static int last_mouse_y = 0;
+
 /* ---- string helpers (freestanding) ---- */
 
-static uint64_t b_strlen(const char *s) {
-    uint64_t n = 0;
-    while (s && s[n]) n++;
-    return n;
-}
-
-static int b_streq(const char *a, const char *b) {
-    uint64_t i = 0;
-    if (!a || !b) return a == b;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return 0;
-        i++;
-    }
-    return a[i] == 0 && b[i] == 0;
-}
-
-static int b_strprefix(const char *s, const char *prefix) {
-    uint64_t i = 0;
-    if (!s || !prefix) return 0;
-    while (prefix[i]) {
-        if (s[i] != prefix[i]) return 0;
-        i++;
-    }
-    return 1;
-}
-
-static void b_strcpy(char *dst, const char *src, uint64_t cap) {
-    uint64_t i = 0;
-    if (!dst || cap == 0) return;
-    while (src && src[i] && i + 1 < cap) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = 0;
-}
-
-static void b_strcat(char *dst, const char *src, uint64_t cap) {
-    uint64_t at = b_strlen(dst);
-    uint64_t i = 0;
-    if (!dst || cap == 0 || at >= cap) return;
-    while (src && src[i] && at + 1 < cap) {
-        dst[at++] = src[i++];
-    }
-    dst[at] = 0;
-}
-
-static char b_lower(char c) {
-    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
-    return c;
-}
-
-static void b_uint_to_str(uint64_t v, char *out, uint64_t cap) {
-    char tmp[32];
-    uint64_t len = 0;
-    uint64_t i = 0;
-    if (!out || cap == 0) return;
-    if (v == 0) {
-        b_strcpy(out, "0", cap);
-        return;
-    }
-    while (v && len < sizeof(tmp)) {
-        tmp[len++] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    while (len && i + 1 < cap) {
-        out[i++] = tmp[--len];
-    }
-    out[i] = 0;
-}
+/* b_* helpers removed in 1.3 — use ic_* from libicda.h directly. */
 
 /* ---- URL parsing ---- */
 
-/*
- * parse_url_format: parse URL into scheme/host/port/path without DNS.
- * Returns 0 on success, -1 on format error.
- */
-static int parse_url_format(const char *url, uint16_t *port_out,
-                            int *https_out, char *host_out, uint64_t host_cap,
-                            char *path_out, uint64_t path_cap) {
-    const char *host;
-    uint64_t host_len = 0;
-    uint64_t path_len = 0;
-    uint16_t port = 80;
-    int use_https = 0;
-
-    if (!url || !*url || !port_out || !https_out) return -1;
-    if (b_strprefix(url, "http://")) {
-        host = url + 7;
-    } else if (b_strprefix(url, "https://")) {
-        host = url + 8;
-        port = 443;
-        use_https = 1;
-    } else {
-        return -1;
-    }
-
-    while (host[host_len] && host[host_len] != ':' && host[host_len] != '/') {
-        if (host_len + 1 >= host_cap) return -1;
-        host_out[host_len] = host[host_len];
-        host_len++;
-    }
-    if (host_len == 0) return -1;
-    host_out[host_len] = 0;
-    host += host_len;
-
-    if (*host == ':') {
-        uint32_t port_value = 0;
-        host++;
-        if (*host < '0' || *host > '9') return -1;
-        while (*host >= '0' && *host <= '9') {
-            port_value = port_value * 10U + (uint32_t)(*host - '0');
-            if (port_value > 65535U) return -1;
-            host++;
-        }
-        port = (uint16_t)port_value;
-    }
-
-    if (*host == 0) {
-        b_strcpy(path_out, "/", path_cap);
-    } else {
-        if (*host != '/') return -1;
-        while (host[path_len] && path_len + 1 < path_cap) {
-            path_out[path_len] = host[path_len];
-            path_len++;
-        }
-        path_out[path_len] = 0;
-    }
-
-    *port_out = port;
-    *https_out = use_https;
-    return 0;
-}
-
-/*
- * resolve_host: resolve hostname to IPv4. Returns 0 on success.
- * Tries IPv4 literal first, then DNS.
- */
-static int resolve_host(const char *host, uint32_t *ip_out) {
-    int is_ip = 1;
-    const char *p = host;
-    int dots = 0;
-    while (*p) {
-        if (*p == '.') dots++;
-        else if (*p < '0' || *p > '9') { is_ip = 0; break; }
-        p++;
-    }
-    if (is_ip && dots == 3) {
-        uint32_t octets[4];
-        uint64_t i = 0;
-        for (int o = 0; o < 4; o++) {
-            uint32_t v = 0;
-            uint64_t start = i;
-            while (host[i] >= '0' && host[i] <= '9') {
-                v = v * 10U + (uint32_t)(host[i] - '0');
-                if (v > 255U) { is_ip = 0; break; }
-                i++;
-            }
-            if (i == start || (o < 3 && host[i] != '.')) { is_ip = 0; break; }
-            if (o < 3) i++;
-            octets[o] = v;
-        }
-        if (is_ip && host[i] == 0) {
-            *ip_out = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
-            return 0;
-        }
-    }
-    /* DNS resolution */
-    long rc = (long)icda_dns_resolve(host, ip_out);
-    return (int)rc;
-}
+/* parse_url_format + resolve_host removed in 1.3.
+ * URL parsing now uses ic_url_split(); HTTP fetch uses ic_http_fetch_to_file(). */
 
 /* ---- HTML rendering ---- */
 
@@ -283,22 +136,22 @@ static void decode_entities(char *dst, uint64_t dst_cap, const char *src) {
     static const char ent_num[]  = { '&', '#', 0 };
     if (!dst || dst_cap == 0) return;
     while (*src && di + 1 < dst_cap) {
-        if (*src == '&' && b_strprefix(src, ent_amp)) {
+        if (*src == '&' && ic_strprefix(src, ent_amp)) {
             dst[di++] = '&';
             src += 5;
-        } else if (*src == '&' && b_strprefix(src, ent_lt)) {
+        } else if (*src == '&' && ic_strprefix(src, ent_lt)) {
             dst[di++] = '<';
             src += 4;
-        } else if (*src == '&' && b_strprefix(src, ent_gt)) {
+        } else if (*src == '&' && ic_strprefix(src, ent_gt)) {
             dst[di++] = '>';
             src += 4;
-        } else if (*src == '&' && b_strprefix(src, ent_quot)) {
+        } else if (*src == '&' && ic_strprefix(src, ent_quot)) {
             dst[di++] = '"';
             src += 6;
-        } else if (*src == '&' && b_strprefix(src, ent_nbsp)) {
+        } else if (*src == '&' && ic_strprefix(src, ent_nbsp)) {
             dst[di++] = ' ';
             src += 6;
-        } else if (*src == '&' && b_strprefix(src, ent_num)) {
+        } else if (*src == '&' && ic_strprefix(src, ent_num)) {
             /* Skip numeric entities */
             src += 2;
             while (*src && *src != ';') src++;
@@ -315,16 +168,16 @@ static void extract_title(const char *html, char *title, uint64_t cap) {
     const char *t_start = 0;
     const char *t_end = 0;
     if (!html || !title || cap == 0) return;
-    b_strcpy(title, "ICDA Browser", cap);
+    ic_strcpy(title, "ICDA Browser", cap);
     while (*p) {
-        if (b_lower(p[0]) == '<' && b_lower(p[1]) == 't' &&
-            b_lower(p[2]) == 'i' && b_lower(p[3]) == 't' &&
-            b_lower(p[4]) == 'l' && b_lower(p[5]) == 'e') {
+        if (ic_lower(p[0]) == '<' && ic_lower(p[1]) == 't' &&
+            ic_lower(p[2]) == 'i' && ic_lower(p[3]) == 't' &&
+            ic_lower(p[4]) == 'l' && ic_lower(p[5]) == 'e') {
             p += 6;
             while (*p && *p != '>') p++;
             if (*p == '>') p++;
             t_start = p;
-            while (*p && !(*p == '<' && b_lower(p[1]) == '/')) p++;
+            while (*p && !(*p == '<' && ic_lower(p[1]) == '/')) p++;
             t_end = p;
             break;
         }
@@ -359,7 +212,7 @@ static int rt_cols;              /* wrap width in characters */
 static int match_word(const char *p, const char *w) {
     uint64_t i = 0;
     while (w[i]) {
-        if (b_lower(p[i]) != w[i]) return 0;
+        if (ic_lower(p[i]) != w[i]) return 0;
         i++;
     }
     {
@@ -384,7 +237,7 @@ static int tag_skips_content(const char *t) {
 
 /* Tags that introduce a line break in the text view. */
 static int tag_is_block(const char *t) {
-    if (b_lower(t[0]) == 'h' && t[1] >= '1' && t[1] <= '6') {
+    if (ic_lower(t[0]) == 'h' && t[1] >= '1' && t[1] <= '6') {
         char c = t[2];
         return c == 0 || c == '>' || c == '/' || c == ' ';
     }
@@ -470,13 +323,13 @@ static uint32_t rt_utf8(const char *p, uint64_t i, uint64_t len, uint64_t *adv) 
 /* Copy a tag attribute value (e.g. href) out of a tag's source range. */
 static void extract_attr(const char *p, uint64_t ts, uint64_t te,
                          const char *name, char *out, uint64_t cap) {
-    uint64_t nlen = b_strlen(name);
+    uint64_t nlen = ic_strlen(name);
     uint64_t i = ts;
     if (cap) out[0] = 0;
     while (i + nlen + 1 < te) {
-        if (b_lower(p[i]) == b_lower(name[0])) {
+        if (ic_lower(p[i]) == ic_lower(name[0])) {
             uint64_t k = 0;
-            while (k < nlen && b_lower(p[i + k]) == b_lower(name[k])) k++;
+            while (k < nlen && ic_lower(p[i + k]) == ic_lower(name[k])) k++;
             if (k == nlen) {
                 uint64_t j = i + nlen;
                 while (j < te && (p[j] == ' ' || p[j] == '=')) j++;
@@ -507,44 +360,44 @@ static void extract_attr(const char *p, uint64_t ts, uint64_t te,
 /* Turn a raw href into an absolute URL against the current page. */
 static void resolve_href(const char *href, char *out, uint64_t cap) {
     uint16_t port;
-    int https;
+    int use_tls;
     char host[128];
     char path[256];
 
     if (cap) out[0] = 0;
     if (!href || !*href || cap == 0) return;
-    if (b_strprefix(href, "http://") || b_strprefix(href, "https://")) {
-        b_strcpy(out, href, cap);
+    if (ic_strprefix(href, "http://") || ic_strprefix(href, "https://")) {
+        ic_strcpy(out, href, cap);
         return;
     }
-    if (parse_url_format(current_url, &port, &https, host, sizeof(host),
-                         path, sizeof(path)) < 0) {
-        b_strcpy(out, href, cap);
+    if (ic_url_split(current_url, host, sizeof(host),
+                     &port, path, sizeof(path), &use_tls) < 0) {
+        ic_strcpy(out, href, cap);
         return;
     }
 
-    if (b_strprefix(href, "//")) {
-        b_strcpy(out, https ? "https:" : "http:", cap);
-        b_strcat(out, href, cap);
+    if (ic_strprefix(href, "//")) {
+        ic_strcpy(out, use_tls ? "https:" : "http:", cap);
+        ic_strcat(out, href, cap);
         return;
     }
-    b_strcpy(out, https ? "https://" : "http://", cap);
-    b_strcat(out, host, cap);
+    ic_strcpy(out, use_tls ? "https://" : "http://", cap);
+    ic_strcat(out, host, cap);
     if (href[0] == '/') {
-        b_strcat(out, href, cap);
+        ic_strcat(out, href, cap);
         return;
     }
     {
         /* Relative to the current path's directory. */
-        uint64_t plen = b_strlen(path);
+        uint64_t plen = ic_strlen(path);
         while (plen > 0 && path[plen - 1] != '/') plen--;
         if (plen > 1) {
             path[plen] = 0;
-            b_strcat(out, path, cap);
+            ic_strcat(out, path, cap);
         } else {
-            b_strcat(out, "/", cap);
+            ic_strcat(out, "/", cap);
         }
-        b_strcat(out, href, cap);
+        ic_strcat(out, href, cap);
     }
 }
 
@@ -606,7 +459,7 @@ static void build_render_text(void) {
                             char href[BROWSER_URL_CAP];
                             extract_attr(p, ts, te, "href", href, sizeof(href));
                             if (href[0] && href[0] != '#' &&
-                                !b_strprefix(href, "javascript:") &&
+                                !ic_strprefix(href, "javascript:") &&
                                 link_count < BROWSER_LINKS) {
                                 resolve_href(href, links[link_count].url, BROWSER_URL_CAP);
                                 links[link_count].start = rt_i;
@@ -657,12 +510,12 @@ static void build_render_text(void) {
                     j += k;
                     if (j < len && p[j] == ';') j++;
                 }
-            } else if (b_strprefix(p + i, "&amp;")) { cp = '&'; ok = 1; j = i + 5; }
-            else if (b_strprefix(p + i, "&lt;")) { cp = '<'; ok = 1; j = i + 4; }
-            else if (b_strprefix(p + i, "&gt;")) { cp = '>'; ok = 1; j = i + 4; }
-            else if (b_strprefix(p + i, "&quot;")) { cp = '"'; ok = 1; j = i + 6; }
-            else if (b_strprefix(p + i, "&apos;")) { cp = '\''; ok = 1; j = i + 6; }
-            else if (b_strprefix(p + i, "&nbsp;")) { cp = 0x00A0; ok = 1; j = i + 6; }
+            } else if (ic_strprefix(p + i, "&amp;")) { cp = '&'; ok = 1; j = i + 5; }
+            else if (ic_strprefix(p + i, "&lt;")) { cp = '<'; ok = 1; j = i + 4; }
+            else if (ic_strprefix(p + i, "&gt;")) { cp = '>'; ok = 1; j = i + 4; }
+            else if (ic_strprefix(p + i, "&quot;")) { cp = '"'; ok = 1; j = i + 6; }
+            else if (ic_strprefix(p + i, "&apos;")) { cp = '\''; ok = 1; j = i + 6; }
+            else if (ic_strprefix(p + i, "&nbsp;")) { cp = 0x00A0; ok = 1; j = i + 6; }
             if (ok) {
                 rt_emit_cp(cp);
                 i = j;
@@ -699,108 +552,91 @@ static void build_render_text(void) {
 /* ---- page loading ---- */
 
 static void navigate_to(const char *url) {
-    uint32_t ip = 0;
-    uint16_t port = 80;
-    int https = 0;
     char host[128];
     char path[256];
     char out_path[64];
+    uint16_t port = 80;
+    int use_tls = 0;
     uint64_t bytes = 0;
     long rc;
 
     if (!url || !*url) return;
     /* Auto-prepend http:// if no scheme given */
-    if (!b_strprefix(url, "http://") && !b_strprefix(url, "https://")) {
+    if (!ic_strprefix(url, "http://") && !ic_strprefix(url, "https://")) {
         char full[BROWSER_URL_CAP];
-        b_strcpy(full, "http://", sizeof(full));
-        b_strcat(full, url, sizeof(full));
-        b_strcpy(current_url, full, BROWSER_URL_CAP);
+        ic_strcpy(full, "http://", sizeof(full));
+        ic_strcat(full, url, sizeof(full));
+        ic_strcpy(current_url, full, BROWSER_URL_CAP);
     } else {
-        b_strcpy(current_url, url, BROWSER_URL_CAP);
+        ic_strcpy(current_url, url, BROWSER_URL_CAP);
     }
-    b_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-    addr_cursor = (int)b_strlen(address_buf);
+    ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
+    addr_cursor = (int)ic_strlen(address_buf);
 
     /* Add to history */
-    if (history_pos < 0 || !b_streq(history[history_pos], url)) {
+    if (history_pos < 0 || !ic_streq(history[history_pos], current_url)) {
         if (history_pos + 1 < BROWSER_HISTORY) {
             history_pos++;
-            b_strcpy(history[history_pos], url, BROWSER_URL_CAP);
+            ic_strcpy(history[history_pos], current_url, BROWSER_URL_CAP);
             history_count = history_pos + 1;
         }
     }
 
     loading = 1;
-    b_strcpy(status, "Resolving...", sizeof(status));
+    ic_strcpy(status, "Resolving...", sizeof(status));
     draw_all();
 
-    /* Step 1: parse URL format (use current_url which has http:// prepended) */
-    rc = parse_url_format(current_url, &port, &https, host, sizeof(host), path, sizeof(path));
+    /* Step 1: parse URL */
+    rc = ic_url_split(current_url, host, sizeof(host),
+                      &port, path, sizeof(path), &use_tls);
     if (rc < 0) {
-        b_strcpy(status, "Invalid URL format", sizeof(status));
+        ic_strcpy(status, "Invalid URL format", sizeof(status));
         loading = 0;
         return;
     }
 
-    /* Step 2: resolve hostname */
-    b_strcpy(status, "Resolving hostname...", sizeof(status));
-    draw_all();
-    rc = (long)resolve_host(host, &ip);
-    if (rc < 0) {
-        long err = -rc;
-        if (err == 2) b_strcpy(status, "DNS: ARP timeout", sizeof(status));
-        else if (err == 3) b_strcpy(status, "DNS: network timeout", sizeof(status));
-        else b_strcpy(status, "DNS resolution failed", sizeof(status));
-        loading = 0;
-        return;
-    }
-
-    /* Step 3: fetch page */
-    b_strcpy(status, "Connecting...", sizeof(status));
+    /* Step 2: resolve + fetch */
+    ic_strcpy(status, "Connecting...", sizeof(status));
     draw_all();
 
-    b_strcpy(out_path, "/browser.page", sizeof(out_path));
+    ic_strcpy(out_path, "/browser.page", sizeof(out_path));
 
-    if (https) {
-        rc = (long)icda_https_get_ipv4(ip, port, host, path, out_path, &bytes);
-    } else {
-        rc = (long)icda_http_get_ipv4(ip, port, host, path, out_path, &bytes);
-    }
+    rc = ic_http_fetch_to_file(host, port, use_tls, path, out_path, &bytes);
 
     if (rc < 0) {
         long err = -rc;
         if (err >= 2000 && err < 3000) {
-            b_strcpy(status, "HTTP error", sizeof(status));
+            ic_strcpy(status, "HTTP error", sizeof(status));
         } else if (err == 2) {
-            b_strcpy(status, "ARP timeout", sizeof(status));
+            ic_strcpy(status, "DNS/ARP timeout", sizeof(status));
         } else if (err == 3) {
-            b_strcpy(status, "TCP timeout", sizeof(status));
+            ic_strcpy(status, "TCP timeout", sizeof(status));
         } else if (err == 4) {
-            b_strcpy(status, "Connection refused", sizeof(status));
+            ic_strcpy(status, "Connection refused", sizeof(status));
         } else if (err == 5) {
-            b_strcpy(status, "Bad HTTP response", sizeof(status));
+            ic_strcpy(status, "Bad HTTP response", sizeof(status));
         } else if (err == 6) {
-            b_strcpy(status, "Response too large", sizeof(status));
+            ic_strcpy(status, "Response too large", sizeof(status));
         } else if (err == 11) {
-            b_strcpy(status, "TLS handshake failed", sizeof(status));
+            ic_strcpy(status, "TLS handshake failed", sizeof(status));
         } else if (err == 12) {
-            b_strcpy(status, "TLS recv failed", sizeof(status));
+            ic_strcpy(status, "TLS recv failed", sizeof(status));
         } else {
-            b_strcpy(status, "Network error", sizeof(status));
+            ic_strcpy(status, "Network error", sizeof(status));
         }
         loading = 0;
         return;
     }
 
     if (!html_buf || !text_buf) {
-        b_strcpy(status, "No memory for page", sizeof(status));
+        ic_strcpy(status, "No memory for page", sizeof(status));
         loading = 0;
         return;
     }
     if (bytes > BROWSER_HTML_CAP - 1) bytes = BROWSER_HTML_CAP - 1;
     {
-        uint64_t n = icda_read_file(out_path, html_buf, bytes);
-        html_len = n > 0 ? n : 0;
+        long rn = (long)icda_read_file(out_path, html_buf, bytes);
+        html_len = rn > 0 ? (uint64_t)rn : 0;
         html_buf[html_len] = 0;
     }
 
@@ -809,21 +645,21 @@ static void navigate_to(const char *url) {
     scroll_y = 0;
     max_scroll = 0;
     loading = 0;
-    b_strcpy(status, "Done ", sizeof(status));
+    ic_strcpy(status, "Done ", sizeof(status));
     {
         char nb[16];
-        b_uint_to_str(html_len, nb, sizeof(nb));
-        b_strcat(status, nb, sizeof(status));
-        b_strcat(status, " bytes", sizeof(status));
+        ic_uint_to_str(html_len, nb, sizeof(nb));
+        ic_strcat(status, nb, sizeof(status));
+        ic_strcat(status, " bytes", sizeof(status));
     }
 }
 
 static void go_back(void) {
     if (history_pos > 0) {
         history_pos--;
-        b_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
-        b_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-        addr_cursor = (int)b_strlen(address_buf);
+        ic_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
+        ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
+        addr_cursor = (int)ic_strlen(address_buf);
         navigate_to(current_url);
     }
 }
@@ -831,18 +667,71 @@ static void go_back(void) {
 static void go_forward(void) {
     if (history_pos + 1 < history_count) {
         history_pos++;
-        b_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
-        b_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-        addr_cursor = (int)b_strlen(address_buf);
+        ic_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
+        ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
+        addr_cursor = (int)ic_strlen(address_buf);
         navigate_to(current_url);
     }
+}
+
+/* ---- context-menu helpers ---- */
+static void br_ctx_set(int idx, int action, const char *label) {
+    if (idx < 0 || idx >= CTX_BR_MAX) return;
+    ctx_actions[idx] = action;
+    ic_strcpy(ctx_labels[idx], label, CTX_BR_LBL);
+}
+
+static void br_ctx_menu_fill(ic_menu_t *m) {
+    int i;
+    if (!m) return;
+    m->count = ctx_nitems;
+    m->selected = -1;
+    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
+        m->items[i] = ctx_labels[i];
+}
+
+static void br_ctx_close(void) { ctx_open = 0; }
+
+static void br_ctx_activate(int which) {
+    int a;
+    if (which < 0 || which >= ctx_nitems) { br_ctx_close(); return; }
+    a = ctx_actions[which];
+    if (a == CTX_BR_BACK)     go_back();
+    else if (a == CTX_BR_FWD)     go_forward();
+    else if (a == CTX_BR_REFRESH) navigate_to(current_url);
+    else if (a == CTX_BR_ADDR)    { addr_active = 1; addr_cursor = (int)ic_strlen(address_buf); }
+    br_ctx_close();
+}
+
+static void br_ctx_open_at(int x, int y) {
+    ic_menu_t m;
+    int w = gui_window_width();
+    int h = gui_window_height();
+    int mw, mh;
+    int i = 0;
+
+    br_ctx_set(i++, CTX_BR_BACK, "Back");
+    br_ctx_set(i++, CTX_BR_FWD, "Forward");
+    br_ctx_set(i++, CTX_BR_REFRESH, "Refresh");
+    br_ctx_set(i++, CTX_BR_ADDR, "Focus Address");
+    ctx_nitems = i;
+
+    br_ctx_menu_fill(&m);
+    mw = ic_menu_width(&m);
+    mh = ic_menu_height(&m);
+    if (x + mw > w) x = w - mw;
+    if (x < 0) x = 0;
+    if (y + mh > h) y = h - mh;
+    if (y < 0) y = 0;
+    ctx_x = x;
+    ctx_y = y;
+    ctx_open = 1;
 }
 
 /* ---- drawing ---- */
 
 static void draw_toolbar(void) {
     int w = gui_window_width();
-    uint32_t *px = gui_pixel_buffer();
     int y = ADDR_BAR_H;
 
     /* Toolbar background */
@@ -910,6 +799,7 @@ static void draw_page(void) {
     }
     max_scroll = (int)(total_lines * (uint64_t)line_h) - content_h + PAD;
     if (max_scroll < 0) max_scroll = 0;
+    if (scroll_y < 0) scroll_y = 0;
     if (scroll_y > max_scroll) scroll_y = max_scroll;
 
     /* Render visible lines; link spans are overdrawn in blue. */
@@ -969,6 +859,18 @@ static void draw_all(void) {
     draw_toolbar();
     draw_page();
     draw_status();
+    /* ---- context menu (topmost overlay) ---- */
+    if (ctx_open && ctx_nitems > 0) {
+        ic_canvas_t mc;
+        const ic_theme_t *t = ic_theme_default();
+        ic_menu_t m;
+        mc.px = gui_pixel_buffer();
+        mc.w = gui_window_width();
+        mc.h = gui_window_height();
+        br_ctx_menu_fill(&m);
+        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
+        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
+    }
     gui_flush();
 }
 
@@ -980,7 +882,6 @@ static int hit_rect(int mx, int my, int x, int y, int w, int h) {
 
 static void handle_click(int mx, int my) {
     int w = gui_window_width();
-    int h = gui_window_height();
     int content_y = ADDR_BAR_H + TOOLBAR_H;
 
     /* Toolbar buttons */
@@ -1036,6 +937,7 @@ static void handle_click(int mx, int my) {
 }
 
 static void handle_key(uint32_t key) {
+    if (ctx_open) return; /* type-ahead guard */
     if (addr_active) {
         if (key == '\r' || key == '\n') {
             addr_active = 0;
@@ -1054,7 +956,7 @@ static void handle_key(uint32_t key) {
     } else {
         if (key == 'l' || key == 'L') {
             addr_active = 1;
-            addr_cursor = (int)b_strlen(address_buf);
+            addr_cursor = (int)ic_strlen(address_buf);
         } else if (key == '\r' || key == '\n') {
             navigate_to(address_buf);
         } else if (key == 27) { /* Escape */
@@ -1066,9 +968,31 @@ static void handle_key(uint32_t key) {
 static int on_event(void *ud, const gui_msg_t *msg) {
     (void)ud;
     if (msg->type == GUI_MSG_MOUSE_EVENT) {
+        int mx = msg->mouse.x, my = msg->mouse.y;
+        /* Left-click: menu/press precedence */
         if (msg->mouse.buttons & GUI_BTN_LEFT) {
-            handle_click(msg->mouse.x, msg->mouse.y);
+            if (!prev_left) {
+                if (ctx_open) {
+                    ic_menu_t m; int hit;
+                    br_ctx_menu_fill(&m);
+                    hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
+                    if (hit >= 0 && hit < ctx_nitems) br_ctx_activate(hit);
+                    else br_ctx_close();
+                } else {
+                    handle_click(mx, my);
+                }
+            }
         }
+        prev_left = (msg->mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+        /* Right-click: edge-detect (desktop.c pattern, single dispatch) */
+        if (msg->mouse.buttons & GUI_BTN_RIGHT) {
+            if (!prev_right) {
+                br_ctx_close();
+                br_ctx_open_at(mx, my);
+            }
+            prev_right = 1;
+        } else { prev_right = 0; }
+        last_mouse_x = mx; last_mouse_y = my;
     } else if (msg->type == GUI_MSG_KEY_EVENT) {
         if (msg->key.pressed) {
             handle_key(msg->key.keycode);
@@ -1091,11 +1015,11 @@ int main(int argc, char **argv) {
     text_shm = icda_shm_create(BROWSER_TEXT_CAP);
     if (text_shm) text_buf = (char *)(uintptr_t)icda_shm_map(text_shm);
 
-    b_strcpy(current_url, "http://example.com", BROWSER_URL_CAP);
-    b_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-    addr_cursor = (int)b_strlen(address_buf);
-    b_strcpy(page_title, "ICDA Browser", BROWSER_TITLE_CAP);
-    b_strcpy(status, "Ready", sizeof(status));
+    ic_strcpy(current_url, "http://example.com", BROWSER_URL_CAP);
+    ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
+    addr_cursor = (int)ic_strlen(address_buf);
+    ic_strcpy(page_title, "ICDA Browser", BROWSER_TITLE_CAP);
+    ic_strcpy(status, "Ready", sizeof(status));
 
     if (gui_open_window("ICDA Browser", 900, 600) != 0) {
         return -1;
@@ -1109,18 +1033,10 @@ int main(int argc, char **argv) {
         int changed = 0;
         while (gui_poll_event(&msg)) {
             changed = 1;
-            if (msg.type == GUI_MSG_CLOSE_WINDOW) {
+            /* All events routed through on_event (single dispatch) */
+            if (!on_event(NULL, &msg)) {
                 gui_close_window();
                 return 0;
-            }
-            if (msg.type == GUI_MSG_MOUSE_EVENT) {
-                if (msg.mouse.buttons & GUI_BTN_LEFT) {
-                    handle_click(msg.mouse.x, msg.mouse.y);
-                }
-            } else if (msg.type == GUI_MSG_KEY_EVENT) {
-                if (msg.key.pressed) {
-                    handle_key(msg.key.keycode);
-                }
             }
         }
         if (changed) {

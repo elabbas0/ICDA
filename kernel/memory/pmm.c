@@ -109,7 +109,7 @@ void pmm_init(void *multiboot_info) {
     last_saw_mmap = saw_mmap;
 
     if (!saw_mmap || mem_top == 0) {
-        console_write("PMM debug: mmap=", CONSOLE_STYLE_WARN);
+        console_write("PMM: mmap=", CONSOLE_STYLE_WARN);
         console_write(saw_mmap ? "yes" : "no", CONSOLE_STYLE_WARN);
         console_write(" total_size=", CONSOLE_STYLE_WARN);
         print_dec64(info->total_size);
@@ -334,6 +334,9 @@ void pmm_print_stats() {
     console_write(last_saw_mmap ? "yes" : "no", CONSOLE_STYLE_WARN);
     console_write(" mem_top=", CONSOLE_STYLE_WARN);
     print_hex64(last_mem_top);
+    console_write(" RAM=", CONSOLE_STYLE_WARN);
+    print_dec64((last_mem_top + 1024ULL * 1024 - 1) / (1024ULL * 1024));
+    console_write("MB", CONSOLE_STYLE_WARN);
     console_write(" total=", CONSOLE_STYLE_WARN);
     print_dec64(total_frames);
     console_write(" used=", CONSOLE_STYLE_WARN);
