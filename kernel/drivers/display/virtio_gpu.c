@@ -34,6 +34,21 @@
 #include "../../memory/vmm.h"
 #include <stdint.h>
 
+/* Verbose serial tracing for probe/setup steps. Default off; the
+ * single "[virtio-gpu] initialized OK" line and all error lines
+ * always log. */
+#ifndef VIRTIO_GPU_DEBUG
+#define VIRTIO_GPU_DEBUG 0
+#endif
+
+static void vg_log(const char *text) {
+#if VIRTIO_GPU_DEBUG
+    serial_write(text);
+#else
+    (void)text;
+#endif
+}
+
 /* Legacy virtio PCI register offsets (I/O-port based) */
 #define VIRTIO_REG_DEVICE_FEATURES  0x00  /* 32-bit RO */
 #define VIRTIO_REG_DRIVER_FEATURES  0x04  /* 32-bit WO */
@@ -125,8 +140,9 @@ static int vg_alloc_page(uint64_t *phys_out, void **virt_out) {
     return 0;
 }
 
-/* ---- Serial helper: print uint32_t as decimal ---- */
+/* ---- Serial helper: print uint32_t as decimal (verbose only) ---- */
 
+#if VIRTIO_GPU_DEBUG
 static void vg_serial_u32(uint32_t v) {
     char buf[11];
     int len = 0;
@@ -137,6 +153,7 @@ static void vg_serial_u32(uint32_t v) {
         serial_write(tmp);
     }
 }
+#endif
 
 /*
  * Legacy PCI capability walk and vg_legacy_mmio removed.
@@ -358,11 +375,11 @@ int virtio_gpu_init(void) {
     uint64_t fb_size;
     uint64_t pages;
 
-    serial_write("[virtio-gpu] scanning PCI...\n");
+    vg_log("[virtio-gpu] scanning PCI...\n");
 
     /* Step 0: early-out when multiboot framebuffer already present */
     if (fb_available()) {
-        serial_write("[virtio-gpu] skipped: multiboot fb present\n");
+        vg_log("[virtio-gpu] skipped: multiboot fb present\n");
         return -1;
     }
 
@@ -380,7 +397,7 @@ int virtio_gpu_init(void) {
         serial_write("[virtio-gpu] no device found\n");
         return -1;
     }
-    serial_write("[virtio-gpu] found device\n");
+    vg_log("[virtio-gpu] found device\n");
 
     if (pci_enable_memory_busmaster(pci) != 0) {
         serial_write("[virtio-gpu] busmaster failed\n");
@@ -396,9 +413,11 @@ int virtio_gpu_init(void) {
     uint16_t port = (uint16_t)(bar0 & ~0x3u);
     vg.port = port;
     vg.pci  = pci;
+#if VIRTIO_GPU_DEBUG
     serial_write("[virtio-gpu] PIO port ");
     vg_serial_u32(port);
     serial_write("\n");
+#endif
 
     /* Step 3: lifecycle reset -> ACK -> Driver */
     vg_out8(port, VIRTIO_REG_DEVICE_STATUS, 0);
@@ -444,7 +463,7 @@ int virtio_gpu_init(void) {
     vg_out8(port, VIRTIO_REG_DEVICE_STATUS,
             VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
     vg_pause();
-    serial_write("[virtio-gpu] DRIVER_OK\n");
+    vg_log("[virtio-gpu] DRIVER_OK\n");
 
     /* Step 5: GET_DISPLAY_INFO */
     if (vg_get_display_info(&vg.width, &vg.height) != 0) {
@@ -452,11 +471,13 @@ int virtio_gpu_init(void) {
         vg_out8(port, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FAILED);
         return -1;
     }
+#if VIRTIO_GPU_DEBUG
     serial_write("[virtio-gpu] display ");
     vg_serial_u32(vg.width);
     serial_write("x");
     vg_serial_u32(vg.height);
     serial_write("\n");
+#endif
     if (vg.width == 0 || vg.height == 0) {
         serial_write("[virtio-gpu] invalid dimensions\n");
         vg_out8(port, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FAILED);
@@ -469,7 +490,7 @@ int virtio_gpu_init(void) {
         vg_out8(port, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    serial_write("[virtio-gpu] resource created\n");
+    vg_log("[virtio-gpu] resource created\n");
 
     /* Step 7: allocate backing pages */
     pitch  = vg.width * 4;
@@ -486,7 +507,7 @@ int virtio_gpu_init(void) {
         uint8_t *v = (uint8_t *)PHYS_TO_VIRT(backing_phys);
         for (uint64_t i = 0; i < fb_size; i++) v[i] = 0;
     }
-    serial_write("[virtio-gpu] backing allocated\n");
+    vg_log("[virtio-gpu] backing allocated\n");
 
     /* Step 8: ATTACH_BACKING (single contiguous entry — valid since backing IS contiguous) */
     if (vg_attach_backing(1, backing_phys, (uint32_t)fb_size) != 0) {
@@ -494,7 +515,7 @@ int virtio_gpu_init(void) {
         vg_out8(port, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    serial_write("[virtio-gpu] backing attached\n");
+    vg_log("[virtio-gpu] backing attached\n");
 
     /* Step 9: SET_SCANOUT (scanout 0, resource 1) */
     if (vg_set_scanout(0, 1, vg.width, vg.height) != 0) {
@@ -502,13 +523,13 @@ int virtio_gpu_init(void) {
         vg_out8(port, VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    serial_write("[virtio-gpu] scanout set\n");
+    vg_log("[virtio-gpu] scanout set\n");
 
     /* Step 10: adopt as the system framebuffer — update framebuffer.c globals
      * so fb_print / fb_phys_addr / devnodes claim map all work. */
     fb_adopt(backing_phys, pitch, (int)vg.width, (int)vg.height, 32);
     fb_set_double_frame(0);
-    serial_write("[virtio-gpu] framebuffer adopted\n");
+    vg_log("[virtio-gpu] framebuffer adopted\n");
 
     /* Register as gpu_device_t (only when no primary exists) */
     if (!gpu_primary()) {

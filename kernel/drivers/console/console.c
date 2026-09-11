@@ -10,6 +10,17 @@ static kernel_device_t *display_device = 0;
 static kernel_device_t *serial_device = 0;
 static int console_display_is_framebuffer = 0;
 static int console_serial_mirror_enabled = 1;
+/* When nonzero, fb text output is suppressed (serial still flows).
+ * Set while the GUI VT is waiting for / owned by the WM. */
+static int console_fb_text_muted = 0;
+
+void console_mute_fb(int muted) {
+    console_fb_text_muted = muted ? 1 : 0;
+}
+
+int console_fb_muted(void) {
+    return console_fb_text_muted;
+}
 
 static int console_has_framebuffer = 0;
 static int console_overlay_active = 0;
@@ -293,7 +304,7 @@ void console_write(const char *str, console_style_t style) {
     }
 
     if (console_has_framebuffer && console_display_is_framebuffer) {
-        if (fb_available() && !splash_active()) {
+        if (fb_available() && !splash_active() && !console_fb_text_muted) {
             fb_print(str, fb_color_for(style), FB_BLACK);
         }
     } else {
@@ -305,6 +316,9 @@ void console_write(const char *str, console_style_t style) {
 }
 
 void console_backspace(void) {
+    if (console_fb_text_muted) {
+        return;
+    }
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
         fb_backspace(FB_BLACK);
         console_refresh_overlay();

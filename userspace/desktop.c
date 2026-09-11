@@ -2,6 +2,7 @@
 #include "icda_sys.h"
 #include "libicda.h"
 #include "font.h"
+#include "settings_store.h"
 
 #include <stdint.h>
 
@@ -714,7 +715,12 @@ static void open_selected(void) {
         return;
     }
     if (items[selected_item].is_wav) {
-        if ((long)icda_play_audio_file(items[selected_item].path) < 0) {
+        icda_settings_t audio_opt;
+        /* Slice C master mute: skip audio paths when disabled. */
+        icda_settings_load(&audio_opt);
+        if (!audio_opt.audio) {
+            set_status("Audio disabled - enable in Settings");
+        } else if ((long)icda_play_audio_file(items[selected_item].path) < 0) {
             set_status("Could not play WAV");
         } else {
             set_status("Playing WAV");
@@ -730,8 +736,15 @@ static void open_selected(void) {
 }
 
 static void play_selected(void) {
+    icda_settings_t audio_opt;
     if (selected_item < 0 || selected_item >= item_count || !items[selected_item].is_wav) {
         set_status("Select a WAV file");
+        return;
+    }
+    /* Slice C master mute: skip audio paths when disabled. */
+    icda_settings_load(&audio_opt);
+    if (!audio_opt.audio) {
+        set_status("Audio disabled - enable in Settings");
         return;
     }
     if ((long)icda_play_audio_file(items[selected_item].path) < 0) set_status("Could not play WAV");

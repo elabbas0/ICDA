@@ -13,6 +13,7 @@ static const uint32_t splash_muted   = 0x0094A3B8;
 static const uint32_t splash_white   = 0x00F1F5F9;
 
 static uint32_t splash_last_fill = 0;                /* bar fill permille */
+static uint32_t splash_frame = 0;                    /* tick-driven anim frame */
 
 /* Draw one ASCII glyph scaled by `scale` (integer pixels per font pixel),
  * centered horizontally around the caller-provided pixel origin. */
@@ -119,12 +120,41 @@ void splash_init(void) {
     splash_text_center("starting", w / 2, bar_y + 22, splash_muted);
 
     splash_last_fill = 0;
+    splash_frame = 0;
     splash_on = 1;
     splash_progress(1, "serial");
 }
 
+/* Tick-driven spinner: 8 dots on a small ring under the stage label.
+ * Each splash_progress call advances one frame (bootstage-driven, no
+ * timer needed, ~22 frames total). Cost is 9 tiny fill_rects per call
+ * (one clear + 8 dots) — microseconds, no measurable boot slowdown. */
+static void splash_spinner(int cx, int cy, uint32_t frame) {
+    static const int off_x[8] = { 0, 10, 14, 10, 0, -10, -14, -10 };
+    static const int off_y[8] = { -14, -10, 0, 10, 14, 10, 0, -10 };
+    uint32_t active = frame % 8U;
+    int i;
+
+    /* Clear the spinner cell to the splash background first so the
+     * previous frame's lit dot is erased. Bounds-safe: fill_rect
+     * clips, and the cell is 36x36 centered at (cx,cy). */
+    fb_fill_rect(cx - 18, cy - 18, 36, 36, splash_bg);
+    for (i = 0; i < 8; i++) {
+        uint32_t color = ((uint32_t)i == active) ? splash_accent : splash_track;
+        int dx = off_x[i];
+        int dy = off_y[i];
+        int sz = ((uint32_t)i == active) ? 6 : 4;
+        int off = sz / 2;
+        if (dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767) {
+            continue;
+        }
+        fb_fill_rect(cx + dx - off, cy + dy - off, sz, sz, color);
+    }
+}
+
 void splash_progress(uint32_t stage, const char *label) {
     int w;
+    int h;
     int bar_w;
     int bar_x;
     int bar_y;
@@ -133,18 +163,30 @@ void splash_progress(uint32_t stage, const char *label) {
 
     if (!splash_on) return;
     w = fb_width;
-    if (w <= 0) return;
+    h = fb_height;
+    if (w <= 0 || h <= 0) return;
     bar_w = w / 2;
     if (bar_w > 640) bar_w = 640;
     bar_x = (w - bar_w) / 2;
-    bar_y = fb_height / 2 + 60;
+    bar_y = h / 2 + 60;
 
     if (permille > 1000) permille = 1000;
     if (permille < splash_last_fill) permille = splash_last_fill;
     fill = (uint32_t)((uint64_t)bar_w * permille / 1000);
     if (fill > splash_last_fill) {
-        fb_fill_rect(bar_x + (int)splash_last_fill, bar_y,
-                     (int)(fill - splash_last_fill), 6, splash_accent);
+        /* Eased leading edge: paint the newest chunk with a brighter
+         * pulse on alternating frames so motion reads as smooth
+         * rather than stepped. */
+        uint32_t lead = (splash_frame & 1U) ? 0x007DD3FC : splash_accent;
+        uint32_t chunk = fill - splash_last_fill;
+        if (chunk > 8) {
+            fb_fill_rect(bar_x + (int)splash_last_fill, bar_y,
+                         (int)(chunk - 4), 6, splash_accent);
+            fb_fill_rect(bar_x + (int)fill - 4, bar_y, 4, 6, lead);
+        } else {
+            fb_fill_rect(bar_x + (int)splash_last_fill, bar_y,
+                         (int)(fill - splash_last_fill), 6, lead);
+        }
         splash_last_fill = fill;
     }
 
@@ -153,6 +195,13 @@ void splash_progress(uint32_t stage, const char *label) {
     if (label && *label) {
         splash_text_center(label, w / 2, bar_y + 40, splash_muted);
     }
+
+    /* Spinner below the label. Gated on screen height so small modes
+     * never draw off-screen. */
+    if (h > 0 && bar_y + 78 + 18 < h && bar_y + 78 - 18 > 0) {
+        splash_spinner(w / 2, bar_y + 78, splash_frame);
+    }
+    splash_frame++;
 }
 
 void splash_finish(void) {

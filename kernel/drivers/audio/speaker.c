@@ -7,6 +7,14 @@
 #define PIT_CHANNEL2_PORT  0x42
 #define SPEAKER_PORT       0x61
 
+/* Slice C audio hardening: the tone duration comes straight from a
+ * userspace syscall argument, so it must be capped - an unbounded
+ * busy-spin here would hang the calling thread (and, on real HW,
+ * needlessly blast the speaker). 500 ticks = 5 s at 100 Hz. */
+#define SPEAKER_MAX_TICKS  500U
+#define SPEAKER_MIN_HZ     30U
+#define SPEAKER_MAX_HZ     8000U
+
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
 }
@@ -33,6 +41,14 @@ void speaker_play(uint32_t frequency_hz) {
     if (frequency_hz == 0) {
         speaker_stop();
         return;
+    }
+    /* Clamp out-of-range requests instead of programming garbage
+     * divisors into the PIT. */
+    if (frequency_hz < SPEAKER_MIN_HZ) {
+        frequency_hz = SPEAKER_MIN_HZ;
+    }
+    if (frequency_hz > SPEAKER_MAX_HZ) {
+        frequency_hz = SPEAKER_MAX_HZ;
     }
 
     divisor = PIT_BASE_FREQUENCY / frequency_hz;
@@ -67,6 +83,11 @@ void speaker_play_for(uint32_t frequency_hz, uint64_t ticks) {
         return;
     }
 
+    /* Bounded busy-wait only: cap the duration so a bad/huge argument
+     * can never spin the CPU (or the speaker) indefinitely. */
+    if (ticks > SPEAKER_MAX_TICKS) {
+        ticks = SPEAKER_MAX_TICKS;
+    }
     speaker_play(frequency_hz);
     delay_units = ticks * 200000ULL;
     if (delay_units < 40000ULL) {

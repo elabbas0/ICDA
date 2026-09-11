@@ -9,6 +9,7 @@
  */
 #include "libicda.h"
 #include "gui_proto.h"
+#include "settings_store.h"
 
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
@@ -24,6 +25,7 @@
 #define WM_ANIM_RESTORE     3
 #define WM_ANIM_MAXIMIZE    4
 #define WM_ANIM_UNMAXIMIZE  5
+#define WM_ANIM_CLOSE       6
 
 typedef struct {
     int      valid;
@@ -37,6 +39,7 @@ typedef struct {
     int      h;
     int      minimized;
     int      maximized;
+    int      closing;
     int      anim;
     int      anim_kind;
     int      anim_from_x;
@@ -91,6 +94,20 @@ static int mouse_y = 0;
 static int prev_mouse_x = -1;
 static int prev_mouse_y = -1;
 static uint8_t mouse_buttons = 0;
+
+/* Slice C system settings (persisted in /cfg/icda-settings, defaults
+ * all-on). Loaded at startup and re-read periodically so the Settings
+ * app applies live without a reboot. vsync gates tick-paced vs
+ * immediate present; animations gates all window anims (instant path
+ * when off); boot_anim gates WM-side transition fades (the kernel
+ * splash runs pre-VFS so it cannot read the file yet); audio is read
+ * by the audio clients before playing. */
+static icda_settings_t wm_settings;
+static uint64_t settings_last_reload = 0;
+
+static void settings_reload(void) {
+    icda_settings_load(&wm_settings);
+}
 
 /* ---- damage tracking -------------------------------------------------
  *
@@ -190,6 +207,9 @@ static void mark_dirty_full(void) {
     dirty_full = 1;
     dirty_count = 0;
 }
+
+/* Slice B power overlay (defined after the blit helpers). action: 0 off, 1 reboot. */
+static void wm_power_sequence(int action, int w, int h);
 
 /* Windows-style AA arrow, 19×30, hotspot 0,0 */
 typedef struct { int n; int x[8]; int y[8]; } cursor_poly_t;
@@ -334,6 +354,24 @@ static void copy_pixels_dim(uint32_t *dst, const uint32_t *src, int count) {
         uint32_t r = ((c >> 16) & 0xFF) * DIM_NUM / DIM_DEN;
         uint32_t g = ((c >> 8) & 0xFF) * DIM_NUM / DIM_DEN;
         uint32_t b = (c & 0xFF) * DIM_NUM / DIM_DEN;
+        dst[i] = (r << 16) | (g << 8) | b;
+    }
+}
+
+/* Slice B fade helper: scale src toward black by num/den (bounds-checked,
+ * den>0 required). OPEN fades num from DIM_NUM*DEN..DEN*DEN up to full
+ * brightness; CLOSE fades down to 0 (black). Row-copy speed, no per-pixel
+ * alpha buffer needed. */
+static void copy_pixels_fade(uint32_t *dst, const uint32_t *src, int count,
+                              int num, int den) {
+    if (!dst || !src || count <= 0 || den <= 0) return;
+    if (num < 0) num = 0;
+    if (num > den) num = den;
+    for (int i = 0; i < count; i++) {
+        uint32_t c = src[i];
+        uint32_t r = ((c >> 16) & 0xFF) * (uint32_t)num / (uint32_t)den;
+        uint32_t g = ((c >> 8) & 0xFF) * (uint32_t)num / (uint32_t)den;
+        uint32_t b = (c & 0xFF) * (uint32_t)num / (uint32_t)den;
         dst[i] = (r << 16) | (g << 8) | b;
     }
 }
@@ -540,6 +578,7 @@ static void desk_init_registry(void) {
     desk_add("Browser", "app", "/apps/browser.app", 1, 0, 3);
     desk_add("Editor", "editor", "/apps/editor.app", 0, 0, 0);
     desk_add("Task Manager", "gear", "/apps/taskman.app", 0, 0, 0);
+    desk_add("Settings", "gear", "/apps/settings.app", 0, 0, 0);
 }
 
 static int desk_icon_x(desk_icon_t *d) {
@@ -1432,6 +1471,7 @@ static const char *window_icon_name(const char *title) {
     if (ic_strprefix(t, "editor") || ic_strprefix(t, "notepad")) return "editor";
     if (ic_strprefix(t, "icda demo")) return "app";
     if (ic_strprefix(t, "icda browser")) return "app";
+    if (ic_strprefix(t, "setting")) return "gear";
     return "app";
 }
 
@@ -1503,10 +1543,11 @@ static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
     ic_text_font(&c, x + 34, y + 6, label, fg, fill, 180, NULL, 0);
 }
 
-/* Start menu layout: apps at the top, system actions (task manager +
- * power) pinned at the bottom under a divider - the modern pattern. */
+/* Start menu layout: apps at the top, system actions (settings +
+ * task manager + power) pinned at the bottom under a divider - the
+ * modern pattern. */
 #define START_MENU_W 270
-#define START_MENU_H 384
+#define START_MENU_H 416
 #define START_ROW_H 30
 #define START_ROW_GAP 32
 
@@ -1530,15 +1571,17 @@ static void draw_start_menu(int w, int h, int mx, int my) {
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 152, 246, START_ROW_H}));
     draw_start_row(w, h, x + 12, y + 184, 246, START_ROW_H, "app", "Browser",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 184, 246, START_ROW_H}));
+    draw_start_row(w, h, x + 12, y + 216, 246, START_ROW_H, "gear", "Settings",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 216, 246, START_ROW_H}));
 
     /* System section */
-    ic_hline(&c, x + 12, y + 224, START_MENU_W - 24, 0x003C4043);
-    draw_start_row(w, h, x + 12, y + 232, 246, START_ROW_H, "gear", "Task Manager",
-                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 232, 246, START_ROW_H}));
-    draw_start_row(w, h, x + 12, y + 264, 246, START_ROW_H, "gear", "Shutdown",
+    ic_hline(&c, x + 12, y + 256, START_MENU_W - 24, 0x003C4043);
+    draw_start_row(w, h, x + 12, y + 264, 246, START_ROW_H, "gear", "Task Manager",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, START_ROW_H}));
-    draw_start_row(w, h, x + 12, y + 296, 246, START_ROW_H, "gear", "Restart",
+    draw_start_row(w, h, x + 12, y + 296, 246, START_ROW_H, "gear", "Shutdown",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, START_ROW_H}));
+    draw_start_row(w, h, x + 12, y + 328, 246, START_ROW_H, "gear", "Restart",
+                   ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 328, 246, START_ROW_H}));
 }
 
 /* ---- focus notifications ------------------------------------------------- */
@@ -1609,7 +1652,8 @@ static void focus_top_visible(void) {
     int found = -1;
     for (int i = num_windows - 1; i >= 0; i--) {
         int idx = z_order[i];
-        if (windows[idx].valid && !windows[idx].minimized) {
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        if (windows[idx].valid && !windows[idx].minimized && !windows[idx].closing) {
             found = idx;
             break;
         }
@@ -1662,6 +1706,45 @@ static void send_close_to_app(wm_window_t *win) {
     if (icda_msg_poll(win->app_queue_handle) > 32) return;
     icda_msg_send(win->app_queue_handle, &close_msg);
 }
+
+/* Slice B close fade: WM-driven, no app roundtrip. Marks the window
+ * closing and runs a fade-out over IC_ANIM_MAX ticks (the anim loop
+ * marks it dirty each tick); the main loop finalizes (shm unmap +
+ * remove) once anim completes, even if the app never responds.
+ * Slice C: with animations off the fade is skipped (anim starts at
+ * MAX) so the finalizer removes the window on the next pass. */
+static void start_close_fade(wm_window_t *win) {
+    if (!win || !win->valid || win->closing) return;
+    win->closing = 1;
+    win->anim_kind = WM_ANIM_CLOSE;
+    win->anim = wm_settings.animations ? 0 : IC_ANIM_MAX;
+    win->anim_from_x = win->x;
+    win->anim_from_y = win->y;
+    win->anim_from_w = win->w;
+    win->anim_from_h = win->h;
+    win->anim_to_x = win->x;
+    win->anim_to_y = win->y;
+    win->anim_to_w = win->w;
+    win->anim_to_h = win->h;
+    mark_dirty_win(win);
+}
+
+/* Finalize a close fade that has run to completion. Unmaps/closes the
+ * shm buffer and removes the window from z-order. Safe to call once. */
+static void finish_close_fade(int slot) {
+    wm_window_t *win;
+    if (slot < 0 || slot >= MAX_WINDOWS) return;
+    win = &windows[slot];
+    if (!win->valid) return;
+    mark_dirty_win(win);
+    icda_shm_unmap(win->shm_handle);
+    icda_shm_close(win->shm_handle);
+    win->valid = 0;
+    win->closing = 0;
+    win->anim_kind = WM_ANIM_NONE;
+    win->anim = 0;
+    remove_window(slot);
+}
 static int send_maybe(uint64_t q, gui_msg_t *m){
     if (icda_msg_poll(q) > 32) return -1;
     return icda_msg_send(q, m);
@@ -1678,11 +1761,34 @@ static void clamp_window(wm_window_t *win, int w, int h) {
 
 /* Start a window geometry animation.  The window's current position/size
  * is the "from" rect; the target is the "to" rect.  The compositor
- * interpolates between them over IC_ANIM_MAX ticks. */
+ * interpolates between them over IC_ANIM_MAX ticks.
+ * Slice C: with animations off this snaps to the target rect instantly
+ * (no animation state), covering OPEN/MINIMIZE/RESTORE/MAXIMIZE/
+ * UNMAXIMIZE through the one choke point. */
 static void start_anim(wm_window_t *win, int kind,
                        int from_x, int from_y, int from_w, int from_h,
                        int to_x, int to_y, int to_w, int to_h) {
     if (!win || !win->valid) return;
+    if (!wm_settings.animations) {
+        /* MINIMIZE must not touch the geometry: the window is only
+         * hidden (minimized=1 by the caller) and RESTORE animates
+         * back from the taskbar to these same coordinates. */
+        if (kind != WM_ANIM_MINIMIZE) {
+            win->x = to_x;
+            win->y = to_y;
+            win->w = to_w;
+            win->h = to_h;
+        }
+        (void)kind;
+        (void)from_x;
+        (void)from_y;
+        (void)from_w;
+        (void)from_h;
+        win->anim_kind = WM_ANIM_NONE;
+        win->anim = 0;
+        mark_dirty_win(win);
+        return;
+    }
     win->anim_kind = kind;
     win->anim_from_x = from_x;
     win->anim_from_y = from_y;
@@ -1814,6 +1920,7 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, int w, int h
                     win->y = 78 + (slot * 32) % range_y;
                     win->minimized = 0;
                     win->maximized = 0;
+                    win->closing = 0;
                     win->anim = 0;
                     win->anim_kind = WM_ANIM_NONE;
                     win->restore_x = win->x;
@@ -1842,7 +1949,23 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, int w, int h
                     reply.open_ok.reply_queue = wm_queue;
                     icda_msg_send(win->app_queue_handle, &reply);
 
-                    mark_dirty_win(win);
+                    /* Slice B open animation: scale-up + fade-in over
+                     * IC_ANIM_MAX frames. From = 3/4-size rect centered
+                     * on the target; composite_window interpolates
+                     * geometry and brightens from dim to full. */
+                    {
+                        int from_w = win_w * 3 / 4;
+                        int from_h = win_h * 3 / 4;
+                        int from_x;
+                        int from_y;
+                        if (from_w < 1) from_w = 1;
+                        if (from_h < 1) from_h = 1;
+                        from_x = win->x + (win_w - from_w) / 2;
+                        from_y = win->y + (win_h - from_h) / 2;
+                        start_anim(win, WM_ANIM_OPEN,
+                                   from_x, from_y, from_w, from_h,
+                                   win->x, win->y, win_w, win_h);
+                    }
 
                     /* Notify focus only after the open handshake completes:
                      * the app is blocked in recv() waiting for OPEN_OK, so a
@@ -1868,7 +1991,9 @@ static int handle_taskbar_click(int mx, int my, int w, int h) {
     }
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
-        if (windows[idx].valid && ic_hit_rect(mx, my, (ic_rect_t){tx, task_y + 7, 136, 28})) {
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        if (windows[idx].valid && !windows[idx].closing &&
+            ic_hit_rect(mx, my, (ic_rect_t){tx, task_y + 7, 136, 28})) {
             if (focused_window_idx == idx && !windows[idx].minimized) {
                 animate_minimize(&windows[idx], w, h);
                 windows[idx].minimized = 1;
@@ -1905,9 +2030,19 @@ static int handle_start_menu_click(int mx, int my, int w, int h) {
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 120, 246, 30})) icda_spawn("/apps/diskman.app");
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 152, 246, 30})) icda_spawn("/apps/audioplay.app");
     else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 184, 246, 30})) icda_spawn("/apps/browser.app");
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 232, 246, 30})) icda_spawn("/apps/taskman.app");
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, 30})) icda_power(0);
-    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, 30})) icda_power(1);
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 216, 246, 30})) icda_spawn("/apps/settings.app");
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 264, 246, 30})) icda_spawn("/apps/taskman.app");
+    else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 296, 246, 30})) {
+        start_menu_open = 0;
+        mark_dirty(x, y, START_MENU_W, START_MENU_H);
+        wm_power_sequence(0, w, h);
+        return 1;
+    } else if (ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 328, 246, 30})) {
+        start_menu_open = 0;
+        mark_dirty(x, y, START_MENU_W, START_MENU_H);
+        wm_power_sequence(1, w, h);
+        return 1;
+    }
     start_menu_open = 0;
     mark_dirty(x, y, START_MENU_W, START_MENU_H);
     return 1;
@@ -1980,7 +2115,15 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     int cw;
     int ch;
 
-    if (!win->valid || win->minimized) return;
+    if (!win || !win->valid) return;
+    /* Minimized windows are skipped, except a closing fade which must
+     * still tick to completion (WM-driven, no app roundtrip). */
+    if (win->minimized) {
+        if (win->anim_kind == WM_ANIM_CLOSE && win->anim < IC_ANIM_MAX) {
+            win->anim++;
+        }
+        return;
+    }
     active = focused_window_idx == idx;
 
     anim = win->anim;
@@ -2024,8 +2167,64 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     }
 
     /* client pixels.  Unfocused windows are dimmed so the active one
-     * reads as the foreground (the same depth cue Windows/Linux use). */
-    if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+     * reads as the foreground (the same depth cue Windows/Linux use).
+     * Slice B: OPEN fades dim->full (scale-up + fade-in) and CLOSE
+     * fades full->black (fade-out), both WM-driven over IC_ANIM_MAX. */
+    if (win->anim_kind == WM_ANIM_OPEN && win->anim < IC_ANIM_MAX) {
+        int pct = DIM_NUM + (100 - DIM_NUM) * (anim + 1) / IC_ANIM_MAX;
+        if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+            for (int cy = 0; cy < ch; cy++) {
+                copy_pixels_fade(back_buffer + (wy + cy) * w + wx,
+                                 win->pixels + cy * win->w, cw, pct, 100);
+            }
+        } else {
+            for (int cy = 0; cy < ch; cy++) {
+                int py = wy + cy;
+                if (py < 0 || py >= h) continue;
+                for (int cx = 0; cx < cw; cx++) {
+                    int px = wx + cx;
+                    uint32_t src;
+                    uint32_t r;
+                    uint32_t g;
+                    uint32_t b;
+                    if (px < 0 || px >= w) continue;
+                    if (cy >= win->h || cx >= win->w) continue;
+                    src = win->pixels[cy * win->w + cx];
+                    r = ((src >> 16) & 0xFF) * (uint32_t)pct / 100U;
+                    g = ((src >> 8) & 0xFF) * (uint32_t)pct / 100U;
+                    b = (src & 0xFF) * (uint32_t)pct / 100U;
+                    back_buffer[py * w + px] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    } else if (win->anim_kind == WM_ANIM_CLOSE) {
+        int pct = 100 * (IC_ANIM_MAX - anim) / IC_ANIM_MAX;
+        if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
+            for (int cy = 0; cy < ch; cy++) {
+                copy_pixels_fade(back_buffer + (wy + cy) * w + wx,
+                                 win->pixels + cy * win->w, cw, pct, 100);
+            }
+        } else {
+            for (int cy = 0; cy < ch; cy++) {
+                int py = wy + cy;
+                if (py < 0 || py >= h) continue;
+                for (int cx = 0; cx < cw; cx++) {
+                    int px = wx + cx;
+                    uint32_t src;
+                    uint32_t r;
+                    uint32_t g;
+                    uint32_t b;
+                    if (px < 0 || px >= w) continue;
+                    if (cy >= win->h || cx >= win->w) continue;
+                    src = win->pixels[cy * win->w + cx];
+                    r = ((src >> 16) & 0xFF) * (uint32_t)pct / 100U;
+                    g = ((src >> 8) & 0xFF) * (uint32_t)pct / 100U;
+                    b = (src & 0xFF) * (uint32_t)pct / 100U;
+                    back_buffer[py * w + px] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    } else if (wx >= 0 && wy >= 0 && wx + cw <= w && wy + ch <= h) {
         /* Fully visible window: tight row copies instead of per-pixel
          * bounds checks - the hot path when windows sit on screen. */
         if (active) {
@@ -2061,9 +2260,15 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
     }
 
     /* Advance the animation.  When it completes, snap the window to the
-     * target rect and clear the animation state. */
+     * target rect and clear the animation state. CLOSE is the exception:
+     * it holds at MAX so the main loop can finalize (shm unmap +
+     * remove) WM-side, even if the app never answers. */
     if (win->anim_kind != WM_ANIM_NONE) {
-        if (win->anim >= IC_ANIM_MAX) {
+        if (win->anim_kind == WM_ANIM_CLOSE) {
+            if (win->anim < IC_ANIM_MAX) {
+                win->anim++;
+            }
+        } else if (win->anim >= IC_ANIM_MAX) {
             win->x = win->anim_to_x;
             win->y = win->anim_to_y;
             win->w = win->anim_to_w;
@@ -2194,6 +2399,67 @@ static void blit_to_screen(int w, int h) {
             copy_pixels(real_fb + y * pitch, back_buffer + y * w, w);
         }
     }
+}
+
+/* Slice B shutdown/reboot UX: fullscreen fade-to-black overlay with
+ * "Shutting down..." / "Restarting..." text, ~700ms (7 frames x 10
+ * ticks), then the power call. Best-effort present each frame; if the
+ * power syscall returns (it should not), fall through to the caller.
+ * Slice C: boot_anim off skips the fade (instant power call). This is
+ * the WM-owned transition animation; the kernel boot splash runs
+ * pre-VFS so it cannot honor the setting yet (see note at
+ * wm_settings). Present honors the vsync flag. */
+static void wm_power_sequence(int action, int w, int h) {
+    const char *msg = action == 1 ? "Restarting..." : "Shutting down...";
+    int sw = (int)fb_info.width;
+    int sh = (int)fb_info.height;
+    int steps = 7;
+    int s;
+
+    if (sw <= 0 || sh <= 0) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
+    }
+    if (sw > BACK_BUFFER_WIDTH) sw = BACK_BUFFER_WIDTH;
+    if (sh > BACK_BUFFER_HEIGHT) sh = BACK_BUFFER_HEIGHT;
+    if (w > 0 && w < sw) sw = w;
+    if (h > 0 && h < sh) sh = h;
+    if (sw < 320 || sh < 240) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
+    }
+    (void)w;
+    (void)h;
+    start_menu_open = 0;
+    if (!wm_settings.boot_anim) {
+        icda_power(action == 1 ? 1U : 0U);
+        return;
+    }
+    for (s = 0; s < steps; s++) {
+        ic_canvas_t c = bb_canvas(sw, sh);
+        int total = sw * sh;
+        int tx = sw / 2 - 90;
+        int ty = sh / 2 - 10;
+        if (total < 0 || total > BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT) {
+            break;
+        }
+        /* Fade the current scene toward black (cumulative 3/4 per
+         * frame: ~13% brightness after 7 frames). */
+        for (int i = 0; i < total; i++) {
+            uint32_t col = back_buffer[i];
+            uint32_t r = ((col >> 16) & 0xFF) * 3U / 4U;
+            uint32_t g = ((col >> 8) & 0xFF) * 3U / 4U;
+            uint32_t b = (col & 0xFF) * 3U / 4U;
+            back_buffer[i] = (r << 16) | (g << 8) | b;
+        }
+        if (tx < 8) tx = 8;
+        if (ty < 8) ty = 8;
+        ic_text_font(&c, tx, ty, msg, 0x00F1F5F9, 0x00000000, 300, NULL, 1);
+        blit_to_screen(sw, sh);
+        icda_gpu_present_flags(wm_settings.vsync ? 1ULL : 0ULL);
+        icda_sleep(10);
+    }
+    icda_power(action == 1 ? 1U : 0U);
 }
 
 static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
@@ -2408,7 +2674,7 @@ static int handle_right_edge(uint8_t buttons, uint8_t prev_buttons,
         gui_msg_t rmsg;
         if (idx < 0 || idx >= MAX_WINDOWS) continue;
         win = &windows[idx];
-        if (!win->valid || win->minimized) continue;
+        if (!win->valid || win->minimized || win->closing) continue;
         iw.x = win->x;
         iw.y = win->y;
         iw.w = win->w;
@@ -2511,6 +2777,12 @@ int main(int argc, char **argv) {
     mouse_x = w / 2;
     mouse_y = h / 2;
 
+    /* Slice C: system settings (vsync/animations/boot_anim/audio,
+     * all-on by default). Re-read periodically below so the Settings
+     * app applies live without a reboot. */
+    settings_reload();
+    settings_last_reload = icda_ticks();
+
     /* Pre-render the static wallpaper + desktop icons once; every frame
      * is copied out of this layer instead of recomputed.  The layer
      * derives its own dimensions from fb_info (the stack w/h above can
@@ -2528,6 +2800,14 @@ int main(int argc, char **argv) {
         for (;;) {
         int need_redraw = 0;
         int mouse_moved = 0;
+        /* Live settings: pick up Settings-app saves (~1s cadence). */
+        {
+            uint64_t tick_now = icda_ticks();
+            if (tick_now - settings_last_reload >= 100) {
+                settings_last_reload = tick_now;
+                settings_reload();
+            }
+        }
         while (icda_msg_poll(wm_queue) > 0) {
             gui_msg_t msg;
             if (icda_msg_recv(wm_queue, &msg, 0) != 0) continue;
@@ -2538,17 +2818,31 @@ int main(int argc, char **argv) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
                     wm_window_t *win = &windows[slot];
-                    mark_dirty_win(win);
-                    icda_shm_unmap(win->shm_handle);
-                    icda_shm_close(win->shm_handle);
-                    win->valid = 0;
-                    remove_window(slot);
+                    /* WM-driven fade-out: start it and finalize after
+                     * IC_ANIM_MAX ticks, even if the app is slow. */
+                    if (!win->closing) {
+                        send_close_to_app(win);
+                        start_close_fade(win);
+                    }
                 }
             } else if (msg.type == GUI_MSG_FLUSH) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
                     mark_dirty_win(&windows[slot]);
                 }
+            }
+        }
+
+        /* Finalize close fades that ran to completion on a previous
+         * frame (WM-driven: shm unmap + remove even if the app never
+         * answered). Runs before input so a closing window never
+         * receives new events. */
+        for (int ci = 0; ci < MAX_WINDOWS; ci++) {
+            if (windows[ci].valid && windows[ci].closing &&
+                windows[ci].anim_kind == WM_ANIM_CLOSE &&
+                windows[ci].anim >= IC_ANIM_MAX) {
+                finish_close_fade(ci);
+                need_redraw = 1;
             }
         }
 
@@ -2610,7 +2904,7 @@ int main(int argc, char **argv) {
                                 wm_window_t *win = &windows[idx];
                                 ic_window_t iw;
 
-                                if (!win->valid || win->minimized) continue;
+                                if (!win->valid || win->minimized || win->closing) continue;
                                 iw.x = win->x;
                                 iw.y = win->y;
                                 iw.w = win->w;
@@ -2618,7 +2912,11 @@ int main(int argc, char **argv) {
                                 iw.title = win->title;
 
                                 if (ic_hit_close(&iw, mouse_x, mouse_y)) {
+                                    /* X-button: WM-driven fade-out, no app
+                                     * roundtrip; best-effort notify too. */
                                     send_close_to_app(win);
+                                    start_close_fade(win);
+                                    need_redraw = 1;
                                     hit = idx;
                                     break;
                                 }
@@ -2695,20 +2993,26 @@ int main(int argc, char **argv) {
                 /* Window title drag (coalesced: one composite per tick). */
                 if (dragging_win_idx != -1 &&
                     (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
-                    wm_window_t *win = &windows[dragging_win_idx];
-                    need_redraw = 1;
-                    mark_dirty_win(win);
-                    win->x = mouse_x - drag_off_x;
-                    win->y = mouse_y - drag_off_y;
-                    clamp_window(win, w, h);
-                    mark_dirty_win(win);
+                    if (dragging_win_idx < 0 || dragging_win_idx >= MAX_WINDOWS ||
+                        !windows[dragging_win_idx].valid ||
+                        windows[dragging_win_idx].closing) {
+                        dragging_win_idx = -1;
+                    } else {
+                        wm_window_t *win = &windows[dragging_win_idx];
+                        need_redraw = 1;
+                        mark_dirty_win(win);
+                        win->x = mouse_x - drag_off_x;
+                        win->y = mouse_y - drag_off_y;
+                        clamp_window(win, w, h);
+                        mark_dirty_win(win);
+                    }
                 }
 
                 /* Forward motion to focused client window. */
                 if (dragging_win_idx == -1 && focused_window_idx != -1 &&
                     (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
                     wm_window_t *win = &windows[focused_window_idx];
-                    if (win->valid && !win->minimized) {
+                    if (win->valid && !win->minimized && !win->closing) {
                         ic_window_t iw;
                         iw.x = win->x;
                         iw.y = win->y;
@@ -2753,7 +3057,7 @@ int main(int argc, char **argv) {
                     props_close();
                 } else if (focused_window_idx != -1) {
                     wm_window_t *win = &windows[focused_window_idx];
-                    if (win->valid && !win->minimized) {
+                    if (win->valid && !win->minimized && !win->closing) {
                         gui_msg_t kmsg;
                         clear_msg(&kmsg);
                         kmsg.type = GUI_MSG_KEY_EVENT;
@@ -2777,10 +3081,23 @@ int main(int argc, char **argv) {
         {
             uint64_t now = icda_ticks();
             int animating = 0;
-            for (int i = 0; i < num_windows; i++) {
+            /* Slice B: scan all slots (not just num_windows) so OPEN /
+             * CLOSE fades always tick even with sparse slots. */
+            for (int i = 0; i < MAX_WINDOWS; i++) {
                 if (windows[i].valid &&
                     (windows[i].anim < IC_ANIM_MAX ||
                      windows[i].anim_kind != WM_ANIM_NONE)) {
+                    animating = 1;
+                    mark_dirty_win(&windows[i]);
+                }
+                /* Minimized close fades never reach composite_window
+                 * (dirty path skips minimized), so tick them here
+                 * WM-side; the finalizer pass removes them at MAX. */
+                if (windows[i].valid && windows[i].closing &&
+                    windows[i].minimized &&
+                    windows[i].anim_kind == WM_ANIM_CLOSE &&
+                    windows[i].anim < IC_ANIM_MAX) {
+                    windows[i].anim++;
                     animating = 1;
                     mark_dirty_win(&windows[i]);
                 }
@@ -2800,13 +3117,13 @@ int main(int argc, char **argv) {
                 dirty_full = 1;
                 need_redraw = 1;
             }
-            /* Composite at most once per tick - the vsync pacing point:
-             * the frame is presented to the screen at the tick boundary
-             * (like waiting on vblank), so repaints never tear mid-frame
-             * and the display can never run faster than the panel.
-             * Full rebuild only for the initial frame or screen-wide
-             * damage; everything else goes through the dirty-rect path. */
-            if (now != last_composite_tick) {
+            /* Composite with the Slice C vsync toggle: ON = at most
+             * once per tick (paced, tear-free-ish via the existing
+             * flip/double-buffer); OFF = immediate present with no
+             * tick gate. Present flags follow the same toggle
+             * (WAIT_VBLANK = one sched_yield, never a spin). */
+            uint64_t pflags = wm_settings.vsync ? 1ULL : 0ULL;
+            if (!wm_settings.vsync || now != last_composite_tick) {
                 if (need_redraw || animating || dragging_win_idx != -1 ||
                     dirty_full || dirty_count > 0) {
                     /* Remap real_fb → back buffer so blit_to_screen /
@@ -2828,7 +3145,7 @@ int main(int argc, char **argv) {
                          * do_present covers virtio-gpu (needs explicit
                          * TRANSFER+FLUSH) and flip mode alike. */
                         if (do_present) {
-                            icda_gpu_present_flags(1);
+                            icda_gpu_present_flags(pflags);
                         }
                         if (gpu_info.flip_active) {
                             wm_flip_page ^= 1;
@@ -2852,7 +3169,7 @@ int main(int argc, char **argv) {
                     composite_cursor_only(w, h, mouse_x, mouse_y,
                                           prev_mouse_x, prev_mouse_y);
                     if (do_present) {
-                        icda_gpu_present_flags(1);
+                        icda_gpu_present_flags(pflags);
                     }
                     if (gpu_info.flip_active) {
                         wm_flip_page ^= 1;

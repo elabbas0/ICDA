@@ -2,12 +2,22 @@
 
 #include "hda.h"
 #include "../console/console.h"
+#include "../serial/serial.h"
 #include "../../proc/sched.h"
 
 #define AUDIO_OUTPUT_CHANNELS 2U
 #define AUDIO_OUTPUT_BITS     16U
 #define AUDIO_OUTPUT_BYTES    4U
 #define AUDIO_OUTPUT_RATE     48000U
+
+/* WAV decode guards (Slice C audio hardening): reject anything outside
+ * these bounds so a corrupt/malicious file can never wedge the player.
+ * Total source duration is capped because playback resamples the whole
+ * file up-front (no streaming path); longer files are refused. */
+#define AUDIO_MIN_RATE_HZ     8000U
+#define AUDIO_MAX_RATE_HZ     96000U
+#define AUDIO_MAX_WAV_BYTES   (8U * 1024U * 1024U)
+#define AUDIO_MAX_SRC_SECONDS 10U
 
 typedef struct {
     const uint8_t *source_pcm;
@@ -73,17 +83,21 @@ static uint32_t read_le32(const uint8_t *p) {
 }
 
 static int parse_wav(const uint8_t *buf, uint64_t size,
-                     uint16_t *channels_out, uint32_t *rate_out,
-                     uint16_t *bits_out, const uint8_t **data_out,
-                     uint32_t *data_size_out) {
+                      uint16_t *channels_out, uint32_t *rate_out,
+                      uint16_t *bits_out, const uint8_t **data_out,
+                      uint32_t *data_size_out) {
     uint64_t off = 12;
     uint16_t fmt_tag = 0;
     uint16_t channels = 0;
     uint32_t rate = 0;
     uint16_t bits = 0;
+    uint16_t block_align = 0;
+    uint32_t byte_rate = 0;
     const uint8_t *data = 0;
     uint32_t data_size = 0;
     int have_fmt = 0;
+    uint32_t frame_bytes;
+    uint64_t total_frames;
 
     if (!buf || size < 44) return -1;
     if (!(buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F')) return -1;
@@ -100,6 +114,8 @@ static int parse_wav(const uint8_t *buf, uint64_t size,
             fmt_tag = read_le16(chunk + 8);
             channels = read_le16(chunk + 10);
             rate = read_le32(chunk + 12);
+            byte_rate = read_le32(chunk + 16);
+            block_align = read_le16(chunk + 20);
             bits = read_le16(chunk + 22);
             have_fmt = 1;
         } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
@@ -109,8 +125,23 @@ static int parse_wav(const uint8_t *buf, uint64_t size,
         off = next;
     }
 
-    if (!have_fmt || !data || fmt_tag != 1 || channels == 0 || rate == 0) return -1;
+    /* Strict header validation: PCM only, 1-2 channels, 8/16-bit,
+     * sane sample rate, internally consistent byte/block rates. */
+    if (!have_fmt || !data || fmt_tag != 1) return -1;
+    if (channels < 1 || channels > 2) return -1;
     if (!(bits == 8 || bits == 16)) return -1;
+    if (rate < AUDIO_MIN_RATE_HZ || rate > AUDIO_MAX_RATE_HZ) return -1;
+    frame_bytes = (uint32_t)channels * (bits / 8U);
+    if (block_align != frame_bytes) return -1;
+    if (byte_rate != rate * frame_bytes) return -1;
+
+    /* Data chunk must sit inside the file, be non-empty, frame-aligned,
+     * and bounded in absolute size and total duration. */
+    if ((uint64_t)(data - buf) + data_size > size) return -1;
+    if (data_size == 0 || data_size > AUDIO_MAX_WAV_BYTES) return -1;
+    if (data_size % frame_bytes != 0) return -1;
+    total_frames = data_size / frame_bytes;
+    if (total_frames == 0 || total_frames > (uint64_t)rate * AUDIO_MAX_SRC_SECONDS) return -1;
 
     *channels_out = channels;
     *rate_out = rate;
@@ -369,15 +400,22 @@ static int audio_start_pending_request(void) {
 
     file_data = (const uint8_t *)vfs_read(vfs_root(), path, &size);
     if (!file_data || size == 0) {
+        serial_write("audio: wav unreadable, refusing\n");
         return -1;
     }
     if (parse_wav(file_data, size, &channels, &sample_rate, &bits, &pcm, &pcm_size) != 0) {
+        serial_write("audio: wav header invalid, refusing\n");
         return -1;
     }
 
     total_frames = pcm_size / (channels * (bits / 8U));
+    if (total_frames == 0 || total_frames > (uint64_t)sample_rate * AUDIO_MAX_SRC_SECONDS) {
+        serial_write("audio: wav length out of bounds, refusing\n");
+        return -1;
+    }
     out_frames = (uint32_t)(((uint64_t)total_frames * AUDIO_OUTPUT_RATE + sample_rate - 1U) / sample_rate);
-    if (out_frames == 0) {
+    if (out_frames == 0 || out_frames > (0xFFFFFFFFU / AUDIO_OUTPUT_BYTES)) {
+        serial_write("audio: wav resample size out of bounds, refusing\n");
         return -1;
     }
 
@@ -406,15 +444,18 @@ static int audio_start_pending_request(void) {
     audio_state.hud_seconds_last = 0xFFFFFFFFU;
 
     if (hda_stream_start_s16_stereo((uint16_t)audio_state.sample_rate, audio_state.dma_buffer_len) != 0) {
+        serial_write("audio: hda stream start failed, playback disabled\n");
         audio_playback_stop();
         return -1;
     }
     audio_state.start_tick = sched_ticks();
     if (audio_fill_available() != 0) {
+        serial_write("audio: initial fill failed, playback disabled\n");
         audio_playback_stop();
         return -1;
     }
     if (hda_stream_run() != 0) {
+        serial_write("audio: hda stream run failed, playback disabled\n");
         audio_playback_stop();
         return -1;
     }

@@ -14,9 +14,16 @@
 #include "../proc/sched.h"
 #include "../syscall/syscall.h"
 
+/* Verbose serial tracing (fb-claim identity log). Default off;
+ * enable with SERIAL_VERBOSE=1. Error paths always log. */
+#ifndef SERIAL_VERBOSE
+#define SERIAL_VERBOSE 0
+#endif
+
 /* ---- local helpers ---- */
 
 /* Minimal serial u64 printer (no printf in kernel). */
+#if SERIAL_VERBOSE
 static void dev_serial_u64(uint64_t v) {
     char buf[21];
     int i = 0;
@@ -40,6 +47,7 @@ static void dev_serial_u64(uint64_t v) {
     }
     serial_write(buf);
 }
+#endif
 
 static uint64_t dev_kstrlen(const char *text) {
     uint64_t len = 0;
@@ -132,6 +140,9 @@ static void fb_release_if_owner_gone(void) {
         owner->state == PROCESS_REAPED) {
         fb_claimed = 0;
         fb_claim_pid = 0;
+        /* WM is gone: unmute fb text so the text VT / recovery
+         * console is visible again. GUI VT re-mutes on next claim. */
+        console_mute_fb(0);
     }
 }
 
@@ -158,7 +169,9 @@ static uint64_t dev_fb_claim_map(void *info) {
     if (!fproc || !fproc->addr_space) {
         return (uint64_t)-1;
     }
-    /* Identity gate, log-only (P0 step 2): record who claims; no denial. */
+    /* Identity gate, log-only (P0 step 2): record who claims; no denial.
+     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+#if SERIAL_VERBOSE
     serial_write("[ident] op=fb-claim pid=");
     dev_serial_u64(fproc->pid);
     serial_write(" uid=");
@@ -166,6 +179,7 @@ static uint64_t dev_fb_claim_map(void *info) {
     serial_write(" tok=");
     dev_serial_u64(fproc->ex_token);
     serial_write(fproc->ex_session_leader ? " leader=1\n" : " leader=0\n");
+#endif
     fb_phys = fb_phys_addr();
     fb_size = fb_phys_size();
     if (!fb_phys || !fb_size) {
@@ -207,6 +221,9 @@ static uint64_t dev_fb_claim_map(void *info) {
     mouse_set_screen(fb_width, fb_height);
     fb_claimed = 1;
     fb_claim_pid = fproc->pid;
+    /* WM owns the screen now: console text goes serial-only so it can
+     * never scribble over the composited desktop. */
+    console_mute_fb(1);
     return fb_virt + page_offset;
 }
 

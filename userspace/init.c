@@ -32,9 +32,12 @@ int init_main(int argc, char **argv) {
     }
     target = gui ? "/apps/wm.app" : "/apps/shell.app";
 
-    icda_write("init: supervising ");
-    icda_write(target);
-    icda_write("\n");
+    /* Product boot: keep the splash/black screen clean until the WM's
+     * first composite presents the wallpaper. The old "supervising"
+     * icda_write hit fb_print as a TTY flash between splash_finish
+     * and the first WM blit, so it is dropped (serial log still shows
+     * the spawn via kernel boot lines). Error paths below still write
+     * to the console (visible in text mode / on failure). */
 
     pid = icda_spawn(target);
     if ((long)pid < 0) {

@@ -55,6 +55,13 @@
 #define SERIAL_SHELL_MIRROR 0
 #endif
 
+/* CI-only boot self-test facility (default off). Build with
+ * CI_SELFTEST=1 for the CI test image; production builds skip the
+ * icda.test=* command-line hook entirely. */
+#ifndef CI_SELFTEST
+#define CI_SELFTEST 0
+#endif
+
 #define PIT_BASE_FREQUENCY 1193182U
 #define PIT_COMMAND_PORT   0x43
 #define PIT_CHANNEL0_PORT  0x40
@@ -444,8 +451,18 @@ void kernel_main(void *multiboot_info) {
         splash_finish();
         if (has_fb) {
             console_clear();
+            /* Any stray console writes between here and the WM's first
+             * wallpaper present must land on black, never as TTY text:
+             * clear explicitly and, on the GUI VT, mute fb text
+             * (serial-only) until the WM claims fb (which re-mutes).
+             * Text VTs stay unmuted so the shell stays visible. */
+            fb_clear(FB_BLACK);
+            if (vt_is_gui()) {
+                console_mute_fb(1);
+            }
         }
         bootstage_set(22, "shell");
+#if CI_SELFTEST
         /* Boot self-test facility (CI + bring-up debugging). With
          * `icda.test=nptest` (or `=nptestlx`) on the kernel command
          * line, run that test app first and report its exit code on
@@ -453,13 +470,10 @@ void kernel_main(void *multiboot_info) {
          * boot (no flag) is unaffected. Physical/cmdline access
          * already implies full control, so this adds no privilege. */
         if (boot_cmdline_has_flag(multiboot_info, "icda.test=nptest") ||
-            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx") ||
-            boot_cmdline_has_flag(multiboot_info, "icda.test=demo")) {
+            boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")) {
             const char *test_path =
                 boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")
                 ? "/bin/nptestlx.elf"
-                : boot_cmdline_has_flag(multiboot_info, "icda.test=demo")
-                ? "/apps/gui_demo.app"
                 : "/apps/nptest.app";
             /* Mirror the console to serial for the duration so every
              * PASS/FAIL line lands in the serial log (the mirror is
@@ -494,6 +508,7 @@ void kernel_main(void *multiboot_info) {
             serial_write(test_rc == 0 ? " NPTEST DONE ALL-PASS\n"
                                       : " NPTEST DONE FAILURES\n");
         }
+#endif
         int shell_failures = 0;
         for (;;) {
             /* PID1 supervision (P0 step 2): the kernel runs init, init

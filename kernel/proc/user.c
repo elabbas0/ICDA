@@ -11,9 +11,6 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 
-extern uint8_t user_demo_start[];
-extern uint8_t user_demo_end[];
-
 static uint64_t user_exit_code = 0;
 
 #define USER_ARG_MAX         32
@@ -811,25 +808,4 @@ int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {
     }
     child->state = PROCESS_REAPED;
     return 0;
-}
-
-int user_run_demo(void) {
-    process_t *user_proc;
-    uint64_t blob_size;
-    uint64_t entry_rip = 0;
-    thread_t *thread;
-
-    user_proc = proc_create_empty(PROCESS_USER);
-    if (!user_proc) {
-        return -1;
-    }
-    blob_size = (uint64_t)(user_demo_end - user_demo_start);
-    if (user_load_image(user_proc, user_demo_start, blob_size, &entry_rip) != 0) {
-        return -1;
-    }
-    thread = proc_create_user_thread(user_proc, entry_rip, USER_STACK_TOP - 16, user_thread_start);
-    if (!thread) {
-        return -1;
-    }
-    return user_wait_pid(user_proc->pid, &user_exit_code);
 }

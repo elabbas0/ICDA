@@ -10,6 +10,7 @@
 #include "icda_sys.h"
 #include "libicda.h"
 #include "font.h"
+#include "settings_store.h"
 
 #include <stdint.h>
 
@@ -144,8 +145,15 @@ static void ap_scan(void) {
 }
 
 static void ap_play_selected(void) {
+    icda_settings_t audio_opt;
     if (ap_count == 0) {
         ap_set_status("No track selected");
+        return;
+    }
+    /* Slice C master mute: skip audio paths when disabled. */
+    icda_settings_load(&audio_opt);
+    if (!audio_opt.audio) {
+        ap_set_status("Audio disabled - enable in Settings");
         return;
     }
     if (ap_sel < 0 || ap_sel >= ap_count) ap_sel = 0;

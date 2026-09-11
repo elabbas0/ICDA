@@ -5,7 +5,12 @@ OVMF_CODE = /usr/share/OVMF/OVMF_CODE.fd
 DOCKER_IMAGE = icda-toolchain
 DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
 SGDISK ?= /usr/sbin/sgdisk
-SHELL_AUTOTEST ?= 0
+# Slice A product cleanup: production `make` builds the product image
+# only (no demo/self-test apps, no verbose serial logs). CI builds the
+# test image with CI_SELFTEST=1 CI_IMAGE=1 (see .github/workflows).
+CI_SELFTEST ?= 0
+CI_IMAGE ?= 0
+SERIAL_VERBOSE ?= 0
 SERIAL_SHELL_MIRROR ?= 0
 # Only git-tracked UI sounds are baked into the kernel. Large media
 # (userspace/*.wav gitignored, e.g. ilove.wav) stays out: use Releases/LFS.
@@ -15,7 +20,9 @@ ICON_ICOS := $(wildcard resources/icons/*.ico)
 CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -I. -fno-stack-protector \
          -mno-mmx -mno-sse -mno-sse2 \
-         -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR)
+         -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR) \
+         -DCI_SELFTEST=$(CI_SELFTEST) -DCI_IMAGE=$(CI_IMAGE) \
+         -DSERIAL_VERBOSE=$(SERIAL_VERBOSE)
 
 # Userspace (the whole GUI stack - WM compositing, libicda drawing, apps)
 # runs optimized: at -O0 the 1920x1080 compositing math made real hardware
@@ -279,9 +286,6 @@ user.o: kernel/proc/user.c kernel/proc/user.h kernel/proc/process.h kernel/proc/
 user_enter.o: kernel/proc/user_enter.asm
 	$(ASM) -f elf64 kernel/proc/user_enter.asm -o user_enter.o
 
-user_demo_blob.o: kernel/proc/user_demo.asm
-	$(ASM) -f elf64 kernel/proc/user_demo.asm -o user_demo_blob.o
-
 userspace/hello.icx: userspace/hello.asm
 	$(ASM) -f bin userspace/hello.asm -o userspace/hello.icx
 
@@ -329,7 +333,7 @@ editor_start.o: userspace/editor_start.asm
 	cp -f /tmp/icda-editor_start.o editor_start.o
 
 shell.o: userspace/shell.c userspace/icda_sys.h Makefile
-	$(CC) $(USR_CFLAGS) -DSHELL_AUTOTEST=$(SHELL_AUTOTEST) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/shell.c -o /tmp/icda-shell.o
 	cp -f /tmp/icda-shell.o shell.o
 
 audioplay.o: userspace/audioplay.c userspace/gui.h userspace/gui_proto.h userspace/libicda.h userspace/icda_sys.h \
@@ -384,6 +388,15 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h userspace/l
 userspace/browser.app: crt0.o browser_start.o browser.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app browser_start.o browser.o gui.o libicda.o
 	cp -f /tmp/icda-browser.app userspace/browser.app
+
+settings.o: userspace/settings.c userspace/gui.h userspace/libicda.h userspace/icda_sys.h userspace/settings_store.h \
+           userspace/font.h userspace/ic_version.h version.h
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings.c -o /tmp/icda-settings.o
+	cp -f /tmp/icda-settings.o settings.o
+
+userspace/settings.app: crt0.o settings.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o gui.o libicda.o
+	cp -f /tmp/icda-settings.app userspace/settings.app
 
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
 	$(ASM) -f elf64 kernel/proc/shell_blob.asm -o shell_blob.o
@@ -550,25 +563,36 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-terminal.app crt0.o terminal.o gui.o libicda.o
 	cp -f /tmp/icda-terminal.app userspace/terminal.app
 
-user_programs.o: kernel/proc/user_programs.asm userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/gui_demo.app userspace/taskman.app userspace/browser.app userspace/nptest.app userspace/nptestlx.elf userspace/init.app
-	$(ASM) -f elf64 kernel/proc/user_programs.asm -o user_programs.o
+# Product image embeds product apps only. The CI test image additionally
+# embeds gui_demo/nptest/nptestlx (mirrors the CI_IMAGE gate in
+# kernel/fs/initramfs.c and kernel/proc/user_programs.asm).
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
+ifeq ($(CI_IMAGE),1)
+USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)
+else
+USER_PROGS_ALL = $(USER_PROGS_PROD)
+endif
+
+user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL)
+	$(ASM) -f elf64 -DCI_IMAGE=$(CI_IMAGE) kernel/proc/user_programs.asm -o user_programs.o
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
-            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
+            sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
+	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
 
 kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
-            sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
+            sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o vfs.o fd.o persistfs.o fat32.o exfat.o ntfs.o tty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o pat.o ioapic.o irq_controller.o acpi.o pmm.o heap.o vmm.o pf.o \
-	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_demo_blob.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
+	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
 
 kernel.iso: kernel.bin
@@ -625,6 +649,24 @@ qemu-uefi: kernel.iso
 qemu-smoke: kernel.iso
 	sh scripts/qemu-smoke.sh kernel.iso
 
+# Slice B real-power test (NOT for CI/smoke): boots WITHOUT -no-reboot /
+# -no-shutdown so ACPI S5 / 8042 / CF9 actually power off or reboot the VM.
+# Needs isa-debug-exit for the QEMU fallback path:
+#   make qemu-power          # shutdown path: VM must exit (not hang at cli;hlt)
+#   make qemu-power-reboot   # reboot path: VM must reboot, not triple-fault-hang
+# Manual check: Start menu -> Shutdown / Restart -> ~700ms fade overlay ->
+# QEMU exits (shutdown) or reboots (reboot). scripts/qemu-smoke.sh and CI
+# keep -no-reboot/-no-shutdown and are unaffected.
+# NOTE: the kernel's isa-debug-exit fallback writes port 0x501, so the
+# test device maps iobase=0x501 (QEMU default 0xf4 would not catch it).
+qemu-power: kernel.iso
+	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none \
+		-device isa-debug-exit,iobase=0x501,iosize=0x04
+
+qemu-power-reboot: kernel.iso
+	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none \
+		-device isa-debug-exit,iobase=0x501,iosize=0x04
+
 docker-image:
 	docker build -t $(DOCKER_IMAGE) .
 
@@ -661,4 +703,4 @@ else
 	@echo "usb-sync: installed kernel.iso -> $(VENTOY_ISO)"
 endif
 
-.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync
+.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync

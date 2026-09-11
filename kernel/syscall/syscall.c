@@ -28,6 +28,12 @@
 #include "uaccess.h"
 #include "native_abi.h"
 
+/* Verbose serial tracing (per-mount / audio-claim identity logs).
+ * Default off; enable with SERIAL_VERBOSE=1. Error paths always log. */
+#ifndef SERIAL_VERBOSE
+#define SERIAL_VERBOSE 0
+#endif
+
 /* ABI freeze (native_abi.h v1): the native numbers below are a stable
  * contract. The compiler enforces the bookends; scripts/check-abi.sh
  * enforces kernel/userspace sync. */
@@ -128,6 +134,7 @@ static uint64_t sys_get_pid(void) {
 }
 
 /* Minimal serial u64 printer for identity-gate logging (no printf). */
+#if SERIAL_VERBOSE
 static void ident_log_u64(uint64_t v) {
     char buf[21];
     int i = 0;
@@ -151,6 +158,7 @@ static void ident_log_u64(uint64_t v) {
     }
     serial_write(buf);
 }
+#endif
 
 /* P0 gate helpers: validated path (512B cap) and buffer range. */
 static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
@@ -777,7 +785,9 @@ static uint64_t sys_mount(uint64_t partition_index, const char *path) {
         return (uint64_t)-1;
     }
     /* Identity gate, log-only (P0 step 2): record who mounts; no denial.
-     * Path is gate-probed above; print bounded to 64 chars. */
+     * Path is gate-probed above; print bounded to 64 chars.
+     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+#if SERIAL_VERBOSE
     {
         int pi = 0;
         serial_write("[ident] op=mount pid=");
@@ -793,6 +803,7 @@ static uint64_t sys_mount(uint64_t partition_index, const char *path) {
         }
         serial_write("\n");
     }
+#endif
     part = partition_get((uint32_t)partition_index);
     if (!part) {
         return (uint64_t)-1;
@@ -1026,6 +1037,14 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
 }
 
 static uint64_t sys_sound_play(uint64_t frequency_hz, uint64_t ticks) {
+    /* Bounded at the gate as well as in the driver: a huge ticks value
+     * must never reach the speaker busy-wait (DoS via long spin). */
+    if (ticks > 500U) {
+        ticks = 500U;
+    }
+    if (frequency_hz > 0xFFFFFFFFU) {
+        frequency_hz = 0xFFFFFFFFU;
+    }
     speaker_play_for((uint32_t)frequency_hz, ticks);
     return 0;
 }
@@ -1094,7 +1113,9 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
         !user_range_prepare_cur_w(sample_rate_out, sizeof(*sample_rate_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    /* Identity gate, log-only (P0 step 2): record who claims; no denial. */
+    /* Identity gate, log-only (P0 step 2): record who claims; no denial.
+     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+#if SERIAL_VERBOSE
     serial_write("[ident] op=audio-claim pid=");
     ident_log_u64(proc->pid);
     serial_write(" uid=");
@@ -1102,6 +1123,7 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
     serial_write(" tok=");
     ident_log_u64(proc->ex_token);
     serial_write("\n");
+#endif
     if (audio_playback_claim(proc->pid, &token, &rate) != 0) {
         return (uint64_t)-1;
     }

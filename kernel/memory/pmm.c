@@ -109,7 +109,7 @@ void pmm_init(void *multiboot_info) {
     last_saw_mmap = saw_mmap;
 
     if (!saw_mmap || mem_top == 0) {
-        console_write("PMM debug: mmap=", CONSOLE_STYLE_WARN);
+        console_write("PMM: mmap=", CONSOLE_STYLE_WARN);
         console_write(saw_mmap ? "yes" : "no", CONSOLE_STYLE_WARN);
         console_write(" total_size=", CONSOLE_STYLE_WARN);
         print_dec64(info->total_size);

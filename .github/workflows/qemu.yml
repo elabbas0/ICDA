@@ -30,12 +30,14 @@ jobs:
 
       # The self-test hook (kernel cmdline icda.test=*) runs a test app
       # before the desktop and reports on serial. Patch the GRUB entry
-      # at CI time only; the tree itself is untouched.
+      # at CI time only; the tree itself is untouched. These builds use
+      # the CI test image (CI_SELFTEST=1 CI_IMAGE=1) so the test apps
+      # are embedded; the default `make` build is the product image.
       - name: Gate self-test (native syscalls)
         run: |
           cp boot/grub/grub.cfg /tmp/grub.cfg.orig
           sed -i 's|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=nptest|' boot/grub/grub.cfg
-          make kernel.iso
+          make kernel.iso CI_SELFTEST=1 CI_IMAGE=1
           QEMU_LOG=/tmp/nptest.log QEMU_TIMEOUT=300 sh scripts/qemu-smoke.sh kernel.iso || true
           grep -a "NPTEST DONE ALL-PASS" /tmp/nptest.log
           cp /tmp/grub.cfg.orig boot/grub/grub.cfg
@@ -44,7 +46,7 @@ jobs:
         run: |
           cp boot/grub/grub.cfg /tmp/grub.cfg.orig
           sed -i 's|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=nptestlx|' boot/grub/grub.cfg
-          make kernel.iso
+          make kernel.iso CI_SELFTEST=1 CI_IMAGE=1
           QEMU_LOG=/tmp/nptestlx.log QEMU_TIMEOUT=300 sh scripts/qemu-smoke.sh kernel.iso || true
           grep -a "NPTEST DONE ALL-PASS" /tmp/nptestlx.log
           cp /tmp/grub.cfg.orig boot/grub/grub.cfg
