@@ -1,6 +1,16 @@
 # ICDA
 ICDA (short for I Can Do Anything) is a modular AI-based operating system. Fully customizable without any code knowledge required
 
+## License
+
+ICDA is source-available under the **PolyForm Noncommercial License 1.0.0**
+plus **ICDA Additional Terms** — see [LICENSE](LICENSE).
+
+In short: you may use, modify, and fork ICDA for noncommercial purposes, but
+you may **never sell it** or market it (or any derivative) as a different
+product, and you must **credit the ICDA project** even in minimally changed
+forks. Commercial use requires a separate license.
+
 ## Build and test
 
 The easiest portable path is Docker. It provides the compiler, NASM, GRUB ISO
