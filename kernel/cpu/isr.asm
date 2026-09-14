@@ -85,6 +85,31 @@ IRQ 12, 44    ; PS/2 mouse
 IRQ 13, 45    ; FPU
 IRQ 14, 46    ; primary ATA
 IRQ 15, 47    ; secondary ATA
+; MSI single-vector range 64-79 (USB Phase 1a): reuse irq_common so the
+; C irq_handler() sees int_no >= 64 and dispatches via msi_handlers[].
+%macro MSI 1
+global msi%1
+msi%1:
+    push 0              ; dummy error code
+    push %1             ; interrupt number
+    jmp irq_common
+%endmacro
+MSI 64
+MSI 65
+MSI 66
+MSI 67
+MSI 68
+MSI 69
+MSI 70
+MSI 71
+MSI 72
+MSI 73
+MSI 74
+MSI 75
+MSI 76
+MSI 77
+MSI 78
+MSI 79
 SYSCALL syscall128, 128
 
 %define GDT_KERNEL_DATA 0x10

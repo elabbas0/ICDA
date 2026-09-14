@@ -292,9 +292,36 @@ typedef struct {
     uint32_t surface;
     uint32_t surface_hover;
     uint32_t surface_active;
+    /* Frost-glass tokens (appended; existing offsets stable). */
+    int      glass_alpha; /* 0..255 panel translucency over blur src */
+    uint32_t glass_tint;  /* tint blended with the blurred backdrop */
+    uint32_t highlight;   /* 1px top highlight line color */
+    int      frost;       /* 1 = frost light, 0 = abyss dark */
 } ic_theme_t;
 
 const ic_theme_t *ic_theme_default(void);
+/* Frost-glass themes: static storage, no alloc, NULL-never (fallback). */
+const ic_theme_t *ic_theme_frost_light(void);
+const ic_theme_t *ic_theme_abyss_dark(void);
+/* Resolve the live theme from Settings values without pulling in
+ * settings_store.h (which includes icda_sys.h only): pass plain ints
+ * to keep headers decoupled.
+ *   theme_mode: 0 = abyss dark, nonzero = frost light.
+ *   accent: 0 Blue, 1 Sky, 2 Teal, 3 Violet (clamped).
+ *   glass: 0 opaque, 1 frost (theme alpha), 2 extra-clear (more
+ *     translucent). Out-of-range values are clamped. */
+const ic_theme_t *ic_theme_current(int theme_mode, int accent, int glass);
+/* Frost-glass rect: sample blur_src (screen-space backdrop, blur_w
+ * stride; may be NULL to blend over the canvas itself), overlay the theme
+ * panel at glass_alpha, paint the top highlight, 1px border, and a
+ * soft shadow. Bounds-checked, integer math only, NULL-safe.
+ * The blur source may be full-resolution (blur_w == canvas w) or a
+ * baked quarter-res mip (see wm_bake_blur): source pixels are mapped
+ * onto the canvas with integer nearest-neighbor scaling
+ * (sx = cx * blur_w / canvas_w), so one call site serves both. */
+void ic_glass_rect(ic_canvas_t *c, int x, int y, int w, int h,
+                   const ic_theme_t *t, const uint32_t *blur_src,
+                   int blur_w, int blur_h);
 
 /* =========================== window chrome =========================== */
 /* A window's x/y is its client origin; the title bar sits above it.
@@ -324,6 +351,19 @@ typedef struct {
 void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
                     const ic_icon_t *icon_close, const ic_icon_t *icon_min,
                     const ic_icon_t *icon_max);
+/* Glass window chrome: identical frame to ic_draw_chrome (shadow,
+ * borders, title text, caption buttons) but the title-bar background
+ * is frost glass sampled from blur_src (quarter-res mip or full-res,
+ * nearest-neighbor upsampled) instead of the opaque gradient.
+ * NULL/degenerate blur falls back to the opaque ic_draw_chrome path.
+ * Bounds-checked, integer math only, NULL-safe. */
+void ic_draw_chrome_glass(ic_canvas_t *c, const ic_theme_t *t,
+                          const ic_window_t *win,
+                          const ic_icon_t *icon_close,
+                          const ic_icon_t *icon_min,
+                          const ic_icon_t *icon_max,
+                          const uint32_t *blur_src,
+                          int blur_w, int blur_h);
 int  ic_hit_title(const ic_window_t *win, int mx, int my);
 int  ic_hit_minimize(const ic_window_t *win, int mx, int my);
 int  ic_hit_maximize(const ic_window_t *win, int mx, int my);
@@ -363,10 +403,25 @@ int ic_menu_width(const ic_menu_t *m);
 int ic_menu_height(const ic_menu_t *m);
 void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
                   const ic_menu_t *m);
+/* Glass menu: frost-glass panel sampled from blur_src (quarter-res
+ * mip or full-res, nearest-neighbor upsampled) with the same rows,
+ * highlight, and text as ic_menu_draw. NULL/degenerate blur falls
+ * back to the opaque ic_menu_draw path. Integer-only, NULL-safe. */
+void ic_menu_draw_glass(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
+                        const ic_menu_t *m, const uint32_t *blur_src,
+                        int blur_w, int blur_h);
 int ic_menu_hit(const ic_menu_t *m, int x, int y, int mx, int my);
 
 void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
                     const char *title, const char *body);
+/* Glass dialog: frost-glass panel sampled from blur_src (quarter-res
+ * mip or full-res, nearest-neighbor upsampled) with the same title,
+ * divider, and body as ic_dialog_draw. NULL/degenerate blur falls
+ * back to the opaque ic_dialog_draw path. Integer-only, NULL-safe. */
+void ic_dialog_draw_glass(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
+                          const char *title, const char *body,
+                          const uint32_t *blur_src,
+                          int blur_w, int blur_h);
 
 void ic_slider_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t track,
                     int value, int vmin, int vmax);

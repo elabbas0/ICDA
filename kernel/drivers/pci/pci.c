@@ -247,6 +247,108 @@ const pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass) {
     return 0;
 }
 
+const pci_device_t *pci_find_class_prog_if(uint8_t class_code, uint8_t subclass,
+                                           uint8_t prog_if) {
+    for (uint32_t i = 0; i < pci_count; i++) {
+        if (pci_devices[i].class_code == class_code &&
+            pci_devices[i].subclass == subclass &&
+            pci_devices[i].prog_if == prog_if) {
+            return &pci_devices[i];
+        }
+    }
+    return 0;
+}
+
+int pci_bar64(const pci_device_t *device, uint8_t bar_index, uint64_t *phys_out,
+              uint64_t *size_out) {
+    uint16_t offset;
+    uint32_t orig_lo;
+    uint32_t orig_hi = 0;
+    uint32_t mask_lo;
+    uint32_t mask_hi = 0;
+    uint16_t saved_cmd;
+    uint64_t phys;
+    uint64_t combined;
+    uint64_t size;
+    int is_64bit;
+
+    if (!device || !phys_out || !size_out) {
+        return -1;
+    }
+    if (bar_index >= 6) {
+        return -1;
+    }
+    offset = (uint16_t)(0x10 + (uint16_t)bar_index * 4U);
+
+    orig_lo = pci_read_config32(device, offset);
+    if (orig_lo & 0x1U) {
+        return -1; /* I/O BAR: not a 64-bit MMIO BAR */
+    }
+    is_64bit = (((orig_lo >> 1) & 0x3U) == 0x2U) ? 1 : 0;
+    if (is_64bit) {
+        if (bar_index >= 5) {
+            return -1; /* upper half missing */
+        }
+        orig_hi = pci_read_config32(device, (uint16_t)(offset + 4));
+    }
+
+    /* Disable MEM+IO decode during the sizing probe so the all-ones
+     * write cannot claim a live address decode. Restored below. */
+    saved_cmd = pci_read_config16(device, 0x04);
+    pci_write_config16(device, 0x04, (uint16_t)(saved_cmd & ~0x3U));
+
+    pci_write_config32(device, offset, 0xFFFFFFFFU);
+    mask_lo = pci_read_config32(device, offset);
+    if (is_64bit) {
+        pci_write_config32(device, (uint16_t)(offset + 4), 0xFFFFFFFFU);
+        mask_hi = pci_read_config32(device, (uint16_t)(offset + 4));
+    }
+
+    /* Restore original BAR values before any early return. */
+    pci_write_config32(device, offset, orig_lo);
+    if (is_64bit) {
+        pci_write_config32(device, (uint16_t)(offset + 4), orig_hi);
+    }
+    pci_write_config16(device, 0x04, saved_cmd);
+
+    mask_lo &= ~0xFU;
+    if (is_64bit) {
+        combined = ((uint64_t)mask_hi << 32) | (uint64_t)mask_lo;
+    } else {
+        combined = (uint64_t)mask_lo;
+    }
+    if (combined == 0) {
+        return -1; /* unimplemented BAR */
+    }
+
+    phys = is_64bit ? (((uint64_t)orig_hi << 32) | (uint64_t)(orig_lo & ~0xFU))
+                    : (uint64_t)(orig_lo & ~0xFU);
+    if (phys == 0) {
+        return -1; /* BAR unprogrammed */
+    }
+
+    size = ~combined + 1ULL;
+    if (size == 0) {
+        return -1;
+    }
+
+    *phys_out = phys;
+    *size_out = size;
+    return 0;
+}
+
+int pci_enable_busmaster_mmio(const pci_device_t *device) {
+    uint16_t cmd;
+    if (!device) {
+        return -1;
+    }
+    cmd = pci_read_config16(device, 0x04);
+    cmd |= (1U << 0) | (1U << 1) | (1U << 2); /* IO + MEM + bus master */
+    cmd |= (1U << 10); /* disable legacy INTx for the MSI path */
+    pci_write_config16(device, 0x04, cmd);
+    return 0;
+}
+
 int pci_find_capability(const pci_device_t *device, uint8_t cap_id, uint8_t *offset_out) {
     uint16_t status;
     uint8_t cap_ptr;
@@ -313,4 +415,11 @@ int pci_enable_msi(const pci_device_t *device, uint8_t vector) {
     control |= 1U;
     pci_write_config16(device, cap + 2, control);
     return 0;
+}
+
+int pci_enable_msi_vector(const pci_device_t *device, uint8_t vector) {
+    if (!device) {
+        return -1;
+    }
+    return pci_enable_msi(device, vector);
 }

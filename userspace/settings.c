@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define SET_WIN_W 480
-#define SET_WIN_H 400
+#define SET_WIN_H 520
 #define SET_STATUS_CAP 128
 
 #define SET_ROW_X 16
@@ -28,7 +28,7 @@
 
 static icda_settings_t set_state;
 static char set_status[SET_STATUS_CAP];
-static int set_row_count = 4;
+static int set_row_count = 7;
 
 static void set_copy(char *dst, const char *src, uint64_t cap) {
     uint64_t i = 0;
@@ -87,7 +87,19 @@ static int set_row_value(int row) {
     if (row == 2) {
         return set_state.boot_anim;
     }
-    return set_state.audio;
+    if (row == 3) {
+        return set_state.audio;
+    }
+    if (row == 4) {
+        return set_state.theme_mode;
+    }
+    if (row == 5) {
+        return set_state.accent;
+    }
+    if (row == 6) {
+        return set_state.glass;
+    }
+    return 0;
 }
 
 static const char *set_row_label(int row) {
@@ -100,7 +112,16 @@ static const char *set_row_label(int row) {
     if (row == 2) {
         return "Boot animation";
     }
-    return "Audio";
+    if (row == 3) {
+        return "Audio";
+    }
+    if (row == 4) {
+        return "Theme (frost glass)";
+    }
+    if (row == 5) {
+        return "Accent color";
+    }
+    return "Glass level";
 }
 
 static const char *set_row_hint(int row) {
@@ -113,10 +134,50 @@ static const char *set_row_hint(int row) {
     if (row == 2) {
         return "splash + power fade (WM)";
     }
-    return "master mute for players";
+    if (row == 3) {
+        return "master mute for players";
+    }
+    if (row == 4) {
+        return "abyss dark / frost light";
+    }
+    if (row == 5) {
+        return "blue / sky / teal / violet";
+    }
+    return "solid / frost / extra-clear";
+}
+
+static const char *set_row_value_text(int row) {
+    static const char *accents[4] = { "Blue", "Sky", "Teal", "Violet" };
+    static const char *glass[3] = { "Solid", "Frost", "Clear" };
+    int v = set_row_value(row);
+    if (row == 4) {
+        return v ? "Frost" : "Abyss";
+    }
+    if (row == 5) {
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 3) {
+            v = 3;
+        }
+        return accents[v];
+    }
+    if (row == 6) {
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 2) {
+            v = 2;
+        }
+        return glass[v];
+    }
+    return v ? "ON" : "OFF";
 }
 
 static void set_toggle(int row) {
+    if (row < 0 || row > 6) {
+        return;
+    }
     if (row == 0) {
         set_state.vsync = !set_state.vsync;
         set_persist(set_state.vsync ? "VSync on" : "VSync off");
@@ -132,6 +193,21 @@ static void set_toggle(int row) {
             icda_stop_audio();
         }
         set_persist(set_state.audio ? "Audio on" : "Audio off");
+    } else if (row == 4) {
+        set_state.theme_mode = set_state.theme_mode ? 0 : 1;
+        set_persist(set_state.theme_mode ? "Frost light" : "Abyss dark");
+    } else if (row == 5) {
+        set_state.accent = (set_state.accent + 1) % 4;
+        if (set_state.accent < 0) {
+            set_state.accent = 0;
+        }
+        set_persist(set_row_value_text(5));
+    } else if (row == 6) {
+        set_state.glass = (set_state.glass + 1) % 3;
+        if (set_state.glass < 0) {
+            set_state.glass = 0;
+        }
+        set_persist(set_row_value_text(6));
     }
 }
 
@@ -163,13 +239,26 @@ static void set_draw(void) {
     }
     gui_fill_rect(0, 63, w, 1, 0x0015449C);
     set_draw_text(16, 16, "ICDA Settings", 0x00FFFFFF, 0x002C73D2, 200);
-    set_draw_text(16, 38, "Click or 1-4 toggle   Q close", 0x00EAF2FF, 0x002C73D2, w - 32);
+    set_draw_text(16, 38, "Click or 1-7 toggle   Q close", 0x00EAF2FF, 0x002C73D2, w - 32);
 
+    if (set_row_count < 0) {
+        set_row_count = 0;
+    }
+    if (set_row_count > 7) {
+        set_row_count = 7;
+    }
     for (i = 0; i < set_row_count; i++) {
         int y = SET_FIRST_Y + i * SET_ROW_GAP;
         int on = set_row_value(i);
         int bx = SET_ROW_X + SET_ROW_W - SET_BOX_W;
         uint32_t fill = on ? 0x001F9D55 : 0x0094A3B8;
+        const char *val = set_row_value_text(i);
+        if (y < 0 || y + SET_ROW_H > h - 30) {
+            continue;
+        }
+        if (i >= 4) {
+            fill = 0x000EA5E9;
+        }
         gui_fill_rect(SET_ROW_X, y, SET_ROW_W, SET_ROW_H, 0x00FFFFFF);
         gui_draw_rect_outline(SET_ROW_X, y, SET_ROW_W, SET_ROW_H, 0x0092B7E8);
         set_draw_text(SET_ROW_X + 10, y + 3, set_row_label(i), 0x001F2937, 0x00FFFFFF,
@@ -178,7 +267,7 @@ static void set_draw(void) {
                       SET_ROW_W - SET_BOX_W - 24);
         gui_fill_rect(bx, y + 4, SET_BOX_W - 8, SET_ROW_H - 8, fill);
         gui_draw_rect_outline(bx, y + 4, SET_BOX_W - 8, SET_ROW_H - 8, 0x0015449C);
-        set_draw_text(bx + 12, y + 9, on ? "ON" : "OFF", 0x00FFFFFF, fill, SET_BOX_W - 20);
+        set_draw_text(bx + 6, y + 9, val, 0x00FFFFFF, fill, SET_BOX_W - 20);
     }
 
     /* Present-mode readout (kernel-reported, read-only). */
@@ -219,8 +308,11 @@ static void set_handle_key(uint32_t key) {
         icda_exit(0);
         return;
     }
-    if (key >= '1' && key <= '4') {
-        set_toggle((int)(key - '1'));
+    if (key >= '1' && key <= '7') {
+        int row = (int)(key - '1');
+        if (row >= 0 && row < set_row_count) {
+            set_toggle(row);
+        }
     }
 }
 

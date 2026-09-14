@@ -70,6 +70,20 @@ static int start_menu_open = 0;
  * tiles), pre-rendered once and copied out as the base of every frame. */
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
+/* Baked quarter-res blur mip of desktop_layer: the frost-glass sampling
+ * source for taskbar, start menu, window headers, and overlay
+ * menus/dialogs. Max 640x400 (2560/4 x 1600/4) = 256000 px, ~1MB BSS.
+ * Baked by wm_bake_blur() after every desktop_layer rebuild (startup +
+ * theme change); glass call sites nearest-neighbor upsample it.
+ * Integer-only, no float, no malloc. */
+#define BLUR_MIP_W 640
+#define BLUR_MIP_H 400
+static uint32_t blur_mip[BLUR_MIP_W * BLUR_MIP_H];
+static int blur_mip_w = 0;
+static int blur_mip_h = 0;
+/* One-row scratch for the separable box pass (still BSS, no stack
+ * pressure on the userspace task stack). */
+static uint32_t blur_tmp[BLUR_MIP_W];
 static uint32_t cursor_scene_save[CURSOR_SAVE_DIM * CURSOR_SAVE_DIM];
 static icda_fb_info_t fb_info;
 static icda_gpu_info_t gpu_info;
@@ -107,6 +121,36 @@ static uint64_t settings_last_reload = 0;
 
 static void settings_reload(void) {
     icda_settings_load(&wm_settings);
+}
+
+/* Frost-glass theme resolution: the WM owns the live ic_theme_t pointer
+ * and re-resolves it from wm_settings whenever the Settings app saves.
+ * ic_theme_current() returns static storage (no alloc); fall back to
+ * the default theme if it ever returns NULL. */
+static int wm_theme_applied = 0;
+static int wm_last_theme = -1;
+static int wm_last_accent = -1;
+static int wm_last_glass = -1;
+
+static void wm_apply_theme(void) {
+    theme = ic_theme_current(wm_settings.theme_mode, wm_settings.accent,
+                             wm_settings.glass);
+    if (!theme) {
+        theme = ic_theme_default();
+    }
+    wm_last_theme = wm_settings.theme_mode;
+    wm_last_accent = wm_settings.accent;
+    wm_last_glass = wm_settings.glass;
+    wm_theme_applied = 1;
+}
+
+static int wm_theme_changed(void) {
+    if (!wm_theme_applied || !theme) {
+        return 1;
+    }
+    return wm_last_theme != wm_settings.theme_mode ||
+           wm_last_accent != wm_settings.accent ||
+           wm_last_glass != wm_settings.glass;
 }
 
 /* ---- damage tracking -------------------------------------------------
@@ -603,6 +647,7 @@ static int desk_press_desktop = 0;/* press began on desktop, not a window */
 static void desk_paint_cell(desk_icon_t *d);
 static void desk_erase_rect(int x, int y, int w, int h);
 static void build_desktop_layer(void);
+static void wm_bake_blur(void);
 static void desk_save(void);
 static void desk_load(void);
 static int rubber_armed = 0;      /* press began on empty desktop */
@@ -1138,7 +1183,7 @@ static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
     if (cy1 > h) cy1 = h;
     if (cx1 <= cx0 || cy1 <= cy0) return;
     c = bb_canvas(w, h);
-    t = ic_theme_default();
+    t = theme ? theme : ic_theme_default();
     if (rubber_active) {
         int x0 = rubber_x0 < rubber_x1 ? rubber_x0 : rubber_x1;
         int y0 = rubber_y0 < rubber_y1 ? rubber_y0 : rubber_y1;
@@ -1197,7 +1242,14 @@ static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
          * motion forces scene redraws while open (see batch loop). */
         ctx_menu(&m);
         m.selected = ic_menu_hit(&m, ctx_x, ctx_y, mouse_x, mouse_y);
-        ic_menu_draw(&c, t, ctx_x, ctx_y, &m);
+        /* Frost menu panel when the frost level is on; the glass
+         * variant falls back to opaque drawing without a baked mip. */
+        if (t->glass_alpha < 255 && blur_mip_w > 0 && blur_mip_h > 0) {
+            ic_menu_draw_glass(&c, t, ctx_x, ctx_y, &m,
+                               blur_mip, blur_mip_w, blur_mip_h);
+        } else {
+            ic_menu_draw(&c, t, ctx_x, ctx_y, &m);
+        }
     }
     if (props_open && props_icon >= 0 && props_icon < desk_icon_count) {
         ic_rect_t r;
@@ -1213,7 +1265,13 @@ static void draw_desktop_overlays(int cx0, int cy0, int cx1, int cy1) {
         if (r.x + r.w > cx1) r.w = cx1 - r.x;
         if (r.y + r.h > cy1) r.h = cy1 - r.y;
         if (r.w > 0 && r.h > 0) {
-            ic_dialog_draw(&c, t, r, "Properties", props_body);
+            /* Frost dialog panel when the frost level is on. */
+            if (t->glass_alpha < 255 && blur_mip_w > 0 && blur_mip_h > 0) {
+                ic_dialog_draw_glass(&c, t, r, "Properties", props_body,
+                                     blur_mip, blur_mip_w, blur_mip_h);
+            } else {
+                ic_dialog_draw(&c, t, r, "Properties", props_body);
+            }
         }
     }
 }
@@ -1296,15 +1354,32 @@ static int desk_hit(int idx, int mx, int my) {
  * fw wide. */
 static void paint_wallpaper_rect(ic_canvas_t *c, int fw, int fh,
                                  int rx, int ry, int rw, int rh) {
-    static const struct { int cx100, cy100, rad, r, g, b, amt; } glows[] = {
+    /* Deep-ocean glows for abyss dark, icy glows for frost light. */
+    static const struct { int cx100, cy100, rad, r, g, b, amt; } abyss_glows[] = {
         { 22, 30, 340,  56, 189, 248, 70 },   /* electric blue, upper left */
         { 78, 62, 420,  45, 212, 191, 52 },   /* teal, lower right */
         { 62, 22, 300, 167, 139, 250, 40 },   /* violet, upper right */
     };
+    static const struct { int cx100, cy100, rad, r, g, b, amt; } frost_glows[] = {
+        { 28, 24, 340, 255, 255, 255, 64 },   /* white sun, upper left */
+        { 72, 66, 420, 125, 211, 252, 52 },   /* sky, lower right */
+        { 58, 20, 300, 186, 230, 253, 48 },   /* light blue, upper right */
+    };
     int x, y;
     unsigned gi;
+    unsigned glow_count;
+    uint32_t wall_top = WALL_TOP;
+    uint32_t wall_bottom = WALL_BOTTOM;
+    int frost = 0;
 
     if (!c || !c->px || fw <= 0 || fh <= 0) return;
+    if (theme) {
+        wall_top = theme->wall_top;
+        wall_bottom = theme->wall_bottom;
+        frost = theme->frost ? 1 : 0;
+    }
+    glow_count = (unsigned)(frost ? sizeof(frost_glows) / sizeof(frost_glows[0])
+                                  : sizeof(abyss_glows) / sizeof(abyss_glows[0]));
     if (rx < 0) { rw += rx; rx = 0; }
     if (ry < 0) { rh += ry; ry = 0; }
     if (rx + rw > fw) rw = fw - rx;
@@ -1312,12 +1387,16 @@ static void paint_wallpaper_rect(ic_canvas_t *c, int fw, int fh,
     if (rw <= 0 || rh <= 0) return;
 
     for (y = ry; y < ry + rh; y++) {
-        ic_rect(c, rx, y, rw, 1, ic_blend(WALL_TOP, WALL_BOTTOM, y, fh));
+        ic_rect(c, rx, y, rw, 1, ic_blend(wall_top, wall_bottom, y, fh > 0 ? fh : 1));
     }
-    for (gi = 0; gi < sizeof(glows) / sizeof(glows[0]); gi++) {
-        int gx = fw * glows[gi].cx100 / 100;
-        int gy = fh * glows[gi].cy100 / 100;
-        int gr = glows[gi].rad;
+    for (gi = 0; gi < glow_count; gi++) {
+        int gx = fw * (frost ? frost_glows[gi].cx100 : abyss_glows[gi].cx100) / 100;
+        int gy = fh * (frost ? frost_glows[gi].cy100 : abyss_glows[gi].cy100) / 100;
+        int gr = frost ? frost_glows[gi].rad : abyss_glows[gi].rad;
+        int grr = frost ? frost_glows[gi].r : abyss_glows[gi].r;
+        int grg = frost ? frost_glows[gi].g : abyss_glows[gi].g;
+        int grb = frost ? frost_glows[gi].b : abyss_glows[gi].b;
+        int gamt = frost ? frost_glows[gi].amt : abyss_glows[gi].amt;
         int gy0 = gy - gr < ry ? ry : gy - gr;
         int gy1 = gy + gr > ry + rh ? ry + rh : gy + gr;
         int gx0 = gx - gr < rx ? rx : gx - gr;
@@ -1329,13 +1408,13 @@ static void paint_wallpaper_rect(ic_canvas_t *c, int fw, int fh,
                 long r2 = (long)gr * gr;
                 if (d2 < r2) {
                     long k = (r2 - d2) * 256 / r2;
-                    long a = k * k / 256 * (long)glows[gi].amt / 256;
+                    long a = k * k / 256 * (long)gamt / 256;
                     uint32_t dst = c->px[y * fw + x];
                     c->px[y * fw + x] = ic_blend(
                         dst,
-                        ((uint32_t)glows[gi].r << 16) |
-                        ((uint32_t)glows[gi].g << 8) |
-                        (uint32_t)glows[gi].b,
+                        ((uint32_t)grr << 16) |
+                        ((uint32_t)grg << 8) |
+                        (uint32_t)grb,
                         (int)a, 256);
                 }
             }
@@ -1421,6 +1500,113 @@ static void draw_desktop_icon_layer(int w, int h, int x, int y,
     ic_text_font(&c, x + 4, y + 58, label, 0x00FFFFFF, 0, 66, NULL, 0);
 }
 
+/* Baked frost source: downsample desktop_layer 4x with an integer
+ * area average, then one separable 3x3 box pass (horizontal + vertical
+ * 3-tap, exact, via the blur_tmp scratch row). Dimensions derive from
+ * fb_info in BSS (never stack-carried w/h). Re-baked after every
+ * desktop_layer rebuild, so startup + theme-change paths funneling
+ * through build_desktop_layer() stay in sync. Integer-only, no
+ * float/malloc; fully bounds-checked and NULL-safe by construction
+ * (static buffers, clamped dims). */
+static void wm_bake_blur(void) {
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
+    int bw, bh;
+    int bx, by;
+
+    if (w <= 0 || h <= 0) return;
+    if (w > BACK_BUFFER_WIDTH) w = BACK_BUFFER_WIDTH;
+    if (h > BACK_BUFFER_HEIGHT) h = BACK_BUFFER_HEIGHT;
+    bw = (w + 3) / 4;
+    bh = (h + 3) / 4;
+    if (bw <= 0 || bh <= 0) return;
+    if (bw > BLUR_MIP_W) bw = BLUR_MIP_W;
+    if (bh > BLUR_MIP_H) bh = BLUR_MIP_H;
+
+    /* Pass 1: 4x4 area average from desktop_layer. */
+    for (by = 0; by < bh; by++) {
+        for (bx = 0; bx < bw; bx++) {
+            int x0 = bx * 4;
+            int y0 = by * 4;
+            int x1 = x0 + 4 < w ? x0 + 4 : w;
+            int y1 = y0 + 4 < h ? y0 + 4 : h;
+            uint32_t sr = 0, sg = 0, sb = 0;
+            int n = 0;
+            int yy, xx;
+            for (yy = y0; yy < y1; yy++) {
+                for (xx = x0; xx < x1; xx++) {
+                    uint32_t c = desktop_layer[(uint64_t)yy * w + xx];
+                    sr += (c >> 16) & 0xFF;
+                    sg += (c >> 8) & 0xFF;
+                    sb += c & 0xFF;
+                    n++;
+                }
+            }
+            if (n <= 0) n = 1;
+            blur_mip[(uint64_t)by * bw + bx] =
+                ((sr / (uint32_t)n) << 16) |
+                ((sg / (uint32_t)n) << 8) |
+                (sb / (uint32_t)n);
+        }
+    }
+
+    /* Pass 2a: horizontal 3-tap box (exact, via scratch row copy). */
+    for (by = 0; by < bh; by++) {
+        int x;
+        for (x = 0; x < bw; x++) blur_tmp[x] = blur_mip[(uint64_t)by * bw + x];
+        for (x = 0; x < bw; x++) {
+            uint32_t sr = 0, sg = 0, sb = 0;
+            int n = 0;
+            int k;
+            for (k = -1; k <= 1; k++) {
+                int xx = x + k;
+                uint32_t c;
+                if (xx < 0 || xx >= bw) continue;
+                c = blur_tmp[xx];
+                sr += (c >> 16) & 0xFF;
+                sg += (c >> 8) & 0xFF;
+                sb += c & 0xFF;
+                n++;
+            }
+            if (n <= 0) n = 1;
+            blur_mip[(uint64_t)by * bw + x] =
+                ((sr / (uint32_t)n) << 16) |
+                ((sg / (uint32_t)n) << 8) |
+                (sb / (uint32_t)n);
+        }
+    }
+
+    /* Pass 2b: vertical 3-tap box (exact, column walk reusing blur_tmp
+     * as the column copy; bh <= BLUR_MIP_H < BLUR_MIP_W so it fits). */
+    for (bx = 0; bx < bw; bx++) {
+        int y;
+        for (y = 0; y < bh; y++) blur_tmp[y] = blur_mip[(uint64_t)y * bw + bx];
+        for (y = 0; y < bh; y++) {
+            uint32_t sr = 0, sg = 0, sb = 0;
+            int n = 0;
+            int k;
+            for (k = -1; k <= 1; k++) {
+                int yy = y + k;
+                uint32_t c;
+                if (yy < 0 || yy >= bh) continue;
+                c = blur_tmp[yy];
+                sr += (c >> 16) & 0xFF;
+                sg += (c >> 8) & 0xFF;
+                sb += c & 0xFF;
+                n++;
+            }
+            if (n <= 0) n = 1;
+            blur_mip[(uint64_t)y * bw + bx] =
+                ((sr / (uint32_t)n) << 16) |
+                ((sg / (uint32_t)n) << 8) |
+                (sb / (uint32_t)n);
+        }
+    }
+
+    blur_mip_w = bw;
+    blur_mip_h = bh;
+}
+
 static void build_desktop_layer(void) {
     /* The compiled main loop has been observed passing corrupted w/h here
      * (the local that main reads from fb_info gets disturbed before the
@@ -1447,16 +1633,20 @@ static void build_desktop_layer(void) {
                                     d->label, d->icon);
         }
     }
+    /* Frost source follows the wallpaper: every rebuild (startup +
+     * theme change) re-bakes the quarter-res blur mip. */
+    wm_bake_blur();
 }
 
 static void draw_start_button(int w, int h, int active) {
     ic_canvas_t c = bb_canvas(w, h);
     int y = h - TASKBAR_H + 6;
-    uint32_t fill = active ? theme->accent : 0x001E293B;
-    uint32_t fg = active ? theme->text_on_accent : 0x00F1F5F9;
+    const ic_theme_t *th = theme ? theme : ic_theme_default();
+    uint32_t fill = active ? th->accent : th->surface;
+    uint32_t fg = active ? th->text_on_accent : th->text;
     const ic_icon_t *icon = ic_icon_builtin("app");
     ic_rect_r(&c, 6, y, 94, 30, IC_RADIUS_BUTTON, fill);
-    if (!active) ic_outline_r(&c, 6,y,94,30,IC_RADIUS_BUTTON,0x00334155);
+    if (!active) ic_outline_r(&c, 6,y,94,30,IC_RADIUS_BUTTON,th->panel_edge);
     if (icon) ic_icon_draw(&c, 12, y + 4, 22, 22, icon);
     ic_text_font(&c, 40, y + 6, "Start", fg, fill, 52, NULL, 0);
 }
@@ -1480,13 +1670,24 @@ static void draw_taskbar(int w, int h) {
     int y = h - TASKBAR_H;
     int tx = 112;
     icda_audio_info_t audio;
-    /* Fake glass: vertical gradient (8% lighter at top) + highlight line. */
-    for (int yy = 0; yy < TASKBAR_H; yy++) {
-        ic_rect(&c, 0, y + yy, w, 1,
-                ic_blend(ic_blend(theme->taskbar_bottom, 0x00F1F5F9, 1, 12),
-                         theme->taskbar_bottom, yy, TASKBAR_H));
+    const ic_theme_t *th = theme ? theme : ic_theme_default();
+    /* Frost glass: baked quarter-res blur mip + translucent overlay +
+     * top highlight (inside ic_glass_rect). Opaque level keeps the
+     * legacy gradient path. */
+    if (th && th->glass_alpha < 255 && w > 0 && w <= BACK_BUFFER_WIDTH &&
+        h > 0 && h <= BACK_BUFFER_HEIGHT &&
+        blur_mip_w > 0 && blur_mip_h > 0) {
+        ic_glass_rect(&c, 0, y, w, TASKBAR_H, th, blur_mip,
+                      blur_mip_w, blur_mip_h);
+    } else {
+        /* Fake glass: vertical gradient (8% lighter at top) + highlight line. */
+        for (int yy = 0; yy < TASKBAR_H; yy++) {
+            ic_rect(&c, 0, y + yy, w, 1,
+                    ic_blend(ic_blend(th->taskbar_bottom, 0x00F1F5F9, 1, 12),
+                             th->taskbar_bottom, yy, TASKBAR_H));
+        }
+        ic_hline(&c, 0, y, w, th->highlight);
     }
-    ic_hline(&c, 0, y, w, 0x003F4C63);
     draw_start_button(w, h, start_menu_open);
     for (int i = 0; i < num_windows && tx + 118 < w - 180; i++) {
         int idx = z_order[i];
@@ -1495,10 +1696,10 @@ static void draw_taskbar(int w, int h) {
         if (!win->valid) continue;
         {
             int focused = focused_window_idx == idx && !win->minimized;
-            uint32_t fill = focused ? theme->accent : 0x001E293B;
-            uint32_t fg = focused ? theme->text_on_accent : 0x00F1F5F9;
+            uint32_t fill = focused ? th->accent : th->surface;
+            uint32_t fg = focused ? th->text_on_accent : th->text;
             ic_rect_r(&c, tx, y + 7, 136, 28, IC_RADIUS_BUTTON, fill);
-            if (!focused) ic_outline_r(&c, tx, y+7, 136, 28, IC_RADIUS_BUTTON, 0x00334155);
+            if (!focused) ic_outline_r(&c, tx, y+7, 136, 28, IC_RADIUS_BUTTON, th->panel_edge);
             if (focused) ic_rect(&c, tx+16, y+30, 104, 2, 0x00FFFFFF);
             icon = ic_icon_builtin(window_icon_name(win->title));
             if (icon) ic_icon_draw(&c, tx + 6, y + 11, 20, 20, icon);
@@ -1508,8 +1709,8 @@ static void draw_taskbar(int w, int h) {
         tx += 142;
     }
     if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        ic_text_font(&c, w - 176, y + 12, "Audio:", 0x0094A3B8, theme->taskbar_top, 56, NULL, 0);
-        ic_text_font(&c, w - 120, y + 12, audio.name, 0x00F1F5F9, theme->taskbar_top, 104, NULL, 0);
+        ic_text_font(&c, w - 176, y + 12, "Audio:", th->text_muted, th->taskbar_top, 56, NULL, 0);
+        ic_text_font(&c, w - 120, y + 12, audio.name, th->text, th->taskbar_top, 104, NULL, 0);
     } else {
         char clk[16];
         uint64_t t = icda_ticks();
@@ -1525,10 +1726,10 @@ static void draw_taskbar(int w, int h) {
         ic_strcat(clk,":",sizeof(clk));
         if (mins<10) ic_strcat(clk,"0",sizeof(clk));
         ic_strcat(clk,mbuf,sizeof(clk));
-        ic_text_font(&c, w - 68, y + 12, clk, 0x00F1F5F9, theme->taskbar_top, 48, NULL, 0);
-        ic_rect_r(&c, w-108, y+18, 4,4,2, 0x0038BDF8);
-        ic_rect_r(&c, w-100, y+18, 4,4,2, 0x0094A3B8);
-        ic_rect_r(&c, w-92, y+18, 4,4,2, 0x00475569);
+        ic_text_font(&c, w - 68, y + 12, clk, th->text, th->taskbar_top, 48, NULL, 0);
+        ic_rect_r(&c, w-108, y+18, 4,4,2, th->accent);
+        ic_rect_r(&c, w-100, y+18, 4,4,2, th->accent);
+        ic_rect_r(&c, w-92, y+18, 4,4,2, th->accent);
     }
 }
 
@@ -1536,8 +1737,9 @@ static void draw_start_row(int sw, int sh, int x, int y, int w, int h,
                            const char *icon_name, const char *label, int hover) {
     ic_canvas_t c = bb_canvas(sw, sh);
     const ic_icon_t *icon = ic_icon_builtin(icon_name);
-    uint32_t fill = hover ? theme->accent : 0x001E293B;
-    uint32_t fg = hover ? theme->text_on_accent : 0x00F1F5F9;
+    const ic_theme_t *th = theme ? theme : ic_theme_default();
+    uint32_t fill = hover ? th->accent : th->surface;
+    uint32_t fg = hover ? th->text_on_accent : th->text;
     ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
     if (icon) ic_icon_draw(&c, x + 6, y + 4, 22, 22, icon);
     ic_text_font(&c, x + 34, y + 6, label, fg, fill, 180, NULL, 0);
@@ -1555,11 +1757,19 @@ static void draw_start_menu(int w, int h, int mx, int my) {
     ic_canvas_t c = bb_canvas(w, h);
     int x = 6;
     int y = h - TASKBAR_H - START_MENU_H;
+    const ic_theme_t *th = theme ? theme : ic_theme_default();
     if (!start_menu_open) return;
-    ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x001E293B);
-    ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, 0x00334155);
-    ic_text_font(&c, x + 16, y + 11, "ICDA Desktop", 0x00F1F5F9, 0x001E293B, 200, NULL, 0);
-    ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, 0x00334155);
+    if (th && th->glass_alpha < 255 && w > 0 && w <= BACK_BUFFER_WIDTH &&
+        h > 0 && h <= BACK_BUFFER_HEIGHT &&
+        blur_mip_w > 0 && blur_mip_h > 0) {
+        ic_glass_rect(&c, x, y, START_MENU_W, START_MENU_H, th,
+                      blur_mip, blur_mip_w, blur_mip_h);
+    } else {
+        ic_rect_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, th->surface);
+        ic_outline_r(&c, x, y, START_MENU_W, START_MENU_H, IC_RADIUS_PANEL, th->panel_edge);
+    }
+    ic_text_font(&c, x + 16, y + 11, "ICDA Desktop", th->text, th->surface, 200, NULL, 0);
+    ic_hline(&c, x + 12, y + 44, START_MENU_W - 24, th->panel_edge);
 
     draw_start_row(w, h, x + 12, y + 56, 246, START_ROW_H, "folder", "Explorer",
                    ic_hit_rect(mx, my, (ic_rect_t){x + 12, y + 56, 246, START_ROW_H}));
@@ -2150,7 +2360,8 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
 
     {
         ic_window_t iw;
-        ic_theme_t t = *theme;
+        const ic_theme_t *th = theme ? theme : ic_theme_default();
+        ic_theme_t t = *th;
         iw.x = wx;
         iw.y = wy;
         iw.w = cw;
@@ -2162,8 +2373,19 @@ static void composite_window(wm_window_t *win, int idx, int w, int h, int mx, in
         iw.hover_close = ic_hit_close(&iw, mx, my);
         iw.hover_min = ic_hit_minimize(&iw, mx, my);
         iw.hover_max = ic_hit_maximize(&iw, mx, my);
-        ic_draw_chrome(&c, &t, &iw, ic_icon_builtin("close"), ic_icon_builtin("min"),
-                       ic_icon_builtin("max"));
+        /* Frost header strip: blurred mip behind the title bar when the
+         * frost level is on; opaque level keeps the legacy gradient.
+         * The glass variant falls back to opaque chrome on its own
+         * when the mip is not baked yet. */
+        if (t.glass_alpha < 255 && blur_mip_w > 0 && blur_mip_h > 0) {
+            ic_draw_chrome_glass(&c, &t, &iw, ic_icon_builtin("close"),
+                                 ic_icon_builtin("min"),
+                                 ic_icon_builtin("max"),
+                                 blur_mip, blur_mip_w, blur_mip_h);
+        } else {
+            ic_draw_chrome(&c, &t, &iw, ic_icon_builtin("close"), ic_icon_builtin("min"),
+                           ic_icon_builtin("max"));
+        }
     }
 
     /* client pixels.  Unfocused windows are dimmed so the active one
@@ -2489,7 +2711,13 @@ static void composite_screen(int w, int h, int mouse_x, int mouse_y) {
     restore_cursor_scene(w, h, mouse_x, mouse_y);
 }
 
-/* Blit one rectangle of the scene buffer to the real framebuffer. */
+/* Blit one rectangle of the scene buffer to the real framebuffer.
+ * This is also the scanout path when neither flip nor virtio-present
+ * is active (do_present == 0: real Intel GOP/VBE fbdev direct) — the
+ * 64-bit copy_pixels writes below are the only thing that makes dirty
+ * rects visible there, so this path must never assume virtio. The
+ * compositor stays 32bpp XRGB; 24/32bpp + BGR wire order lives behind
+ * fb_* (blit_row_24) only. */
 static void blit_region(int x, int y, int rw, int rh, int w) {
     uint32_t pitch = fb_pitch_pixels();
     if (x < 0) { rw += x; x = 0; }
@@ -2739,7 +2967,10 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    theme = ic_theme_default();
+    theme = ic_theme_current(0, 0, 1);
+    if (!theme) {
+        theme = ic_theme_default();
+    }
     build_cursor_sprite();
 
     /* Replace the stock icon set with whatever the user dropped into
@@ -2759,7 +2990,14 @@ int main(int argc, char **argv) {
      * two counters stay in lock-step. */
     wm_flip_page = gpu_info.flip_active ? 1 : 0;
     /* do_present: virtio-gpu always needs explicit TRANSFER+FLUSH;
-     * fbdev needs it only when flip mode is active. */
+     * fbdev needs it only when flip mode is active.
+     * Rect-aware present: evaluated against kernel/syscall/syscall.c —
+     * SYS_GPU_PRESENT carries only a flags word (bit0 WAIT_VBLANK,
+     * upper bits reserved-zero, ABI frozen), so no per-rect flush can
+     * cross the ABI without breaking it. The compositor therefore keeps
+     * one coalesced present() per frame after composite_dirty(); the
+     * kernel driver gained virtio_gpu_present_rect() for future/internal
+     * use, and the full-frame present() stays the fallback. */
     int do_present = gpu_info.flip_active || gpu_info.needs_present;
 
     w = fb_info.width;
@@ -2781,6 +3019,7 @@ int main(int argc, char **argv) {
      * all-on by default). Re-read periodically below so the Settings
      * app applies live without a reboot. */
     settings_reload();
+    wm_apply_theme();
     settings_last_reload = icda_ticks();
 
     /* Pre-render the static wallpaper + desktop icons once; every frame
@@ -2806,6 +3045,14 @@ int main(int argc, char **argv) {
             if (tick_now - settings_last_reload >= 100) {
                 settings_last_reload = tick_now;
                 settings_reload();
+                /* Live frost-glass theming: a theme/accent/glass change
+                 * re-resolves the theme, re-renders the wallpaper
+                 * variant, and forces a full composite. */
+                if (wm_theme_changed()) {
+                    wm_apply_theme();
+                    build_desktop_layer();
+                    mark_dirty_full();
+                }
             }
         }
         while (icda_msg_poll(wm_queue) > 0) {

@@ -118,8 +118,11 @@ static irq_controller_ops_t apic_ops = {
 };
 
 static irq_controller_ops_t *active_controller = 0;
+static void *saved_multiboot_info = 0;
+static int lapic_msi_ready = 0;
 
 int irq_controller_init(void *multiboot_info) {
+    saved_multiboot_info = multiboot_info;
     if (pic_ops.init(multiboot_info) == 0) {
         active_controller = &pic_ops;
         return 0;
@@ -138,6 +141,63 @@ void irq_controller_eoi(int irq) {
         return;
     }
     active_controller->eoi(irq);
+}
+
+/* Lazily bring up the local APIC for MSI without disturbing the active
+ * legacy controller: no pic_disable(), no IOAPIC remap, no timer change.
+ * Existing PIC drivers keep working; MSI gets lapic_id() + lapic_eoi().
+ * Returns 0 when the LAPIC is usable, -1 otherwise. */
+int irq_controller_force_apic(void) {
+    const struct acpi_madt *madt;
+    const uint8_t *ptr;
+    const uint8_t *end;
+    uint64_t lapic_phys = 0;
+
+    if (lapic_msi_ready && lapic_physical_base() != 0) {
+        return 0;
+    }
+    if (lapic_physical_base() != 0) {
+        lapic_msi_ready = 1;
+        return 0;
+    }
+    madt = acpi_madt();
+    if (!madt) {
+        if (!saved_multiboot_info) {
+            return -1;
+        }
+        if (acpi_init(saved_multiboot_info) != 0) {
+            return -1;
+        }
+        madt = acpi_madt();
+        if (!madt) {
+            return -1;
+        }
+    }
+
+    lapic_phys = madt->lapic_address;
+    ptr = madt->entries;
+    end = ((const uint8_t *)madt) + madt->header.length;
+    while (ptr + sizeof(struct acpi_madt_entry_header) <= end) {
+        const struct acpi_madt_entry_header *hdr =
+            (const struct acpi_madt_entry_header *)ptr;
+        if (hdr->length < sizeof(struct acpi_madt_entry_header) ||
+            ptr + hdr->length > end) {
+            break;
+        }
+        if (hdr->type == 5 &&
+            hdr->length >= sizeof(struct acpi_madt_lapic_override)) {
+            const struct acpi_madt_lapic_override *ovr =
+                (const struct acpi_madt_lapic_override *)ptr;
+            lapic_phys = ovr->lapic_address;
+        }
+        ptr += hdr->length;
+    }
+
+    if (lapic_init(lapic_phys) != 0) {
+        return -1;
+    }
+    lapic_msi_ready = 1;
+    return 0;
 }
 
 void irq_controller_mask(int irq) {
