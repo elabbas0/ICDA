@@ -16,6 +16,7 @@
  *   /dev/console  keyboard/screen text surface
  *   /dev/input    keyboard input surface (mouse stays direct for now)
  *   /dev/fb0      framebuffer + GPU surface
+ *   /dev/rtc      wall clock, read as "YYYY-MM-DD HH:MM:SS\n"
  *
  * All functions run in syscall context. A NULL table or NULL entry
  * means dev_populate() failed — callers must return -1, never invent
@@ -42,6 +43,10 @@ typedef struct dev_calls {
     int      (*gpu_present)(void);
     int      (*gpu_set_cursor)(int x, int y, const uint32_t *image,
                                int w, int h);
+    /* Readable text nodes (/dev/rtc): SYS_VFS_READ on the node's path
+     * returns this snapshot instead of the placeholder file contents.
+     * Writes at most cap-1 bytes and returns the count. */
+    uint64_t (*node_read)(char *buf, uint64_t cap);
 } dev_calls_t;
 
 /* Register a table under an absolute path ("/dev/console"). The table

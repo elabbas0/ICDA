@@ -1,29 +1,37 @@
 /*
- * taskman.app - ICDA Task Manager.
+ * taskman.app - ICDA Activity.
  *
- * Shows every running process with its PID, state, CPU usage (from the
- * scheduler's per-process tick counter) and RAM (mapped user pages),
- * plus storage devices/partitions.  You can select a process and kill it,
- * or refresh the list.  Polls the kernel once a second.
+ * The Monitor shell from docs/DESIGN.md: a toolbar strip, a process
+ * table, and a summary footer.  Every destructive action sits behind an
+ * ic_ui_alert, because a mis-click here ends a program.
+ *
+ * The kernel serves the process table on demand (icda_list_procs plus a
+ * per-PID icda_proc_stats), so the whole monitor costs one poll a
+ * second: CPU is the busy-tick delta over the wall-tick delta, Memory
+ * is mapped user pages.  The row list is virtual, so a long table does
+ * not need a tall window.
  */
-#include "gui.h"
-#include "icda_sys.h"
 #include "libicda.h"
-#include "font.h"
 
-#include <stdint.h>
+#define WIN_W 720
+#define WIN_H 480
 
-#define TM_WIN_W 640
-#define TM_WIN_H 460
+#define TM_MAX_PROCS     64
+#define TM_BUF_CAP       8192
+#define TM_STATUS_CAP    160
+#define TM_STORAGE_CAP   512
+#define TM_SAMPLE_TICKS  100      /* ~1 s at the 100 Hz scheduler */
+#define TM_FOOTER_H      26
 
-#define TM_MAX_PROCS 64
-#define TM_LIST_X 14
-#define TM_LIST_Y 66
-#define TM_LIST_W (TM_WIN_W - 28)
-#define TM_ROW_H 22
-#define TM_MAX_ROWS 15
-#define TM_STATUS_CAP 128
-#define TM_BUF_CAP 8192
+/* Table columns, in pixels from the table's left edge. */
+#define COL_PID    0
+#define COL_NAME   58
+#define COL_STATE  238
+#define COL_CPU    312
+#define COL_MEM    384
+#define COL_MEM_W  92
+
+enum { TM_NONE = 0, TM_KILL, TM_SUSPEND };
 
 typedef struct {
     uint64_t pid;
@@ -32,491 +40,549 @@ typedef struct {
     uint64_t cpu_ticks;
     uint64_t mem_bytes;
     uint64_t prev_cpu_ticks;
-    uint64_t prev_sample_tick;
+    int      suspended;           /* we asked for it; the kernel has no flag */
 } tm_proc_t;
 
-static tm_proc_t procs[TM_MAX_PROCS];
-static int proc_count = 0;
-static int selected = -1;
-static uint64_t last_sample_tick = 0;
-static char status[TM_STATUS_CAP];
-static char list_buf[TM_BUF_CAP];
+static struct {
+    tm_proc_t procs[TM_MAX_PROCS];
+    int       count;
+    int       selected;
 
-/* ---- context-menu BSS (desktop.c pattern) ---- */
-#define CTX_TM_MAX  5
-#define CTX_TM_LBL  32
+    /* view */
+    int rows;
+    int scroll;
+    int first_row;                /* index of the first drawn process */
+    int last_row;                 /* one past the last drawn process */
 
-enum { CTX_TM_KILL = 1, CTX_TM_REFRESH, CTX_TM_QUIT };
+    /* pointer state */
+    int hover_row;
+    int hover_refresh;
+    int hover_suspend;
+    int hover_kill;
+    int list_focused;
 
-static int ctx_open = 0;
-static int ctx_x = 0;
-static int ctx_y = 0;
-static int ctx_nitems = 0;
-static int ctx_actions[CTX_TM_MAX];
-static char ctx_labels[CTX_TM_MAX][CTX_TM_LBL];
-static int prev_right = 0;
-static int prev_left = 0;
-static int last_mouse_x = 0;
-static int last_mouse_y = 0;
+    /* confirmation */
+    int alert_action;             /* TM_* pending confirmation */
+    int alert_hover;              /* 0 cancel, 1 confirm */
 
-static uint64_t tm_strlen(const char *s) {
-    uint64_t n = 0;
-    while (s && s[n]) n++;
-    return n;
+    char     storage[TM_STORAGE_CAP];
+    char     status[TM_STATUS_CAP];
+    uint64_t last_sample;
+} tm;
+
+/* ------------------------------------------------------------- layout */
+
+static ic_rect_t toolbar_rect(ic_app_t *app) {
+    return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
 }
+
+static ic_rect_t table_rect(ic_app_t *app) {
+    int y = IC_H_TOOLBAR + IC_H_ROW + IC_SP_1;
+    return ic_rect_make(IC_SP_4, y, app->width - 2 * IC_SP_4,
+                        app->height - y - TM_FOOTER_H - IC_SP_2);
+}
+
+static ic_rect_t header_rect(ic_app_t *app) {
+    ic_rect_t t = table_rect(app);
+    return ic_rect_make(t.x, t.y - IC_H_ROW - 2, t.w, IC_H_ROW);
+}
+
+static ic_rect_t footer_rect(ic_app_t *app) {
+    return ic_rect_make(0, app->height - TM_FOOTER_H, app->width, TM_FOOTER_H);
+}
+
+static ic_rect_t row_rect(ic_app_t *app, int row) {
+    ic_rect_t t = table_rect(app);
+    return ic_rect_make(t.x, t.y + row * IC_H_ROW, t.w, IC_H_ROW);
+}
+
+/* Rows, the visible slice and the scroll clamp: one function, called by
+ * draw() and by every reflow. */
+static void layout(ic_app_t *app) {
+    ic_rect_t t = table_rect(app);
+    int rows = t.h / IC_H_ROW;
+    if (rows < 1) rows = 1;
+    if (rows > TM_MAX_PROCS) rows = TM_MAX_PROCS;
+    tm.rows = rows;
+    if (tm.scroll > tm.count - rows) tm.scroll = tm.count - rows;
+    if (tm.scroll < 0) tm.scroll = 0;
+    tm.first_row = tm.scroll;
+    tm.last_row = tm.scroll + rows;
+    if (tm.last_row > tm.count) tm.last_row = tm.count;
+}
+
+static ic_rect_t refresh_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    return ic_rect_make(b.x + IC_SP_4, (b.h - IC_H_CONTROL_SM) / 2, 30, IC_H_CONTROL_SM);
+}
+
+static int suspend_label_is_resume(void) {
+    return tm.selected >= 0 && tm.selected < tm.count && tm.procs[tm.selected].suspended;
+}
+
+static ic_rect_t suspend_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    ic_rect_t r = refresh_rect(app);
+    int w = ic_ui_button_width(suspend_label_is_resume() ? "Resume" : "Suspend", IC_SYM_NONE);
+    return ic_rect_make(r.x + r.w + IC_SP_2, (b.h - IC_H_CONTROL_SM) / 2, w, IC_H_CONTROL_SM);
+}
+
+static ic_rect_t kill_rect(ic_app_t *app) {
+    ic_rect_t r = suspend_rect(app);
+    int w = ic_ui_button_width("Quit Process", IC_SYM_NONE);
+    return ic_rect_make(r.x + r.w + IC_SP_2, r.y, w, IC_H_CONTROL_SM);
+}
+
+static ic_rect_t alert_rect(ic_app_t *app) {
+    int w = 380, h = 140;
+    return ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
+}
+
+static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
+    ic_rect_t r = alert_rect(app);
+    const char *label = index == 0 ? "Cancel" : "Quit Process";
+    int w = ic_ui_button_width(label, IC_SYM_NONE);
+    int y = r.y + r.h - IC_H_CONTROL - IC_SP_3;
+    return ic_rect_make(r.x + r.w - w - (index == 0 ? w + IC_SP_2 + IC_SP_3 : IC_SP_3), y, w,
+                        IC_H_CONTROL);
+}
+
+/* ------------------------------------------------------------ helpers */
 
 static void tm_copy(char *dst, const char *src, uint64_t cap) {
     uint64_t i = 0;
     if (!dst || cap == 0) return;
-    while (src && src[i] && i + 1 < cap) {
-        dst[i] = src[i];
-        i++;
-    }
+    while (src && src[i] && i + 1 < cap) { dst[i] = src[i]; i++; }
     dst[i] = 0;
 }
 
-static void tm_append(char *dst, const char *src, uint64_t cap) {
-    uint64_t at = tm_strlen(dst);
-    uint64_t i = 0;
-    if (!dst || cap == 0 || at >= cap) return;
-    while (src && src[i] && at + 1 < cap) {
-        dst[at++] = src[i++];
-    }
-    dst[at] = 0;
+static void tm_u64(uint64_t v, char *dst, uint64_t cap) {
+    char tmp[24];
+    int n = 0;
+    int i = 0;
+    if (cap == 0) return;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v && n < 24);
+    while (n > 0 && (uint64_t)i + 1 < cap) dst[i++] = tmp[--n];
+    dst[i] = 0;
 }
 
-static void tm_append_uint(char *dst, const char *src_prefix, uint64_t value,
-                           const char *src_suffix, uint64_t cap) {
-    char num[32];
-    uint64_t i = sizeof(num) - 1;
-    num[i] = 0;
-    if (value == 0) {
-        num[--i] = '0';
-    } else {
-        while (value && i > 0) {
-            num[--i] = (char)('0' + (value % 10));
-            value /= 10;
-        }
-    }
-    if (src_prefix) tm_append(dst, src_prefix, cap);
-    tm_append(dst, &num[i], cap);
-    if (src_suffix) tm_append(dst, src_suffix, cap);
+static void tm_status(const char *text) {
+    tm_copy(tm.status, text, TM_STATUS_CAP);
 }
 
-static int tm_hit(int mx, int my, int x, int y, int w, int h) {
-    return mx >= x && my >= y && mx < x + w && my < y + h;
+static void tm_status_pid(const char *prefix, uint64_t pid) {
+    char digits[24];
+    tm_u64(pid, digits, sizeof(digits));
+    tm.status[0] = 0;
+    ic_strlcat(tm.status, prefix, TM_STATUS_CAP);
+    ic_strlcat(tm.status, digits, TM_STATUS_CAP);
 }
 
-static uint64_t tm_atoi(const char *s) {
+static int tm_atoi(const char *s) {
     uint64_t v = 0;
     if (!s) return 0;
-    while (*s >= '0' && *s <= '9') {
-        v = v * 10 + (uint64_t)(*s - '0');
-        s++;
-    }
-    return v;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (uint64_t)(*s - '0'); s++; }
+    return (int)v;
 }
 
-static void tm_set_status(const char *text) {
-    tm_copy(status, text, sizeof(status));
-}
-
-/* Parse the SYS_LIST_PROCS text output into the proc table. */
-static void tm_parse_procs(const char *buf, uint64_t len) {
-    uint64_t pos = 0;
-    proc_count = 0;
-    while (pos < len && proc_count < TM_MAX_PROCS) {
-        char line[256];
-        uint64_t li = 0;
-        while (pos < len && buf[pos] != '\n' && li + 1 < sizeof(line)) {
-            line[li++] = buf[pos++];
-        }
-        while (pos < len && buf[pos] != '\n') pos++;
-        if (pos < len && buf[pos] == '\n') pos++;
-        line[li] = 0;
-
-        /* Header line starts with "pid"; skip it. */
-        if (li == 0 || (line[0] == 'p' && line[1] == 'i' && line[2] == 'd')) continue;
-
-        /* Fields: pid ppid sid pgid kind state exit */
-        uint64_t pid = 0, ppid = 0, sid = 0, pgid = 0;
-        char kind[16] = {0}, state[16] = {0};
-        uint64_t exit_code = 0;
-        int fi = 0;
-        char *tok[8];
-        char *p = line;
-        tok[fi++] = p;
-        while (*p && fi < 8) {
-            if (*p == ' ') {
-                *p = 0;
-                p++;
-                tok[fi++] = p;
-            } else {
-                p++;
-            }
-        }
-        if (fi < 7) continue;
-        pid = tm_atoi(tok[0]);
-        ppid = tm_atoi(tok[1]);
-        sid = tm_atoi(tok[2]);
-        pgid = tm_atoi(tok[3]);
-        tm_copy(kind, tok[4], sizeof(kind));
-        tm_copy(state, tok[5], sizeof(state));
-        exit_code = tm_atoi(tok[6]);
-
-        (void)ppid; (void)sid; (void)pgid; (void)kind; (void)exit_code;
-
-        procs[proc_count].pid = pid;
-        tm_copy(procs[proc_count].name, "?", sizeof(procs[0].name));
-        tm_copy(procs[proc_count].state, state, sizeof(procs[0].state));
-        procs[proc_count].cpu_ticks = 0;
-        procs[proc_count].mem_bytes = 0;
-        procs[proc_count].prev_cpu_ticks = 0;
-        procs[proc_count].prev_sample_tick = 0;
-
-        /* Per-process detail from the kernel. */
-        icda_proc_stats_t st;
-        if (icda_proc_stats(pid, &st) == 0) {
-            tm_copy(procs[proc_count].name, st.name, sizeof(procs[0].name));
-            procs[proc_count].cpu_ticks = st.cpu_ticks;
-            procs[proc_count].mem_bytes = st.mem_bytes;
-        }
-        proc_count++;
-    }
-    if (selected >= proc_count) selected = -1;
-}
-
-static void tm_sample(void) {
-    long rc = (long)icda_list_procs(list_buf, sizeof(list_buf));
-    if (rc < 0) {
-        tm_set_status("Could not read process table");
-        return;
-    }
-    tm_parse_procs(list_buf, (uint64_t)rc);
-    last_sample_tick = icda_ticks();
-    tm_set_status(proc_count > 0 ? "Refresh: R    Kill: Del/K    Quit: Q" : "(no processes)");
-}
-
-static int tm_percent(uint64_t delta_ticks, uint64_t delta_time) {
-    if (delta_time == 0) return 0;
-    /* One tick = 10ms at the 100Hz scheduler; CPU% = busy ticks / wall ticks. */
-    uint64_t pct = delta_ticks * 100 / delta_time;
+static int cpu_percent(uint64_t busy, uint64_t wall) {
+    uint64_t pct;
+    if (wall == 0) return 0;
+    pct = busy * 100 / wall;
     if (pct > 999) pct = 999;
     return (int)pct;
 }
 
-static void tm_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
-    int cx = x;
-    if (max_px <= 0) return;
-    while (text && *text && cx + FONT_CELL_WIDTH <= x + max_px) {
-        gui_draw_char(cx, y, *text, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        text++;
-    }
+static const char *state_label(int i) {
+    const tm_proc_t *p = &tm.procs[i];
+    if (p->suspended) return "Suspended";
+    if (ic_streq(p->state, "R")) return "Running";
+    if (ic_streq(p->state, "S")) return "Sleeping";
+    if (ic_streq(p->state, "Z")) return "Stopped";
+    return p->state;
 }
 
-/* Forward declarations for context menu (used in tm_draw before definition) */
-static void tm_ctx_menu_fill(ic_menu_t *m);
+static int state_is_idle(int i) {
+    const char *s = state_label(i);
+    return s[0] == 'S' || s[0] == 'Z';
+}
 
-static void tm_draw_button(int x, int y, int w, int h, const char *label, int active) {
-    uint32_t fill = active ? 0x001A73E8 : 0x00E8EAED;
-    uint32_t fg = active ? 0x00FFFFFF : 0x00444A50;
-    gui_fill_rect(x, y, w, h, fill);
-    gui_draw_rect_outline(x, y, w, h, active ? 0x001966C6 : 0x00D0D3D6);
-    {
-        int cx = x + 8;
-        int cy = y + 5;
-        const char *s = label;
-        while (*s && cx + FONT_CELL_WIDTH <= x + w - 8) {
-            gui_draw_char(cx, cy, *s, fg, fill);
-            cx += FONT_CELL_WIDTH;
-            s++;
+static int has_selection(void) {
+    return tm.selected >= 0 && tm.selected < tm.count;
+}
+
+/* ------------------------------------------------------------ sampling */
+
+static void parse_procs(const char *buf, uint64_t len) {
+    uint64_t pos = 0;
+    tm.count = 0;
+    while (pos < len && tm.count < TM_MAX_PROCS) {
+        char line[256];
+        uint64_t li = 0;
+        char *tok[8];
+        char *p;
+        int fi = 0;
+        int pid;
+        tm_proc_t *out;
+
+        while (pos < len && buf[pos] != '\n' && li + 1 < sizeof(line)) {
+            line[li++] = buf[pos++];
         }
-    }
-}
+        while (pos < len && buf[pos] != '\n') pos++;
+        if (pos < len) pos++;
+        line[li] = 0;
+        if (li == 0) continue;
+        if (line[0] == 'p' && line[1] == 'i' && line[2] == 'd') continue;
 
-static void tm_draw(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int rows = (h - TM_LIST_Y - 92) / TM_ROW_H;
-    if (rows > TM_MAX_ROWS) rows = TM_MAX_ROWS;
-    if (rows < 1) rows = 1;
+        p = line;
+        tok[fi++] = p;
+        while (*p && fi < 8) {
+            if (*p == ' ') { *p = 0; p++; tok[fi++] = p; }
+            else p++;
+        }
+        if (fi < 6) continue;
+        pid = tm_atoi(tok[0]);
+        if (pid <= 0) continue;
 
-    gui_fill_rect(0, 0, w, h, 0x00F5F7FA);
-    /* Header bar */
-    for (int row = 0; row < 56; row++) {
-        gui_fill_rect(0, row, w, 1, 0x001A73E8);
-    }
-    tm_draw_text(14, 16, "ICDA Task Manager", 0x00FFFFFF, 0x001A73E8, 200);
-    tm_draw_text(14, 36, "Refresh: R    Kill: Del/K    Quit: Q", 0x00DCE8FA, 0x001A73E8, w - 28);
-
-    /* Column headers */
-    tm_draw_text(TM_LIST_X + 2, TM_LIST_Y - 2, "PID", 0x005F6368, 0x00F5F7FA, 48);
-    tm_draw_text(TM_LIST_X + 64, TM_LIST_Y - 2, "Name", 0x005F6368, 0x00F5F7FA, 150);
-    tm_draw_text(TM_LIST_X + 230, TM_LIST_Y - 2, "State", 0x005F6368, 0x00F5F7FA, 80);
-    tm_draw_text(TM_LIST_X + 320, TM_LIST_Y - 2, "CPU%", 0x005F6368, 0x00F5F7FA, 64);
-    tm_draw_text(TM_LIST_X + 380, TM_LIST_Y - 2, "RAM", 0x005F6368, 0x00F5F7FA, 90);
-
-    gui_fill_rect(TM_LIST_X, TM_LIST_Y, TM_LIST_W, rows * TM_ROW_H, 0x00FFFFFF);
-    gui_draw_rect_outline(TM_LIST_X, TM_LIST_Y, TM_LIST_W, rows * TM_ROW_H, 0x00D0D3D6);
-
-    {
-        uint64_t now = icda_ticks();
-        uint64_t elapsed = last_sample_tick ? (now - last_sample_tick) : 0;
-        for (int i = 0; i < rows && i < proc_count; i++) {
-            int y = TM_LIST_Y + 2 + i * TM_ROW_H;
-            tm_proc_t *p = &procs[i];
-            if (i == selected) {
-                gui_fill_rect(TM_LIST_X + 1, TM_LIST_Y + i * TM_ROW_H, TM_LIST_W - 2, TM_ROW_H - 1, 0x00CFE6FF);
-            }
-            {
-                char cell[64];
-                /* PID */
-                cell[0] = 0;
-                tm_append_uint(cell, 0, p->pid, 0, sizeof(cell));
-                tm_draw_text(TM_LIST_X + 4, y, cell, i == selected ? 0x001F2937 : 0x001F2937,
-                             i == selected ? 0x00CFE6FF : 0x00FFFFFF, 48);
-                /* Name */
-                tm_draw_text(TM_LIST_X + 64, y, p->name,
-                             i == selected ? 0x001F2937 : 0x001F2937,
-                             i == selected ? 0x00CFE6FF : 0x00FFFFFF, 150);
-                /* State */
-                tm_draw_text(TM_LIST_X + 230, y, p->state,
-                             i == selected ? 0x001F2937 : 0x0064758B,
-                             i == selected ? 0x00CFE6FF : 0x00FFFFFF, 80);
-                /* CPU% (delta since last sample) */
-                uint64_t dticks = p->cpu_ticks > p->prev_cpu_ticks ? p->cpu_ticks - p->prev_cpu_ticks : 0;
-                cell[0] = 0;
-                tm_append_uint(cell, 0, (uint64_t)tm_percent(dticks, elapsed), 0, sizeof(cell));
-                tm_draw_text(TM_LIST_X + 322, y, cell,
-                             i == selected ? 0x001F2937 : 0x00334455,
-                             i == selected ? 0x00CFE6FF : 0x00FFFFFF, 48);
-                /* RAM */
-                cell[0] = 0;
-                tm_append_uint(cell, 0, p->mem_bytes / 1024, "K", sizeof(cell));
-                tm_draw_text(TM_LIST_X + 382, y, cell,
-                             i == selected ? 0x001F2937 : 0x00334455,
-                             i == selected ? 0x00CFE6FF : 0x00FFFFFF, 90);
-                p->prev_cpu_ticks = p->cpu_ticks;
+        out = &tm.procs[tm.count];
+        out->pid = (uint64_t)pid;
+        tm_copy(out->name, "?", sizeof(out->name));
+        tm_copy(out->state, tok[5], sizeof(out->state));
+        out->cpu_ticks = 0;
+        out->mem_bytes = 0;
+        out->prev_cpu_ticks = 0;
+        out->suspended = 0;
+        /* Carry our own suspend flag across samples, matched by pid. */
+        for (int k = 0; k < tm.count; k++) {
+            if (tm.procs[k].pid == out->pid && tm.procs[k].suspended) out->suspended = 1;
+        }
+        {
+            icda_proc_stats_t st;
+            if (icda_proc_stats((uint64_t)pid, &st) == 0) {
+                tm_copy(out->name, st.name, sizeof(out->name));
+                out->cpu_ticks = st.cpu_ticks;
+                out->mem_bytes = st.mem_bytes;
             }
         }
+        tm.count++;
     }
-
-    if (proc_count == 0) {
-        tm_draw_text(TM_LIST_X + 8, TM_LIST_Y + 6, "(no processes)", 0x0064758B, 0x00FFFFFF, TM_LIST_W - 20);
-    }
-
-    /* Footer: storage info */
-    gui_fill_rect(0, h - 84, w, 84, 0x00E8ECF1);
-    gui_draw_hline(0, h - 84, w, 0x00D0D3D6);
-    tm_draw_text(12, h - 78, "Storage:", 0x005F6368, 0x00E8ECF1, 100);
-    {
-        long n = (long)icda_storage_info(list_buf, sizeof(list_buf));
-        int y = h - 62;
-        if (n > 0) {
-            tm_draw_text(12, y, list_buf, 0x00334455, 0x00E8ECF1, w - 24);
-        } else {
-            tm_draw_text(12, y, "(no storage info)", 0x0064758B, 0x00E8ECF1, w - 24);
-        }
-    }
-
-    tm_draw_button(12, h - 36, 80, 26, "Kill", selected >= 0);
-    tm_draw_button(100, h - 36, 90, 26, "Refresh", 1);
-    tm_draw_button(198, h - 36, 70, 26, "Quit", 1);
-    tm_draw_text(290, h - 30, status, 0x00334455, 0x00E8ECF1, w - 300);
-    /* ---- context menu (topmost overlay) ---- */
-    if (ctx_open && ctx_nitems > 0) {
-        ic_canvas_t mc;
-        const ic_theme_t *t = ic_theme_default();
-        ic_menu_t m;
-        mc.px = gui_pixel_buffer();
-        mc.w = gui_window_width();
-        mc.h = gui_window_height();
-        tm_ctx_menu_fill(&m);
-        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
-        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
-    }
+    if (tm.selected >= tm.count) tm.selected = -1;
 }
 
-static void tm_kill_selected(void) {
-    if (selected < 0 || selected >= proc_count) {
-        tm_set_status("Nothing selected");
+static void sample(void) {
+    static char buf[TM_BUF_CAP];
+    long rc = (long)icda_list_procs(buf, sizeof(buf) - 1);
+    long sn;
+    if (rc < 0) {
+        tm_status("Could not read the process table");
         return;
     }
-    if (icda_kill(procs[selected].pid, 1) == 0) {
-        char msg[TM_STATUS_CAP];
-        tm_copy(msg, "Killed PID ", sizeof(msg));
-        tm_append_uint(msg, 0, procs[selected].pid, 0, sizeof(msg));
-        tm_set_status(msg);
+    buf[rc] = 0;
+    parse_procs(buf, (uint64_t)rc);
+    tm.last_sample = icda_ticks();
+    sn = (long)icda_storage_info(tm.storage, sizeof(tm.storage) - 1);
+    if (sn < 0 || (uint64_t)sn >= sizeof(tm.storage)) tm.storage[0] = 0;
+    else tm.storage[sn] = 0;
+}
+
+static uint64_t selected_pid(void) {
+    return has_selection() ? tm.procs[tm.selected].pid : 0;
+}
+
+static void reselect(uint64_t pid) {
+    if (pid == 0) return;
+    for (int i = 0; i < tm.count; i++) {
+        if (tm.procs[i].pid == pid) { tm.selected = i; return; }
+    }
+}
+
+/* ------------------------------------------------------------- actions */
+
+static void kill_selected(void) {
+    uint64_t pid;
+    if (!has_selection()) return;
+    pid = tm.procs[tm.selected].pid;
+    if (icda_kill(pid, 1) == 0) {
+        tm_status_pid("Quit PID ", pid);
     } else {
-        tm_set_status("Kill failed (protected process?)");
+        tm_status("That process could not be quit");
     }
-    tm_sample();
+    sample();
+    reselect(pid);
 }
 
-/* ---- context-menu helpers ---- */
-static void tm_ctx_set(int idx, int action, const char *label) {
-    if (idx < 0 || idx >= CTX_TM_MAX) return;
-    ctx_actions[idx] = action;
-    tm_copy(ctx_labels[idx], label, CTX_TM_LBL);
+static void toggle_suspend(void) {
+    uint64_t pid;
+    int rc;
+    if (!has_selection()) return;
+    pid = tm.procs[tm.selected].pid;
+    if (tm.procs[tm.selected].suspended) {
+        rc = (int)icda_resume(pid);
+        tm_status(rc == 0 ? "Process resumed" : "Could not resume that process");
+    } else {
+        rc = (int)icda_suspend(pid);
+        tm_status(rc == 0 ? "Process suspended" : "Could not suspend that process");
+    }
+    if (rc != 0) return;
+    sample();
+    reselect(pid);
 }
 
-static void tm_ctx_menu_fill(ic_menu_t *m) {
+static void confirm(int action) {
+    tm.alert_action = action;
+    tm.alert_hover = -1;
+}
+
+/* ------------------------------------------------------------ drawing */
+
+static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t b = toolbar_rect(app);
+    ic_rect_t k = kill_rect(app);
+    const ic_palette_t *p = ic_palette();
+    char label[64];
+    int n = tm.count;
+
+    ic_ui_toolbar(c, b);
+    ic_ui_icon_button(c, refresh_rect(app), IC_SYM_RELOAD,
+                      tm.hover_refresh ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_ui_button(c, suspend_rect(app), suspend_label_is_resume() ? "Resume" : "Suspend",
+                 IC_SYM_NONE, IC_BUTTON_DEFAULT,
+                 has_selection() ? (tm.hover_suspend ? IC_STATE_HOVER : IC_STATE_NORMAL)
+                                 : IC_STATE_DISABLED);
+    ic_ui_button(c, k, "Quit Process", IC_SYM_NONE, IC_BUTTON_DESTRUCTIVE,
+                 has_selection() ? (tm.hover_kill ? IC_STATE_HOVER : IC_STATE_NORMAL)
+                                 : IC_STATE_DISABLED);
+
+    if (n > 0) {
+        tm_u64((uint64_t)n, label, 24);
+        ic_strlcat(label, n == 1 ? " process" : " processes", sizeof(label));
+    } else {
+        ic_strcpy(label, "No processes", sizeof(label));
+    }
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                    ic_rect_make(k.x + k.w + IC_SP_3, 0,
+                                 b.w - (k.x + k.w) - IC_SP_3, b.h),
+                    label, p->label_secondary, IC_ALIGN_LEFT);
+}
+
+static void draw_table(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t t = table_rect(app);
+    const ic_face_t *body = ic_font(IC_FONT_BODY);
+    const ic_face_t *mono = ic_font(IC_FONT_MONO_SMALL);
+    static const char *const titles[5] = { "PID", "Process", "State", "CPU", "Memory" };
+    static const int widths[5] = { COL_NAME, COL_STATE - COL_NAME, COL_CPU - COL_STATE,
+                                   COL_MEM - COL_CPU, COL_MEM_W + IC_SP_4 };
+    char cell[32];
+
+    layout(app);
+    ic_ui_table_header(c, header_rect(app), titles, widths, 5);
+    ic_gfx_fill(c, t.x, t.y, t.w, t.h, ic_palette()->content);
+
+    for (int i = tm.first_row; i < tm.last_row; i++) {
+        ic_rect_t r = row_rect(app, i - tm.scroll);
+        tm_proc_t *p = &tm.procs[i];
+        ic_color_t text = ic_ui_list_row(c, r, i == tm.selected, tm.list_focused,
+                                         i == tm.hover_row ? 1.0f : 0.0f);
+        uint64_t busy = p->cpu_ticks > p->prev_cpu_ticks ? p->cpu_ticks - p->prev_cpu_ticks : 0;
+        /* One sampling window: 100 ticks of wall clock. */
+        uint64_t wall = TM_SAMPLE_TICKS;
+
+        tm_u64(p->pid, cell, sizeof(cell));
+        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_PID, r.y, COL_NAME - COL_PID - IC_SP_2, r.h),
+                        cell, text, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, body, ic_rect_make(r.x + COL_NAME, r.y, COL_STATE - COL_NAME - IC_SP_2, r.h),
+                        p->name, text, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, body, ic_rect_make(r.x + COL_STATE, r.y, COL_CPU - COL_STATE - IC_SP_2, r.h),
+                        state_label(i), state_is_idle(i) ? ic_palette()->label_secondary : text,
+                        IC_ALIGN_LEFT);
+        tm_u64((uint64_t)cpu_percent(busy, wall), cell, sizeof(cell));
+        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_CPU, r.y, COL_MEM - COL_CPU - IC_SP_2, r.h),
+                        cell, text, IC_ALIGN_RIGHT);
+        tm_u64(p->mem_bytes / 1024, cell, sizeof(cell));
+        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_MEM, r.y, COL_MEM_W, r.h),
+                        cell, text, IC_ALIGN_RIGHT);
+        /* Consume the delta so the next frame measures the next window. */
+        p->prev_cpu_ticks = p->cpu_ticks;
+    }
+
+    if (tm.count == 0) {
+        ic_ui_empty_state(c, t, IC_SYM_ACTIVITY, "No processes",
+                          "The kernel did not report any running programs.");
+    } else if (tm.count > tm.rows) {
+        ic_ui_scrollbar(c, t, tm.scroll, tm.count, 1.0f);
+    }
+}
+
+static void draw_footer(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t f = footer_rect(app);
+    const ic_palette_t *p = ic_palette();
+    ic_ui_statusbar(c, f, tm.status);
+    if (tm.storage[0]) {
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                        ic_rect_make(f.x + f.w / 2, f.y, f.w / 2 - IC_SP_3, f.h),
+                        tm.storage, p->label_secondary, IC_ALIGN_RIGHT);
+    }
+}
+
+static void draw_alert(ic_app_t *app, ic_canvas_t *c) {
+    static const char *const labels[2] = { "Cancel", "Quit Process" };
+    ic_rect_t rects[2];
+    char msg[160];
+    const char *title = tm.alert_action == TM_KILL ? "Quit this process?" : "Suspend this process?";
+
+    msg[0] = 0;
+    if (has_selection()) {
+        ic_strlcat(msg, tm.procs[tm.selected].name, sizeof(msg));
+        if (tm.alert_action == TM_KILL) {
+            ic_strlcat(msg, " will be stopped and cannot be restarted.", sizeof(msg));
+        } else {
+            ic_strlcat(msg, " will be paused until it is resumed.", sizeof(msg));
+        }
+    } else {
+        ic_strcpy(msg, "No process is selected.", sizeof(msg));
+    }
+    ic_ui_alert(c, alert_rect(app), tm.alert_action == TM_KILL ? IC_SYM_WARNING : IC_SYM_INFO,
+                title, msg, labels, 2, tm.alert_hover, rects);
+}
+
+static void draw(ic_app_t *app, ic_canvas_t *c) {
+    ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
+    draw_toolbar(app, c);
+    draw_table(app, c);
+    draw_footer(app, c);
+    if (tm.alert_action != TM_NONE) draw_alert(app, c);
+    /* The table is the only focusable surface; keep the caret alive. */
+    if (app->focused) ic_app_animate(app);
+}
+
+/* -------------------------------------------------------------- events */
+
+static int row_at(ic_app_t *app, int x, int y) {
+    ic_rect_t t = table_rect(app);
     int i;
-    if (!m) return;
-    m->count = ctx_nitems;
-    m->selected = -1;
-    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
-        m->items[i] = ctx_labels[i];
+    if (!ic_ui_hit(t, x, y)) return -1;
+    i = tm.scroll + (y - t.y) / IC_H_ROW;
+    return (i >= 0 && i < tm.count) ? i : -1;
 }
 
-static void tm_ctx_close(void) { ctx_open = 0; }
-
-static void tm_ctx_activate(int which) {
-    int a;
-    if (which < 0 || which >= ctx_nitems) { tm_ctx_close(); return; }
-    a = ctx_actions[which];
-    if (a == CTX_TM_KILL)    tm_kill_selected();
-    else if (a == CTX_TM_REFRESH) tm_sample();
-    else if (a == CTX_TM_QUIT) { gui_close_window(); icda_exit(0); }
-    tm_ctx_close();
+static void resolve_alert(void) {
+    int action = tm.alert_action;
+    tm.alert_action = TM_NONE;
+    tm.alert_hover = -1;
+    if (action == TM_KILL) kill_selected();
+    else if (action == TM_SUSPEND) toggle_suspend();
 }
 
-static void tm_ctx_open_at(int x, int y) {
-    ic_menu_t m;
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int mw, mh;
-    int i = 0;
-
-    if (selected >= 0 && selected < proc_count)
-        tm_ctx_set(i++, CTX_TM_KILL, "Kill");
-    tm_ctx_set(i++, CTX_TM_REFRESH, "Refresh");
-    tm_ctx_set(i++, CTX_TM_QUIT, "Quit");
-    ctx_nitems = i;
-
-    tm_ctx_menu_fill(&m);
-    mw = ic_menu_width(&m);
-    mh = ic_menu_height(&m);
-    if (x + mw > w) x = w - mw;
-    if (x < 0) x = 0;
-    if (y + mh > h) y = h - mh;
-    if (y < 0) y = 0;
-    ctx_x = x;
-    ctx_y = y;
-    ctx_open = 1;
+static void event(ic_app_t *app, const ic_event_t *ev) {
+    switch (ev->type) {
+    case IC_EV_MOUSE_MOVE:
+        if (tm.alert_action != TM_NONE) {
+            tm.alert_hover = ic_ui_hit(alert_button_rect(app, 0), ev->x, ev->y) ? 0
+                           : (ic_ui_hit(alert_button_rect(app, 1), ev->x, ev->y) ? 1 : -1);
+            break;
+        }
+        tm.hover_refresh = ic_ui_hit(refresh_rect(app), ev->x, ev->y);
+        tm.hover_suspend = ic_ui_hit(suspend_rect(app), ev->x, ev->y);
+        tm.hover_kill = ic_ui_hit(kill_rect(app), ev->x, ev->y);
+        tm.hover_row = row_at(app, ev->x, ev->y);
+        break;
+    case IC_EV_MOUSE_DOWN:
+        if (ev->button != GUI_BTN_LEFT) break;
+        if (tm.alert_action != TM_NONE) {
+            if (ic_ui_hit(alert_button_rect(app, 1), ev->x, ev->y)) resolve_alert();
+            else if (ic_ui_hit(alert_button_rect(app, 0), ev->x, ev->y)) {
+                tm.alert_action = TM_NONE;
+                tm.alert_hover = -1;
+            }
+            break;
+        }
+        if (tm.hover_refresh) { sample(); break; }
+        if (tm.hover_suspend && has_selection()) { confirm(TM_SUSPEND); break; }
+        if (tm.hover_kill && has_selection()) { confirm(TM_KILL); break; }
+        {
+            int i = row_at(app, ev->x, ev->y);
+            if (i >= 0) {
+                tm.selected = i;
+                tm.list_focused = 1;
+            } else {
+                tm.list_focused = 0;
+            }
+        }
+        break;
+    case IC_EV_MOUSE_LEAVE:
+        tm.hover_row = -1;
+        tm.hover_refresh = tm.hover_suspend = tm.hover_kill = 0;
+        break;
+    case IC_EV_KEY:
+        if (tm.alert_action != TM_NONE) {
+            if (ev->key == IC_KEY_ESCAPE) {
+                tm.alert_action = TM_NONE;
+                tm.alert_hover = -1;
+            } else if (ev->key == IC_KEY_ENTER || ev->key == IC_KEY_RIGHT) {
+                resolve_alert();
+            } else if (ev->key == IC_KEY_LEFT || ev->key == IC_KEY_TAB) {
+                tm.alert_hover = tm.alert_hover == 0 ? 1 : 0;
+            }
+            break;
+        }
+        switch (ev->key) {
+        case IC_KEY_UP:   if (tm.selected > 0) tm.selected--; break;
+        case IC_KEY_DOWN: if (tm.selected + 1 < tm.count) tm.selected++; break;
+        case IC_KEY_PAGE_UP:   tm.scroll -= tm.rows; break;
+        case IC_KEY_PAGE_DOWN: tm.scroll += tm.rows; break;
+        case IC_KEY_HOME:  tm.scroll = 0; break;
+        case IC_KEY_END:   tm.scroll = tm.count; break;
+        case IC_KEY_DELETE: if (has_selection()) confirm(TM_KILL); break;
+        case IC_KEY_ESCAPE: if (has_selection()) confirm(TM_KILL); break;
+        case 's': case 'S': if (has_selection()) confirm(TM_SUSPEND); break;
+        case 'r': case 'R': sample(); break;
+        default: break;
+        }
+        break;
+    case IC_EV_RESIZE:
+        layout(app);
+        break;
+    case IC_EV_BLUR:
+        tm.list_focused = 0;
+        break;
+    default:
+        break;
+    }
+    ic_app_invalidate(app);
 }
 
-static void tm_handle_mouse(gui_msg_t *msg) {
-    int mx = msg->mouse.x;
-    int my = msg->mouse.y;
-    int h = gui_window_height();
-    int rows = (h - TM_LIST_Y - 92) / TM_ROW_H;
-    if (rows > TM_MAX_ROWS) rows = TM_MAX_ROWS;
-    if (rows < 1) rows = 1;
-
-    if (tm_hit(mx, my, 12, h - 36, 80, 26)) { tm_kill_selected(); return; }
-    if (tm_hit(mx, my, 100, h - 36, 90, 26)) { tm_sample(); return; }
-    if (tm_hit(mx, my, 198, h - 36, 70, 26)) { gui_close_window(); icda_exit(0); return; }
-
-    if (tm_hit(mx, my, TM_LIST_X, TM_LIST_Y, TM_LIST_W, rows * TM_ROW_H)) {
-        int i = (my - TM_LIST_Y) / TM_ROW_H;
-        if (i >= 0 && i < proc_count) selected = i;
-        return;
+static void tick(ic_app_t *app) {
+    if (icda_ticks() - tm.last_sample > TM_SAMPLE_TICKS) {
+        uint64_t pid = selected_pid();
+        sample();
+        reselect(pid);
+        ic_app_invalidate(app);
     }
 }
 
-static void tm_handle_key(uint32_t key) {
-    if (ctx_open) return; /* type-ahead guard */
-    if (key == 24 || key == 'q' || key == 'Q') {
-        gui_close_window();
-        icda_exit(0);
-        return;
-    }
-    if (key == 3) { /* SPECIAL_UP */ if (selected > 0) selected--; return; }
-    if (key == 4) { /* SPECIAL_DOWN */ if (selected + 1 < proc_count) selected++; return; }
-    if (key == 'r' || key == 'R') { tm_sample(); return; }
-    if (key == 'k' || key == 'K' || key == 127) { tm_kill_selected(); return; }
+static void init(ic_app_t *app) {
+    (void)app;
+    tm.count = 0;
+    tm.selected = -1;
+    tm.scroll = 0;
+    tm.hover_row = -1;
+    tm.hover_refresh = tm.hover_suspend = tm.hover_kill = 0;
+    tm.list_focused = 1;
+    tm.alert_action = TM_NONE;
+    tm.alert_hover = -1;
+    tm.last_sample = 0;
+    tm.status[0] = 0;
+    tm.storage[0] = 0;
+    sample();
 }
 
 int main(int argc, char **argv) {
-    int key_seq = 0;
+    static const ic_app_desc_t desc = { "Activity", WIN_W, WIN_H, init, draw, event, tick };
     (void)argc;
     (void)argv;
-
-    status[0] = 0;
-    if (gui_open_window("Task Manager", TM_WIN_W, TM_WIN_H) != 0) {
-        icda_write("task manager requires the desktop (Ctrl+Alt+F1)\n");
+    if (ic_app_run(&desc, 0) != 0) {
+        icda_write("activity requires the desktop (Ctrl+Alt+F1)\n");
         return 1;
     }
-    tm_sample();
-    tm_draw();
-    gui_flush();
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            if (msg.type == GUI_MSG_MOUSE_EVENT) {
-                int mx = msg.mouse.x, my = msg.mouse.y;
-                /* Left-click: menu/press precedence */
-                if (msg.mouse.buttons & GUI_BTN_LEFT) {
-                    if (!prev_left) {
-                        if (ctx_open) {
-                            ic_menu_t m; int hit;
-                            tm_ctx_menu_fill(&m);
-                            hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
-                            if (hit >= 0 && hit < ctx_nitems) tm_ctx_activate(hit);
-                            else tm_ctx_close();
-                        } else {
-                            tm_handle_mouse(&msg);
-                        }
-                    }
-                }
-                prev_left = (msg.mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
-                /* Right-click: edge-detect (desktop.c pattern) */
-                if (msg.mouse.buttons & GUI_BTN_RIGHT) {
-                    if (!prev_right) {
-                        int h = gui_window_height();
-                        int rows = (h - TM_LIST_Y - 92) / TM_ROW_H;
-                        tm_ctx_close();
-                        if (rows > TM_MAX_ROWS) rows = TM_MAX_ROWS;
-                        if (rows < 1) rows = 1;
-                        if (tm_hit(mx, my, TM_LIST_X, TM_LIST_Y, TM_LIST_W, rows * TM_ROW_H)) {
-                            int i = (my - TM_LIST_Y) / TM_ROW_H;
-                            if (i >= 0 && i < proc_count) selected = i;
-                        }
-                        tm_ctx_open_at(mx, my);
-                    }
-                    prev_right = 1;
-                } else { prev_right = 0; }
-                last_mouse_x = mx; last_mouse_y = my;
-            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
-                uint32_t code = msg.key.keycode;
-                if (key_seq == 0 && code == 27) {
-                    key_seq = 1;
-                } else if (key_seq == 1 && code == '[') {
-                    key_seq = 2;
-                } else if (key_seq == 2) {
-                    key_seq = 0;
-                    if (code == 'A') tm_handle_key(3);
-                    else if (code == 'B') tm_handle_key(4);
-                } else {
-                    key_seq = 0;
-                    tm_handle_key(code);
-                }
-            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        /* Auto-refresh every 100 ticks (~1s) so CPU% and RAM stay live. */
-        if (changed || (icda_ticks() - last_sample_tick) > 100) {
-            tm_sample();
-            tm_draw();
-            gui_flush();
-        }
-        icda_sleep(1);
-    }
+    return 0;
 }

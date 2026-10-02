@@ -29,6 +29,5 @@ struct idt_ptr {
 
 void idt_init();
 void idt_set_entry(int index, uint64_t handler, uint8_t flags);
-void idt_set_entry_ist(int vec, uint64_t handler, uint8_t flags, uint8_t ist);
 
 #endif

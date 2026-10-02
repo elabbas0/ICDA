@@ -53,6 +53,11 @@ function Get-DockerCli {
         return $programFilesDocker
     }
 
+    $perUserDocker = Join-Path $env:LocalAppData "Programs\DockerDesktop\resources\bin\docker.exe"
+    if (Test-Path $perUserDocker) {
+        return $perUserDocker
+    }
+
     throw "Docker CLI was not found. Run scripts\icda.cmd install, then start Docker Desktop and run scripts\icda.cmd ready."
 }
 
@@ -232,6 +237,7 @@ function Test-DockerResponding {
 function Start-DockerDesktopIfInstalled {
     $dockerDesktopPaths = @(
         "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        (Join-Path $env:LocalAppData "Programs\DockerDesktop\Docker Desktop.exe"),
         (Join-Path $env:LocalAppData "Docker\Docker Desktop.exe")
     )
 

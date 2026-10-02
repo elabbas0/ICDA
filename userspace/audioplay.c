@@ -1,89 +1,140 @@
 /*
- * audioplay.app - ICDA Audio Player.
+ * audioplay.app - ICDA Music.
  *
- * A real GUI window (unlike the old console stub that only knew about a
- * request file nobody wrote).  Lists every .wav in /usr/share/audio and
- * /home, lets you pick one with the mouse or arrow keys, and plays/stops
- * it through the kernel's background audio engine.
+ * The list + now-playing bar from docs/DESIGN.md: a source list of
+ * tracks found in the media folders, a transport row, and a now-playing
+ * bar pinned to the bottom with real progress from icda_audio_info.
+ *
+ * Discovery walks /usr/share/audio and /home for .wav files, plus any
+ * path passed on the command line (the Explorer "Open With" path).  The
+ * `audio` setting is a master switch: with it off, Play explains itself
+ * instead of failing silently.
  */
-#include "gui.h"
-#include "icda_sys.h"
 #include "libicda.h"
-#include "font.h"
 #include "settings_store.h"
 
-#include <stdint.h>
+#define WIN_W 560
+#define WIN_H 420
 
-#define AP_WIN_W 520
-#define AP_WIN_H 400
-#define AP_MAX_TRACKS 48
-#define AP_NAME_CAP 96
-#define AP_PATH_CAP 192
-#define AP_STATUS_CAP 128
+#define AP_MAX_TRACKS  64
+#define AP_NAME_CAP    96
+#define AP_PATH_CAP    192
+#define AP_STATUS_CAP  128
+#define AP_STATUS_H    24
+#define AP_NOWPLAY_H   64
 
-#define AP_LIST_X 14
-#define AP_LIST_Y 74
-#define AP_LIST_W (AP_WIN_W - 28)
-#define AP_ROW_H 20
-#define AP_MAX_ROWS 14
+typedef struct {
+    char name[AP_NAME_CAP];
+    char path[AP_PATH_CAP];
+} ap_track_t;
 
-static char ap_tracks[AP_MAX_TRACKS][AP_NAME_CAP];
-static char ap_paths[AP_MAX_TRACKS][AP_PATH_CAP];
-static int ap_count = 0;
-static int ap_sel = 0;
-static char ap_status[AP_STATUS_CAP];
+static struct {
+    ap_track_t tracks[AP_MAX_TRACKS];
+    int        count;
+    int        selected;
+    int        scroll;
 
-static uint64_t ap_strlen(const char *s) {
-    uint64_t n = 0;
-    while (s && s[n]) n++;
-    return n;
+    /* view */
+    int rows;
+    int first_row;
+    int last_row;
+
+    /* pointer */
+    int hover_row;
+    int hover_play;
+    int hover_stop;
+    int hover_refresh;
+    int list_focused;
+
+    char status[AP_STATUS_CAP];
+    int  playing;              /* the kernel reports an active stream */
+} ap;
+
+/* ------------------------------------------------------------- layout */
+
+static ic_rect_t toolbar_rect(ic_app_t *app) {
+    return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
 }
 
-static void ap_copy(char *dst, const char *src, uint64_t cap) {
-    uint64_t i = 0;
-    if (!dst || cap == 0) return;
-    while (src && src[i] && i + 1 < cap) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = 0;
+static ic_rect_t list_rect(ic_app_t *app) {
+    int y = IC_H_TOOLBAR;
+    return ic_rect_make(IC_SP_4, y, app->width - 2 * IC_SP_4,
+                        app->height - y - AP_NOWPLAY_H - AP_STATUS_H);
 }
 
-static void ap_append(char *dst, const char *src, uint64_t cap) {
-    uint64_t at = ap_strlen(dst);
-    uint64_t i = 0;
-    if (!dst || cap == 0 || at >= cap) return;
-    while (src && src[i] && at + 1 < cap) {
-        dst[at++] = src[i++];
-    }
-    dst[at] = 0;
+static ic_rect_t row_rect(ic_app_t *app, int row) {
+    ic_rect_t l = list_rect(app);
+    return ic_rect_make(l.x, l.y + row * IC_H_ROW, l.w, IC_H_ROW);
 }
 
-static char ap_lower(char c) {
-    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
-    return c;
+static ic_rect_t status_rect(ic_app_t *app) {
+    return ic_rect_make(0, app->height - AP_STATUS_H, app->width, AP_STATUS_H);
 }
 
-static int ap_has_wav_suffix(const char *name) {
-    uint64_t len = ap_strlen(name);
+static ic_rect_t nowplaying_rect(ic_app_t *app) {
+    return ic_rect_make(0, app->height - AP_STATUS_H - AP_NOWPLAY_H, app->width,
+                        AP_NOWPLAY_H);
+}
+
+static ic_rect_t play_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    int w = ic_ui_button_width("Play", IC_SYM_PLAY);
+    return ic_rect_make(b.x + IC_SP_4, (b.h - IC_H_CONTROL_SM) / 2, w, IC_H_CONTROL_SM);
+}
+
+static ic_rect_t stop_rect(ic_app_t *app) {
+    ic_rect_t r = play_rect(app);
+    int w = ic_ui_button_width("Stop", IC_SYM_STOP);
+    return ic_rect_make(r.x + r.w + IC_SP_2, r.y, w, IC_H_CONTROL_SM);
+}
+
+static ic_rect_t refresh_rect(ic_app_t *app) {
+    ic_rect_t r = stop_rect(app);
+    int w = ic_ui_button_width("Refresh", IC_SYM_RELOAD);
+    return ic_rect_make(r.x + r.w + IC_SP_2, r.y, w, IC_H_CONTROL_SM);
+}
+
+static void layout(ic_app_t *app) {
+    ic_rect_t l = list_rect(app);
+    int rows = l.h / IC_H_ROW;
+    if (rows < 1) rows = 1;
+    ap.rows = rows;
+    if (ap.selected < ap.scroll) ap.scroll = ap.selected;
+    if (ap.selected >= ap.scroll + rows) ap.scroll = ap.selected - rows + 1;
+    if (ap.scroll < 0) ap.scroll = 0;
+    if (ap.scroll > ap.count - rows) ap.scroll = ap.count - rows;
+    if (ap.scroll < 0) ap.scroll = 0;
+    ap.first_row = ap.scroll;
+    ap.last_row = ap.scroll + rows;
+    if (ap.last_row > ap.count) ap.last_row = ap.count;
+}
+
+/* ------------------------------------------------------------ helpers */
+
+static void ap_status(const char *text) {
+    ic_strcpy(ap.status, text, AP_STATUS_CAP);
+}
+
+static int has_wav_suffix(const char *name) {
     static const char suffix[] = ".wav";
-    uint64_t sl = 4;
-    if (len < sl) return 0;
-    for (uint64_t i = 0; i < sl; i++) {
-        if (ap_lower(name[len - sl + i]) != suffix[i]) return 0;
+    uint64_t len = ic_strlen(name);
+    for (int i = 0; i < 4; i++) {
+        if (ic_lower(name[len - 4 + i]) != suffix[i]) return 0;
     }
     return 1;
 }
 
-static int ap_hit(int mx, int my, int x, int y, int w, int h) {
-    return mx >= x && my >= y && mx < x + w && my < y + h;
+static void add_track(const char *name, const char *path) {
+    if (ap.count >= AP_MAX_TRACKS) return;
+    for (int i = 0; i < ap.count; i++) {
+        if (ic_streq(ap.tracks[i].name, name)) return;
+    }
+    ic_strcpy(ap.tracks[ap.count].name, name, AP_NAME_CAP);
+    ic_strcpy(ap.tracks[ap.count].path, path, AP_PATH_CAP);
+    ap.count++;
 }
 
-static void ap_set_status(const char *text) {
-    ap_copy(ap_status, text, sizeof(ap_status));
-}
-
-static void ap_add_dir(const char *dir) {
+static void add_dir(const char *dir) {
     char buf[4096];
     long rc;
     uint64_t pos = 0;
@@ -92,274 +143,313 @@ static void ap_add_dir(const char *dir) {
     rc = (long)icda_list_dir(dir, buf, sizeof(buf));
     if (rc < 0) return;
 
-    while (pos < (uint64_t)rc && ap_count < AP_MAX_TRACKS) {
+    while (pos < (uint64_t)rc && ap.count < AP_MAX_TRACKS) {
         char entry[AP_NAME_CAP];
         uint64_t ei = 0;
-        int dup = 0;
+        char path[AP_PATH_CAP];
 
         while (pos < (uint64_t)rc && buf[pos] != '\n' && ei + 1 < sizeof(entry)) {
             entry[ei++] = buf[pos++];
         }
         while (pos < (uint64_t)rc && buf[pos] != '\n') pos++;
-        if (pos < (uint64_t)rc && buf[pos] == '\n') pos++;
+        if (pos < (uint64_t)rc) pos++;
         entry[ei] = 0;
 
         if (ei == 0 || entry[ei - 1] == '/') continue;
-        if (!ap_has_wav_suffix(entry)) continue;
+        if (!has_wav_suffix(entry)) continue;
 
-        for (int i = 0; i < ap_count; i++) {
-            if (ap_strlen(ap_tracks[i]) == ap_strlen(entry)) {
-                uint64_t j = 0;
-                int same = 1;
-                while (entry[j]) {
-                    if (ap_tracks[i][j] != entry[j]) { same = 0; break; }
-                    j++;
-                }
-                if (same) { dup = 1; break; }
-            }
-        }
-        if (dup) continue;
-
-        ap_copy(ap_tracks[ap_count], entry, sizeof(ap_tracks[0]));
-        if (dir[0] == '/' && ap_strlen(dir) == 1) {
-            ap_append(ap_paths[ap_count], "/", sizeof(ap_paths[0]));
-        } else {
-            ap_append(ap_paths[ap_count], dir, sizeof(ap_paths[0]));
-            ap_append(ap_paths[ap_count], "/", sizeof(ap_paths[0]));
-        }
-        ap_append(ap_paths[ap_count], entry, sizeof(ap_paths[0]));
-        ap_count++;
+        path[0] = 0;
+        ic_strlcat(path, dir, sizeof(path));
+        if (path[0] && path[ic_strlen(path) - 1] != '/') ic_strlcat(path, "/", sizeof(path));
+        ic_strlcat(path, entry, sizeof(path));
+        add_track(entry, path);
     }
 }
 
-static void ap_scan(void) {
-    ap_count = 0;
-    ap_sel = 0;
-    ap_add_dir("/usr/share/audio");
-    ap_add_dir("/home");
-    if (ap_count == 0) {
-        ap_set_status("No .wav files found - put some in /usr/share/audio");
-    } else {
-        ap_set_status("Select a track and press Play");
+static void scan(void) {
+    char keep[AP_PATH_CAP];
+    keep[0] = 0;
+    if (ap.selected >= 0 && ap.selected < ap.count) {
+        ic_strcpy(keep, ap.tracks[ap.selected].path, sizeof(keep));
     }
+    ap.count = 0;
+    add_dir("/usr/share/audio");
+    add_dir("/home");
+    ap.selected = 0;
+    /* Keep pointing at the same file across a rescan. */
+    if (keep[0]) {
+        for (int i = 0; i < ap.count; i++) {
+            if (ic_streq(ap.tracks[i].path, keep)) { ap.selected = i; break; }
+        }
+    }
+    if (ap.count == 0) ap_status("No .wav files found in the media folders");
+    else ap_status("Select a track, then press Play");
 }
 
-static void ap_play_selected(void) {
-    icda_settings_t audio_opt;
-    if (ap_count == 0) {
-        ap_set_status("No track selected");
+/* ------------------------------------------------------------- actions */
+
+static void play_selected(void) {
+    icda_settings_t opt;
+    if (ap.selected < 0 || ap.selected >= ap.count) {
+        ap_status("No track selected");
         return;
     }
-    /* Slice C master mute: skip audio paths when disabled. */
-    icda_settings_load(&audio_opt);
-    if (!audio_opt.audio) {
-        ap_set_status("Audio disabled - enable in Settings");
+    icda_settings_load(&opt);
+    if (!opt.audio) {
+        ap_status("Sound is off. Turn it on in Settings.");
         return;
     }
-    if (ap_sel < 0 || ap_sel >= ap_count) ap_sel = 0;
-    if ((long)icda_play_audio_file(ap_paths[ap_sel]) < 0) {
-        ap_set_status("Could not play track");
-    } else {
-        char msg[AP_STATUS_CAP];
-        ap_copy(msg, "Playing ", sizeof(msg));
-        ap_append(msg, ap_tracks[ap_sel], sizeof(msg));
-        ap_set_status(msg);
+    if ((long)icda_play_audio_file(ap.tracks[ap.selected].path) < 0) {
+        ap_status("This track could not be played");
+        return;
     }
+    ap_status("Playing");
 }
 
-static void ap_draw_button(int x, int y, int w, int h, const char *label, int active) {
-    uint32_t top = active ? 0x003D8BFF : 0x00FFFFFF;
-    uint32_t bottom = active ? 0x001F5EBE : 0x00DDEBFF;
-    uint32_t edge = active ? 0x000C3C88 : 0x006EA6E8;
-    for (int row = 0; row < h; row++) {
-        int t = row;
-        int d = h - 1;
-        int r = (int)(((top >> 16) & 0xFF) + ((((bottom >> 16) & 0xFF) - ((top >> 16) & 0xFF)) * t) / d);
-        int g = (int)(((top >> 8) & 0xFF) + ((((bottom >> 8) & 0xFF) - ((top >> 8) & 0xFF)) * t) / d);
-        int b = (int)((top & 0xFF) + (((bottom & 0xFF) - (top & 0xFF)) * t) / d);
-        gui_fill_rect(x, y + row, w, 1, (uint32_t)((r << 16) | (g << 8) | b));
-    }
-    gui_draw_rect_outline(x, y, w, h, edge);
+static void stop_playback(void) {
+    icda_stop_audio();
+    ap_status("Stopped");
+}
+
+/* Progress of the active stream, 0..1, or -1 when nothing is playing. */
+static float playback_progress(char *name, int name_cap, uint64_t *seconds_left) {
+    icda_audio_info_t info;
+    name[0] = 0;
+    *seconds_left = 0;
+    if ((long)icda_audio_info(&info) < 0 || !info.active) return -1.0f;
+    ic_strncpy(name, info.name, (uint64_t)name_cap, (uint64_t)name_cap);
+    *seconds_left = info.seconds_left;
+    if (info.total_seconds == 0) return -1.0f;
     {
-        int cx = x + 8;
-        int cy = y + 5;
-        const char *s = label;
-        while (*s && cx + FONT_CELL_WIDTH <= x + w - 8) {
-            gui_draw_char(cx, cy, *s, active ? 0x00FFFFFF : 0x001D3F66, bottom);
-            cx += FONT_CELL_WIDTH;
-            s++;
-        }
+        uint64_t left = info.seconds_left;
+        if (left > info.total_seconds) return 0.0f;
+        return 1.0f - (float)left / (float)info.total_seconds;
     }
 }
 
-static void ap_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
-    int cx = x;
-    if (max_px <= 0) return;
-    while (text && *text && cx + FONT_CELL_WIDTH <= x + max_px) {
-        gui_draw_char(cx, y, *text, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        text++;
+static void refresh_status(void) {
+    char name[AP_NAME_CAP];
+    uint64_t left = 0;
+    float p = playback_progress(name, AP_NAME_CAP, &left);
+    ap.playing = p >= 0.0f;
+}
+
+/* ------------------------------------------------------------ drawing */
+
+static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t b = toolbar_rect(app);
+    const ic_palette_t *p = ic_palette();
+    int enabled = ap.selected >= 0 && ap.selected < ap.count;
+
+    ic_ui_toolbar(c, b);
+    ic_ui_button(c, play_rect(app), "Play", IC_SYM_PLAY,
+                 ap.playing ? IC_BUTTON_DEFAULT : IC_BUTTON_PRIMARY,
+                 !enabled ? IC_STATE_DISABLED
+                          : (ap.hover_play ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_button(c, stop_rect(app), "Stop", IC_SYM_STOP, IC_BUTTON_DEFAULT,
+                 !ap.playing ? IC_STATE_DISABLED
+                             : (ap.hover_stop ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_button(c, refresh_rect(app), "Refresh", IC_SYM_RELOAD, IC_BUTTON_DEFAULT,
+                 ap.hover_refresh ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                    ic_rect_make(refresh_rect(app).x + refresh_rect(app).w + IC_SP_3, 0,
+                                 b.w - refresh_rect(app).w - IC_SP_3, b.h),
+                    ap.playing ? "Playing" : "Stopped", p->label_secondary, IC_ALIGN_LEFT);
+}
+
+static void draw_list(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t l = list_rect(app);
+    const ic_face_t *body = ic_font(IC_FONT_BODY);
+
+    layout(app);
+    ic_gfx_fill(c, l.x, l.y, l.w, l.h, ic_palette()->content);
+
+    for (int i = ap.first_row; i < ap.last_row; i++) {
+        ic_rect_t r = row_rect(app, i - ap.scroll);
+        ic_color_t text = ic_ui_list_row(c, r, i == ap.selected, ap.list_focused,
+                                         i == ap.hover_row ? 1.0f : 0.0f);
+        ic_symbol_draw(c, IC_SYM_MUSIC, (float)(r.x + IC_SP_3 + 8), (float)(r.y + r.h / 2),
+                       16.0f, text);
+        ic_text_draw_in(c, body,
+                        ic_rect_make(r.x + IC_SP_3 + 20, r.y, r.w - IC_SP_3 - 24, r.h),
+                        ap.tracks[i].name, text, IC_ALIGN_LEFT);
+    }
+
+    if (ap.count == 0) {
+        ic_ui_empty_state(c, l, IC_SYM_MUSIC, "No music found",
+                          "Add .wav files to the media folder, then press Refresh.");
+    } else if (ap.count > ap.rows) {
+        ic_ui_scrollbar(c, l, ap.scroll, ap.count, 1.0f);
     }
 }
 
-static void ap_refresh_status(void) {
-    icda_audio_info_t audio;
-    if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        char msg[AP_STATUS_CAP];
-        ap_copy(msg, "Playing: ", sizeof(msg));
-        ap_append(msg, audio.name, sizeof(msg));
-        {
-            char num[24];
-            uint64_t i = sizeof(num) - 1;
-            uint64_t secs = audio.seconds_left;
-            num[i] = 0;
-            if (secs == 0) {
-                num[--i] = '0';
-            } else {
-                while (secs && i > 0) {
-                    num[--i] = (char)('0' + (secs % 10));
-                    secs /= 10;
-                }
-            }
-            ap_append(msg, "  ", sizeof(msg));
-            ap_append(msg, &num[i], sizeof(msg));
-            ap_append(msg, "s left", sizeof(msg));
-        }
-        ap_set_status(msg);
-    } else if (ap_count > 0 && ap_status[0] == 0) {
-        ap_set_status("Select a track and press Play");
+static void draw_now_playing(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t r = nowplaying_rect(app);
+    const ic_palette_t *p = ic_palette();
+    const ic_face_t *title = ic_font(IC_FONT_HEADLINE);
+    const ic_face_t *sub = ic_font(IC_FONT_FOOTNOTE);
+    char name[AP_NAME_CAP];
+    char time[32];
+    uint64_t left = 0;
+    float progress = playback_progress(name, AP_NAME_CAP, &left);
+    ic_rect_t bar;
+
+    ic_ui_group(c, ic_rect_make(r.x + IC_SP_4, r.y + IC_SP_2,
+                                r.w - 2 * IC_SP_4, r.h - 2 * IC_SP_2));
+
+    if (progress < 0.0f) {
+        ic_symbol_draw(c, IC_SYM_MUSIC, (float)(r.x + IC_SP_6 + 12),
+                       (float)(r.y + IC_SP_4 + 14), 24.0f, p->label_tertiary);
+        ic_text_draw_in(c, title, ic_rect_make(r.x + IC_SP_6 + 32, r.y + IC_SP_3 + 2,
+                                               r.w - IC_SP_8 - 32, 18),
+                        "Nothing playing", p->label_secondary, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, sub, ic_rect_make(r.x + IC_SP_6 + 32, r.y + IC_SP_3 + 20,
+                                             r.w - IC_SP_8 - 32, 16),
+                        "Choose a track and press Play", p->label_tertiary, IC_ALIGN_LEFT);
+        return;
     }
+
+    ic_symbol_draw(c, IC_SYM_PLAY, (float)(r.x + IC_SP_6 + 12),
+                   (float)(r.y + IC_SP_4 + 14), 24.0f, p->accent);
+    ic_text_draw_in(c, title, ic_rect_make(r.x + IC_SP_6 + 32, r.y + IC_SP_3 + 2,
+                                           r.w - IC_SP_8 - 32, 18),
+                    name[0] ? name : "Unknown track", p->label, IC_ALIGN_LEFT);
+
+    time[0] = 0;
+    ic_strlcat(time, "0:", sizeof(time));
+    {
+        char n[24];
+        ic_snprintf_u64(n, sizeof(n), left);
+        ic_strlcat(time, n, sizeof(time));
+        ic_strlcat(time, " left", sizeof(time));
+    }
+    ic_text_draw_in(c, sub, ic_rect_make(r.x + IC_SP_6 + 32, r.y + IC_SP_3 + 20,
+                                         r.w - IC_SP_8 - 32, 16),
+                    time, p->label_tertiary, IC_ALIGN_LEFT);
+
+    bar = ic_rect_make(r.x + IC_SP_6, r.y + r.h - IC_SP_3 - 4,
+                       r.w - 2 * (IC_SP_6 + IC_SP_2), 4);
+    ic_ui_progress(c, bar, progress, p->accent);
 }
 
-static void ap_draw(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int rows = (h - AP_LIST_Y - 96) / AP_ROW_H;
-    if (rows > AP_MAX_ROWS) rows = AP_MAX_ROWS;
-    if (rows < 1) rows = 1;
-
-    gui_fill_rect(0, 0, w, h, 0x00E7F1FF);
-    for (int row = 0; row < 64; row++) {
-        int t = row, d = 63;
-        int r = (int)(0x3D + ((0x1F - 0x3D) * t) / d);
-        int g = (int)(0x8B + ((0x5E - 0x8B) * t) / d);
-        int b = (int)(0xFF + ((0xBE - 0xFF) * t) / d);
-        gui_fill_rect(0, row, w, 1, (uint32_t)((r << 16) | (g << 8) | b));
-    }
-    gui_fill_rect(0, 63, w, 1, 0x0015449C);
-    ap_draw_text(16, 16, "ICDA Audio Player", 0x00FFFFFF, 0x002C73D2, 200);
-    ap_draw_text(16, 38, "Up/Down select   Enter/Space play   S stop   R refresh   Q close",
-                 0x00EAF2FF, 0x002C73D2, w - 32);
-
-    gui_fill_rect(AP_LIST_X, AP_LIST_Y, AP_LIST_W, rows * AP_ROW_H, 0x00FFFFFF);
-    gui_draw_rect_outline(AP_LIST_X, AP_LIST_Y, AP_LIST_W, rows * AP_ROW_H, 0x0092B7E8);
-
-    for (int i = 0; i < rows; i++) {
-        int idx = i;
-        int y = AP_LIST_Y + 2 + i * AP_ROW_H;
-        if (idx >= ap_count) break;
-        if (idx == ap_sel) {
-            gui_fill_rect(AP_LIST_X + 1, AP_LIST_Y + i * AP_ROW_H, AP_LIST_W - 2, AP_ROW_H - 1, 0x00CFE6FF);
-            ap_draw_text(AP_LIST_X + 8, y, ap_tracks[idx], 0x001F2937, 0x00CFE6FF, AP_LIST_W - 20);
-        } else {
-            ap_draw_text(AP_LIST_X + 8, y, ap_tracks[idx], 0x001F2937, 0x00FFFFFF, AP_LIST_W - 20);
-        }
-    }
-    if (ap_count == 0) {
-        ap_draw_text(AP_LIST_X + 8, AP_LIST_Y + 6, "(no audio files found)", 0x0064758B, 0x00FFFFFF, AP_LIST_W - 20);
-    }
-
-    ap_draw_button(16, h - 58, 70, 28, "Play", ap_count > 0);
-    ap_draw_button(96, h - 58, 70, 28, "Stop", 1);
-    ap_draw_button(176, h - 58, 80, 28, "Refresh", 1);
-
-    gui_fill_rect(0, h - 30, w, 30, 0x00EAF2FF);
-    gui_draw_hline(0, h - 30, w, 0x0092B7E8);
-    ap_draw_text(12, h - 24, ap_status, 0x00334455, 0x00EAF2FF, w - 24);
+static void draw_status(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t s = status_rect(app);
+    ic_ui_statusbar(c, s, ap.status);
 }
 
-static void ap_handle_mouse(gui_msg_t *msg) {
-    int mx = msg->mouse.x;
-    int my = msg->mouse.y;
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int rows = (h - AP_LIST_Y - 96) / AP_ROW_H;
+static void draw(ic_app_t *app, ic_canvas_t *c) {
+    ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
+    draw_toolbar(app, c);
+    draw_list(app, c);
+    draw_now_playing(app, c);
+    draw_status(app, c);
+    /* The progress bar moves while a track plays. */
+    if (ap.playing || app->focused) ic_app_animate(app);
+}
+
+/* -------------------------------------------------------------- events */
+
+static int row_at(ic_app_t *app, int x, int y) {
+    ic_rect_t l = list_rect(app);
     int i;
-
-    if (rows > AP_MAX_ROWS) rows = AP_MAX_ROWS;
-    if (rows < 1) rows = 1;
-
-    if (ap_hit(mx, my, 16, h - 58, 70, 28)) { ap_play_selected(); return; }
-    if (ap_hit(mx, my, 96, h - 58, 70, 28)) { icda_stop_audio(); ap_set_status("Audio stopped"); return; }
-    if (ap_hit(mx, my, 176, h - 58, 80, 28)) { ap_scan(); return; }
-
-    if (ap_hit(mx, my, AP_LIST_X, AP_LIST_Y, AP_LIST_W, rows * AP_ROW_H)) {
-        i = (my - AP_LIST_Y) / AP_ROW_H;
-        if (i >= 0 && i < ap_count) ap_sel = i;
-        return;
-    }
-    (void)w;
+    if (!ic_ui_hit(l, x, y)) return -1;
+    i = ap.scroll + (y - l.y) / IC_H_ROW;
+    return (i >= 0 && i < ap.count) ? i : -1;
 }
 
-static void ap_handle_key(uint32_t key) {
-    if (key == 24 || key == 'q' || key == 'Q') {
-        gui_close_window();
-        icda_exit(0);
-        return;
+static void event(ic_app_t *app, const ic_event_t *ev) {
+    switch (ev->type) {
+    case IC_EV_MOUSE_MOVE:
+        ap.hover_play = ic_ui_hit(play_rect(app), ev->x, ev->y);
+        ap.hover_stop = ic_ui_hit(stop_rect(app), ev->x, ev->y);
+        ap.hover_refresh = ic_ui_hit(refresh_rect(app), ev->x, ev->y);
+        ap.hover_row = row_at(app, ev->x, ev->y);
+        break;
+    case IC_EV_MOUSE_DOWN: {
+        int i;
+        if (ev->button != GUI_BTN_LEFT) break;
+        if (ap.hover_play) { play_selected(); break; }
+        if (ap.hover_stop) { stop_playback(); break; }
+        if (ap.hover_refresh) { scan(); break; }
+        i = row_at(app, ev->x, ev->y);
+        if (i >= 0) {
+            ap.selected = i;
+            ap.list_focused = 1;
+            /* A plain click plays, like every other music player. */
+            play_selected();
+        } else {
+            ap.list_focused = 0;
+        }
+        break;
     }
-    if (key == 3) { /* SPECIAL_UP */ if (ap_sel > 0) ap_sel--; return; }
-    if (key == 4) { /* SPECIAL_DOWN */ if (ap_sel + 1 < ap_count) ap_sel++; return; }
-    if (key == '\r' || key == '\n' || key == ' ') { ap_play_selected(); return; }
-    if (key == 's' || key == 'S') { icda_stop_audio(); ap_set_status("Audio stopped"); return; }
-    if (key == 'r' || key == 'R') { ap_scan(); return; }
+    case IC_EV_MOUSE_LEAVE:
+        ap.hover_row = -1;
+        ap.hover_play = ap.hover_stop = ap.hover_refresh = 0;
+        break;
+    case IC_EV_KEY:
+        switch (ev->key) {
+        case IC_KEY_UP:   if (ap.selected > 0) ap.selected--; break;
+        case IC_KEY_DOWN: if (ap.selected + 1 < ap.count) ap.selected++; break;
+        case IC_KEY_HOME: ap.selected = 0; break;
+        case IC_KEY_END:  ap.selected = ap.count > 0 ? ap.count - 1 : 0; break;
+        case IC_KEY_ENTER:
+        case ' ':
+            play_selected();
+            break;
+        case IC_KEY_ESCAPE: stop_playback(); break;
+        case 's': case 'S': stop_playback(); break;
+        case 'r': case 'R': scan(); break;
+        default: break;
+        }
+        break;
+    case IC_EV_RESIZE:
+        layout(app);
+        break;
+    case IC_EV_BLUR:
+        ap.list_focused = 0;
+        break;
+    case IC_EV_APPEARANCE:
+    case IC_EV_FOCUS:
+    default:
+        break;
+    }
+    ic_app_invalidate(app);
+}
+
+static void tick(ic_app_t *app) {
+    int was = ap.playing;
+    refresh_status();
+    if (ap.playing != was) ic_app_invalidate(app);
+}
+
+static void init(ic_app_t *app) {
+    ap.count = 0;
+    ap.selected = 0;
+    ap.scroll = 0;
+    ap.hover_row = -1;
+    ap.hover_play = ap.hover_stop = ap.hover_refresh = 0;
+    ap.list_focused = 1;
+    ap.playing = 0;
+    ap.status[0] = 0;
+    scan();
+    /* `user` carries argv[1] when the shell opened a specific file. */
+    if (app->user) {
+        const char *arg = (const char *)app->user;
+        if (arg[0]) {
+            add_track(arg, arg);
+            for (int i = 0; i < ap.count; i++) {
+                if (ic_streq(ap.tracks[i].path, arg)) ap.selected = i;
+            }
+        }
+    }
 }
 
 int main(int argc, char **argv) {
-    int key_seq = 0;
-    (void)argc;
-    (void)argv;
-
-    ap_status[0] = 0;
-    if (gui_open_window("Audio Player", AP_WIN_W, AP_WIN_H) != 0) {
-        /* No desktop running (e.g. booted to a text virtual terminal). */
-        icda_write("audio player requires the desktop (Ctrl+Alt+F1)\n");
+    static const ic_app_desc_t desc = { "Music", WIN_W, WIN_H, init, draw, event, tick };
+    const char *arg = (argc > 1 && argv) ? argv[1] : 0;
+    if (ic_app_run(&desc, (void *)arg) != 0) {
+        icda_write("music requires the desktop (Ctrl+Alt+F1)\n");
         return 1;
     }
-    ap_scan();
-    ap_draw();
-    gui_flush();
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            if (msg.type == GUI_MSG_MOUSE_EVENT && (msg.mouse.buttons & GUI_BTN_LEFT)) {
-                ap_handle_mouse(&msg);
-            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
-                uint32_t code = msg.key.keycode;
-                if (key_seq == 0 && code == 27) {
-                    key_seq = 1;
-                } else if (key_seq == 1 && code == '[') {
-                    key_seq = 2;
-                } else if (key_seq == 2) {
-                    key_seq = 0;
-                    if (code == 'A') ap_handle_key(3);
-                    else if (code == 'B') ap_handle_key(4);
-                } else {
-                    key_seq = 0;
-                    ap_handle_key(code);
-                }
-            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        ap_refresh_status();
-        if (changed || (icda_ticks() % 8) == 0) {
-            ap_draw();
-            gui_flush();
-        }
-        icda_sleep(1);
-    }
+    return 0;
 }

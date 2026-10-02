@@ -1,425 +1,513 @@
 /*
- * editor.app - ICDA Text Editor (GUI).
+ * editor.app - ICDA Editor.
  *
- * A real desktop window (previously a console program that only ran on
- * the text virtual terminal).  Opens the file from /home/.edit.request
- * (falling back to /home/untitled.txt), edits it in a window with the
- * same core as the old console editor, and saves with Ctrl+S.
+ * The Document shell from docs/DESIGN.md: a toolbar, a monospaced text
+ * area with a line-number gutter, and a status bar.  Keys arrive
+ * already decoded from ic_app (IC_KEY_* for navigation, plain bytes for
+ * text), so there is no escape-sequence decoder here.
+ *
+ * The document is one flat buffer with newlines.  Rows and columns come
+ * from a single layout() pass, so a resize reflows the gutter and the
+ * text together.  Soft wrapping is deliberately off: a code editor
+ * keeps the authored line breaks and scrolls horizontally instead.
  */
-#include "gui.h"
-#include "icda_sys.h"
 #include "libicda.h"
-#include "font.h"
 
-#include <stdint.h>
+#define WIN_W 700
+#define WIN_H 480
 
-#define EDIT_REQUEST_PATH "/home/.edit.request"
-#define EDIT_DEFAULT_PATH "/home/untitled.txt"
-#define EDIT_PATH_CAP 128
-#define EDIT_BUF_CAP 4096
+#define EDIT_BUF_CAP    8192
+#define EDIT_PATH_CAP   128
+#define EDIT_STATUS_CAP 96
+#define EDIT_GUTTER_W   46
+#define EDIT_TAB        4
 
-/* Window-relative text area */
-#define ED_TOP_H 64
-#define ED_STATUS_H 30
-#define ED_GUTTER_W 34
+static struct {
+    char     path[EDIT_PATH_CAP];
+    char     buf[EDIT_BUF_CAP];
+    uint64_t len;
+    uint64_t cursor;          /* byte offset */
+    uint64_t want_col;        /* sticky column for vertical moves */
+    int      modified;
+    int      scroll_row;
+    int      scroll_col;
 
-enum {
-    KEY_SPECIAL_BASE = 256,
-    KEY_UP,
-    KEY_DOWN,
-    KEY_LEFT,
-    KEY_RIGHT,
-    KEY_DELETE
-};
+    /* view */
+    int rows;
+    int cols;
+    int text_x, text_y, text_w, text_h;
+    int ch, cw;
 
-static char editor_path[EDIT_PATH_CAP];
-static char editor_buf[EDIT_BUF_CAP];
-static uint64_t editor_len = 0;
-static uint64_t editor_cursor = 0;
-static int editor_modified = 0;
-static uint64_t editor_top_row = 0;
-static char status_msg[64] = "Ctrl+S save   Ctrl+X exit   arrows move";
+    /* pointer */
+    int hover_save;
+    int hover_new;
 
-static uint64_t ed_strlen(const char *s) {
-    uint64_t n = 0;
-    while (s && s[n]) n++;
-    return n;
+    char status[EDIT_STATUS_CAP];
+} ed;
+
+/* ------------------------------------------------------------- layout */
+
+static ic_rect_t toolbar_rect(ic_app_t *app) {
+    return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
 }
 
-static void ed_copy(char *dst, const char *src, uint64_t cap) {
-    uint64_t i = 0;
-    if (!dst || cap == 0) return;
-    while (src && src[i] && i + 1 < cap) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = 0;
+static ic_rect_t text_rect(ic_app_t *app) {
+    int y = IC_H_TOOLBAR;
+    return ic_rect_make(0, y, app->width, app->height - y - 24);
 }
 
-static void ed_append_uint(char *dst, uint64_t value, uint64_t cap) {
-    char num[32];
-    uint64_t i = sizeof(num) - 1;
-    uint64_t at = ed_strlen(dst);
-    num[i] = 0;
-    if (value == 0) {
-        num[--i] = '0';
-    } else {
-        while (value && i > 0) {
-            num[--i] = (char)('0' + (value % 10));
-            value /= 10;
-        }
-    }
-    while (num[i] && at + 1 < cap) {
-        dst[at++] = num[i++];
-    }
-    dst[at] = 0;
+static ic_rect_t new_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    int w = ic_ui_button_width("New", IC_SYM_NONE);
+    return ic_rect_make(b.x + IC_SP_4, (b.h - IC_H_CONTROL_SM) / 2, w, IC_H_CONTROL_SM);
 }
 
-/* ---- core editing (unchanged from the console editor) ---------------- */
+static ic_rect_t save_rect(ic_app_t *app) {
+    ic_rect_t r = new_rect(app);
+    int w = ic_ui_button_width("Save", IC_SYM_NONE);
+    return ic_rect_make(r.x + r.w + IC_SP_2, r.y, w, IC_H_CONTROL_SM);
+}
 
-static uint64_t editor_line_start(const char *buf, uint64_t len, uint64_t pos) {
-    if (pos > len) pos = len;
-    while (pos > 0 && buf[pos - 1] != '\n') pos--;
+static const ic_face_t *mono(void) { return ic_font(IC_FONT_MONO); }
+
+/* Everything geometric, from one place. */
+static void layout(ic_app_t *app) {
+    ic_rect_t t = text_rect(app);
+    const ic_face_t *f = mono();
+    ed.ch = f->line_h > 0 ? f->line_h : 1;
+    ed.cw = ic_text_measure(f, "0");
+    if (ed.cw <= 0) ed.cw = 8;
+    ed.text_x = EDIT_GUTTER_W + IC_SP_2;
+    ed.text_y = t.y + IC_SP_2;
+    ed.text_w = t.w - ed.text_x - IC_SP_3;
+    ed.text_h = t.h - 2 * IC_SP_2;
+    ed.rows = ed.text_h / ed.ch;
+    ed.cols = ed.text_w / ed.cw;
+    if (ed.rows < 1) ed.rows = 1;
+    if (ed.cols < 8) ed.cols = 8;
+}
+
+/* ----------------------------------------------------- buffer helpers */
+
+static uint64_t line_start(uint64_t pos) {
+    if (pos > ed.len) pos = ed.len;
+    while (pos > 0 && ed.buf[pos - 1] != '\n') pos--;
     return pos;
 }
 
-static uint64_t editor_line_end(const char *buf, uint64_t len, uint64_t pos) {
-    if (pos > len) pos = len;
-    while (pos < len && buf[pos] != '\n') pos++;
+static uint64_t line_end(uint64_t pos) {
+    if (pos > ed.len) pos = ed.len;
+    while (pos < ed.len && ed.buf[pos] != '\n') pos++;
     return pos;
 }
 
-static uint64_t editor_column(const char *buf, uint64_t len, uint64_t pos) {
-    return pos - editor_line_start(buf, len, pos);
+static uint64_t column_of(uint64_t pos) {
+    return pos - line_start(pos);
 }
 
-static uint64_t editor_line_number(const char *buf, uint64_t pos) {
-    uint64_t line = 1;
-    for (uint64_t i = 0; i < pos && buf[i]; i++) {
-        if (buf[i] == '\n') line++;
-    }
-    return line;
-}
-
-static uint64_t editor_find_row_start(const char *buf, uint64_t len, uint64_t target_row) {
+static uint64_t row_of(uint64_t pos) {
     uint64_t row = 0;
-    uint64_t pos = 0;
-    while (pos < len && row < target_row) {
-        if (buf[pos++] == '\n') row++;
-    }
-    return pos;
-}
-
-static uint64_t editor_cursor_row(const char *buf, uint64_t pos) {
-    uint64_t row = 0;
-    for (uint64_t i = 0; i < pos && buf[i]; i++) {
-        if (buf[i] == '\n') row++;
+    for (uint64_t i = 0; i < pos && i < ed.len; i++) {
+        if (ed.buf[i] == '\n') row++;
     }
     return row;
 }
 
-static void editor_insert_char(char *buf, uint64_t *len, uint64_t *cursor, char ch, uint64_t cap) {
-    if (!buf || !len || !cursor || *len + 1 >= cap) return;
-    for (uint64_t i = *len; i > *cursor; i--) buf[i] = buf[i - 1];
-    buf[*cursor] = ch;
-    (*len)++;
-    (*cursor)++;
-    buf[*len] = 0;
-}
-
-static void editor_backspace(char *buf, uint64_t *len, uint64_t *cursor) {
-    if (!buf || !len || !cursor || *cursor == 0) return;
-    for (uint64_t i = *cursor - 1; i < *len; i++) buf[i] = buf[i + 1];
-    (*cursor)--;
-    (*len)--;
-    buf[*len] = 0;
-}
-
-static void editor_delete(char *buf, uint64_t *len, uint64_t *cursor) {
-    if (!buf || !len || !cursor || *cursor >= *len) return;
-    for (uint64_t i = *cursor; i < *len; i++) buf[i] = buf[i + 1];
-    (*len)--;
-    buf[*len] = 0;
-}
-
-static void editor_move_left(uint64_t *cursor) {
-    if (*cursor > 0) (*cursor)--;
-}
-
-static void editor_move_right(uint64_t len, uint64_t *cursor) {
-    if (*cursor < len) (*cursor)++;
-}
-
-static void editor_move_vertical(const char *buf, uint64_t len, uint64_t *cursor, int direction) {
-    uint64_t current_start = editor_line_start(buf, len, *cursor);
-    uint64_t current_col = *cursor - current_start;
-    uint64_t target_start;
-    uint64_t target_end;
-
-    if (direction < 0) {
-        if (current_start == 0) return;
-        target_end = current_start - 1;
-        target_start = editor_line_start(buf, len, target_end);
-    } else {
-        target_end = editor_line_end(buf, len, current_start);
-        if (target_end >= len) return;
-        target_start = target_end + 1;
-        target_end = editor_line_end(buf, len, target_start);
+static uint64_t offset_of_row(uint64_t row) {
+    uint64_t r = 0;
+    uint64_t pos = 0;
+    while (pos < ed.len && r < row) {
+        if (ed.buf[pos++] == '\n') r++;
     }
-
-    *cursor = target_start + current_col;
-    if (*cursor > target_end) *cursor = target_end;
+    return pos;
 }
 
-static void editor_scroll_to_cursor(void) {
-    uint64_t row = editor_cursor_row(editor_buf, editor_cursor);
-    int win_h = gui_window_height();
-    int rows = (win_h - ED_TOP_H - ED_STATUS_H) / FONT_CELL_HEIGHT;
-    if (rows < 1) rows = 1;
-    if (row < editor_top_row) editor_top_row = row;
-    if (row >= editor_top_row + (uint64_t)rows) editor_top_row = row - (uint64_t)rows + 1;
+static void ed_status(const char *text) {
+    ic_strcpy(ed.status, text, EDIT_STATUS_CAP);
 }
 
-/* ---- GUI rendering --------------------------------------------------- */
-
-static void ed_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
-    int cx = x;
-    if (max_px <= 0) return;
-    while (text && *text && cx + FONT_CELL_WIDTH <= x + max_px) {
-        gui_draw_char(cx, y, *text, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        text++;
-    }
+/* Keep the cursor inside the visible area, both ways. */
+static void scroll_to_cursor(void) {
+    uint64_t row = row_of(ed.cursor);
+    int col = (int)column_of(ed.cursor);
+    if ((int)row < ed.scroll_row) ed.scroll_row = (int)row;
+    if ((int)row >= ed.scroll_row + ed.rows) ed.scroll_row = (int)row - ed.rows + 1;
+    if (col < ed.scroll_col) ed.scroll_col = col;
+    if (col >= ed.scroll_col + ed.cols) ed.scroll_col = col - ed.cols + 1;
+    if (ed.scroll_row < 0) ed.scroll_row = 0;
+    if (ed.scroll_col < 0) ed.scroll_col = 0;
 }
 
-static void ed_draw(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int rows = (h - ED_TOP_H - ED_STATUS_H) / FONT_CELL_HEIGHT;
-    int cols = (w - ED_GUTTER_W - 8) / FONT_CELL_WIDTH;
-    uint64_t line_no;
-    uint64_t start;
+/* ------------------------------------------------------------ editing */
 
-    if (rows < 1) rows = 1;
-    if (cols < 8) cols = 8;
-
-    /* Header bar */
-    gui_fill_rect(0, 0, w, ED_TOP_H, 0x001A73E8);
-    ed_draw_text(14, 10, "ICDA Editor", 0x00FFFFFF, 0x001A73E8, 140);
-    ed_draw_text(14, 32, editor_path, 0x00DCE8FA, 0x001A73E8, w - 28);
-    ed_draw_text(w - 120, 32, editor_modified ? "*modified" : "saved",
-                 0x00FFFFFF, 0x001A73E8, 104);
-
-    /* Text area */
-    gui_fill_rect(0, ED_TOP_H, w, h - ED_TOP_H - ED_STATUS_H, 0x00FFFFFF);
-
-    line_no = editor_top_row + 1;
-    start = editor_find_row_start(editor_buf, editor_len, editor_top_row);
-
-    for (int r = 0; r < rows; r++) {
-        int y = ED_TOP_H + 4 + r * FONT_CELL_HEIGHT;
-        uint64_t cursor_row = editor_cursor_row(editor_buf, editor_cursor);
-        int is_cursor_line = ((uint64_t)r + editor_top_row) == cursor_row;
-
-        /* Line number gutter */
-        gui_fill_rect(0, y, ED_GUTTER_W, FONT_CELL_HEIGHT,
-                      is_cursor_line ? 0x00DCE8FA : 0x00F0F2F5);
-        {
-            char num[16];
-            num[0] = 0;
-            ed_append_uint(num, line_no, sizeof(num));
-            ed_draw_text(ED_GUTTER_W - 6 - (int)ed_strlen(num) * FONT_CELL_WIDTH,
-                         y, num, is_cursor_line ? 0x001A73E8 : 0x00878B90,
-                         is_cursor_line ? 0x00DCE8FA : 0x00F0F2F5, ED_GUTTER_W - 6);
-        }
-
-        if (start > editor_len) start = editor_len;
-        {
-            uint64_t end = editor_line_end(editor_buf, editor_len, start);
-            uint64_t pos = start;
-            int cx = ED_GUTTER_W + 4;
-            int max_cols = cols;
-            while (pos < end && max_cols > 0) {
-                uint32_t fg = 0x00202124;
-                uint32_t bg = 0x00FFFFFF;
-                char ch = editor_buf[pos];
-                if (pos == editor_cursor) {
-                    /* cursor cell: inverted */
-                    fg = 0x00FFFFFF;
-                    bg = 0x001A73E8;
-                }
-                gui_fill_rect(cx, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, bg);
-                if (ch >= 32 && ch < 127) {
-                    gui_draw_char(cx, y, ch, fg, bg);
-                } else if (ch == '\t') {
-                    /* expand tab to 4 cells */
-                    gui_fill_rect(cx, y, FONT_CELL_WIDTH * 3, FONT_CELL_HEIGHT, bg);
-                    pos++;
-                    cx += FONT_CELL_WIDTH * 4;
-                    max_cols -= 4;
-                    continue;
-                }
-                pos++;
-                cx += FONT_CELL_WIDTH;
-                max_cols--;
-            }
-            /* cursor at end of line */
-            if (pos == editor_cursor && pos == end) {
-                gui_fill_rect(cx, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x001A73E8);
-            }
-            /* clear the rest of the line */
-            if (cx < w - 4) {
-                gui_fill_rect(cx, y, w - 4 - cx, FONT_CELL_HEIGHT, 0x00FFFFFF);
-            }
-            start = end;
-            if (start < editor_len && editor_buf[start] == '\n') start++;
-        }
-        line_no++;
-    }
-
-    /* Status bar */
-    gui_fill_rect(0, h - ED_STATUS_H, w, ED_STATUS_H, 0x00E8ECF1);
-    gui_draw_hline(0, h - ED_STATUS_H, w, 0x00D0D3D6);
-    {
-        char sb[96];
-        sb[0] = 0;
-        ed_copy(sb, "Ln ", sizeof(sb));
-        ed_append_uint(sb, editor_line_number(editor_buf, editor_cursor), sizeof(sb));
-        ed_draw_text(10, h - ED_STATUS_H + 7, sb, 0x00334455, 0x00E8ECF1, 90);
-        {
-            char sb2[64];
-            sb2[0] = 0;
-            ed_copy(sb2, "Col ", sizeof(sb2));
-            ed_append_uint(sb2, editor_column(editor_buf, editor_len, editor_cursor) + 1, sizeof(sb2));
-            ed_draw_text(110, h - ED_STATUS_H + 7, sb2, 0x00334455, 0x00E8ECF1, 80);
-        }
-        ed_draw_text(210, h - ED_STATUS_H + 7, status_msg, 0x005F6368, 0x00E8ECF1, w - 220);
-    }
-}
-
-static void ed_save(void) {
-    if ((long)icda_write_file(editor_path, editor_buf, editor_len) >= 0) {
-        editor_modified = 0;
-        ed_copy(status_msg, "Saved", sizeof(status_msg));
-    } else {
-        ed_copy(status_msg, "Save failed!", sizeof(status_msg));
-    }
-}
-
-static void ed_handle_key(uint32_t code, int *key_seq) {
-    if (*key_seq == 0 && code == 27) { *key_seq = 1; return; }
-    if (*key_seq == 1 && code == '[') { *key_seq = 2; return; }
-    if (*key_seq == 2) {
-        *key_seq = 0;
-        if (code == 'A') { editor_move_vertical(editor_buf, editor_len, &editor_cursor, -1); }
-        else if (code == 'B') { editor_move_vertical(editor_buf, editor_len, &editor_cursor, 1); }
-        else if (code == 'C') { editor_move_right(editor_len, &editor_cursor); }
-        else if (code == 'D') { editor_move_left(&editor_cursor); }
-        else if (code == '3') { editor_delete(editor_buf, &editor_len, &editor_cursor); editor_modified = 1; }
+static void insert_char(char ch) {
+    if (ed.len + 1 >= EDIT_BUF_CAP) {
+        ed_status("Document is full");
         return;
     }
-    *key_seq = 0;
-    switch (code) {
-        case 24: /* Ctrl+X: save+exit */
-            ed_save();
-            gui_close_window();
-            icda_exit(0);
-            return;
-        case 19: /* Ctrl+S */
-            ed_save();
-            return;
-        case 8: /* backspace */
-            editor_backspace(editor_buf, &editor_len, &editor_cursor);
-            editor_modified = 1;
-            return;
-        case 127: /* delete (GUI key 127 = forward delete) */
-            editor_delete(editor_buf, &editor_len, &editor_cursor);
-            editor_modified = 1;
-            return;
-        case '\r':
-        case '\n':
-            editor_insert_char(editor_buf, &editor_len, &editor_cursor, '\n', sizeof(editor_buf));
-            editor_modified = 1;
-            return;
-        default:
-            if (code >= 32 && code <= 126) {
-                editor_insert_char(editor_buf, &editor_len, &editor_cursor, (char)code, sizeof(editor_buf));
-                editor_modified = 1;
-            }
-            return;
+    for (uint64_t i = ed.len; i > ed.cursor; i--) ed.buf[i] = ed.buf[i - 1];
+    ed.buf[ed.cursor] = ch;
+    ed.len++;
+    ed.cursor++;
+    ed.buf[ed.len] = 0;
+    ed.modified = 1;
+}
+
+static void backspace(void) {
+    if (ed.cursor == 0) return;
+    for (uint64_t i = ed.cursor - 1; i < ed.len; i++) ed.buf[i] = ed.buf[i + 1];
+    ed.cursor--;
+    ed.len--;
+    ed.buf[ed.len] = 0;
+    ed.modified = 1;
+}
+
+static void delete_forward(void) {
+    if (ed.cursor >= ed.len) return;
+    for (uint64_t i = ed.cursor; i < ed.len; i++) ed.buf[i] = ed.buf[i + 1];
+    ed.len--;
+    ed.buf[ed.len] = 0;
+    ed.modified = 1;
+}
+
+static void move_vertical(int direction) {
+    uint64_t start = line_start(ed.cursor);
+    uint64_t col = ed.cursor - start;
+    uint64_t target;
+    uint64_t end;
+
+    if (direction < 0) {
+        if (start == 0) return;
+        target = line_start(start - 1);
+        end = line_end(target);
+    } else {
+        target = line_end(start);
+        if (target >= ed.len) return;
+        target++;
+        end = line_end(target);
+    }
+    ed.cursor = target + col;
+    if (ed.cursor > end) ed.cursor = end;
+}
+
+static void move_to(uint64_t pos) {
+    if (pos > ed.len) pos = ed.len;
+    ed.cursor = pos;
+}
+
+static void open_file(const char *path) {
+    long n;
+    ic_strcpy(ed.path, path, EDIT_PATH_CAP);
+    n = (long)icda_read_file(ed.path, ed.buf, sizeof(ed.buf) - 1);
+    if (n < 0) {
+        ed.buf[0] = 0;
+        ed.len = 0;
+        ed_status("New document");
+    } else {
+        ed.len = (uint64_t)n;
+        ed.buf[ed.len] = 0;
+        ed_status("Opened");
+    }
+    ed.cursor = 0;
+    ed.scroll_row = 0;
+    ed.scroll_col = 0;
+    ed.modified = 0;
+}
+
+static void save(void) {
+    /* The write returns a byte count, or (uint64_t)-1 on failure. */
+    if (icda_write_file(ed.path, ed.buf, ed.len) != (uint64_t)-1) {
+        ed.modified = 0;
+        ed_status("Saved");
+    } else {
+        ed_status("Could not save this file");
     }
 }
 
-static void ed_handle_mouse(gui_msg_t *msg) {
-    int mx = msg->mouse.x;
-    int my = msg->mouse.y;
-    int w = gui_window_width();
-    int rows = (gui_window_height() - ED_TOP_H - ED_STATUS_H) / FONT_CELL_HEIGHT;
-    if (rows < 1) rows = 1;
+/* ------------------------------------------------------------ drawing */
 
-    if (my < ED_TOP_H || my >= gui_window_height() - ED_STATUS_H) return;
-    {
-        uint64_t row = (uint64_t)((my - ED_TOP_H) / FONT_CELL_HEIGHT) + editor_top_row;
-        uint64_t col = mx >= ED_GUTTER_W ? (uint64_t)((mx - ED_GUTTER_W) / FONT_CELL_WIDTH) : 0;
-        uint64_t start = editor_find_row_start(editor_buf, editor_len, row);
-        uint64_t end = editor_line_end(editor_buf, editor_len, start);
-        editor_cursor = start + col;
-        if (editor_cursor > end) editor_cursor = end;
-        (void)w;
+static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t b = toolbar_rect(app);
+    ic_rect_t s = save_rect(app);
+    const ic_palette_t *p = ic_palette();
+
+    ic_ui_toolbar(c, b);
+    ic_ui_button(c, new_rect(app), "New", IC_SYM_NONE, IC_BUTTON_DEFAULT,
+                 ed.hover_new ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_ui_button(c, s, "Save", IC_SYM_NONE,
+                 ed.modified ? IC_BUTTON_PRIMARY : IC_BUTTON_DEFAULT,
+                 ed.hover_save ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_text_draw_in(c, ic_font(IC_FONT_BODY),
+                    ic_rect_make(s.x + s.w + IC_SP_3, 0, b.w - (s.x + s.w) - IC_SP_3, b.h),
+                    ed.path, p->label_secondary, IC_ALIGN_LEFT);
+}
+
+static void draw_text(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t t = text_rect(app);
+    const ic_palette_t *p = ic_palette();
+    const ic_face_t *f = mono();
+    const ic_face_t *num = ic_font(IC_FONT_MONO_SMALL);
+    ic_rect_t saved;
+    uint64_t cursor_row = row_of(ed.cursor);
+    char digits[16];
+
+    ic_gfx_fill(c, t.x, t.y, t.w, t.h, p->content);
+
+    ic_canvas_push_clip(c, t.x, t.y, t.w, t.h, &saved);
+
+    /* Gutter background, then the line numbers of the visible rows. */
+    ic_gfx_fill(c, t.x, t.y, EDIT_GUTTER_W, t.h, p->sidebar);
+    for (int r = 0; r < ed.rows; r++) {
+        uint64_t row = (uint64_t)(ed.scroll_row + r);
+        uint64_t start = offset_of_row(row);
+        ic_rect_t rr = ic_rect_make(t.x, ed.text_y + r * ed.ch, EDIT_GUTTER_W, ed.ch);
+        int n = 0;
+        uint64_t v = row + 1;
+        if (start > ed.len) break;
+        if (row == cursor_row) ic_gfx_fill(c, rr.x, rr.y, rr.w, rr.h, p->accent_soft);
+        do { digits[n++] = (char)('0' + (v % 10)); v /= 10; } while (v && n < 15);
+        ic_text_draw_n(c, num,
+                       t.x + EDIT_GUTTER_W - IC_SP_2 -
+                           ic_text_measure_n(num, digits, n),
+                       ed.text_y + r * ed.ch + ic_text_center_baseline(f, 0, ed.ch),
+                       digits, n, row == cursor_row ? p->accent : p->label_tertiary);
     }
+    ic_gfx_vline(c, EDIT_GUTTER_W, t.y, t.h, p->separator);
+
+    /* Text rows, clipped horizontally to the viewport.  Rows are drawn
+     * as runs of same-colour bytes rather than per glyph: one text call
+     * per visible run keeps a full 1920x1080 document cheap. */
+    for (int r = 0; r < ed.rows; r++) {
+        uint64_t row = (uint64_t)(ed.scroll_row + r);
+        uint64_t start = offset_of_row(row);
+        uint64_t end;
+        int y = ed.text_y + r * ed.ch + ic_text_center_baseline(f, 0, ed.ch);
+        int col = 0;
+        uint64_t pos = start;
+        if (start > ed.len) break;
+        end = line_end(start);
+        while (pos < end) {
+            uint64_t run_end = pos;
+            int run_start_col = col;
+            if (ed.buf[pos] == '\t') {
+                col += EDIT_TAB - (col % EDIT_TAB);
+                pos++;
+                continue;
+            }
+            /* Extend the run while the bytes are printable and on screen. */
+            while (run_end < end) {
+                int vis = run_start_col + (int)(run_end - pos);
+                unsigned char ch = (unsigned char)ed.buf[run_end];
+                if (ch == '\t' || ch < 32 || ch > 126) break;
+                if (vis >= ed.scroll_col + ed.cols) break;
+                run_end++;
+            }
+            if (run_end > pos) {
+                /* The run ends at screen column `end_col` (exclusive). */
+                int end_col = run_start_col + (int)(run_end - pos);
+                int from = ed.scroll_col > run_start_col ? ed.scroll_col - run_start_col : 0;
+                int to = end_col - ed.scroll_col;
+                if (from < to) {
+                    if (to > ed.cols) to = ed.cols;
+                    if (from < to) {
+                        int x = ed.text_x + (run_start_col + from - ed.scroll_col) * ed.cw;
+                        ic_text_draw_n(c, f, x, y, ed.buf + pos + from, to - from, p->label);
+                    }
+                }
+                col = run_start_col + (int)(run_end - pos);
+                pos = run_end;
+            }
+        }
+    }
+    ic_canvas_pop_clip(c, &saved);
+}
+
+static void draw_caret(ic_app_t *app, ic_canvas_t *c) {
+    uint64_t row = row_of(ed.cursor);
+    int col = (int)column_of(ed.cursor);
+    int r = (int)row - ed.scroll_row;
+    int cc = col - ed.scroll_col;
+    if (r < 0 || r >= ed.rows || cc < 0 || cc >= ed.cols) return;
+    if (!ic_app_caret_visible(app)) return;
+    ic_gfx_fill(c, ed.text_x + cc * ed.cw, ed.text_y + r * ed.ch, 2, ed.ch,
+                ic_palette()->label);
+}
+
+static void draw_status(ic_canvas_t *c, int app_w) {
+    ic_rect_t s = ic_rect_make(0, app_w - 24, app_w, 24);
+    const ic_palette_t *p = ic_palette();
+    char left[64];
+    char mid[64];
+    char right[64];
+    uint64_t row = row_of(ed.cursor) + 1;
+    uint64_t col = column_of(ed.cursor) + 1;
+
+    left[0] = 0;
+    ic_strlcat(left, "Ln ", sizeof(left));
+    {
+        char n[24];
+        ic_snprintf_u64(n, sizeof(n), row);
+        ic_strlcat(left, n, sizeof(left));
+    }
+    mid[0] = 0;
+    ic_strlcat(mid, "Col ", sizeof(mid));
+    {
+        char n[24];
+        ic_snprintf_u64(n, sizeof(n), col);
+        ic_strlcat(mid, n, sizeof(mid));
+    }
+    right[0] = 0;
+    {
+        char n[24];
+        ic_snprintf_u64(n, sizeof(n), ed.len);
+        ic_strlcat(right, n, sizeof(right));
+        ic_strlcat(right, " bytes", sizeof(right));
+    }
+
+    ic_ui_statusbar(c, s, ed.status);
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                    ic_rect_make(s.x + IC_SP_3, s.y, 90, s.h), left, p->label_secondary,
+                    IC_ALIGN_LEFT);
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                    ic_rect_make(s.x + 100, s.y, 90, s.h), mid, p->label_secondary,
+                    IC_ALIGN_LEFT);
+    ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL),
+                    ic_rect_make(s.x + s.w - 140, s.y, 140 - IC_SP_3, s.h), right,
+                    p->label_secondary, IC_ALIGN_RIGHT);
+}
+
+static void draw(ic_app_t *app, ic_canvas_t *c) {
+    layout(app);
+    scroll_to_cursor();
+    ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
+    draw_toolbar(app, c);
+    draw_text(app, c);
+    draw_caret(app, c);
+    draw_status(c, app->width);
+    if (app->focused) ic_app_animate(app);
+}
+
+/* -------------------------------------------------------------- events */
+
+/* Map a click inside the text area to a byte offset. */
+static void click_to_cursor(int mx, int my) {
+    int r = (my - ed.text_y) / ed.ch;
+    int col = (mx - ed.text_x) / ed.cw + ed.scroll_col;
+    uint64_t row = (uint64_t)(ed.scroll_row + (r < 0 ? 0 : r));
+    uint64_t start;
+    uint64_t end;
+    uint64_t pos;
+    int c = 0;
+    if (r < 0 || r >= ed.rows) return;
+    start = offset_of_row(row);
+    end = line_end(start);
+    pos = start;
+    while (pos < end && c < col) {
+        if (ed.buf[pos] == '\t') c += EDIT_TAB - (c % EDIT_TAB);
+        else c++;
+        pos++;
+    }
+    move_to(pos);
+}
+
+static void event(ic_app_t *app, const ic_event_t *ev) {
+    switch (ev->type) {
+    case IC_EV_MOUSE_MOVE:
+        ed.hover_new = ic_ui_hit(new_rect(app), ev->x, ev->y);
+        ed.hover_save = ic_ui_hit(save_rect(app), ev->x, ev->y);
+        break;
+    case IC_EV_MOUSE_DOWN:
+        if (ev->button != GUI_BTN_LEFT) break;
+        if (ed.hover_new) {
+            ic_strcpy(ed.path, "untitled.txt", EDIT_PATH_CAP);
+            ed.buf[0] = 0;
+            ed.len = 0;
+            ed.cursor = 0;
+            ed.modified = 0;
+            ed.scroll_row = 0;
+            ed.scroll_col = 0;
+            ed_status("New document");
+            break;
+        }
+        if (ed.hover_save) { save(); break; }
+        click_to_cursor(ev->x, ev->y);
+        break;
+    case IC_EV_MOUSE_LEAVE:
+        ed.hover_new = ed.hover_save = 0;
+        break;
+    case IC_EV_KEY:
+        switch (ev->key) {
+        case IC_KEY_LEFT:      move_to(ed.cursor > 0 ? ed.cursor - 1 : 0); break;
+        case IC_KEY_RIGHT:     move_to(ed.cursor + 1); break;
+        case IC_KEY_UP:        move_vertical(-1); break;
+        case IC_KEY_DOWN:      move_vertical(1); break;
+        case IC_KEY_HOME:      move_to(line_start(ed.cursor)); break;
+        case IC_KEY_END:       move_to(line_end(ed.cursor)); break;
+        case IC_KEY_PAGE_UP:
+            for (int i = 0; i < ed.rows; i++) move_vertical(-1);
+            break;
+        case IC_KEY_PAGE_DOWN:
+            for (int i = 0; i < ed.rows; i++) move_vertical(1);
+            break;
+        case IC_KEY_BACKSPACE: backspace(); break;
+        case IC_KEY_DELETE:    delete_forward(); break;
+        case IC_KEY_ENTER:     insert_char('\n'); break;
+        case IC_KEY_TAB:       insert_char('\t'); break;
+        default:
+            if (ev->key >= 32 && ev->key < 127) insert_char((char)ev->key);
+            break;
+        }
+        break;
+    case IC_EV_RESIZE:
+        layout(app);
+        break;
+    case IC_EV_FOCUS:
+    case IC_EV_APPEARANCE:
+    case IC_EV_BLUR:
+    default:
+        break;
+    }
+    ic_app_invalidate(app);
+}
+
+static void init(ic_app_t *app) {
+    long n = (long)icda_read_file("/home/.edit.request", ed.path, sizeof(ed.path));
+    if (app->user) {
+        /* Explorer "Open With Editor" passes the file on the command line. */
+        const char *arg = (const char *)app->user;
+        if (arg[0]) {
+            open_file(arg);
+            ed.cursor = 0;
+            ed.scroll_row = 0;
+            ed.scroll_col = 0;
+            layout(app);
+            return;
+        }
+    }
+    if (n <= 0) {
+        ic_strcpy(ed.path, "/home/untitled.txt", EDIT_PATH_CAP);
+        ed.buf[0] = 0;
+        ed.len = 0;
+        ed_status("New document");
+    } else {
+        if ((uint64_t)n >= sizeof(ed.path)) n = (long)sizeof(ed.path) - 1;
+        ed.path[n] = 0;
+        open_file(ed.path);
+    }
+    ed.cursor = 0;
+    ed.modified = 0;
+    ed.scroll_row = 0;
+    ed.scroll_col = 0;
+    layout(app);
+    ed_status("Ready");
 }
 
 int main(int argc, char **argv) {
-    long ret;
-    int key_seq = 0;
-    (void)argc;
-    (void)argv;
-
-    if (gui_open_window("Editor", 680, 460) != 0) {
+    static const ic_app_desc_t desc = { "Editor", WIN_W, WIN_H, init, draw, event, 0 };
+    const char *arg = (argc > 1 && argv) ? argv[1] : 0;
+    if (ic_app_run(&desc, (void *)arg) != 0) {
         icda_write("editor requires the desktop (Ctrl+Alt+F1)\n");
         return 1;
     }
-
-    ret = (long)icda_read_file(EDIT_REQUEST_PATH, editor_path, sizeof(editor_path));
-    if (ret <= 0) {
-        ed_copy(editor_path, EDIT_DEFAULT_PATH, sizeof(editor_path));
-        editor_buf[0] = 0;
-        editor_len = 0;
-    } else {
-        if ((uint64_t)ret >= sizeof(editor_path)) ret = (long)sizeof(editor_path) - 1;
-        editor_path[ret] = 0;
-        ret = (long)icda_read_file(editor_path, editor_buf, sizeof(editor_buf) - 1);
-        if (ret < 0) {
-            editor_buf[0] = 0;
-            editor_len = 0;
-        } else {
-            editor_len = (uint64_t)ret;
-            editor_buf[editor_len] = 0;
-        }
-    }
-
-    ed_draw();
-    gui_flush();
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            if (msg.type == GUI_MSG_MOUSE_EVENT && (msg.mouse.buttons & GUI_BTN_LEFT)) {
-                ed_handle_mouse(&msg);
-            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
-                ed_handle_key(msg.key.keycode, &key_seq);
-            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        if (changed) {
-            editor_scroll_to_cursor();
-            ed_draw();
-            gui_flush();
-        }
-        icda_sleep(1);
-    }
+    return 0;
 }

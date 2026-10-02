@@ -85,31 +85,6 @@ IRQ 12, 44    ; PS/2 mouse
 IRQ 13, 45    ; FPU
 IRQ 14, 46    ; primary ATA
 IRQ 15, 47    ; secondary ATA
-; MSI single-vector range 64-79 (USB Phase 1a): reuse irq_common so the
-; C irq_handler() sees int_no >= 64 and dispatches via msi_handlers[].
-%macro MSI 1
-global msi%1
-msi%1:
-    push 0              ; dummy error code
-    push %1             ; interrupt number
-    jmp irq_common
-%endmacro
-MSI 64
-MSI 65
-MSI 66
-MSI 67
-MSI 68
-MSI 69
-MSI 70
-MSI 71
-MSI 72
-MSI 73
-MSI 74
-MSI 75
-MSI 76
-MSI 77
-MSI 78
-MSI 79
 SYSCALL syscall128, 128
 
 %define GDT_KERNEL_DATA 0x10
@@ -143,6 +118,24 @@ isr_common:
     mov rdi, rsp        ; first arg = pointer to registers on stack
     call isr_handler
 
+    ; Reload the data segments for the interrupted context BEFORE the
+    ; register frame is restored.  Doing it after the pops (through CX)
+    ; zeroed RCX of whatever code the interrupt landed in - any user
+    ; instruction could see RCX change under it on a timer tick.  RAX is
+    ; used as scratch here and restored by the pops below.
+    ; Frame: 15 GPRs, int_no, err_code, then RIP, CS (at rsp + 18*8).
+    test byte [rsp + 18*8], GDT_USER_RPL
+    jz .isr_return_kernel
+    xor eax, eax
+    jmp .isr_return_segs
+.isr_return_kernel:
+    mov eax, GDT_KERNEL_DATA
+.isr_return_segs:
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     pop r15
     pop r14
     pop r13
@@ -160,21 +153,6 @@ isr_common:
     pop rax
 
     add rsp, 16         ; skip int_no and err_code
-    test byte [rsp + 8], GDT_USER_RPL
-    jz .isr_return_kernel
-    xor ecx, ecx
-    mov ds, cx
-    mov es, cx
-    mov fs, cx
-    mov gs, cx
-    jmp .isr_return_done
-.isr_return_kernel:
-    mov cx, GDT_KERNEL_DATA
-    mov ds, cx
-    mov es, cx
-    mov fs, cx
-    mov gs, cx
-.isr_return_done:
     iretq
 
 ; common irq handler
@@ -205,6 +183,24 @@ irq_common:
     mov rdi, rsp        ; first arg = pointer to registers on stack
     call irq_handler
 
+    ; Reload the data segments for the interrupted context BEFORE the
+    ; register frame is restored.  Doing it after the pops (through CX)
+    ; zeroed RCX of whatever code the interrupt landed in - any user
+    ; instruction could see RCX change under it on a timer tick.  RAX is
+    ; used as scratch here and restored by the pops below.
+    ; Frame: 15 GPRs, int_no, err_code, then RIP, CS (at rsp + 18*8).
+    test byte [rsp + 18*8], GDT_USER_RPL
+    jz .irq_return_kernel
+    xor eax, eax
+    jmp .irq_return_segs
+.irq_return_kernel:
+    mov eax, GDT_KERNEL_DATA
+.irq_return_segs:
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     pop r15
     pop r14
     pop r13
@@ -222,21 +218,6 @@ irq_common:
     pop rax
 
     add rsp, 16         ; skip int_no and err_code
-    test byte [rsp + 8], GDT_USER_RPL
-    jz .irq_return_kernel
-    xor ecx, ecx
-    mov ds, cx
-    mov es, cx
-    mov fs, cx
-    mov gs, cx
-    jmp .irq_return_done
-.irq_return_kernel:
-    mov cx, GDT_KERNEL_DATA
-    mov ds, cx
-    mov es, cx
-    mov fs, cx
-    mov gs, cx
-.irq_return_done:
     iretq
 
 extern syscall_handler

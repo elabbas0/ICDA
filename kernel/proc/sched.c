@@ -4,6 +4,7 @@
 #include "../memory/vmm.h"
 #include "../memory/pf.h"
 #include "../cpu/gdt.h"
+#include "../cpu/fpu.h"
 #include "../fs/fd.h"
 #include "../fs/vfs.h"
 #include "../drivers/console/console.h"
@@ -43,7 +44,11 @@ static process_t *alloc_process(void) {
 }
 
 static thread_t *alloc_thread(void) {
-    return (thread_t *)alloc_object_page();
+    thread_t *thread = (thread_t *)alloc_object_page();
+    if (thread) {
+        fpu_state_init(thread->fpu_state);
+    }
+    return thread;
 }
 
 static void register_process(process_t *proc) {
@@ -388,6 +393,7 @@ static void schedule_inner(int force) {
         pf_set_current_as(next->owner->addr_space);
     }
 
+    fpu_switch(prev->fpu_state, next->fpu_state);
     switch_context(prev, next);
 }
 

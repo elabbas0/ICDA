@@ -326,39 +326,28 @@ static int vg_set_scanout(uint32_t scanout_id, uint32_t resource_id,
     return vg_ctrl_send(sizeof(virtio_gpu_cmd_set_scanout_t));
 }
 
-/* Rect primitives: TRANSFER_TO_HOST_2D / RESOURCE_FLUSH for one
- * clipped rectangle. Offsets go on the wire (offset_x/offset_y);
- * callers clip to the live display size first. */
-static int vg_transfer_rect(uint32_t resource_id, int x, int y, int w, int h) {
+static int vg_transfer_to_host_2d(uint32_t resource_id, uint32_t w, uint32_t h) {
     virtio_gpu_cmd_transfer_flush_t *cmd =
         (virtio_gpu_cmd_transfer_flush_t *)vg.cmd_buf;
     for (uint32_t i = 0; i < sizeof(virtio_gpu_cmd_transfer_flush_t); i++)
         vg.cmd_buf[i] = 0;
     cmd->hdr.type    = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
     cmd->resource_id = resource_id;
-    cmd->offset_x = (uint32_t)x;  cmd->offset_y = (uint32_t)y;
-    cmd->width = (uint32_t)w;     cmd->height = (uint32_t)h;
+    cmd->offset_x = 0;  cmd->offset_y = 0;
+    cmd->width = w;     cmd->height = h;
     return vg_ctrl_send(sizeof(virtio_gpu_cmd_transfer_flush_t));
 }
 
-static int vg_flush_rect(uint32_t resource_id, int x, int y, int w, int h) {
+static int vg_resource_flush(uint32_t resource_id, uint32_t w, uint32_t h) {
     virtio_gpu_cmd_transfer_flush_t *cmd =
         (virtio_gpu_cmd_transfer_flush_t *)vg.cmd_buf;
     for (uint32_t i = 0; i < sizeof(virtio_gpu_cmd_transfer_flush_t); i++)
         vg.cmd_buf[i] = 0;
     cmd->hdr.type    = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
     cmd->resource_id = resource_id;
-    cmd->offset_x = (uint32_t)x;  cmd->offset_y = (uint32_t)y;
-    cmd->width = (uint32_t)w;     cmd->height = (uint32_t)h;
+    cmd->offset_x = 0;  cmd->offset_y = 0;
+    cmd->width = w;     cmd->height = h;
     return vg_ctrl_send(sizeof(virtio_gpu_cmd_transfer_flush_t));
-}
-
-static int vg_transfer_to_host_2d(uint32_t resource_id, uint32_t w, uint32_t h) {
-    return vg_transfer_rect(resource_id, 0, 0, (int)w, (int)h);
-}
-
-static int vg_resource_flush(uint32_t resource_id, uint32_t w, uint32_t h) {
-    return vg_flush_rect(resource_id, 0, 0, (int)w, (int)h);
 }
 
 /* ---- gpu_device_t callbacks ---- */
@@ -569,36 +558,11 @@ int virtio_gpu_init(void) {
 
     vg.ready = 1;
     serial_write("[virtio-gpu] initialized OK\n");
-    /* Live-path declaration: virtio-gpu owns the scanout (QEMU -vga
-     * virtio without a multiboot FB tag). TRANSFER+FLUSH present path;
-     * fbdev was never registered in this configuration. */
-    serial_write("display: virtio-gpu online (TRANSFER+FLUSH present path)\n");
     return 0;
 }
 
 int virtio_gpu_present(void) {
     return vg_gpu_present(0);
-}
-
-int virtio_gpu_present_rect(int x, int y, int w, int h) {
-    int sw;
-    int sh;
-    if (!vg.ready) return -1;
-    if (w <= 0 || h <= 0) return -1;
-    sw = (int)vg.width;
-    sh = (int)vg.height;
-    if (sw <= 0 || sh <= 0) return -1;
-    /* Clip to the live scanout (never trust caller rects). */
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x >= sw || y >= sh) return -1;
-    if (x + w > sw) w = sw - x;
-    if (y + h > sh) h = sh - y;
-    if (w <= 0 || h <= 0) return -1;
-    /* Same bounded-poll TRANSFER + FLUSH as the full present, rect only. */
-    if (vg_transfer_rect(1, x, y, w, h) != 0) return -1;
-    if (vg_flush_rect(1, x, y, w, h) != 0) return -1;
-    return 0;
 }
 
 int virtio_gpu_ready(void) {

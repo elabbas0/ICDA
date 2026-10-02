@@ -35,18 +35,7 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
-// MSI single-vector stubs for vectors 64-79 (defined in isr.asm)
-extern void msi64(void);  extern void msi65(void);  extern void msi66(void);
-extern void msi67(void);  extern void msi68(void);  extern void msi69(void);
-extern void msi70(void);  extern void msi71(void);  extern void msi72(void);
-extern void msi73(void);  extern void msi74(void);  extern void msi75(void);
-extern void msi76(void);  extern void msi77(void);  extern void msi78(void);
-extern void msi79(void);
 extern void syscall128(void);
-
-#define MSI_VEC_BASE 64
-#define MSI_VEC_COUNT 16
-#define MSI_VEC_LAST (MSI_VEC_BASE + MSI_VEC_COUNT - 1)
 
 // c handlers called from assembly stubs
 void isr_handler(struct registers* regs);
@@ -56,9 +45,6 @@ void syscall_handler(struct registers* regs);
 // register a custom irq handler
 typedef void (*irq_handler_t)(struct registers*);
 void irq_register(int irq, irq_handler_t handler);
-
-// register a single-vector MSI handler (vectors 64-79); returns 0/-1
-int irq_register_msi(int vector, irq_handler_t handler);
 
 // register a custom exception handler (0-31)
 // if a handler is registered it is called instead of the default panic

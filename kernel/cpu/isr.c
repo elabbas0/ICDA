@@ -1,7 +1,5 @@
 #include "isr.h"
-#include "idt.h"
 #include "irq_controller.h"
-#include "lapic.h"
 #include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
 #include "../drivers/audio/speaker.h"
@@ -28,29 +26,6 @@ const char *exception_names[32] = {
 };
 static irq_handler_t irq_handlers[16] = {0};
 static isr_handler_t isr_handlers[32] = {0};
-static irq_handler_t msi_handlers[MSI_VEC_COUNT] = {0};
-
-static void *msi_stub_for(int vector) {
-    switch (vector) {
-    case 64: return msi64;
-    case 65: return msi65;
-    case 66: return msi66;
-    case 67: return msi67;
-    case 68: return msi68;
-    case 69: return msi69;
-    case 70: return msi70;
-    case 71: return msi71;
-    case 72: return msi72;
-    case 73: return msi73;
-    case 74: return msi74;
-    case 75: return msi75;
-    case 76: return msi76;
-    case 77: return msi77;
-    case 78: return msi78;
-    case 79: return msi79;
-    default: return 0;
-    }
-}
 
 static void fb_print_hex64(uint64_t v) {
     char buf[19];
@@ -132,29 +107,6 @@ void irq_register(int irq, irq_handler_t handler) {
     }
 }
 
-int irq_register_msi(int vector, irq_handler_t handler) {
-    void *stub;
-    if (vector < MSI_VEC_BASE || vector > MSI_VEC_LAST) {
-        return -1;
-    }
-    if (!handler) {
-        return -1;
-    }
-    /* MSI needs a live local APIC for the message address and EOI.
-     * Lazily bring it up; legacy PIC routing is left untouched. */
-    if (irq_controller_force_apic() != 0) {
-        return -1;
-    }
-    stub = msi_stub_for(vector);
-    if (!stub) {
-        return -1;
-    }
-    msi_handlers[vector - MSI_VEC_BASE] = handler;
-    idt_set_entry_ist(vector, (uint64_t)stub,
-                       (uint8_t)(IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT), 0);
-    return 0;
-}
-
 // called from isr.asm when a cpu exception fires
 void isr_handler(struct registers* regs) {
     uint64_t num = regs->int_no;
@@ -175,15 +127,17 @@ void isr_handler(struct registers* regs) {
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
 
-    if (regs->int_no >= (uint64_t)MSI_VEC_BASE &&
-        regs->int_no <= (uint64_t)MSI_VEC_LAST) {
-        int idx = (int)regs->int_no - MSI_VEC_BASE;
-        if (idx >= 0 && idx < MSI_VEC_COUNT && msi_handlers[idx]) {
-            msi_handlers[idx](regs);
+    /* The timer handler may context-switch away and not return here
+     * until this thread is scheduled again.  Acknowledge it first: a
+     * deferred EOI would mask the timer for as long as the interrupted
+     * thread waits (forever, when that is the idle thread and another
+     * task keeps yielding).  IF stays clear until iretq, so this cannot
+     * nest. */
+    if (irq == 0) {
+        irq_controller_eoi(irq);
+        if (irq_handlers[0]) {
+            irq_handlers[0](regs);
         }
-        /* MSI is edge-triggered via the local APIC; EOI directly so the
-         * legacy PIC path (still active for IRQ0-15) is untouched. */
-        lapic_eoi();
         return;
     }
 

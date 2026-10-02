@@ -103,6 +103,10 @@ typedef struct thread {
     uint64_t         user_entry_stack_top;
     uint64_t         block_reason;
     uint64_t         wake_tick;
+    /* x87/SSE register image (fxsave layout), swapped by fpu_switch()
+     * on every context switch.  Threads live in their own zeroed page,
+     * so the 16-byte alignment fxsave needs holds by construction. */
+    uint8_t          fpu_state[512] __attribute__((aligned(16)));
 } thread_t;
 
 #endif

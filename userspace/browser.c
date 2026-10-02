@@ -1,92 +1,79 @@
 /*
- * browser.c - ICDA web browser.
+ * browser.app - ICDA Browser.
  *
- * A native GUI browser that fetches pages over HTTP/HTTPS using the
- * kernel's network stack and renders basic HTML (headings, paragraphs,
- * links, lists) into a scrollable view.  The address bar accepts
- * http:// and https:// URLs; Enter navigates, Back/Forward walk the
- * history, and links are clickable.
+ * The Document shell from docs/DESIGN.md: a toolbar (back, forward,
+ * reload, address field, Go), a reading page, and a status bar.
+ *
+ * The page pipeline is unchanged from the working version: invisible
+ * subtrees (<script>, <style>, <svg>, ...) are dropped, entities and
+ * UTF-8 punctuation are mapped to ASCII, block tags force breaks, and
+ * <a href> anchors are kept as byte ranges so the draw pass can
+ * highlight and hit-test them.  The text is reflowed whenever the
+ * window changes size, so the wrap width tracks the reading column.
  */
 #include "libicda.h"
-#include "gui_proto.h"
 
-/* Forward declarations */
-static void draw_all(void);
+#define WIN_W 900
+#define WIN_H 600
 
-#define BROWSER_URL_CAP   256
-#define BROWSER_HTML_CAP  (1024 * 1024)
-#define BROWSER_TEXT_CAP  (1024 * 1024)
-#define BROWSER_TITLE_CAP 64
-#define BROWSER_HISTORY   16
-#define BROWSER_LINKS     256
-#define BROWSER_LINE_CAP  512
-#define FONT_W            8
+#define BR_URL_CAP   256
+#define BR_HTML_CAP  (1024 * 1024)
+#define BR_TEXT_CAP  (1024 * 1024)
+#define BR_TITLE_CAP 96
+#define BR_HISTORY   16
+#define BR_LINKS     256
+#define BR_STATUS_H  24
+#define BR_ADDR_W    420
 
-#define ADDR_BAR_H  34
-#define TOOLBAR_H   30
-#define PAD         6
-
-/* Links are byte ranges in the processed render text; the clickable
- * rectangle is computed at draw time from the monospace layout. */
+/* Links are byte ranges in the render text; the clickable rect is
+ * computed at draw time from the proportional layout. */
 typedef struct {
     uint64_t start;
     uint64_t end;
-    char url[BROWSER_URL_CAP];
-} browser_link_t;
+    char     url[BR_URL_CAP];
+} br_link_t;
 
-static char current_url[BROWSER_URL_CAP];
-static char address_buf[BROWSER_URL_CAP];
-static char page_title[BROWSER_TITLE_CAP];
-static char *html_buf = NULL;
-static uint64_t html_len = 0;
-static char *text_buf = NULL;
-static uint64_t text_len = 0;
-static uint64_t html_shm = 0;
-static uint64_t text_shm = 0;
+static struct {
+    char      current_url[BR_URL_CAP];
+    char      address[BR_URL_CAP];
+    char      title[BR_TITLE_CAP];
+    char     *html;
+    uint64_t  html_len;
+    char     *text;
+    uint64_t  text_len;
+    uint64_t  html_shm;
+    uint64_t  text_shm;
 
-static char history[BROWSER_HISTORY][BROWSER_URL_CAP];
-static int history_count = 0;
-static int history_pos = -1;
+    char      history[BR_HISTORY][BR_URL_CAP];
+    int       history_count;
+    int       history_pos;
 
-static browser_link_t links[BROWSER_LINKS];
-static int link_count = 0;
+    br_link_t links[BR_LINKS];
+    int       link_count;
 
-static int scroll_y = 0;
-static int max_scroll = 0;
-static int hover_link = -1;
-static int loading = 0;
-static char status[64];
+    int  scroll;               /* pixels scrolled down the page */
+    int  content_h;            /* full page height in pixels */
+    int  wrap_cols;            /* characters per wrapped line */
 
-static int addr_cursor = 0;
-static int addr_active = 0;
+    int  loading;
+    int  addr_focused;
 
-/* ---- context-menu BSS (desktop.c pattern) ---- */
-#define CTX_BR_MAX  5
-#define CTX_BR_LBL  32
+    /* pointer */
+    int  hover_back;
+    int  hover_forward;
+    int  hover_reload;
+    int  hover_go;
+    int  hover_link;
 
-enum { CTX_BR_BACK = 1, CTX_BR_FWD, CTX_BR_REFRESH, CTX_BR_ADDR };
+    /* The address field's text is const in ic_textfield_t, so the
+     * editable buffer lives here and the field points at it. */
+    char           addr_buf[BR_URL_CAP];
+    ic_textfield_t addr;
+    ic_tween_t     scrollbar;
+    char           status[80];
+} br;
 
-static int ctx_open = 0;
-static int ctx_x = 0;
-static int ctx_y = 0;
-static int ctx_nitems = 0;
-static int ctx_actions[CTX_BR_MAX];
-static char ctx_labels[CTX_BR_MAX][CTX_BR_LBL];
-static int prev_right = 0;
-static int prev_left = 0;
-static int last_mouse_x = 0;
-static int last_mouse_y = 0;
-
-/* ---- string helpers (freestanding) ---- */
-
-/* b_* helpers removed in 1.3 — use ic_* from libicda.h directly. */
-
-/* ---- URL parsing ---- */
-
-/* parse_url_format + resolve_host removed in 1.3.
- * URL parsing now uses ic_url_split(); HTTP fetch uses ic_http_fetch_to_file(). */
-
-/* ---- HTML rendering ---- */
+/* --------------------------------------------------------------- HTML */
 
 static void strip_tags(char *dst, uint64_t dst_cap, const char *src) {
     uint64_t di = 0;
@@ -94,32 +81,16 @@ static void strip_tags(char *dst, uint64_t dst_cap, const char *src) {
     int in_entity = 0;
     if (!dst || dst_cap == 0) return;
     while (*src && di + 1 < dst_cap) {
-        if (*src == '<') {
-            in_tag = 1;
-            src++;
-            continue;
-        }
-        if (*src == '>') {
-            in_tag = 0;
-            src++;
-            continue;
-        }
-        if (in_tag) {
-            src++;
-            continue;
-        }
-        if (*src == '&') {
-            in_entity = 1;
-            src++;
-            continue;
-        }
+        if (*src == '<') { in_tag = 1; src++; continue; }
+        if (*src == '>') { in_tag = 0; src++; continue; }
+        if (in_tag) { src++; continue; }
+        if (*src == '&') { in_entity = 1; src++; continue; }
         if (in_entity) {
             if (*src == ';') in_entity = 0;
             src++;
             continue;
         }
-        dst[di++] = *src;
-        src++;
+        dst[di++] = *src++;
     }
     dst[di] = 0;
 }
@@ -152,7 +123,6 @@ static void decode_entities(char *dst, uint64_t dst_cap, const char *src) {
             dst[di++] = ' ';
             src += 6;
         } else if (*src == '&' && ic_strprefix(src, ent_num)) {
-            /* Skip numeric entities */
             src += 2;
             while (*src && *src != ';') src++;
             if (*src == ';') src++;
@@ -194,20 +164,12 @@ static void extract_title(const char *html, char *title, uint64_t cap) {
     }
 }
 
-/* ---- HTML -> plain text extraction ----
- *
- * Modern pages (React/Next/etc.) are dominated by <script>, <style>,
- * <svg> blobs and minified markup with no newlines.  This pipeline
- * produces a readable, word-wrapped text view: invisible subtrees are
- * dropped, entities and common UTF-8 punctuation are mapped to ASCII,
- * block-level tags force line breaks, and <a href> anchors are tracked
- * as byte ranges so the draw pass can highlight and hit-test them.
- */
+/* ------------------------------------------------- HTML -> render text */
 
-static uint64_t rt_i;            /* write index into text_buf */
-static uint64_t rt_line_start;   /* index where the current visual line began */
-static uint64_t rt_last_space;   /* offset of the last emitted space (wrap point) */
-static int rt_cols;              /* wrap width in characters */
+static uint64_t rt_i;            /* write index into br.text */
+static uint64_t rt_line_start;   /* where the current visual line began */
+static uint64_t rt_last_space;   /* offset of the last emitted space */
+static int      rt_cols;         /* wrap width in characters */
 
 static int match_word(const char *p, const char *w) {
     uint64_t i = 0;
@@ -257,33 +219,32 @@ static int tag_is_block(const char *t) {
 }
 
 static void rt_newline(void) {
-    if (rt_i == 0 || rt_i + 1 >= BROWSER_TEXT_CAP) return;
-    if (text_buf[rt_i - 1] == '\n') return; /* collapse blank lines */
-    text_buf[rt_i++] = '\n';
+    if (rt_i == 0 || rt_i + 1 >= BR_TEXT_CAP) return;
+    if (br.text[rt_i - 1] == '\n') return;      /* collapse blank lines */
+    br.text[rt_i++] = '\n';
     rt_line_start = rt_i;
     rt_last_space = (uint64_t)-1;
 }
 
 static void rt_put(char c) {
-    if (rt_i + 1 >= BROWSER_TEXT_CAP) return;
-    text_buf[rt_i++] = c;
-    /* Word wrap: rewind the current line at the last space. */
+    if (rt_i + 1 >= BR_TEXT_CAP) return;
+    br.text[rt_i++] = c;
     if (rt_i - rt_line_start > (uint64_t)rt_cols &&
         rt_last_space != (uint64_t)-1 && rt_last_space >= rt_line_start) {
-        text_buf[rt_last_space] = '\n';
+        br.text[rt_last_space] = '\n';
         rt_line_start = rt_last_space + 1;
         rt_last_space = (uint64_t)-1;
     }
 }
 
 static void rt_space(void) {
-    if (rt_i == 0 || rt_i + 1 >= BROWSER_TEXT_CAP) return;
-    if (text_buf[rt_i - 1] == ' ' || text_buf[rt_i - 1] == '\n') return;
+    if (rt_i == 0 || rt_i + 1 >= BR_TEXT_CAP) return;
+    if (br.text[rt_i - 1] == ' ' || br.text[rt_i - 1] == '\n') return;
     rt_last_space = rt_i;
     rt_put(' ');
 }
 
-/* Map a Unicode codepoint to something the 8x16 font can show. */
+/* Map a Unicode codepoint to something the atlas can show. */
 static void rt_emit_cp(uint32_t cp) {
     char c;
     switch (cp) {
@@ -370,12 +331,11 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
         ic_strcpy(out, href, cap);
         return;
     }
-    if (ic_url_split(current_url, host, sizeof(host),
+    if (ic_url_split(br.current_url, host, sizeof(host),
                      &port, path, sizeof(path), &use_tls) < 0) {
         ic_strcpy(out, href, cap);
         return;
     }
-
     if (ic_strprefix(href, "//")) {
         ic_strcpy(out, use_tls ? "https:" : "http:", cap);
         ic_strcat(out, href, cap);
@@ -403,29 +363,27 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
 
 /* Build the word-wrapped plain-text view of the fetched page. */
 static void build_render_text(void) {
-    const char *p = html_buf ? html_buf : "";
-    uint64_t len = html_len;
+    const char *p = br.html ? br.html : "";
+    uint64_t len = br.html_len;
     uint64_t i = 0;
     int skip_depth = 0;
     int cur_link = -1;
 
-    if (!text_buf) return;
+    if (!br.text) return;
     rt_i = 0;
     rt_line_start = 0;
     rt_last_space = (uint64_t)-1;
-    rt_cols = (gui_window_width() - 2 * PAD) / FONT_W;
+    rt_cols = br.wrap_cols;
     if (rt_cols < 20) rt_cols = 20;
-    link_count = 0;
+    br.link_count = 0;
 
-    while (i < len && rt_i + 1 < BROWSER_TEXT_CAP) {
+    while (i < len && rt_i + 1 < BR_TEXT_CAP) {
         char c = p[i];
 
-        /* Tags (quoted '>' inside attributes is handled) */
         if (c == '<' && i + 1 < len &&
             ((p[i + 1] >= 'a' && p[i + 1] <= 'z') ||
              (p[i + 1] >= 'A' && p[i + 1] <= 'Z') ||
              p[i + 1] == '/' || p[i + 1] == '!')) {
-            /* HTML comment */
             if (p[i + 1] == '!' && i + 3 < len && p[i + 2] == '-' && p[i + 3] == '-') {
                 i += 4;
                 while (i + 2 < len && !(p[i] == '-' && p[i + 1] == '-' && p[i + 2] == '>')) i++;
@@ -456,20 +414,20 @@ static void build_render_text(void) {
                         }
                     } else if (skip_depth == 0) {
                         if (!closing && match_word(tn, "a")) {
-                            char href[BROWSER_URL_CAP];
+                            char href[BR_URL_CAP];
                             extract_attr(p, ts, te, "href", href, sizeof(href));
                             if (href[0] && href[0] != '#' &&
                                 !ic_strprefix(href, "javascript:") &&
-                                link_count < BROWSER_LINKS) {
-                                resolve_href(href, links[link_count].url, BROWSER_URL_CAP);
-                                links[link_count].start = rt_i;
-                                links[link_count].end = rt_i;
-                                cur_link = (int)link_count++;
+                                br.link_count < BR_LINKS) {
+                                resolve_href(href, br.links[br.link_count].url, BR_URL_CAP);
+                                br.links[br.link_count].start = rt_i;
+                                br.links[br.link_count].end = rt_i;
+                                cur_link = (int)br.link_count++;
                             } else {
                                 cur_link = -2; /* anchor without a usable href */
                             }
                         } else if (closing && match_word(tn, "a")) {
-                            if (cur_link >= 0) links[cur_link].end = rt_i;
+                            if (cur_link >= 0) br.links[cur_link].end = rt_i;
                             cur_link = -1;
                         } else if (tag_is_block(tn)) {
                             rt_newline();
@@ -483,7 +441,6 @@ static void build_render_text(void) {
 
         if (skip_depth > 0) { i++; continue; }
 
-        /* Entities */
         if (c == '&') {
             uint64_t j = i + 1;
             uint32_t cp = 0;
@@ -526,14 +483,12 @@ static void build_render_text(void) {
             continue;
         }
 
-        /* Whitespace collapse */
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             rt_space();
             i++;
             continue;
         }
 
-        /* UTF-8 */
         if ((unsigned char)c >= 0x80) {
             uint64_t adv = 1;
             uint32_t cp = rt_utf8(p, i, len, &adv);
@@ -545,11 +500,24 @@ static void build_render_text(void) {
         rt_put(c);
         i++;
     }
-    text_buf[rt_i] = 0;
-    text_len = rt_i;
+    br.text[rt_i] = 0;
+    br.text_len = rt_i;
 }
 
-/* ---- page loading ---- */
+/* -------------------------------------------------------- page loading */
+
+static void br_status(const char *text) {
+    ic_strcpy(br.status, text, sizeof(br.status));
+}
+
+static void set_address(const char *url) {
+    ic_strcpy(br.addr_buf, url, BR_URL_CAP);
+    br.addr.text = br.addr_buf;
+    br.addr.cursor = (int)ic_strlen(br.addr_buf);
+    br.addr.sel_start = br.addr.sel_end = br.addr.cursor;
+    br.addr.scroll_px = 0;
+    ic_strcpy(br.address, url, BR_URL_CAP);
+}
 
 static void navigate_to(const char *url) {
     char host[128];
@@ -561,487 +529,523 @@ static void navigate_to(const char *url) {
     long rc;
 
     if (!url || !*url) return;
-    /* Auto-prepend http:// if no scheme given */
+    /* Auto-prepend http:// when no scheme was typed. */
     if (!ic_strprefix(url, "http://") && !ic_strprefix(url, "https://")) {
-        char full[BROWSER_URL_CAP];
+        char full[BR_URL_CAP];
         ic_strcpy(full, "http://", sizeof(full));
         ic_strcat(full, url, sizeof(full));
-        ic_strcpy(current_url, full, BROWSER_URL_CAP);
+        ic_strcpy(br.current_url, full, BR_URL_CAP);
     } else {
-        ic_strcpy(current_url, url, BROWSER_URL_CAP);
+        ic_strcpy(br.current_url, url, BR_URL_CAP);
     }
-    ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-    addr_cursor = (int)ic_strlen(address_buf);
+    set_address(br.current_url);
 
-    /* Add to history */
-    if (history_pos < 0 || !ic_streq(history[history_pos], current_url)) {
-        if (history_pos + 1 < BROWSER_HISTORY) {
-            history_pos++;
-            ic_strcpy(history[history_pos], current_url, BROWSER_URL_CAP);
-            history_count = history_pos + 1;
+    if (br.history_pos < 0 || !ic_streq(br.history[br.history_pos], br.current_url)) {
+        if (br.history_pos + 1 < BR_HISTORY) {
+            br.history_pos++;
+            ic_strcpy(br.history[br.history_pos], br.current_url, BR_URL_CAP);
+            br.history_count = br.history_pos + 1;
         }
     }
 
-    loading = 1;
-    ic_strcpy(status, "Resolving...", sizeof(status));
-    draw_all();
+    br.loading = 1;
+    br_status("Resolving host...");
 
-    /* Step 1: parse URL */
-    rc = ic_url_split(current_url, host, sizeof(host),
-                      &port, path, sizeof(path), &use_tls);
-    if (rc < 0) {
-        ic_strcpy(status, "Invalid URL format", sizeof(status));
-        loading = 0;
+    if (ic_url_split(br.current_url, host, sizeof(host),
+                     &port, path, sizeof(path), &use_tls) < 0) {
+        br_status("That address is not a valid URL");
+        br.loading = 0;
         return;
     }
 
-    /* Step 2: resolve + fetch */
-    ic_strcpy(status, "Connecting...", sizeof(status));
-    draw_all();
-
+    br_status(use_tls ? "Connecting over TLS..." : "Connecting...");
     ic_strcpy(out_path, "/browser.page", sizeof(out_path));
-
     rc = ic_http_fetch_to_file(host, port, use_tls, path, out_path, &bytes);
 
     if (rc < 0) {
         long err = -rc;
-        if (err >= 2000 && err < 3000) {
-            ic_strcpy(status, "HTTP error", sizeof(status));
-        } else if (err == 2) {
-            ic_strcpy(status, "DNS/ARP timeout", sizeof(status));
-        } else if (err == 3) {
-            ic_strcpy(status, "TCP timeout", sizeof(status));
-        } else if (err == 4) {
-            ic_strcpy(status, "Connection refused", sizeof(status));
-        } else if (err == 5) {
-            ic_strcpy(status, "Bad HTTP response", sizeof(status));
-        } else if (err == 6) {
-            ic_strcpy(status, "Response too large", sizeof(status));
-        } else if (err == 11) {
-            ic_strcpy(status, "TLS handshake failed", sizeof(status));
-        } else if (err == 12) {
-            ic_strcpy(status, "TLS recv failed", sizeof(status));
-        } else {
-            ic_strcpy(status, "Network error", sizeof(status));
-        }
-        loading = 0;
+        if (err >= 2000 && err < 3000)      br_status("The server refused the request");
+        else if (err == 2)                 br_status("The host name did not resolve");
+        else if (err == 3)                 br_status("The connection timed out");
+        else if (err == 4)                 br_status("The connection was refused");
+        else if (err == 5)                 br_status("The server sent a malformed reply");
+        else if (err == 6)                 br_status("The page is too large to load");
+        else if (err == 11)                br_status("The secure connection failed");
+        else if (err == 12)                br_status("The secure connection dropped");
+        else                               br_status("The network is unavailable");
+        br.loading = 0;
         return;
     }
 
-    if (!html_buf || !text_buf) {
-        ic_strcpy(status, "No memory for page", sizeof(status));
-        loading = 0;
+    if (!br.html || !br.text) {
+        br_status("Not enough memory to hold the page");
+        br.loading = 0;
         return;
     }
-    if (bytes > BROWSER_HTML_CAP - 1) bytes = BROWSER_HTML_CAP - 1;
+    if (bytes > BR_HTML_CAP - 1) bytes = BR_HTML_CAP - 1;
     {
-        long rn = (long)icda_read_file(out_path, html_buf, bytes);
-        html_len = rn > 0 ? (uint64_t)rn : 0;
-        html_buf[html_len] = 0;
+        long rn = (long)icda_read_file(out_path, br.html, bytes);
+        br.html_len = rn > 0 ? (uint64_t)rn : 0;
+        br.html[br.html_len] = 0;
     }
 
-    extract_title(html_buf, page_title, BROWSER_TITLE_CAP);
+    extract_title(br.html, br.title, BR_TITLE_CAP);
     build_render_text();
-    scroll_y = 0;
-    max_scroll = 0;
-    loading = 0;
-    ic_strcpy(status, "Done ", sizeof(status));
+    br.scroll = 0;
+    br.loading = 0;
     {
-        char nb[16];
-        ic_uint_to_str(html_len, nb, sizeof(nb));
-        ic_strcat(status, nb, sizeof(status));
-        ic_strcat(status, " bytes", sizeof(status));
+        char msg[80];
+        char n[24];
+        ic_strcpy(msg, "Loaded ", sizeof(msg));
+        ic_snprintf_u64(n, sizeof(n), br.html_len);
+        ic_strcat(msg, n, sizeof(msg));
+        ic_strcat(msg, " bytes", sizeof(msg));
+        br_status(msg);
     }
 }
 
 static void go_back(void) {
-    if (history_pos > 0) {
-        history_pos--;
-        ic_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
-        ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-        addr_cursor = (int)ic_strlen(address_buf);
-        navigate_to(current_url);
-    }
+    if (br.history_pos <= 0) return;
+    br.history_pos--;
+    ic_strcpy(br.current_url, br.history[br.history_pos], BR_URL_CAP);
+    set_address(br.current_url);
+    navigate_to(br.current_url);
 }
 
 static void go_forward(void) {
-    if (history_pos + 1 < history_count) {
-        history_pos++;
-        ic_strcpy(current_url, history[history_pos], BROWSER_URL_CAP);
-        ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-        addr_cursor = (int)ic_strlen(address_buf);
-        navigate_to(current_url);
-    }
+    if (br.history_pos + 1 >= br.history_count) return;
+    br.history_pos++;
+    ic_strcpy(br.current_url, br.history[br.history_pos], BR_URL_CAP);
+    set_address(br.current_url);
+    navigate_to(br.current_url);
 }
 
-/* ---- context-menu helpers ---- */
-static void br_ctx_set(int idx, int action, const char *label) {
-    if (idx < 0 || idx >= CTX_BR_MAX) return;
-    ctx_actions[idx] = action;
-    ic_strcpy(ctx_labels[idx], label, CTX_BR_LBL);
+/* ------------------------------------------------------------- layout */
+
+static const ic_face_t *reading(void) { return ic_font(IC_FONT_SUBHEAD); }
+
+static ic_rect_t toolbar_rect(ic_app_t *app) {
+    return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
 }
 
-static void br_ctx_menu_fill(ic_menu_t *m) {
-    int i;
-    if (!m) return;
-    m->count = ctx_nitems;
-    m->selected = -1;
-    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++)
-        m->items[i] = ctx_labels[i];
+static ic_rect_t back_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    return ic_rect_make(b.x + IC_SP_2, (b.h - IC_H_CONTROL) / 2, IC_H_CONTROL, IC_H_CONTROL);
 }
 
-static void br_ctx_close(void) { ctx_open = 0; }
-
-static void br_ctx_activate(int which) {
-    int a;
-    if (which < 0 || which >= ctx_nitems) { br_ctx_close(); return; }
-    a = ctx_actions[which];
-    if (a == CTX_BR_BACK)     go_back();
-    else if (a == CTX_BR_FWD)     go_forward();
-    else if (a == CTX_BR_REFRESH) navigate_to(current_url);
-    else if (a == CTX_BR_ADDR)    { addr_active = 1; addr_cursor = (int)ic_strlen(address_buf); }
-    br_ctx_close();
+static ic_rect_t forward_rect(ic_app_t *app) {
+    ic_rect_t r = back_rect(app);
+    return ic_rect_make(r.x + r.w + IC_SP_1, r.y, IC_H_CONTROL, IC_H_CONTROL);
 }
 
-static void br_ctx_open_at(int x, int y) {
-    ic_menu_t m;
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int mw, mh;
-    int i = 0;
-
-    br_ctx_set(i++, CTX_BR_BACK, "Back");
-    br_ctx_set(i++, CTX_BR_FWD, "Forward");
-    br_ctx_set(i++, CTX_BR_REFRESH, "Refresh");
-    br_ctx_set(i++, CTX_BR_ADDR, "Focus Address");
-    ctx_nitems = i;
-
-    br_ctx_menu_fill(&m);
-    mw = ic_menu_width(&m);
-    mh = ic_menu_height(&m);
-    if (x + mw > w) x = w - mw;
-    if (x < 0) x = 0;
-    if (y + mh > h) y = h - mh;
-    if (y < 0) y = 0;
-    ctx_x = x;
-    ctx_y = y;
-    ctx_open = 1;
+static ic_rect_t reload_rect(ic_app_t *app) {
+    ic_rect_t r = forward_rect(app);
+    return ic_rect_make(r.x + r.w + IC_SP_1, r.y, IC_H_CONTROL, IC_H_CONTROL);
 }
 
-/* ---- drawing ---- */
+static ic_rect_t addr_rect(ic_app_t *app) {
+    ic_rect_t r = reload_rect(app);
+    int w = app->width - r.x - r.w - IC_SP_4 - 68 - IC_SP_2;
+    if (w > BR_ADDR_W) w = BR_ADDR_W;
+    if (w < 80) w = 80;
+    return ic_rect_make(r.x + r.w + IC_SP_2, (toolbar_rect(app).h - IC_H_CONTROL) / 2, w,
+                        IC_H_CONTROL);
+}
 
-static void draw_toolbar(void) {
-    int w = gui_window_width();
-    int y = ADDR_BAR_H;
+static ic_rect_t go_rect(ic_app_t *app) {
+    ic_rect_t a = addr_rect(app);
+    return ic_rect_make(a.x + a.w + IC_SP_2, a.y, 68, IC_H_CONTROL);
+}
 
-    /* Toolbar background */
-    gui_fill_rect(0, y, w, TOOLBAR_H, 0x00F1F3F4);
-    gui_draw_hline(0, y + TOOLBAR_H - 1, w, 0x00DADCE0);
+static ic_rect_t page_rect(ic_app_t *app) {
+    int y = IC_H_TOOLBAR;
+    return ic_rect_make(0, y, app->width, app->height - y - BR_STATUS_H);
+}
 
-    /* Back button */
-    gui_fill_rect(6, y + 4, 28, 22, hover_link == -2 ? 0x00E8EAED : 0x00F8F9FA);
-    gui_draw_rect_outline(6, y + 4, 28, 22, 0x00DADCE0);
-    gui_draw_text(12, y + 8, "<", 0x00202124, 0x00F8F9FA);
+static ic_rect_t status_rect(ic_app_t *app) {
+    return ic_rect_make(0, app->height - BR_STATUS_H, app->width, BR_STATUS_H);
+}
 
-    /* Forward button */
-    gui_fill_rect(38, y + 4, 28, 22, hover_link == -3 ? 0x00E8EAED : 0x00F8F9FA);
-    gui_draw_rect_outline(38, y + 4, 28, 22, 0x00DADCE0);
-    gui_draw_text(44, y + 8, ">", 0x00202124, 0x00F8F9FA);
-
-    /* Refresh button */
-    gui_fill_rect(70, y + 4, 28, 22, hover_link == -4 ? 0x00E8EAED : 0x00F8F9FA);
-    gui_draw_rect_outline(70, y + 4, 28, 22, 0x00DADCE0);
-    gui_draw_text(76, y + 8, "R", 0x00202124, 0x00F8F9FA);
-
-    /* Address bar */
-    gui_fill_rect(104, y + 4, w - 110, 22, 0x00FFFFFF);
-    gui_draw_rect_outline(104, y + 4, w - 110, 22, 0x00DADCE0);
-    if (addr_active) {
-        gui_draw_rect_outline(104, y + 4, w - 110, 22, 0x001A73E8);
-    }
-    gui_draw_text(110, y + 8, address_buf, 0x00202124, 0x00FFFFFF);
-    if (addr_active) {
-        int cx = 110 + addr_cursor * 8;
-        if (cx < w - 10) {
-            gui_draw_vline(cx, y + 7, 16, 0x001A73E8);
+/* One place for the reading column, the wrap width and the document
+ * height: draw(), the resize reflow and the hit-test all use it. */
+static void layout(ic_app_t *app) {
+    ic_rect_t p = page_rect(app);
+    const ic_face_t *f = reading();
+    int col_w = p.w - 2 * IC_SP_6;
+    int avg = ic_text_measure(f, "abcdefghijklmnopqrstuvwxyz ") / 27;
+    int lines = 1;
+    if (avg < 1) avg = 1;
+    if (col_w > 720) col_w = 720;              /* comfortable measure */
+    br.wrap_cols = col_w / avg;
+    if (br.wrap_cols < 20) br.wrap_cols = 20;
+    if (br.text) {
+        for (uint64_t i = 0; i < br.text_len; i++) {
+            if (br.text[i] == '\n') lines++;
         }
     }
+    br.content_h = lines * (f->line_h + 2) + 2 * IC_SP_5;
+    if (br.scroll > br.content_h - p.h) br.scroll = br.content_h - p.h;
+    if (br.scroll < 0) br.scroll = 0;
 }
 
-static void draw_page(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int content_y = ADDR_BAR_H + TOOLBAR_H;
-    int content_h = h - content_y;
-    int line_h = 18;
-    uint64_t i;
-    uint64_t total_lines = 1;
-    int row = 0;
-    char line[BROWSER_LINE_CAP];
+/* ------------------------------------------------------------ drawing */
 
-    /* Content background */
-    gui_fill_rect(0, content_y, w, content_h, 0x00FFFFFF);
+static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t b = toolbar_rect(app);
+    const ic_palette_t *p = ic_palette();
+    int can_back = br.history_pos > 0;
+    int can_fwd = br.history_pos + 1 < br.history_count;
 
-    if (loading) {
-        gui_draw_text(PAD, content_y + PAD, "Loading...", 0x005F6368, 0x00FFFFFF);
+    ic_ui_toolbar(c, b);
+    ic_ui_icon_button(c, back_rect(app), IC_SYM_CHEVRON_LEFT,
+                      !can_back ? IC_STATE_DISABLED
+                                : (br.hover_back ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_icon_button(c, forward_rect(app), IC_SYM_CHEVRON_RIGHT,
+                      !can_fwd ? IC_STATE_DISABLED
+                               : (br.hover_forward ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_icon_button(c, reload_rect(app), IC_SYM_RELOAD,
+                      br.loading ? IC_STATE_PRESSED
+                                 : (br.hover_reload ? IC_STATE_HOVER : IC_STATE_NORMAL));
+
+    {
+        ic_textfield_t tf = br.addr;
+        tf.focused = br.addr_focused;
+        tf.caret_on = ic_app_caret_visible(app);
+        tf.placeholder = "Search or enter an address";
+        tf.scroll_px = br.addr.scroll_px;
+        ic_ui_textfield(c, addr_rect(app), &tf);
+    }
+    ic_ui_button(c, go_rect(app), "Go", IC_SYM_CHEVRON_RIGHT, IC_BUTTON_PRIMARY,
+                 br.hover_go ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    (void)p;
+}
+
+/* Byte offset of the start of absolute line `row` in the render text. */
+static uint64_t line_offset(uint64_t row) {
+    uint64_t r = 0;
+    uint64_t i = 0;
+    while (i < br.text_len && r < row) {
+        while (i < br.text_len && br.text[i] != '\n') i++;
+        if (i < br.text_len) i++;
+        r++;
+    }
+    return i;
+}
+
+static uint64_t line_count(void) {
+    uint64_t n = 1;
+    for (uint64_t i = 0; i < br.text_len; i++) {
+        if (br.text[i] == '\n') n++;
+    }
+    return n;
+}
+
+static void draw_page(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t p = page_rect(app);
+    const ic_palette_t *pal = ic_palette();
+    const ic_face_t *f = reading();
+    int lh = f->line_h + 2;
+    int col_x = p.x + (p.w - (p.w - 2 * IC_SP_6 > 720 ? 720 : p.w - 2 * IC_SP_6)) / 2;
+    int col_w = p.w - 2 * IC_SP_6;
+    uint64_t first, last, row;
+    ic_rect_t saved;
+
+    if (col_w > 720) col_w = 720;
+    ic_gfx_fill(c, p.x, p.y, p.w, p.h, pal->content);
+    ic_canvas_push_clip(c, p.x, p.y, p.w, p.h, &saved);
+
+    if (br.loading) {
+        ic_ui_empty_state(c, p, IC_SYM_RELOAD, "Loading", br.status);
+        ic_canvas_pop_clip(c, &saved);
+        return;
+    }
+    if (!br.text || br.text_len == 0) {
+        ic_ui_empty_state(c, p, IC_SYM_GLOBE, "Nothing loaded yet",
+                          "Enter an address above, or pick a link from a page you have loaded.");
+        ic_canvas_pop_clip(c, &saved);
         return;
     }
 
-    if (!text_buf || text_len == 0) {
-        gui_draw_text(PAD, content_y + PAD, "Enter a URL to browse the web.", 0x005F6368, 0x00FFFFFF);
-        gui_draw_text(PAD, content_y + PAD + 20, "Example: example.com", 0x005F6368, 0x00FFFFFF);
-        return;
-    }
-
-    /* Total document height for the scrollbar range. */
-    for (i = 0; i < text_len; i++) {
-        if (text_buf[i] == '\n') total_lines++;
-    }
-    max_scroll = (int)(total_lines * (uint64_t)line_h) - content_h + PAD;
-    if (max_scroll < 0) max_scroll = 0;
-    if (scroll_y < 0) scroll_y = 0;
-    if (scroll_y > max_scroll) scroll_y = max_scroll;
-
-    /* Render visible lines; link spans are overdrawn in blue. */
-    i = 0;
-    while (i < text_len) {
-        uint64_t ls = i;
-        uint64_t le;
-        int y;
-
-        while (i < text_len && text_buf[i] != '\n') i++;
-        le = i;
-        if (i < text_len) i++; /* consume the newline */
-
-        y = content_y + PAD + row * line_h - scroll_y;
-        row++;
-
-        if (le == ls) continue;                 /* blank line */
-        if (y + line_h <= content_y) continue;  /* above viewport */
-        if (y >= content_y + content_h) break;  /* below viewport */
-        if (le - ls >= BROWSER_LINE_CAP) le = ls + BROWSER_LINE_CAP - 1;
-
-        {
-            uint64_t n = le - ls;
-            uint64_t b;
-            for (b = 0; b < n; b++) line[b] = text_buf[ls + b];
-            line[n] = 0;
-            gui_draw_text(PAD, y, line, 0x003C4043, 0x00FFFFFF);
-        }
-
-        /* Link spans overlapping this line. */
-        for (int li = 0; li < link_count; li++) {
-            uint64_t s = links[li].start;
-            uint64_t e = links[li].end;
-            uint64_t c0, c1, b;
+    first = (uint64_t)(br.scroll / lh);
+    last = first + (uint64_t)(p.h / lh) + 2;
+    for (row = first; row < last && row < line_count(); row++) {
+        uint64_t ls = line_offset(row);
+        uint64_t le = ls;
+        int y = p.y + IC_SP_5 + (int)(row * (uint64_t)lh) - br.scroll;
+        ic_canvas_t lc;
+        while (le < br.text_len && br.text[le] != '\n') le++;
+        if (le == ls) continue;
+        if (y + lh <= p.y || y >= p.y + p.h) continue;
+        lc = *c;
+        (void)lc;
+        /* Body copy, then the accent-coloured link spans on top. */
+        ic_text_draw_n(c, f, col_x, y + ic_text_center_baseline(f, 0, f->line_h),
+                       br.text + ls, (int)(le - ls), pal->label);
+        for (int li = 0; li < br.link_count; li++) {
+            uint64_t s = br.links[li].start;
+            uint64_t e = br.links[li].end;
+            uint64_t c0, c1;
             if (e <= s || s >= le || e <= ls) continue;
             c0 = s > ls ? s - ls : 0;
             c1 = e < le ? e - ls : le - ls;
             if (c1 <= c0) continue;
-            for (b = 0; b < c1 - c0; b++) line[b] = text_buf[ls + c0 + b];
-            line[c1 - c0] = 0;
-            gui_draw_text(PAD + (int)c0 * FONT_W, y, line, 0x001A73E8, 0x00FFFFFF);
-            gui_draw_hline(PAD + (int)c0 * FONT_W, y + line_h - 3,
-                           (int)(c1 - c0) * FONT_W, 0x001A73E8);
+            {
+                int x = col_x + ic_text_measure_n(f, br.text + ls, (int)c0);
+                int w = ic_text_measure_n(f, br.text + ls + c0, (int)(c1 - c0));
+                ic_color_t col = pal->accent;
+                if (li == br.hover_link) col = pal->accent_hover;
+                ic_text_draw_n(c, f, x, y + ic_text_center_baseline(f, 0, f->line_h),
+                               br.text + ls + c0, (int)(c1 - c0), col);
+                ic_gfx_hline(c, x, y + f->line_h + 1, w, col);
+            }
         }
     }
+    ic_canvas_pop_clip(c, &saved);
+
+    if (br.content_h > p.h) {
+        float a = ic_tween_value(&br.scrollbar);
+        if (a > 0.01f) ic_ui_scrollbar(c, p, br.scroll, br.content_h, a);
+    }
 }
 
-static void draw_status(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    gui_fill_rect(0, h - 20, w, 20, 0x00F1F3F4);
-    gui_draw_hline(0, h - 21, w, 0x00DADCE0);
-    gui_draw_text(6, h - 16, status, 0x005F6368, 0x00F1F3F4);
+static void draw_status(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t s = status_rect(app);
+    const ic_palette_t *p = ic_palette();
+    ic_ui_statusbar(c, s, br.status);
+    if (br.title[0] && !br.loading) {
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                        ic_rect_make(s.x + s.w - 320, s.y, 320 - IC_SP_3, s.h),
+                        br.title, p->label_tertiary, IC_ALIGN_RIGHT);
+    }
 }
 
-static void draw_all(void) {
-    draw_toolbar();
-    draw_page();
-    draw_status();
-    /* ---- context menu (topmost overlay) ---- */
-    if (ctx_open && ctx_nitems > 0) {
-        ic_canvas_t mc;
-        const ic_theme_t *t = ic_theme_default();
-        ic_menu_t m;
-        mc.px = gui_pixel_buffer();
-        mc.w = gui_window_width();
-        mc.h = gui_window_height();
-        br_ctx_menu_fill(&m);
-        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
-        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
-    }
-    gui_flush();
+static void draw(ic_app_t *app, ic_canvas_t *c) {
+    int scrolled;
+    layout(app);
+    ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
+    draw_toolbar(app, c);
+    draw_page(app, c);
+    draw_status(app, c);
+
+    scrolled = br.scroll > 0;
+    ic_tween_to(&br.scrollbar, scrolled ? 1.0f : 0.0f, IC_DUR_FAST,
+                scrolled ? IC_EASE_ENTER : IC_EASE_EXIT);
+    if (ic_tween_running(&br.scrollbar)) ic_app_animate(app);
+    if (br.addr_focused || br.loading) ic_app_animate(app);
 }
 
-/* ---- input handling ---- */
+/* -------------------------------------------------------------- events */
 
-static int hit_rect(int mx, int my, int x, int y, int w, int h) {
-    return mx >= x && my >= y && mx < x + w && my < y + h;
-}
+static void event(ic_app_t *app, const ic_event_t *ev) {
+    ic_rect_t a = addr_rect(app);
 
-static void handle_click(int mx, int my) {
-    int w = gui_window_width();
-    int content_y = ADDR_BAR_H + TOOLBAR_H;
-
-    /* Toolbar buttons */
-    if (hit_rect(mx, my, 6, ADDR_BAR_H + 4, 28, 22)) {
-        go_back();
-        return;
-    }
-    if (hit_rect(mx, my, 38, ADDR_BAR_H + 4, 28, 22)) {
-        go_forward();
-        return;
-    }
-    if (hit_rect(mx, my, 70, ADDR_BAR_H + 4, 28, 22)) {
-        navigate_to(current_url);
-        return;
-    }
-
-    /* Address bar */
-    if (hit_rect(mx, my, 104, ADDR_BAR_H + 4, w - 110, 22)) {
-        addr_active = 1;
-        return;
-    }
-    addr_active = 0;
-
-    /* Links: map the click to a byte offset in the render text, then test
-     * it against each link's byte range (handles links that wrap across
-     * visual lines). */
-    if (text_buf && my >= content_y + PAD) {
-        int line_h = 18;
-        int row = (my - content_y - PAD + scroll_y) / line_h;
-        int col = (mx - PAD) / FONT_W;
-        if (row >= 0 && col >= 0) {
-            uint64_t ls = 0;
-            for (int r = 0; r < row && ls < text_len; r++) {
-                while (ls < text_len && text_buf[ls] != '\n') ls++;
-                if (ls < text_len) ls++;
-            }
-            {
-                uint64_t le = ls;
-                while (le < text_len && text_buf[le] != '\n') le++;
-                if (le - ls >= BROWSER_LINE_CAP) le = ls + BROWSER_LINE_CAP - 1;
-                uint64_t pos = ls + (uint64_t)col;
-                if (pos < le) {
-                    for (int li = 0; li < link_count; li++) {
-                        if (links[li].url[0] && pos >= links[li].start && pos < links[li].end) {
-                            navigate_to(links[li].url);
-                            return;
-                        }
+    switch (ev->type) {
+    case IC_EV_MOUSE_MOVE:
+        if (br.addr_focused) {
+            /* Clicking elsewhere drops focus from the address field. */
+            if (!ic_ui_hit(a, ev->x, ev->y)) br.addr_focused = 0;
+        }
+        br.hover_back = ic_ui_hit(back_rect(app), ev->x, ev->y);
+        br.hover_forward = ic_ui_hit(forward_rect(app), ev->x, ev->y);
+        br.hover_reload = ic_ui_hit(reload_rect(app), ev->x, ev->y);
+        br.hover_go = ic_ui_hit(go_rect(app), ev->x, ev->y);
+        br.hover_link = -1;
+        break;
+    case IC_EV_MOUSE_DOWN: {
+        int i;
+        if (ev->button != GUI_BTN_LEFT) break;
+        if (br.hover_back) { go_back(); break; }
+        if (br.hover_forward) { go_forward(); break; }
+        if (br.hover_reload) { navigate_to(br.current_url); break; }
+        if (br.hover_go) { br.addr_focused = 0; navigate_to(br.addr.text); break; }
+        if (ic_ui_hit(a, ev->x, ev->y)) {
+            br.addr_focused = 1;
+            br.addr.cursor = ic_ui_textfield_index_at(a, &br.addr, ev->x);
+            br.addr.sel_start = br.addr.sel_end = br.addr.cursor;
+            ic_ui_textfield_scroll(a, &br.addr);
+            break;
+        }
+        /* Links. */
+        {
+            ic_rect_t p = page_rect(app);
+            const ic_face_t *f = reading();
+            int lh = f->line_h + 2;
+            int col_w = p.w - 2 * IC_SP_6;
+            int col_x;
+            int row;
+            if (col_w > 720) col_w = 720;
+            col_x = p.x + (p.w - col_w) / 2;
+            if (ic_ui_hit(p, ev->x, ev->y) && br.text) {
+                uint64_t ls, le, target;
+                int col = 0;
+                row = (ev->y - p.y - IC_SP_5 + br.scroll) / lh;
+                if (row < 0) break;
+                ls = line_offset((uint64_t)row);
+                le = ls;
+                while (le < br.text_len && br.text[le] != '\n') le++;
+                /* Walk the line to find the byte under the pointer. */
+                {
+                    int x = col_x;
+                    target = le;
+                    for (uint64_t k = ls; k < le; k++) {
+                        int w = ic_text_measure_n(f, br.text + k, 1);
+                        if (ev->x < x + w / 2) { target = k; break; }
+                        x += w;
+                    }
+                    col = (int)(target - ls);
+                }
+                for (i = 0; i < br.link_count; i++) {
+                    if (br.links[i].url[0] && target >= br.links[i].start &&
+                        target < br.links[i].end) {
+                        navigate_to(br.links[i].url);
+                        break;
                     }
                 }
+                (void)col;
             }
         }
+        break;
     }
-}
-
-static void handle_key(uint32_t key) {
-    if (ctx_open) return; /* type-ahead guard */
-    if (addr_active) {
-        if (key == '\r' || key == '\n') {
-            addr_active = 0;
-            navigate_to(address_buf);
-        } else if (key == '\b') {
-            if (addr_cursor > 0) {
-                addr_cursor--;
-                address_buf[addr_cursor] = 0;
-            }
-        } else if (key >= 32 && key <= 126) {
-            if (addr_cursor < BROWSER_URL_CAP - 1) {
-                address_buf[addr_cursor++] = (char)key;
-                address_buf[addr_cursor] = 0;
-            }
-        }
-    } else {
-        if (key == 'l' || key == 'L') {
-            addr_active = 1;
-            addr_cursor = (int)ic_strlen(address_buf);
-        } else if (key == '\r' || key == '\n') {
-            navigate_to(address_buf);
-        } else if (key == 27) { /* Escape */
-            addr_active = 0;
-        }
-    }
-}
-
-static int on_event(void *ud, const gui_msg_t *msg) {
-    (void)ud;
-    if (msg->type == GUI_MSG_MOUSE_EVENT) {
-        int mx = msg->mouse.x, my = msg->mouse.y;
-        /* Left-click: menu/press precedence */
-        if (msg->mouse.buttons & GUI_BTN_LEFT) {
-            if (!prev_left) {
-                if (ctx_open) {
-                    ic_menu_t m; int hit;
-                    br_ctx_menu_fill(&m);
-                    hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
-                    if (hit >= 0 && hit < ctx_nitems) br_ctx_activate(hit);
-                    else br_ctx_close();
-                } else {
-                    handle_click(mx, my);
+    case IC_EV_MOUSE_LEAVE:
+        br.hover_back = br.hover_forward = br.hover_reload = br.hover_go = 0;
+        br.hover_link = -1;
+        break;
+    case IC_EV_KEY:
+        if (br.addr_focused) {
+            switch (ev->key) {
+            case IC_KEY_ENTER:
+                br.addr_focused = 0;
+                navigate_to(br.addr.text);
+                break;
+            case IC_KEY_ESCAPE:
+                br.addr_focused = 0;
+                set_address(br.current_url);
+                break;
+            case IC_KEY_LEFT:
+                if (br.addr.cursor > 0) br.addr.cursor--;
+                ic_ui_textfield_scroll(a, &br.addr);
+                break;
+            case IC_KEY_RIGHT:
+                if (br.addr.cursor < (int)ic_strlen(br.addr_buf)) br.addr.cursor++;
+                ic_ui_textfield_scroll(a, &br.addr);
+                break;
+            case IC_KEY_HOME: br.addr.cursor = 0; ic_ui_textfield_scroll(a, &br.addr); break;
+            case IC_KEY_END:
+                br.addr.cursor = (int)ic_strlen(br.addr_buf);
+                ic_ui_textfield_scroll(a, &br.addr);
+                break;
+            case IC_KEY_BACKSPACE: {
+                int len = (int)ic_strlen(br.addr_buf);
+                if (br.addr.cursor > 0) {
+                    for (int k = br.addr.cursor; k < len; k++) br.addr_buf[k - 1] = br.addr_buf[k];
+                    br.addr_buf[len - 1] = 0;
+                    br.addr.cursor--;
+                    ic_ui_textfield_scroll(a, &br.addr);
                 }
+                break;
             }
-        }
-        prev_left = (msg->mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
-        /* Right-click: edge-detect (desktop.c pattern, single dispatch) */
-        if (msg->mouse.buttons & GUI_BTN_RIGHT) {
-            if (!prev_right) {
-                br_ctx_close();
-                br_ctx_open_at(mx, my);
+            case IC_KEY_DELETE: {
+                int len = (int)ic_strlen(br.addr_buf);
+                if (br.addr.cursor < len) {
+                    for (int k = br.addr.cursor; k < len - 1; k++) br.addr_buf[k] = br.addr_buf[k + 1];
+                    br.addr_buf[len - 1] = 0;
+                    ic_ui_textfield_scroll(a, &br.addr);
+                }
+                break;
             }
-            prev_right = 1;
-        } else { prev_right = 0; }
-        last_mouse_x = mx; last_mouse_y = my;
-    } else if (msg->type == GUI_MSG_KEY_EVENT) {
-        if (msg->key.pressed) {
-            handle_key(msg->key.keycode);
+            default:
+                if (ev->key >= 32 && ev->key < 127) {
+                    int len = (int)ic_strlen(br.addr_buf);
+                    if (len + 1 < BR_URL_CAP) {
+                        for (int k = len; k > br.addr.cursor; k--) {
+                            br.addr_buf[k] = br.addr_buf[k - 1];
+                        }
+                        br.addr_buf[br.addr.cursor++] = (char)ev->key;
+                        br.addr_buf[len + 1] = 0;
+                        ic_ui_textfield_scroll(a, &br.addr);
+                    }
+                }
+                break;
+            }
+            break;
         }
-    } else if (msg->type == GUI_MSG_CLOSE_WINDOW) {
-        return 0;
+        switch (ev->key) {
+        case IC_KEY_PAGE_DOWN: br.scroll += page_rect(app).h - IC_H_TOOLBAR; break;
+        case IC_KEY_PAGE_UP:   br.scroll -= page_rect(app).h - IC_H_TOOLBAR; break;
+        case IC_KEY_DOWN:      br.scroll += reading()->line_h + 2; break;
+        case IC_KEY_UP:        br.scroll -= reading()->line_h + 2; break;
+        case IC_KEY_HOME:      br.scroll = 0; break;
+        case IC_KEY_END:       br.scroll = br.content_h; break;
+        case IC_KEY_ENTER:     navigate_to(br.addr.text); break;
+        case IC_KEY_ESCAPE:    br.addr_focused = 1; break;
+        case 'l': case 'L':    br.addr_focused = 1; break;
+        case 'r': case 'R':    navigate_to(br.current_url); break;
+        case IC_KEY_LEFT:      go_back(); break;
+        case IC_KEY_DELETE:    go_forward(); break;
+        default: break;
+        }
+        break;
+    case IC_EV_RESIZE:
+        /* The wrap width changed, so reflow the page and re-derive the
+         * document height. */
+        layout(app);
+        if (br.html) {
+            build_render_text();
+            layout(app);
+        }
+        break;
+    case IC_EV_BLUR:
+        br.addr_focused = 0;
+        break;
+    case IC_EV_FOCUS:
+    case IC_EV_APPEARANCE:
+    default:
+        break;
     }
-    return 1;
+    ic_app_invalidate(app);
+}
+
+static void init(ic_app_t *app) {
+    br.hover_back = br.hover_forward = br.hover_reload = br.hover_go = 0;
+    br.hover_link = -1;
+    br.addr.leading = IC_SYM_SEARCH;
+    br.addr.scroll_px = 0;
+    ic_tween_set(&br.scrollbar, 0.0f);
+    if (app->user) {
+        const char *arg = (const char *)app->user;
+        if (arg[0]) {
+            set_address(arg);
+            navigate_to(arg);
+            return;
+        }
+    }
+    set_address("http://example.com");
+    layout(app);
+    br_status("Ready");
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    static const ic_app_desc_t desc = { "Browser", WIN_W, WIN_H, init, draw, event, 0 };
+    const char *arg = (argc > 1 && argv) ? argv[1] : 0;
 
-    /* Page buffers come from shared-memory regions - properly mapped,
-     * process-owned memory.  (The previous hardcoded 0x60000000 pointed
-     * at unmapped memory and page-faulted on the first fetch.) */
-    html_shm = icda_shm_create(BROWSER_HTML_CAP);
-    if (html_shm) html_buf = (char *)(uintptr_t)icda_shm_map(html_shm);
-    text_shm = icda_shm_create(BROWSER_TEXT_CAP);
-    if (text_shm) text_buf = (char *)(uintptr_t)icda_shm_map(text_shm);
+    /* Page buffers come from shared-memory regions: process-owned memory
+     * that is properly mapped. */
+    br.html_shm = icda_shm_create(BR_HTML_CAP);
+    if (br.html_shm) br.html = (char *)(uintptr_t)icda_shm_map(br.html_shm);
+    br.text_shm = icda_shm_create(BR_TEXT_CAP);
+    if (br.text_shm) br.text = (char *)(uintptr_t)icda_shm_map(br.text_shm);
 
-    ic_strcpy(current_url, "http://example.com", BROWSER_URL_CAP);
-    ic_strcpy(address_buf, current_url, BROWSER_URL_CAP);
-    addr_cursor = (int)ic_strlen(address_buf);
-    ic_strcpy(page_title, "ICDA Browser", BROWSER_TITLE_CAP);
-    ic_strcpy(status, "Ready", sizeof(status));
+    br.history_pos = -1;
+    br.history_count = 0;
+    br.scroll = 0;
+    br.loading = 0;
+    br.addr_focused = 0;
+    ic_strcpy(br.title, "ICDA Browser", BR_TITLE_CAP);
+    br_status("Ready");
 
-    if (gui_open_window("ICDA Browser", 900, 600) != 0) {
-        return -1;
+    if (ic_app_run(&desc, (void *)arg) != 0) {
+        icda_write("browser requires the desktop (Ctrl+Alt+F1)\n");
+        return 1;
     }
-
-    navigate_to(current_url);
-    draw_all();
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            /* All events routed through on_event (single dispatch) */
-            if (!on_event(NULL, &msg)) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        if (changed) {
-            draw_all();
-        }
-        icda_sleep(1);
-    }
+    return 0;
 }

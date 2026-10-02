@@ -257,28 +257,3 @@ int mouse_read_event(mouse_event_t *out) {
 int32_t mouse_abs_x(void) { return mouse_x; }
 int32_t mouse_abs_y(void) { return mouse_y; }
 uint8_t mouse_buttons(void) { return mouse_btn; }
-
-/* USB HID bridge: same ring, same clamp, same overflow policy as the
- * PS/2 IRQ path. Wheel is consumed by the HID layer (no wheel field in
- * mouse_event_t) so it is not passed here. */
-void mouse_usb_inject(int32_t dx, int32_t dy, uint8_t buttons) {
-    uint32_t next;
-    mouse_x += dx;
-    mouse_y += dy;
-    if (mouse_x < 0) mouse_x = 0;
-    if (mouse_y < 0) mouse_y = 0;
-    if (screen_w > 0 && mouse_x >= screen_w) mouse_x = screen_w - 1;
-    if (screen_h > 0 && mouse_y >= screen_h) mouse_y = screen_h - 1;
-    mouse_btn = (uint8_t)(buttons & 0x07U);
-    next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
-    if (next == mouse_buf_tail) {
-        mouse_buf_tail = (mouse_buf_tail + 1) % MOUSE_BUF_CAP;
-    }
-    mouse_buf[mouse_buf_head].abs_x = mouse_x;
-    mouse_buf[mouse_buf_head].abs_y = mouse_y;
-    mouse_buf[mouse_buf_head].dx = dx;
-    mouse_buf[mouse_buf_head].dy = dy;
-    mouse_buf[mouse_buf_head].buttons = mouse_btn;
-    mouse_buf_head = next;
-    sched_wake_input_waiters();
-}

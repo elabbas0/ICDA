@@ -257,21 +257,6 @@ void keyboard_pump(void) {
     keyboard_poll_hardware();
 }
 
-/* USB HID bridge: inject already-decoded chars/sequences into the shared
- * queue. Mirrors the wakeup behavior of the PS/2 path. */
-void keyboard_usb_push(char c) {
-    queue_push(c);
-    sched_wake_input_waiters();
-}
-
-void keyboard_usb_push_seq(const char *seq) {
-    if (!seq) {
-        return;
-    }
-    queue_push_seq(seq);
-    sched_wake_input_waiters();
-}
-
 void keyboard_init(void) {
     queue_head = 0;
     queue_tail = 0;

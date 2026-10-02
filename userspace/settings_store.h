@@ -8,16 +8,15 @@
  * live ISO). Read falls back to /etc/icda-settings (seeded defaults).
  *
  * File format: one "key=value" per line, '#' comments and blank lines
- * ignored, unknown keys ignored. Values are 0/1; anything else leaves
- * the default in place:
+ * ignored, unknown keys ignored. Values are single digits; anything
+ * else leaves the default in place:
  *
  *   vsync=1        tick-paced present (tear-free-ish) vs immediate
  *   animations=1   window open/close/min/max animations vs instant
  *   boot_anim=1    boot/power transition animation vs instant
  *   audio=1        audio enabled vs master mute (skip audio paths)
- *   theme=0        0 abyss dark, 1 frost light (frost-glass theme)
- *   accent=0       0 Blue, 1 Sky, 2 Teal, 3 Violet
- *   glass=1        0 opaque, 1 frost, 2 extra-clear
+ *   appearance=0   0 = dark, 1 = light (ic_theme.h palettes)
+ *   accent=0       accent colour index (ic_accent_t, 0..6)
  *
  * All helpers are bounds-checked and freestanding-safe (no libc).
  */
@@ -28,16 +27,19 @@
 
 #define ICDA_SETTINGS_PATH "/cfg/icda-settings"
 #define ICDA_SETTINGS_FALLBACK "/etc/icda-settings"
-#define ICDA_SETTINGS_CAP 384
+#define ICDA_SETTINGS_CAP 256
+
+#define ICDA_APPEARANCE_DARK  0
+#define ICDA_APPEARANCE_LIGHT 1
+#define ICDA_ACCENT_MAX       6
 
 typedef struct {
     int vsync;
     int animations;
     int boot_anim;
     int audio;
-    int theme_mode;
+    int appearance;
     int accent;
-    int glass;
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -48,9 +50,17 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->animations = 1;
     s->boot_anim = 1;
     s->audio = 1;
-    s->theme_mode = 0;
+    s->appearance = ICDA_APPEARANCE_DARK;
     s->accent = 0;
-    s->glass = 1;
+}
+
+static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
+                                                        const char *key) {
+    uint64_t i = 0;
+    while (i < key_len && key[i] && line[i] == key[i]) {
+        i++;
+    }
+    return i == key_len && key[i] == '\0';
 }
 
 static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s, const char *line,
@@ -74,58 +84,36 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
     if (i + key_len >= len || line[i + key_len] != '=') {
         return;
     }
-    if (i + key_len + 2 > len) {
+    if (key_len + 2 > len) {
         return;
     }
     {
         char vc = line[i + key_len + 1];
-        if (vc == '0' || vc == '1') {
-            value = vc - '0';
+        if (vc < '0' || vc > '9') {
+            return;
         }
-        /* wider ranges (accent 0-3, glass 0-2) are validated per key
-         * below; 0/1-only keys require value != -1 via the branches. */
+        value = vc - '0';
     }
-    if (key_len == 5 && line[i] == 'v' && line[i + 1] == 's' && line[i + 2] == 'y' &&
-        line[i + 3] == 'n' && line[i + 4] == 'c') {
-        if (value != -1) {
-            s->vsync = value;
+    line += i;
+    if (icda_settings_key_is(line, key_len, "accent")) {
+        if (value <= ICDA_ACCENT_MAX) {
+            s->accent = value;
         }
-    } else if (key_len == 10 && line[i] == 'a' && line[i + 1] == 'n' && line[i + 2] == 'i' &&
-               line[i + 3] == 'm' && line[i + 4] == 'a' && line[i + 5] == 't' &&
-               line[i + 6] == 'i' && line[i + 7] == 'o' && line[i + 8] == 'n' &&
-               line[i + 9] == 's') {
-        if (value != -1) {
-            s->animations = value;
-        }
-    } else if (key_len == 9 && line[i] == 'b' && line[i + 1] == 'o' && line[i + 2] == 'o' &&
-               line[i + 3] == 't' && line[i + 4] == '_' && line[i + 5] == 'a' &&
-               line[i + 6] == 'n' && line[i + 7] == 'i' && line[i + 8] == 'm') {
-        if (value != -1) {
-            s->boot_anim = value;
-        }
-    } else if (key_len == 5 && line[i] == 'a' && line[i + 1] == 'u' && line[i + 2] == 'd' &&
-               line[i + 3] == 'i' && line[i + 4] == 'o') {
-        if (value != -1) {
-            s->audio = value;
-        }
-    } else if (key_len == 5 && line[i] == 't' && line[i + 1] == 'h' && line[i + 2] == 'e' &&
-               line[i + 3] == 'm' && line[i + 4] == 'e') {
-        char vc = line[i + key_len + 1];
-        if (vc >= '0' && vc <= '1') {
-            s->theme_mode = vc - '0';
-        }
-    } else if (key_len == 6 && line[i] == 'a' && line[i + 1] == 'c' && line[i + 2] == 'c' &&
-               line[i + 3] == 'e' && line[i + 4] == 'n' && line[i + 5] == 't') {
-        char vc = line[i + key_len + 1];
-        if (vc >= '0' && vc <= '3') {
-            s->accent = vc - '0';
-        }
-    } else if (key_len == 5 && line[i] == 'g' && line[i + 1] == 'l' && line[i + 2] == 'a' &&
-               line[i + 3] == 's' && line[i + 4] == 's') {
-        char vc = line[i + key_len + 1];
-        if (vc >= '0' && vc <= '2') {
-            s->glass = vc - '0';
-        }
+        return;
+    }
+    if (value > 1) {
+        return;
+    }
+    if (icda_settings_key_is(line, key_len, "vsync")) {
+        s->vsync = value;
+    } else if (icda_settings_key_is(line, key_len, "animations")) {
+        s->animations = value;
+    } else if (icda_settings_key_is(line, key_len, "boot_anim")) {
+        s->boot_anim = value;
+    } else if (icda_settings_key_is(line, key_len, "audio")) {
+        s->audio = value;
+    } else if (icda_settings_key_is(line, key_len, "appearance")) {
+        s->appearance = value;
     }
 }
 
@@ -176,17 +164,11 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     char buf[ICDA_SETTINGS_CAP];
     uint64_t pos = 0;
     long rc = 0;
-    int theme_mode;
-    int accent;
-    int glass;
 
     if (!s) {
         return -1;
     }
-    theme_mode = s->theme_mode < 0 ? 0 : (s->theme_mode > 1 ? 1 : s->theme_mode);
-    accent = s->accent < 0 ? 0 : (s->accent > 3 ? 3 : s->accent);
-    glass = s->glass < 0 ? 0 : (s->glass > 2 ? 2 : s->glass);
-    icda_settings_put(buf, sizeof(buf), &pos, "# ICDA settings (0/1 + theme/accent/glass)\n");
+    icda_settings_put(buf, sizeof(buf), &pos, "# ICDA settings (0/1)\n");
     icda_settings_put(buf, sizeof(buf), &pos, "vsync=");
     icda_settings_put(buf, sizeof(buf), &pos, s->vsync ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "animations=");
@@ -195,14 +177,17 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     icda_settings_put(buf, sizeof(buf), &pos, s->boot_anim ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "audio=");
     icda_settings_put(buf, sizeof(buf), &pos, s->audio ? "1\n" : "0\n");
-    icda_settings_put(buf, sizeof(buf), &pos, "theme=");
-    icda_settings_put(buf, sizeof(buf), &pos, theme_mode ? "1\n" : "0\n");
-    icda_settings_put(buf, sizeof(buf), &pos, "accent=");
-    icda_settings_put(buf, sizeof(buf), &pos,
-                      accent == 0 ? "0\n" : (accent == 1 ? "1\n" : (accent == 2 ? "2\n" : "3\n")));
-    icda_settings_put(buf, sizeof(buf), &pos, "glass=");
-    icda_settings_put(buf, sizeof(buf), &pos,
-                      glass == 0 ? "0\n" : (glass == 1 ? "1\n" : "2\n"));
+    icda_settings_put(buf, sizeof(buf), &pos, "appearance=");
+    icda_settings_put(buf, sizeof(buf), &pos, s->appearance ? "1\n" : "0\n");
+    {
+        char accent_line[4];
+        int a = s->accent < 0 ? 0 : (s->accent > ICDA_ACCENT_MAX ? 0 : s->accent);
+        accent_line[0] = (char)('0' + a);
+        accent_line[1] = '\n';
+        accent_line[2] = '\0';
+        icda_settings_put(buf, sizeof(buf), &pos, "accent=");
+        icda_settings_put(buf, sizeof(buf), &pos, accent_line);
+    }
     if (pos == 0 || pos >= sizeof(buf)) {
         return -1;
     }

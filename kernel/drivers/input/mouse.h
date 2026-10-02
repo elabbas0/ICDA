@@ -21,10 +21,4 @@ int32_t mouse_abs_x(void);
 int32_t mouse_abs_y(void);
 uint8_t mouse_buttons(void);
 
-/* USB HID bridge (Phase 1c): feed a boot-protocol relative report into the
- * SAME mouse_event_t ring the PS/2 path uses. dx/dy are signed screen
- * deltas (HID Y+ is already screen-down, unlike PS/2 which negates).
- * Applies the same screen-edge clamp, overflow policy and waiter wakeup. */
-void mouse_usb_inject(int32_t dx, int32_t dy, uint8_t buttons);
-
 #endif

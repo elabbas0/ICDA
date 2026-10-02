@@ -20,7 +20,6 @@
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
 #include "drivers/storage/partition.h"
-#include "drivers/usb/xhci.h"
 #include "diag/bootstage.h"
 #include "diag/splash.h"
 #include "fs/fat32.h"
@@ -42,6 +41,7 @@
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
 #include "cpu/pat.h"
+#include "cpu/fpu.h"
 
 #include "memory/pf.h"
 #include "memory/heap.h"
@@ -205,14 +205,8 @@ void kernel_main(void *multiboot_info) {
         console_write(" pitch=", CONSOLE_STYLE_MUTED);
         console_write_dec64((uint64_t)fb_pitch_value(), CONSOLE_STYLE_INFO);
         console_write("\n", CONSOLE_STYLE_INFO);
-        /* Live-path declaration for the serial log: firmware GOP/VBE
-         * framebuffer (Intel iGPU class, gfxpayload=keep) drives the
-         * scanout directly via fbdev — virtio-gpu is skipped below and
-         * gpu_init() has already registered fbdev (never broken). */
-        serial_write("display: fbdev GOP/VBE direct (Intel iGPU class)\n");
     } else {
         boot_line("display", "vga fallback attached");
-        serial_write("display: vga text fallback (no framebuffer)\n");
     }
 
     gdt_init();
@@ -266,6 +260,11 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(9, "pf");
     boot_line("interrupts", "page fault handler armed");
 
+    /* Threads copy the default FPU/SSE image at creation, so the unit
+     * must be enabled before the scheduler builds its first thread. */
+    fpu_init();
+    boot_line("cpu", "x87/sse state switching enabled");
+
     sched_init();
     bootstage_set(10, "sched");
     boot_line("scheduler", "scheduler core online");
@@ -306,20 +305,14 @@ void kernel_main(void *multiboot_info) {
     }
 
     /* virtio-gpu: only when no multiboot framebuffer is available.
-     * Must run AFTER pci_init so PCI devices are enumerated.
-     * Optional and non-fatal: on real Intel hardware GRUB keeps the
-     * GOP framebuffer (fb_available()==1) so this block never runs and
-     * the fbdev direct path above owns the scanout — never hang
-     * waiting for virtio. */
+     * Must run AFTER pci_init so PCI devices are enumerated. */
     if (!fb_available()) {
         bootstage_set(1201, "virtio-gpu");
         if (virtio_gpu_init() == 0) {
             boot_line("display", "virtio-gpu online");
-            serial_write("display: virtio-gpu online\n");
         } else {
             boot_prefix("display");
             console_write("virtio-gpu unavailable\n", CONSOLE_STYLE_WARN);
-            serial_write("display: no live display (virtio-gpu unavailable)\n");
         }
     }
 
@@ -386,16 +379,6 @@ void kernel_main(void *multiboot_info) {
                 boot_line("storage", "no ata/ahci disk detected");
             }
         }
-    }
-
-    bootstage_set(126, "usb");
-    if (xhci_init() == 0) {
-        boot_prefix("usb");
-        console_write("xhci online, devices=", CONSOLE_STYLE_INFO);
-        console_write_dec64(xhci_device_count(), CONSOLE_STYLE_INFO);
-        console_write("\n", CONSOLE_STYLE_INFO);
-    } else {
-        boot_line("usb", "xhci unavailable, continuing without usb");
     }
 
     if (vfs_init() != 0) {

@@ -8,6 +8,7 @@
 #include "../drivers/display/vga.h"
 #include "../drivers/input/input.h"
 #include "../drivers/input/mouse.h"
+#include "../drivers/rtc/rtc.h"
 #include "../fs/vfs.h"
 #include "../memory/vmm.h"
 #include "../cpu/pat.h"
@@ -286,6 +287,18 @@ static const dev_calls_t dev_fb_calls = {
     dev_gpu_set_cursor,
 };
 
+/* ---- /dev/rtc (read-only text node) ---- */
+
+static uint64_t dev_rtc_read(char *buf, uint64_t cap) {
+    return rtc_format(buf, cap);
+}
+
+static const dev_calls_t dev_rtc_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    dev_rtc_read,
+};
+
 /* ---- population ---- */
 
 int dev_populate(void) {
@@ -319,6 +332,11 @@ int dev_populate(void) {
             rc = -1;
         }
     }
+    if (!vfs_resolve(vfs_root(), "/dev/rtc")) {
+        if (vfs_create(vfs_root(), "/dev/rtc") != 0) {
+            rc = -1;
+        }
+    }
     if (devops_register("/dev/console", &dev_console_calls) != 0) {
         rc = -1;
     }
@@ -326,6 +344,9 @@ int dev_populate(void) {
         rc = -1;
     }
     if (devops_register("/dev/fb0", &dev_fb_calls) != 0) {
+        rc = -1;
+    }
+    if (devops_register("/dev/rtc", &dev_rtc_calls) != 0) {
         rc = -1;
     }
     return rc;

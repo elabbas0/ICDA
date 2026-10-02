@@ -1,299 +1,351 @@
 #!/usr/bin/env python3
-"""gen_icons.py - draw ICDA's own flat icon set (no external art).
+"""gen_icons.py - draw ICDA's icon set (no external art).
 
-Renders 16 distinct 32x32 RGBA icons with pure-stdlib raster ops and
-writes two outputs consumed by the build:
+Every icon is drawn at 4x on a 64 px grid and box-filtered down, so edges
+are antialiased at every size the shell uses (22 px taskbar, 44-48 px
+launcher and desktop, 64 px native).
 
-  1. resources/icons/<name>.ico  - single-entry BMP .ico (32x32 32bpp
-     BI_RGB) parsed by ic_ico_parse() into /usr/share/icons.
-  2. userspace/icon_data.h       - builtin RGBA registry with the exact
-     same struct layout the tree already uses
+The set follows one template so icons read as a family:
+  * app icons sit on a 52 px rounded tile (radius 12) centred on the
+    grid, filled with a top-lit vertical gradient, with a 1 px inner top
+    highlight and a soft contact shadow beneath;
+  * glyphs are white (or a single accent) with round caps, stroke 4 px
+    at 64 px;
+  * document/folder icons (used in file listings) are shaped objects,
+    not tiles, with the same shadow.
+
+Outputs consumed by the build:
+  1. resources/icons/<name>.ico - single-entry BMP .ico (64x64 32bpp)
+     parsed by ic_ico_parse() into /usr/share/icons.
+  2. userspace/icon_data.h      - builtin RGBA registry
      (ic_builtin_icon_entry_t {name, w, h, rgba}).
 
-Style: flat modern tiles - rounded-square hue tile + white glyph with
-features >= 2px so icons survive nearest-neighbor downscales to the
-22px taskbar and desktop sizes. Fully deterministic output.
-
-Usage:  python3 scripts/gen_icons.py   (run from repo root)
+Requires Pillow.  Usage:  python3 scripts/gen_icons.py
 """
 import math
 import os
 import struct
 import sys
 
-SIZE = 32
+from PIL import Image, ImageDraw, ImageFilter
+
+SIZE = 64
+S = 4                      # supersampling factor
+BIG = SIZE * S
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICON_DIR = os.path.join(REPO, "resources", "icons")
 HEADER_PATH = os.path.join(REPO, "userspace", "icon_data.h")
 
 WHITE = (255, 255, 255, 255)
+TILE = (6, 5, 58, 57)      # x0, y0, x1, y1 on the 64 grid
+TILE_R = 12
+STROKE = 4
 
 
-class Canvas:
-    """Tiny 32x32 RGBA raster surface (top-left origin)."""
-
-    def __init__(self):
-        self.px = bytearray(SIZE * SIZE * 4)  # transparent
-
-    def set(self, x, y, color):
-        if 0 <= x < SIZE and 0 <= y < SIZE:
-            r, g, b, a = color
-            o = (y * SIZE + x) * 4
-            if a == 255:
-                self.px[o:o + 4] = bytes((r, g, b, a))
-            else:
-                # source-over blend onto destination
-                dr, dg, db, da = self.px[o:o + 4]
-                inv = 255 - a
-                self.px[o:o + 4] = bytes((
-                    (r * a + dr * inv) // 255,
-                    (g * a + dg * inv) // 255,
-                    (b * a + db * inv) // 255,
-                    a + da * inv // 255,
-                ))
-
-    def rect(self, x0, y0, x1, y1, color):
-        for y in range(max(0, y0), min(SIZE, y1)):
-            for x in range(max(0, x0), min(SIZE, x1)):
-                self.set(x, y, color)
-
-    def hline(self, x0, x1, y, color):
-        self.rect(x0, y, x1, y + 1, color)
-
-    def vline(self, x, y0, y1, color):
-        self.rect(x, y0, x + 1, y1, color)
-
-    def line(self, x0, y0, x1, y1, w, color):
-        """Thick line via square brush along Bresenham path."""
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        r = w // 2
-        x, y = x0, y0
-        while True:
-            self.rect(x - r, y - r, x + r + (w % 2), y + r + (w % 2), color)
-            if x == x1 and y == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x += sx
-            if e2 <= dx:
-                err += dx
-                y += sy
-
-    def circle(self, cx, cy, rad, color, fill=True):
-        for y in range(cy - rad - 1, cy + rad + 2):
-            for x in range(cx - rad - 1, cx + rad + 2):
-                d = math.hypot(x - cx + 0.5, y - cy + 0.5)
-                if fill and d <= rad + 0.5:
-                    self.set(x, y, color)
-                elif not fill and abs(d - rad) < 0.9:
-                    self.set(x, y, color)
-
-    def ellipse(self, cx, cy, rx, ry, color):
-        for y in range(cy - ry - 1, cy + ry + 2):
-            for x in range(cx - rx - 1, cx + rx + 2):
-                if ((x - cx + 0.5) / (rx + 0.5)) ** 2 + \
-                   ((y - cy + 0.5) / (ry + 0.5)) ** 2 <= 1.0:
-                    self.set(x, y, color)
-
-    def rrect(self, x0, y0, x1, y1, rad, color):
-        self.rect(x0 + rad, y0, x1 - rad, y1, color)
-        self.rect(x0, y0 + rad, x1, y1 - rad, color)
-        for cx, cy in ((x0 + rad, y0 + rad), (x1 - rad - 1, y0 + rad),
-                       (x0 + rad, y1 - rad - 1), (x1 - rad - 1, y1 - rad - 1)):
-            self.circle(cx, cy, rad, color)
-
-    def triangle(self, ax, ay, bx, by, cx, cy, color):
-        xs = sorted((ax, bx, cx))
-        for y in range(min(ay, by, cy), max(ay, by, cy) + 1):
-            row = []
-            for (px, py), (qx, qy) in (((ax, ay), (bx, by)),
-                                       ((bx, by), (cx, cy)),
-                                       ((cx, cy), (ax, ay))):
-                if (py <= y < qy) or (qy <= y < py):
-                    t = (y - py) / (qy - py)
-                    row.append(px + t * (qx - px))
-            if len(row) >= 2:
-                self.hline(int(min(row)), int(max(row)) + 1, y, color)
-
-    def polygon(self, pts, color):
-        """Scanline fill for convex/concave polygons (cursor arrow)."""
-        ys = [p[1] for p in pts]
-        for y in range(min(ys), max(ys) + 1):
-            row = []
-            n = len(pts)
-            for i in range(n):
-                (px, py), (qx, qy) = pts[i], pts[(i + 1) % n]
-                if (py <= y < qy) or (qy <= y < py):
-                    t = (y - py) / (qy - py)
-                    row.append(px + t * (qx - px))
-            row.sort()
-            for i in range(0, len(row) - 1, 2):
-                self.hline(int(math.ceil(row[i])),
-                           int(math.floor(row[i + 1])) + 1, y, color)
-
-    def tile(self, rgb, radius=6, light=True):
-        """Rounded-square app tile + subtle top light."""
-        self.rrect(3, 3, 29, 29, radius, rgb + (255,))
-        if light:
-            r, g, b = rgb
-            hi = (min(255, r + 28), min(255, g + 28), min(255, b + 28), 255)
-            self.rect(3 + radius, 3, 29 - radius, 8, hi)
+def sc(v):
+    return int(round(v * S))
 
 
-def shade(rgb, f):
-    return tuple(max(0, min(255, int(c * f))) for c in rgb)
+def box(x0, y0, x1, y1):
+    return [sc(x0), sc(y0), sc(x1), sc(y1)]
 
 
-def draw_folder(c):
-    c.tile((217, 147, 30))
-    c.rrect(5, 9, 13, 13, 1, (217, 147, 30, 255))
-    c.rrect(5, 13, 27, 25, 2, (245, 185, 63, 255))
-    c.rect(5, 13, 27, 15, (255, 208, 107, 255))
+def new_layer():
+    return Image.new("RGBA", (BIG, BIG), (0, 0, 0, 0))
 
 
-def draw_terminal(c):
-    c.tile((22, 32, 46))
-    c.line(10, 13, 15, 17, 2, (74, 222, 128, 255))
-    c.line(15, 17, 10, 21, 2, (74, 222, 128, 255))
-    c.rect(17, 20, 23, 22, (74, 222, 128, 255))
+def lerp(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(len(a)))
 
 
-def draw_shell(c):
-    c.tile((11, 18, 32))
-    y = (74, 222, 128, 255)
-    c.rect(9, 12, 15, 14, y)      # upper bar
-    c.rect(20, 12, 23, 23, y)     # right spine
-    c.rect(9, 16, 23, 18, y)      # middle bar
-    c.rect(9, 16, 12, 23, y)      # lower-left hook
-    c.rect(9, 21, 15, 23, y)      # lower bar
+def gradient(top, bottom, y0=0, y1=SIZE):
+    """Full-canvas vertical gradient layer (RGBA)."""
+    img = new_layer()
+    px = img.load()
+    for y in range(BIG):
+        t = min(1.0, max(0.0, (y / S - y0) / max(1e-6, (y1 - y0))))
+        c = lerp(top, bottom, t) + (255,)
+        for x in range(BIG):
+            px[x, y] = c
+    return img
 
 
-def draw_file(c):
-    c.rect(9, 5, 21, 27, (237, 242, 247, 255))
-    c.triangle(21, 5, 21, 11, 15, 5, (148, 163, 184, 255))
-    for yy in (15, 18, 21):
-        c.rect(12, yy, 20, yy + 1, (100, 116, 139, 255))
+def mask_rrect(x0, y0, x1, y1, r):
+    m = Image.new("L", (BIG, BIG), 0)
+    ImageDraw.Draw(m).rounded_rectangle(box(x0, y0, x1, y1), radius=sc(r), fill=255)
+    return m
 
 
-def draw_editor(c):
-    c.tile((20, 184, 166))
-    c.line(20, 8, 11, 22, 3, WHITE)
-    c.triangle(11, 22, 8, 26, 13, 24, (251, 191, 36, 255))
+def shadow(base, mask, dy=1.5, blur=2.0, alpha=0.32):
+    """Soft contact shadow of `mask`, composited under everything."""
+    sh = Image.new("L", (BIG, BIG), 0)
+    sh.paste(mask, (0, sc(dy)))
+    sh = sh.filter(ImageFilter.GaussianBlur(blur * S))
+    sh = sh.point(lambda v: int(v * alpha))
+    layer = Image.new("RGBA", (BIG, BIG), (0, 0, 0, 255))
+    layer.putalpha(sh)
+    return Image.alpha_composite(base, layer)
 
 
-def draw_disk(c):
-    c.tile((31, 41, 55))
-    c.circle(16, 16, 9, (203, 213, 225, 255))
-    c.circle(16, 16, 3, (31, 41, 55, 255))
-    c.rect(14, 6, 18, 9, (245, 185, 63, 255))
+def tile(top, bottom):
+    """The shared app tile: gradient + inner highlight + contact shadow."""
+    img = new_layer()
+    m = mask_rrect(*TILE, TILE_R)
+    img = shadow(img, m)
+    fill = gradient(top, bottom, TILE[1], TILE[3])
+    img.paste(fill, (0, 0), m)
+    # 1 px inner highlight along the top edge, fading down the sides.
+    hl = new_layer()
+    d = ImageDraw.Draw(hl)
+    d.rounded_rectangle(box(TILE[0] + 0.5, TILE[1] + 0.5, TILE[2] - 0.5, TILE[3] - 0.5),
+                        radius=sc(TILE_R - 0.5), outline=(255, 255, 255, 70), width=S)
+    fade = Image.new("L", (BIG, BIG), 0)
+    fp = fade.load()
+    for y in range(BIG):
+        v = int(255 * max(0.0, 1.0 - (y / S - TILE[1]) / 14.0))
+        for x in range(BIG):
+            fp[x, y] = v
+    hl.putalpha(Image.composite(hl.getchannel("A"), Image.new("L", (BIG, BIG), 0), fade))
+    img = Image.alpha_composite(img, hl)
+    # Hairline edge so light tiles hold their shape on light wallpapers.
+    edge = new_layer()
+    ImageDraw.Draw(edge).rounded_rectangle(box(*TILE), radius=sc(TILE_R),
+                                           outline=(0, 0, 0, 38), width=max(1, S // 2))
+    return Image.alpha_composite(img, edge)
 
 
-def draw_gear(c):
-    c.tile((51, 65, 85))
-    for dx, dy in ((0, -9), (0, 9), (-9, 0), (9, 0),
-                   (-6, -6), (6, -6), (-6, 6), (6, 6)):
-        c.rect(16 + dx - 2, 16 + dy - 2, 16 + dx + 2, 16 + dy + 2,
-               (226, 232, 240, 255))
-    c.circle(16, 16, 7, (226, 232, 240, 255))
-    c.circle(16, 16, 3, (51, 65, 85, 255))
+def over(img, layer):
+    return Image.alpha_composite(img, layer)
 
 
-def draw_app(c):
-    c.tile((37, 99, 235))
-    for bx, by in ((8, 8), (18, 8), (8, 18), (18, 18)):
-        c.rrect(bx, by, bx + 7, by + 7, 2, WHITE)
+def stroke_lines(img, points, color=WHITE, width=STROKE, closed=False):
+    layer = new_layer()
+    d = ImageDraw.Draw(layer)
+    pts = [(sc(x), sc(y)) for x, y in points]
+    if closed:
+        pts.append(pts[0])
+    d.line(pts, fill=color, width=sc(width), joint="curve")
+    r = sc(width) / 2
+    for x, y in (pts if not closed else pts[:-1]):
+        d.ellipse([x - r, y - r, x + r, y + r], fill=color)
+    return over(img, layer)
 
 
-def draw_audio(c):
-    c.tile((124, 58, 237))
-    c.rect(7, 13, 11, 20, WHITE)
-    c.triangle(11, 10, 18, 16, 11, 22, WHITE)
-    for rad in (4, 8):
-        for deg in range(-50, 51, 4):
-            a = math.radians(deg)
-            c.set(int(18 + rad * math.cos(a)), int(16 + rad * math.sin(a)),
-                  WHITE)
+def glyph_shadow(img, draw_fn, alpha=0.22):
+    """Draw a glyph with a faint 1 px drop shadow for lift."""
+    g = new_layer()
+    draw_fn(ImageDraw.Draw(g))
+    a = g.getchannel("A")
+    sh = Image.new("L", (BIG, BIG), 0)
+    sh.paste(a, (0, sc(1)))
+    sh = sh.filter(ImageFilter.GaussianBlur(S)).point(lambda v: int(v * alpha))
+    dark = Image.new("RGBA", (BIG, BIG), (0, 0, 0, 255))
+    dark.putalpha(sh)
+    return over(over(img, dark), g)
 
 
-def draw_music(c):
-    c.tile((219, 39, 119))
-    c.rect(19, 7, 21, 21, WHITE)
-    c.rect(11, 7, 21, 10, WHITE)
-    c.ellipse(13, 21, 4, 3, WHITE)
-    c.ellipse(22, 22, 4, 3, WHITE)
+# --------------------------------------------------------------- app icons
+
+def draw_explorer():
+    img = tile((92, 170, 255), (30, 110, 235))
+
+    def g(d):
+        d.rounded_rectangle(box(17, 22, 32, 30), radius=sc(2.5), fill=(214, 233, 255, 255))
+        d.rounded_rectangle(box(17, 26, 47, 44), radius=sc(3.5), fill=WHITE)
+        d.rectangle(box(17, 26, 47, 29), fill=(233, 243, 255, 255))
+    return glyph_shadow(img, g)
 
 
-def draw_wav(c):
-    c.tile((8, 145, 178))
-    heights = (6, 12, 18, 11, 7, 14, 9)
-    for i, hh in enumerate(heights):
-        x = 6 + i * 3
-        c.rect(x, 16 - hh // 2, x + 2, 16 + (hh + 1) // 2, WHITE)
+def draw_terminal():
+    img = tile((64, 64, 70), (28, 28, 32))
+    inner = new_layer()
+    ImageDraw.Draw(inner).rounded_rectangle(box(11, 10, 53, 52), radius=sc(8),
+                                            outline=(255, 255, 255, 26), width=S)
+    img = over(img, inner)
+    img = stroke_lines(img, [(20, 24), (28, 31), (20, 38)], color=(245, 245, 247, 255), width=4)
+    img = stroke_lines(img, [(32, 39), (43, 39)], color=(152, 152, 160, 255), width=4)
+    return img
 
 
-def draw_desktop(c):
-    c.rrect(5, 8, 27, 22, 2, (15, 23, 42, 255))
-    c.rect(7, 10, 25, 19, (125, 211, 252, 255))
-    c.rect(14, 22, 18, 25, (15, 23, 42, 255))
-    c.rect(10, 25, 22, 27, (15, 23, 42, 255))
+def draw_browser():
+    img = tile((64, 200, 250), (24, 104, 232))
+    cx, cy, r = 32, 31, 15
+
+    def g(d):
+        w = sc(3)
+        d.ellipse(box(cx - r, cy - r, cx + r, cy + r), outline=WHITE, width=w)
+        d.ellipse(box(cx - 6.5, cy - r, cx + 6.5, cy + r), outline=WHITE, width=w)
+        d.line([sc(cx - r), sc(cy), sc(cx + r), sc(cy)], fill=WHITE, width=w)
+        d.arc(box(cx - r * 1.5, cy - r - 13, cx + r * 1.5, cy - 4), 50, 130, fill=WHITE, width=w)
+        d.arc(box(cx - r * 1.5, cy + 4, cx + r * 1.5, cy + r + 13), 230, 310, fill=WHITE, width=w)
+    return glyph_shadow(img, g)
 
 
-def draw_cursor(c):
-    arrow = [(8, 4), (8, 24), (13, 19), (16, 25), (19, 24),
-             (15, 18), (20, 18)]
-    fat = [(x * 2 - 8, y * 2 - 4) for x, y in arrow]
-    c.polygon([(x // 2, y // 2) for x, y in fat], (15, 23, 42, 255))
-    c.polygon(arrow, WHITE)
+def draw_editor():
+    img = tile((255, 255, 255), (228, 228, 234))
+    lines = new_layer()
+    d = ImageDraw.Draw(lines)
+    for i, y in enumerate((20, 27, 34, 41)):
+        w = (28, 30, 24, 17)[i]
+        d.rounded_rectangle(box(15, y, 15 + w, y + 3), radius=sc(1.5), fill=(160, 160, 170, 255))
+    img = over(img, lines)
+
+    def pencil(d):
+        # Pencil at 45 degrees: orange body, dark tip.
+        ax, ay, bx, by = 47, 17, 29, 35
+        d.line([sc(ax), sc(ay), sc(bx), sc(by)], fill=(255, 159, 10, 255), width=sc(7))
+        d.line([sc(ax + 1.5), sc(ay - 1.5), sc(ax + 4), sc(ay - 4)], fill=(255, 105, 97, 255),
+               width=sc(7))
+        d.polygon([(sc(bx - 2.5), sc(by - 2.5)), (sc(bx + 2.5), sc(by + 2.5)),
+                   (sc(bx - 5), sc(by + 5))], fill=(58, 58, 60, 255))
+    return glyph_shadow(img, pencil, alpha=0.18)
 
 
-def draw_close(c):
-    c.tile((220, 38, 38))
-    c.line(10, 10, 22, 22, 3, WHITE)
-    c.line(22, 10, 10, 22, 3, WHITE)
+def draw_music():
+    img = tile((255, 104, 132), (240, 40, 82))
+
+    def g(d):
+        d.ellipse(box(15.5, 36, 26.5, 45), fill=WHITE)
+        d.ellipse(box(35.5, 32, 46.5, 41), fill=WHITE)
+        d.line([sc(25), sc(40), sc(25), sc(18)], fill=WHITE, width=sc(3.2))
+        d.line([sc(45), sc(36), sc(45), sc(14)], fill=WHITE, width=sc(3.2))
+        d.polygon([(sc(23.4), sc(16)), (sc(46.6), sc(11)), (sc(46.6), sc(18)), (sc(23.4), sc(23))],
+                  fill=WHITE)
+    return glyph_shadow(img, g)
 
 
-def draw_min(c):
-    c.tile((71, 85, 105))
-    c.rect(10, 15, 22, 17, WHITE)
+def draw_disk():
+    img = tile((120, 128, 146), (58, 64, 80))
+
+    def g(d):
+        d.rounded_rectangle(box(13, 20, 51, 43), radius=sc(5), fill=(236, 238, 242, 255))
+        d.rectangle(box(13, 34, 51, 35), fill=(170, 174, 184, 255))
+        d.ellipse(box(42, 37.5, 46, 41.5), fill=(52, 199, 89, 255))
+        for x in (17, 21, 25):
+            d.rounded_rectangle(box(x, 38, x + 2, 40), radius=sc(1), fill=(150, 154, 164, 255))
+    return glyph_shadow(img, g)
 
 
-def draw_max(c):
-    c.tile((71, 85, 105))
-    c.rect(10, 10, 22, 12, WHITE)
-    c.rect(10, 20, 22, 22, WHITE)
-    c.rect(10, 10, 12, 22, WHITE)
-    c.rect(20, 10, 22, 22, WHITE)
+def draw_taskman():
+    img = tile((58, 58, 62), (22, 22, 26))
+    grid = new_layer()
+    d = ImageDraw.Draw(grid)
+    for y in (20, 31, 42):
+        d.line([sc(12), sc(y), sc(52), sc(y)], fill=(255, 255, 255, 20), width=S)
+    img = over(img, grid)
+    return stroke_lines(img, [(12, 33), (21, 33), (26, 20), (33, 44), (38, 29), (42, 33), (52, 33)],
+                        color=(52, 211, 110, 255), width=3.6)
+
+
+def gear_polygon(cx, cy, r_out, r_in, teeth, tooth_frac=0.46):
+    pts = []
+    n = teeth * 4
+    for i in range(n):
+        seg = i % 4
+        a = (i // 4 + (0, tooth_frac * 0.5, 1 - tooth_frac * 0.5, 1)[seg] * 1.0) * 2 * math.pi / teeth
+        r = r_out if seg in (1, 2) else r_in
+        pts.append((sc(cx + r * math.cos(a)), sc(cy + r * math.sin(a))))
+    return pts
+
+
+def draw_settings():
+    img = tile((214, 214, 220), (150, 150, 158))
+
+    def g(d):
+        d.polygon(gear_polygon(32, 31, 19, 15.5, 12), fill=(84, 84, 92, 255))
+        d.ellipse(box(21, 20, 43, 42), fill=(84, 84, 92, 255))
+        d.ellipse(box(24.5, 23.5, 39.5, 38.5), fill=(200, 200, 206, 255))
+        d.ellipse(box(28, 27, 36, 35), fill=(84, 84, 92, 255))
+    return glyph_shadow(img, g, alpha=0.3)
+
+
+def draw_app():
+    img = tile((170, 170, 178), (110, 110, 118))
+
+    def g(d):
+        for bx, by in ((18, 17), (34, 17), (18, 33), (34, 33)):
+            d.rounded_rectangle(box(bx, by, bx + 12, by + 12), radius=sc(3.5), fill=WHITE)
+    return glyph_shadow(img, g)
+
+
+# ----------------------------------------------------------- object icons
+
+def draw_folder():
+    img = new_layer()
+    back = mask_rrect(8, 14, 56, 50, 5)
+    tab = new_layer()
+    d = ImageDraw.Draw(tab)
+    d.rounded_rectangle(box(8, 11, 28, 20), radius=sc(3.5), fill=(53, 132, 228, 255))
+    img = shadow(img, back, dy=1.2, blur=1.6, alpha=0.28)
+    img = over(img, tab)
+    bk = gradient((58, 140, 235), (43, 116, 214), 14, 50)
+    img.paste(bk, (0, 0), back)
+    front = mask_rrect(8, 20, 56, 51, 5)
+    fr = gradient((117, 188, 255), (74, 156, 246), 20, 51)
+    img.paste(fr, (0, 0), front)
+    hl = new_layer()
+    ImageDraw.Draw(hl).line([sc(12), sc(21), sc(52), sc(21)], fill=(255, 255, 255, 110), width=S)
+    return over(img, hl)
+
+
+def document(accent=None):
+    img = new_layer()
+    body = [(sc(14), sc(6)), (sc(40), sc(6)), (sc(50), sc(16)), (sc(50), sc(58)), (sc(14), sc(58))]
+    m = Image.new("L", (BIG, BIG), 0)
+    ImageDraw.Draw(m).polygon(body, fill=255)
+    img = shadow(img, m, dy=1.0, blur=1.4, alpha=0.30)
+    page = gradient((255, 255, 255), (242, 242, 246), 6, 58)
+    img.paste(page, (0, 0), m)
+    d = ImageDraw.Draw(img)
+    d.polygon(body + [body[0]], outline=(0, 0, 0, 40))
+    d.polygon([(sc(40), sc(6)), (sc(40), sc(16)), (sc(50), sc(16))], fill=(220, 220, 228, 255))
+    return img
+
+
+def draw_file():
+    img = document()
+    d = ImageDraw.Draw(img)
+    for i, y in enumerate((26, 32, 38, 44)):
+        w = (24, 26, 20, 14)[i]
+        d.rounded_rectangle(box(20, y, 20 + w, y + 2.4), radius=sc(1.2), fill=(176, 176, 186, 255))
+    return img
+
+
+def draw_wav():
+    img = document()
+    d = ImageDraw.Draw(img)
+    heights = (6, 12, 18, 10, 20, 14, 8, 16, 6)
+    for i, h in enumerate(heights):
+        x = 18 + i * 3.4
+        d.rounded_rectangle(box(x, 37 - h / 2, x + 2.2, 37 + h / 2), radius=sc(1.1),
+                            fill=lerp((255, 70, 110), (175, 82, 222), i / (len(heights) - 1)) + (255,))
+    return img
 
 
 DRAWERS = {
-    "app": draw_app,
-    "audio": draw_audio,
-    "close": draw_close,
-    "cursor": draw_cursor,
-    "desktop": draw_desktop,
-    "disk": draw_disk,
-    "editor": draw_editor,
-    "file": draw_file,
-    "folder": draw_folder,
-    "gear": draw_gear,
-    "max": draw_max,
-    "min": draw_min,
-    "music": draw_music,
-    "shell": draw_shell,
+    "explorer": draw_explorer,
     "terminal": draw_terminal,
+    "browser": draw_browser,
+    "editor": draw_editor,
+    "music": draw_music,
+    "disk": draw_disk,
+    "taskman": draw_taskman,
+    "settings": draw_settings,
+    "app": draw_app,
+    "folder": draw_folder,
+    "file": draw_file,
     "wav": draw_wav,
 }
 
 
-def write_ico(path, canvas):
-    """Single-entry 32x32 32bpp BI_RGB .ico (what ic_ico_parse reads)."""
-    px = canvas.px
-    assert len(px) == SIZE * SIZE * 4
+def render(fn):
+    big = fn()
+    return big.resize((SIZE, SIZE), Image.Resampling.BOX)
+
+
+def write_ico(path, img):
+    """Single-entry 64x64 32bpp BI_RGB .ico (what ic_ico_parse reads)."""
+    px = img.tobytes()
     dib = struct.pack("<IIIHHIIIIII", 40, SIZE, SIZE * 2, 1, 32, 0,
                       SIZE * SIZE * 4, 0, 0, 0, 0)
     body = bytearray()
@@ -302,16 +354,15 @@ def write_ico(path, canvas):
             o = (y * SIZE + x) * 4
             r, g, b, a = px[o:o + 4]
             body += bytes((b, g, r, a))
-    body += bytes(SIZE * SIZE // 8)  # AND mask: all opaque
-    img = dib + bytes(body)
+    body += bytes(SIZE * SIZE // 8)  # AND mask: alpha channel decides
+    data = dib + bytes(body)
     hdr = struct.pack("<HHH", 0, 1, 1)
-    entry = struct.pack("<BBBBHHII", SIZE, SIZE, 0, 0, 1, 32,
-                        len(img), 6 + 16)
+    entry = struct.pack("<BBBBHHII", SIZE, SIZE, 0, 0, 1, 32, len(data), 6 + 16)
     with open(path, "wb") as f:
-        f.write(hdr + entry + img)
+        f.write(hdr + entry + data)
 
 
-def write_header(path, canvases):
+def write_header(path, images):
     with open(path, "w") as f:
         f.write("/* Generated by scripts/gen_icons.py - do not edit by hand. */\n"
                 "#ifndef USERSPACE_ICON_DATA_H\n"
@@ -323,37 +374,40 @@ def write_header(path, canvases):
                 "    uint16_t     h;\n"
                 "    const uint8_t *rgba;\n"
                 "} ic_builtin_icon_entry_t;\n\n")
-        for name in sorted(canvases):
-            px = canvases[name].px
-            f.write("static const uint8_t icon_%s_rgba[] = {\n    " % name)
-            f.write(", ".join(str(b) for b in px))
-            f.write("\n};\n\n")
+        for name in sorted(images):
+            px = images[name].tobytes()
+            f.write("static const uint8_t icon_%s_rgba[] = {\n" % name)
+            for i in range(0, len(px), 32):
+                f.write("    " + ",".join(str(b) for b in px[i:i + 32]) + ",\n")
+            f.write("};\n\n")
         f.write("static const ic_builtin_icon_entry_t ic_builtin_icons[] = {\n")
-        for name in sorted(canvases):
-            f.write('    { "%s", 32, 32, icon_%s_rgba },\n' % (name, name))
+        for name in sorted(images):
+            f.write('    { "%s", %d, %d, icon_%s_rgba },\n' % (name, SIZE, SIZE, name))
         f.write("};\n\n#define IC_BUILTIN_ICON_COUNT %d\n\n"
-                "#endif /* USERSPACE_ICON_DATA_H */\n" % len(canvases))
+                "#endif /* USERSPACE_ICON_DATA_H */\n" % len(images))
 
 
 def main():
     os.makedirs(ICON_DIR, exist_ok=True)
-    canvases = {}
-    for name, fn in sorted(DRAWERS.items()):
-        c = Canvas()
-        fn(c)
-        canvases[name] = c
-        write_ico(os.path.join(ICON_DIR, name + ".ico"), c)
-    write_header(HEADER_PATH, canvases)
-    import hashlib
-    digests = set()
-    for n in canvases:
-        with open(os.path.join(ICON_DIR, n + ".ico"), "rb") as f:
-            digests.add(hashlib.md5(f.read()).digest())
-    print("icons: %d, distinct .ico contents: %d, header: %s"
-          % (len(canvases), len(digests), HEADER_PATH))
-    if len(digests) != len(canvases):
-        print("WARNING: duplicate .ico contents!", file=sys.stderr)
-        return 1
+    images = {name: render(fn) for name, fn in sorted(DRAWERS.items())}
+    keep = set(n + ".ico" for n in images)
+    for stale in os.listdir(ICON_DIR):
+        if stale.endswith(".ico") and stale not in keep:
+            os.remove(os.path.join(ICON_DIR, stale))
+    for name, img in images.items():
+        write_ico(os.path.join(ICON_DIR, name + ".ico"), img)
+    write_header(HEADER_PATH, images)
+    if len(sys.argv) > 1 and sys.argv[1] == "--sheet":
+        sheet = Image.new("RGBA", (SIZE * len(images) + 8 * (len(images) + 1), SIZE * 2 + 24),
+                          (40, 40, 46, 255))
+        light = Image.new("RGBA", (sheet.width, SIZE + 12), (236, 236, 240, 255))
+        sheet.paste(light, (0, SIZE + 12))
+        for i, name in enumerate(sorted(images)):
+            x = 8 + i * (SIZE + 8)
+            sheet.alpha_composite(images[name], (x, 6))
+            sheet.alpha_composite(images[name], (x, SIZE + 18))
+        sheet.save(sys.argv[2])
+    print("icons: %d -> %s, %s" % (len(images), ICON_DIR, HEADER_PATH))
     return 0
 
 

@@ -1,123 +1,235 @@
-#include "gui.h"
-#include "icda_sys.h"
+/*
+ * desktop.app - ICDA Explorer.
+ *
+ * The "browser of things" shell from docs/DESIGN.md: a toolbar, a
+ * sidebar of places, and a content area that switches between an icon
+ * grid and a detail list.
+ *
+ * Opening an item picks the right app by type: folders navigate, .app
+ * and .elf files launch, .wav files play (respecting the `audio`
+ * setting) and everything else opens in the Editor.  The context menu
+ * carries Rename, Get Info and Delete; Delete is behind an ic_ui_alert
+ * because it cannot be undone.
+ */
 #include "libicda.h"
-#include "font.h"
 #include "settings_store.h"
 
-#include <stdint.h>
+#define WIN_W 780
+#define WIN_H 520
 
-#define DESKTOP_W 760
-#define DESKTOP_H 520
-#define PATH_CAP 192
-#define NAME_CAP 64
-#define STATUS_CAP 96
-#define LIST_CAP 4096
-#define MAX_ITEMS 96
-#define HISTORY_CAP 16
-#define EDIT_CAP 4096
+#define PATH_CAP     192
+#define NAME_CAP     64
+#define STATUS_CAP   128
+#define LIST_CAP     4096
+#define MAX_ITEMS    96
+#define HISTORY_CAP  16
+#define DIALOG_CAP   PATH_CAP
+#define STATUS_H     24
+#define GRID_CELL_W  104
+#define GRID_CELL_H  88
+#define ROW_H        IC_H_ROW
 
-#define TOP_H 80
-#define SIDE_W 132
-#define STATUS_H 36
-#define ICON_CELL_W 96
-#define ICON_CELL_H 82
+/* Icon grid vs detail list. */
+enum { VIEW_GRID = 0, VIEW_LIST };
 
+/* The small modal that asks for one line of text. */
+enum { DLG_NONE = 0, DLG_NEW_FILE, DLG_NEW_FOLDER, DLG_GOTO, DLG_RENAME };
+
+/* Context-menu actions.  Delete is deliberately absent: the VFS has no
+ * unlink primitive and the native ABI is frozen at 70 calls
+ * (scripts/check-abi.sh), so there is no honest way to offer it yet. */
 enum {
-    MODE_BROWSER = 0,
-    MODE_EDITOR = 1
-};
-
-enum {
-    DIALOG_NONE = 0,
-    DIALOG_NEW_FILE,
-    DIALOG_NEW_FOLDER,
-    DIALOG_GOTO
-};
-
-enum {
-    SPECIAL_UP = 1,
-    SPECIAL_DOWN,
-    SPECIAL_LEFT,
-    SPECIAL_RIGHT,
-    SPECIAL_DELETE
+    CA_OPEN = 1,
+    CA_EDIT,
+    CA_RENAME,
+    CA_INFO,
+    CA_NEW_FILE,
+    CA_NEW_FOLDER,
+    CA_OPEN_TERMINAL,
+    CA_REFRESH
 };
 
 typedef struct {
-    char name[NAME_CAP];
-    char path[PATH_CAP];
-    int is_dir;
-    int is_app;
-    int is_wav;
+    char     name[NAME_CAP];
+    char     path[PATH_CAP];
+    int      is_dir;
+    int      is_app;
+    int      is_wav;
     uint64_t size;
-    uint8_t readonly;
-    int x;
-    int y;
-    int w;
-    int h;
-} desktop_item_t;
+    uint8_t  readonly;
+} ex_item_t;
 
-static desktop_item_t items[MAX_ITEMS];
-static int item_count = 0;
-static int selected_item = -1;
-static int hover_item = -1;
-static int page_offset = 0;
-static int layout_cols = 1;
-static int layout_visible = 1;
+static struct {
+    ex_item_t items[MAX_ITEMS];
+    int       count;
+    int       selected;          /* index into items, -1 none */
+    int       hover;              /* index under the pointer, -1 none */
 
-static char current_path[PATH_CAP] = "/";
-static char status_text[STATUS_CAP] = "Ready";
-static char list_buf[LIST_CAP];
-static char history[HISTORY_CAP][PATH_CAP];
-static int history_count = 0;
+    char      path[PATH_CAP];
+    char      history[HISTORY_CAP][PATH_CAP];
+    int       history_count;
+    int       history_pos;       /* where we are in the history list */
 
-static int mode = MODE_BROWSER;
-static int dialog = DIALOG_NONE;
-static char dialog_input[PATH_CAP];
-static char dialog_title[48];
-static int dialog_cursor = 0;
+    int       view;
+    int       scroll;             /* first visible row (grid) or item (list) */
+    int       rows;               /* visible grid rows / list rows */
+    int       cols;               /* grid columns */
+    int       first_item;         /* first drawn index (list view) */
+    int       last_item;
 
-static char editor_path[PATH_CAP];
-static char editor_buf[EDIT_CAP];
-static uint64_t editor_len = 0;
-static uint64_t editor_cursor = 0;
-static int editor_modified = 0;
-static int editor_top_row = 0;
+    /* pointer */
+    int hover_back;
+    int hover_up;
+    int hover_view;
+    int hover_new_folder;
+    int hover_new_file;
+    int hover_sidebar;
+    int list_focused;
 
-static uint64_t last_click_tick = 0;
-static int last_click_item = -1;
-static int key_seq_state = 0;
-static int last_blink_state = 0;   /* selection blink phase tracker */
+    /* modal text prompt */
+    int  dialog;
+    char dialog_title[48];
+    char dialog_buf[DIALOG_CAP];
+    int  dialog_cursor;
+    int  dialog_scroll;
 
-/* ---- context-menu BSS (ported from wm.c ctx pattern) ---- */
-#define CTX_MAX_ITEMS 10
-#define CTX_LABEL_LEN 32
+    /* context menu */
+    ic_menu_model_t menu;
+    int  menu_x, menu_y;
+    int  menu_open;
+    int  menu_item;               /* -1 = the folder itself */
+    int  menu_hover;
 
-enum {
-    CTX_OPEN = 1,
-    CTX_EDIT,
-    CTX_PLAY_STOP,
-    CTX_PROPERTIES,
-    CTX_RELOAD,
-    CTX_NEW_FILE,
-    CTX_NEW_FOLDER,
-    CTX_GOTO,
-    CTX_TERMINAL,
-    CTX_DISKMAN
+    /* Get Info */
+    int  info_open;
+
+    char list_buf[LIST_CAP];
+    char status[STATUS_CAP];
+} ex;
+
+/* ------------------------------------------------------------- layout */
+
+static ic_rect_t toolbar_rect(ic_app_t *app) {
+    return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
+}
+
+static ic_rect_t sidebar_rect(ic_app_t *app) {
+    return ic_rect_make(0, IC_H_TOOLBAR, IC_W_SIDEBAR, app->height - IC_H_TOOLBAR - STATUS_H);
+}
+
+static ic_rect_t content_rect(ic_app_t *app) {
+    ic_rect_t s = sidebar_rect(app);
+    return ic_rect_make(s.x + s.w, s.y, app->width - s.x - s.w, s.h);
+}
+
+static ic_rect_t status_rect(ic_app_t *app) {
+    return ic_rect_make(0, app->height - STATUS_H, app->width, STATUS_H);
+}
+
+static ic_rect_t back_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    return ic_rect_make(b.x + IC_SP_2, (b.h - IC_H_CONTROL) / 2, IC_H_CONTROL, IC_H_CONTROL);
+}
+
+static ic_rect_t up_rect(ic_app_t *app) {
+    ic_rect_t r = back_rect(app);
+    return ic_rect_make(r.x + r.w + IC_SP_1, r.y, IC_H_CONTROL, IC_H_CONTROL);
+}
+
+static ic_rect_t path_rect(ic_app_t *app) {
+    ic_rect_t r = up_rect(app);
+    int x = r.x + r.w + IC_SP_2;
+    int w = app->width - x - 2 * (IC_H_CONTROL + IC_SP_2) - 2 * IC_SP_3;
+    if (w < 60) w = 60;
+    return ic_rect_make(x, (toolbar_rect(app).h - IC_H_CONTROL) / 2, w, IC_H_CONTROL);
+}
+
+static ic_rect_t view_rect(ic_app_t *app) {
+    ic_rect_t p = path_rect(app);
+    return ic_rect_make(p.x + p.w + IC_SP_2, p.y, IC_H_CONTROL, IC_H_CONTROL);
+}
+
+static ic_rect_t new_folder_rect(ic_app_t *app) {
+    ic_rect_t v = view_rect(app);
+    return ic_rect_make(v.x + v.w + IC_SP_2, v.y,
+                        ic_ui_button_width("New Folder", IC_SYM_NONE), IC_H_CONTROL);
+}
+
+static ic_rect_t new_file_rect(ic_app_t *app) {
+    ic_rect_t n = new_folder_rect(app);
+    return ic_rect_make(n.x + n.w + IC_SP_2, n.y,
+                        ic_ui_button_width("New File", IC_SYM_NONE), IC_H_CONTROL);
+}
+
+/* Places in the sidebar. */
+static const char *const PLACES[] = {
+    "/", "/home", "/apps", "/usr/share/audio", "/usr/share/apps", "/etc", "/cfg"
+};
+#define PLACE_COUNT ((int)(sizeof(PLACES) / sizeof(PLACES[0])))
+
+static const ic_symbol_t PLACE_SYMBOLS[PLACE_COUNT] = {
+    IC_SYM_DISK, IC_SYM_FOLDER, IC_SYM_GRID, IC_SYM_MUSIC, IC_SYM_FOLDER, IC_SYM_GEAR,
+    IC_SYM_GEAR
 };
 
-static int ctx_open = 0;
-static int ctx_x = 0;
-static int ctx_y = 0;
-static int ctx_item = -1;          /* -1 = background */
-static int ctx_nitems = 0;
-static int ctx_actions[CTX_MAX_ITEMS];
-static char ctx_labels[CTX_MAX_ITEMS][CTX_LABEL_LEN];
-static int props_open = 0;
-static char props_body[192];
-static int prev_right = 0;         /* edge-detect latch for right button */
-static int prev_left = 0;          /* rising-edge latch for left button */
-static int last_mouse_x = 0;       /* for menu hover tracking */
-static int last_mouse_y = 0;
+static ic_rect_t place_rect(ic_app_t *app, int i) {
+    ic_rect_t s = sidebar_rect(app);
+    return ic_rect_make(s.x, s.y + IC_SP_3 + i * (IC_H_ROW + 2), s.w, IC_H_ROW);
+}
+
+static ic_rect_t item_rect(ic_app_t *app, int index) {
+    ic_rect_t c = content_rect(app);
+    if (ex.view == VIEW_LIST) {
+        int first = ex.first_item;
+        return ic_rect_make(c.x + IC_SP_2, c.y + IC_SP_2 + (index - first) * ROW_H,
+                            c.w - 2 * IC_SP_2 - IC_SP_2, ROW_H);
+    }
+    {
+        int slot = index - ex.scroll;
+        int col = slot % ex.cols;
+        int row = slot / ex.cols;
+        return ic_rect_make(c.x + IC_SP_3 + col * GRID_CELL_W, c.y + IC_SP_3 + row * GRID_CELL_H,
+                            GRID_CELL_W - IC_SP_2, GRID_CELL_H - IC_SP_2);
+    }
+}
+
+static int can_go_back(void) { return ex.history_pos > 0; }
+
+static int can_go_up(void) { return !ic_streq(ex.path, "/"); }
+
+static void layout(ic_app_t *app) {
+    ic_rect_t c = content_rect(app);
+    if (ex.view == VIEW_LIST) {
+        int rows = (c.h - 2 * IC_SP_2) / ROW_H;
+        if (rows < 1) rows = 1;
+        ex.rows = rows;
+        ex.cols = 1;
+        if (ex.selected < 0) ex.first_item = 0;
+        else if (ex.selected < ex.first_item) ex.first_item = ex.selected;
+        else if (ex.selected >= ex.first_item + rows) ex.first_item = ex.selected - rows + 1;
+        if (ex.first_item > ex.count - rows) ex.first_item = ex.count - rows;
+        if (ex.first_item < 0) ex.first_item = 0;
+        ex.last_item = ex.first_item + rows;
+        if (ex.last_item > ex.count) ex.last_item = ex.count;
+    } else {
+        int cols = (c.w - 2 * IC_SP_3) / GRID_CELL_W;
+        int rows;
+        if (cols < 1) cols = 1;
+        rows = (c.h - 2 * IC_SP_3) / GRID_CELL_H;
+        if (rows < 1) rows = 1;
+        ex.cols = cols;
+        ex.rows = rows;
+        /* Page the grid so the selection stays on screen. */
+        if (ex.selected < 0) ex.scroll = 0;
+        else {
+            int page = cols * rows;
+            int first_page = (ex.selected / page) * page;
+            ex.scroll = first_page;
+        }
+    }
+}
+
+/* ------------------------------------------------------------ helpers */
 
 static uint64_t d_strlen(const char *s) {
     uint64_t n = 0;
@@ -125,130 +237,68 @@ static uint64_t d_strlen(const char *s) {
     return n;
 }
 
-static int d_streq(const char *a, const char *b) {
-    uint64_t i = 0;
-    if (!a || !b) return 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return 0;
-        i++;
-    }
-    return a[i] == 0 && b[i] == 0;
-}
-
-static char d_lower(char c) {
-    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
-    return c;
-}
-
 static void d_copy(char *dst, const char *src, uint64_t cap) {
     uint64_t i = 0;
     if (!dst || cap == 0) return;
-    while (src && src[i] && i + 1 < cap) {
-        dst[i] = src[i];
-        i++;
-    }
+    while (src && src[i] && i + 1 < cap) { dst[i] = src[i]; i++; }
     dst[i] = 0;
 }
 
-static void d_append(char *dst, const char *src, uint64_t cap) {
-    uint64_t at = d_strlen(dst);
+static int d_streq(const char *a, const char *b) {
     uint64_t i = 0;
-    if (!dst || cap == 0 || at >= cap) return;
-    while (src && src[i] && at + 1 < cap) {
-        dst[at++] = src[i++];
-    }
-    dst[at] = 0;
+    if (!a || !b) return a == b;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
 }
 
-static void uint_to_text(uint64_t v, char *out, uint64_t cap) {
-    char tmp[32];
-    uint64_t len = 0;
-    uint64_t i = 0;
-
-    if (!out || cap == 0) return;
-    if (v == 0) {
-        d_copy(out, "0", cap);
-        return;
-    }
-    while (v && len < sizeof(tmp)) {
-        tmp[len++] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    while (len && i + 1 < cap) {
-        out[i++] = tmp[--len];
-    }
-    out[i] = 0;
+static char d_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
 static int has_suffix(const char *text, const char *suffix) {
     uint64_t tl = d_strlen(text);
     uint64_t sl = d_strlen(suffix);
-    if (sl > tl) return 0;
+    if (tl < sl) return 0;
     for (uint64_t i = 0; i < sl; i++) {
-        if (d_lower(text[tl - sl + i]) != d_lower(suffix[i])) return 0;
+        if (d_lower(text[tl - sl + i]) != suffix[i]) return 0;
     }
     return 1;
 }
 
-static void set_status(const char *text) {
-    d_copy(status_text, text, sizeof(status_text));
+static void ex_status(const char *text) {
+    d_copy(ex.status, text, STATUS_CAP);
 }
 
-static int hit_rect(int mx, int my, int x, int y, int w, int h) {
-    return mx >= x && my >= y && mx < x + w && my < y + h;
-}
-
-static void draw_text_clip(int x, int y, const char *text, uint32_t fg, uint32_t bg, int max_px) {
-    ic_canvas_t c;
-    if (max_px <= 0) return;
-    c.px = gui_pixel_buffer();
-    c.w = gui_window_width();
-    c.h = gui_window_height();
-    ic_text_font(&c, x, y, text, fg, bg, max_px, NULL, 1);
-}
-
-static void draw_panel(int x, int y, int w, int h, uint32_t fill, uint32_t edge) {
-    gui_fill_rect(x, y, w, h, fill);
-    gui_draw_rect_outline(x, y, w, h, edge);
-}
-
-static void draw_button(int x, int y, int w, int h, const char *label, int active) {
-    uint32_t fill = active ? 0x0038BDF8 : 0x001E293B;
-    uint32_t edge = active ? 0x000EA5E9 : 0x00334155;
-    uint32_t fg = active ? 0x000F172A : 0x00F1F5F9;
-    ic_canvas_t c;
-    c.px = gui_pixel_buffer();
-    c.w = gui_window_width();
-    c.h = gui_window_height();
-    ic_rect_r(&c, x, y, w, h, IC_RADIUS_BUTTON, fill);
-    ic_outline_r(&c, x, y, w, h, IC_RADIUS_BUTTON, edge);
-    draw_text_clip(x + 8, y + 5, label, fg, fill, w - 14);
+static void size_text(uint64_t bytes, char *out, uint64_t cap) {
+    static const char *const units[4] = { "bytes", "KB", "MB", "GB" };
+    uint64_t whole = bytes;
+    int unit = 0;
+    if (cap == 0) return;
+    while (whole >= 1000 && unit < 3) { whole /= 1000; unit++; }
+    out[0] = 0;
+    ic_snprintf_u64(out, cap, whole);
+    ic_strlcat(out, " ", cap);
+    ic_strlcat(out, units[unit], cap);
 }
 
 static void path_join(char *out, uint64_t cap, const char *dir, const char *name) {
-    d_copy(out, dir && *dir ? dir : "/", cap);
-    if (!d_streq(out, "/")) d_append(out, "/", cap);
-    d_append(out, name, cap);
+    d_copy(out, (dir && *dir) ? dir : "/", cap);
+    if (!d_streq(out, "/")) ic_strlcat(out, "/", cap);
+    ic_strlcat(out, name, cap);
 }
 
 static void path_parent(char *out, uint64_t cap, const char *path) {
     uint64_t len;
-    d_copy(out, path && *path ? path : "/", cap);
+    d_copy(out, (path && *path) ? path : "/", cap);
     len = d_strlen(out);
     while (len > 1 && out[len - 1] == '/') out[--len] = 0;
-    if (len <= 1) {
-        d_copy(out, "/", cap);
-        return;
-    }
+    if (len <= 1) { d_copy(out, "/", cap); return; }
     while (len > 1 && out[len - 1] != '/') len--;
-    if (len <= 1) {
-        d_copy(out, "/", cap);
-    } else {
-        out[len - 1] = 0;
-    }
+    if (len <= 1) d_copy(out, "/", cap);
+    else out[len - 1] = 0;
 }
 
-static int valid_new_name(const char *name) {
+static int valid_name(const char *name) {
     uint64_t len = d_strlen(name);
     if (len == 0 || len >= NAME_CAP) return 0;
     for (uint64_t i = 0; i < len; i++) {
@@ -258,1058 +308,846 @@ static int valid_new_name(const char *name) {
     return 1;
 }
 
-static void history_push(const char *path) {
-    if (history_count >= HISTORY_CAP) {
-        for (int i = 1; i < HISTORY_CAP; i++) {
-            d_copy(history[i - 1], history[i], sizeof(history[0]));
-        }
-        history_count = HISTORY_CAP - 1;
+static int valid_path(const char *path) {
+    uint64_t len = d_strlen(path);
+    if (len == 0 || len >= PATH_CAP) return 0;
+    for (uint64_t i = 0; i < len; i++) {
+        char c = path[i];
+        if (c == '\\' || c < 32) return 0;
     }
-    d_copy(history[history_count++], path, sizeof(history[0]));
+    return path[0] == '/';
 }
 
-static void layout_items(int win_w, int win_h) {
-    int grid_x = SIDE_W + 16;
-    int grid_y = TOP_H + 14;
-    int grid_w = win_w - grid_x - 14;
-    int grid_h = win_h - grid_y - STATUS_H - 10;
+/* ---------------------------------------------------------- browsing */
 
-    layout_cols = grid_w / ICON_CELL_W;
-    if (layout_cols < 1) layout_cols = 1;
-    layout_visible = layout_cols * (grid_h / ICON_CELL_H);
-    if (layout_visible < 1) layout_visible = layout_cols;
-
-    if (page_offset >= item_count) page_offset = 0;
-    if (selected_item >= item_count) selected_item = -1;
-
-    for (int i = 0; i < item_count; i++) {
-        items[i].x = items[i].y = items[i].w = items[i].h = 0;
-    }
-    for (int slot = 0; slot < layout_visible; slot++) {
-        int idx = page_offset + slot;
-        if (idx >= item_count) break;
-        items[idx].x = grid_x + (slot % layout_cols) * ICON_CELL_W;
-        items[idx].y = grid_y + (slot / layout_cols) * ICON_CELL_H;
-        items[idx].w = ICON_CELL_W - 8;
-        items[idx].h = ICON_CELL_H - 6;
-    }
-}
-
-static void browser_refresh(void) {
+static void refresh(void) {
     uint64_t rc;
     uint64_t pos = 0;
-    item_count = 0;
-    hover_item = -1;
+    ex.count = 0;
+    ex.hover = -1;
+    ex.scroll = 0;
 
-    rc = icda_list_dir(current_path, list_buf, sizeof(list_buf));
+    rc = icda_list_dir(ex.path, ex.list_buf, sizeof(ex.list_buf) - 1);
     if ((long)rc < 0) {
-        set_status("Could not read folder");
-        current_path[0] = '/';
-        current_path[1] = 0;
-        rc = icda_list_dir(current_path, list_buf, sizeof(list_buf));
-        if ((long)rc < 0) return;
+        ex_status("That folder could not be read");
+        ex.count = 0;
+        ex.selected = -1;
+        return;
     }
+    ex.list_buf[rc] = 0;
 
-    while (pos < rc && item_count < MAX_ITEMS) {
+    while (pos < rc && ex.count < MAX_ITEMS) {
         char entry[NAME_CAP];
         uint64_t ei = 0;
         int is_dir = 0;
+        ex_item_t *it = &ex.items[ex.count];
 
-        while (pos < rc && list_buf[pos] != '\n' && ei + 1 < sizeof(entry)) {
-            entry[ei++] = list_buf[pos++];
+        while (pos < rc && ex.list_buf[pos] != '\n' && ei + 1 < sizeof(entry)) {
+            entry[ei++] = ex.list_buf[pos++];
         }
-        while (pos < rc && list_buf[pos] != '\n') pos++;
-        if (pos < rc && list_buf[pos] == '\n') pos++;
+        while (pos < rc && ex.list_buf[pos] != '\n') pos++;
+        if (pos < rc) pos++;
         entry[ei] = 0;
         if (ei == 0) continue;
-        if (entry[ei - 1] == '/') {
-            entry[ei - 1] = 0;
-            is_dir = 1;
-        }
+        if (entry[ei - 1] == '/') { entry[ei - 1] = 0; is_dir = 1; }
+        if (entry[0] == 0) continue;
 
-        d_copy(items[item_count].name, entry, sizeof(items[item_count].name));
-        path_join(items[item_count].path, sizeof(items[item_count].path), current_path, entry);
-        items[item_count].is_dir = is_dir;
-        items[item_count].is_app = has_suffix(entry, ".app") || has_suffix(entry, ".elf");
-        items[item_count].is_wav = has_suffix(entry, ".wav");
-        items[item_count].size = 0;
-        items[item_count].readonly = 0;
+        d_copy(it->name, entry, sizeof(it->name));
+        path_join(it->path, sizeof(it->path), ex.path, entry);
+        it->is_dir = is_dir;
+        it->is_app = has_suffix(entry, ".app") || has_suffix(entry, ".elf");
+        it->is_wav = has_suffix(entry, ".wav");
+        it->size = 0;
+        it->readonly = 0;
         {
             icda_stat_t st;
-            if ((long)icda_stat(items[item_count].path, &st) >= 0) {
-                items[item_count].size = st.size;
-                items[item_count].readonly = st.readonly;
-                items[item_count].is_dir = st.type == 2;
+            if ((long)icda_stat(it->path, &st) >= 0) {
+                it->size = st.size;
+                it->readonly = st.readonly;
+                it->is_dir = st.type == 2;
             }
         }
-        item_count++;
+        ex.count++;
     }
-    set_status("Folder loaded");
+    if (ex.selected >= ex.count) ex.selected = -1;
+    if (ex.count == 0) ex_status("This folder is empty");
+    else ex_status("Ready");
 }
 
 static void navigate_to(const char *path, int record_history) {
-    if (!path || !*path) return;
-    if (record_history) history_push(current_path);
-    d_copy(current_path, path, sizeof(current_path));
-    selected_item = -1;
-    page_offset = 0;
-    browser_refresh();
-}
-
-static void navigate_up(void) {
-    char parent[PATH_CAP];
-    if (d_streq(current_path, "/")) {
-        set_status("Already at root");
+    if (!valid_path(path)) {
+        ex_status("That is not a valid path");
         return;
     }
-    path_parent(parent, sizeof(parent), current_path);
+    if (record_history && !d_streq(path, ex.path)) {
+        if (ex.history_pos + 1 < HISTORY_CAP) {
+            ex.history_pos++;
+            d_copy(ex.history[ex.history_pos], ex.path, PATH_CAP);
+            ex.history_count = ex.history_pos + 1;
+        }
+    }
+    d_copy(ex.path, path, PATH_CAP);
+    ex.selected = -1;
+    ex.scroll = 0;
+    refresh();
+}
+
+static void go_back(void) {
+    if (!can_go_back()) return;
+    ex.history_pos--;
+    d_copy(ex.path, ex.history[ex.history_pos], PATH_CAP);
+    ex.selected = -1;
+    ex.scroll = 0;
+    refresh();
+}
+
+static void go_up(void) {
+    char parent[PATH_CAP];
+    if (!can_go_up()) return;
+    path_parent(parent, sizeof(parent), ex.path);
     navigate_to(parent, 1);
 }
 
-static void navigate_back(void) {
-    if (history_count <= 0) {
-        set_status("No previous folder");
+/* ------------------------------------------------------------ actions */
+
+static void open_item(int index) {
+    ex_item_t *it;
+    if (index < 0 || index >= ex.count) {
+        ex_status("Select something first");
         return;
     }
-    history_count--;
-    d_copy(current_path, history[history_count], sizeof(current_path));
-    selected_item = -1;
-    page_offset = 0;
-    browser_refresh();
-}
-
-static void draw_item(desktop_item_t *item, int idx, uint64_t tick) {
-    int selected = idx == selected_item;
-    int hover = idx == hover_item;
-    int lift = hover ? 2 : 0;
-    uint32_t bg = selected ? 0x0038BDF8 : (hover ? 0x0023344D : 0x001E293B);
-    uint32_t edge = selected ? 0x000EA5E9 : (hover ? 0x00334155 : 0x001E293B);
-    const char *icon_name;
-    const ic_icon_t *icon;
-    ic_canvas_t c;
-    uint32_t fg = selected ? 0x000F172A : 0x00F1F5F9;
-
-    if (selected && ((tick / 8) & 1)) bg = 0x000EA5E9;
-    c.px = gui_pixel_buffer();
-    c.w = gui_window_width();
-    c.h = gui_window_height();
-    ic_rect_r(&c, item->x, item->y - lift, item->w, item->h, IC_RADIUS_TILE, bg);
-    if (selected || hover) ic_outline_r(&c, item->x, item->y - lift, item->w, item->h, IC_RADIUS_TILE, edge);
-    if (selected) ic_rect(&c, item->x + 8, item->y + 54 - lift, item->w - 16, 2, 0x00F1F5F9);
-    icon_name = item->is_dir ? "folder" : (item->is_wav ? "wav" : (item->is_app ? "app" : "file"));
-    icon = ic_icon_builtin(icon_name);
-    if (icon) ic_icon_draw(&c, item->x + 20, item->y + 8 - lift, 48, 48, icon);
-    draw_text_clip(item->x + 6, item->y + 60 - lift, item->name, fg, bg, item->w - 12);
-}
-
-static void draw_sidebar_button(int y, const char *label, const char *path) {
-    int active = d_streq(current_path, path);
-    draw_button(12, y, SIDE_W - 24, 26, label, active);
-}
-
-/* ---- context menu helpers (BSS + draw primitives; actions wired below) ---- */
-static void ctx_set_item(int idx, int action, const char *label) {
-    if (idx < 0 || idx >= CTX_MAX_ITEMS) return;
-    ctx_actions[idx] = action;
-    d_copy(ctx_labels[idx], label, CTX_LABEL_LEN);
-}
-
-static void ctx_menu_fill(ic_menu_t *m) {
-    int i;
-    if (!m) return;
-    m->count = ctx_nitems;
-    m->selected = -1;
-    for (i = 0; i < ctx_nitems && i < IC_MENU_MAX_ITEMS; i++) {
-        m->items[i] = ctx_labels[i];
-    }
-}
-
-static void ctx_close(void) { ctx_open = 0; }
-static void props_close(void) { props_open = 0; }
-
-static int is_audio_playing(void) {
-    icda_audio_info_t a;
-    return (long)icda_audio_info(&a) >= 0 && a.active;
-}
-
-static void draw_browser(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    uint64_t tick = icda_ticks();
-    icda_audio_info_t audio;
-    char count_buf[32];
-
-    layout_items(w, h);
-    gui_fill_rect(0, 0, w, h, 0x000F172A);
-    gui_fill_rect(0, 0, w, TOP_H, 0x001E293B);
-    gui_draw_hline(0, TOP_H, w, 0x00334155);
-    gui_fill_rect(0, TOP_H, SIDE_W, h - TOP_H - STATUS_H, 0x00111D2E);
-    gui_draw_vline(SIDE_W, TOP_H, h - TOP_H - STATUS_H, 0x00334155);
-    {
-        ic_canvas_t c;
-        c.px = gui_pixel_buffer();
-        c.w = gui_window_width();
-        c.h = gui_window_height();
-        ic_rect_r(&c, 12, 12, w - 24, 26, IC_RADIUS_BUTTON, 0x000F172A);
-        ic_outline_r(&c, 12, 12, w - 24, 26, IC_RADIUS_BUTTON, 0x00334155);
-    }
-    draw_text_clip(20, 17, current_path, 0x00F1F5F9, 0x000F172A, w - 40);
-    draw_button(12, 50, 50, 25, "Back", history_count > 0);
-    draw_button(68, 50, 42, 25, "Up", !d_streq(current_path, "/"));
-    draw_text_clip(18, TOP_H + 14, "Places", 0x0094A3B8, 0x00111D2E, SIDE_W - 28);
-    draw_sidebar_button(TOP_H + 42, "Root", "/");
-    draw_sidebar_button(TOP_H + 74, "Home", "/home");
-    draw_sidebar_button(TOP_H + 106, "Apps", "/apps");
-    draw_sidebar_button(TOP_H + 138, "Audio", "/usr/share/audio");
-    draw_sidebar_button(TOP_H + 170, "Volumes", "/volumes");
-    draw_button(12, h - STATUS_H - 42, SIDE_W - 24, 26, "Open Path", 0);
-    gui_fill_rect(SIDE_W + 1, TOP_H, w - SIDE_W - 1, h - TOP_H - STATUS_H, 0x000F172A);
-    gui_draw_hline(SIDE_W + 1, TOP_H, w - SIDE_W - 1, 0x00334155);
-    for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
-        draw_item(&items[i], i, tick);
-    }
-    if (item_count == 0) {
-        draw_text_clip(SIDE_W + 28, TOP_H + 34, "This folder is empty.", 0x0094A3B8, 0x000F172A, w - SIDE_W - 56);
-    }
-    if (page_offset > 0) draw_button(w - 176, h - STATUS_H - 30, 72, 22, "Previous", 0);
-    if (page_offset + layout_visible < item_count) draw_button(w - 94, h - STATUS_H - 30, 72, 22, "Next", 0);
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00111D2E);
-    gui_draw_hline(0, h - STATUS_H, w, 0x00334155);
-    uint_to_text((uint64_t)item_count, count_buf, sizeof(count_buf));
-    draw_text_clip(12, h - 25, count_buf, 0x0094A3B8, 0x00111D2E, 56);
-    draw_text_clip(36, h - 25, "items", 0x0094A3B8, 0x00111D2E, 56);
-    draw_text_clip(96, h - 25, status_text, 0x0094A3B8, 0x00111D2E, 340);
-    if ((long)icda_audio_info(&audio) >= 0 && audio.active) {
-        char secs[32];
-        uint_to_text(audio.seconds_left, secs, sizeof(secs));
-        draw_text_clip(w - 284, h - 25, "Playing:", 0x0038BDF8, 0x00111D2E, 72);
-        draw_text_clip(w - 212, h - 25, audio.name, 0x00F1F5F9, 0x00111D2E, 130);
-        draw_text_clip(w - 74, h - 25, secs, 0x00F1F5F9, 0x00111D2E, 32);
-        draw_text_clip(w - 42, h - 25, "s", 0x00F1F5F9, 0x00111D2E, 16);
-    } else {
-        draw_text_clip(w - 120, h - 25, "Audio idle", 0x0064758B, 0x00111D2E, 100);
-    }
-    /* ---- context menu (topmost overlay) ---- */
-    if (ctx_open && ctx_nitems > 0) {
-        ic_canvas_t mc;
-        const ic_theme_t *t = ic_theme_default();
-        ic_menu_t m;
-        mc.px = gui_pixel_buffer();
-        mc.w = gui_window_width();
-        mc.h = gui_window_height();
-        ctx_menu_fill(&m);
-        m.selected = ic_menu_hit(&m, ctx_x, ctx_y, last_mouse_x, last_mouse_y);
-        ic_menu_draw(&mc, t, ctx_x, ctx_y, &m);
-    }
-    /* ---- properties dialog (topmost overlay) ---- */
-    if (props_open) {
-        ic_canvas_t pc;
-        const ic_theme_t *t = ic_theme_default();
-        ic_rect_t r;
-        r.w = 380;
-        r.h = 120;
-        r.x = (w - r.w) / 2;
-        r.y = (h - r.h) / 2;
-        if (r.x < 0) r.x = 0;
-        if (r.y < 0) r.y = 0;
-        pc.px = gui_pixel_buffer();
-        pc.w = gui_window_width();
-        pc.h = gui_window_height();
-        ic_dialog_draw(&pc, t, r, "Properties", props_body);
-    }
-}
-
-static void perform_create(int make_dir) {
-    char full[PATH_CAP];
-    if (!valid_new_name(dialog_input)) {
-        set_status("Name is not valid");
+    it = &ex.items[index];
+    if (it->is_dir) {
+        navigate_to(it->path, 1);
         return;
     }
-    path_join(full, sizeof(full), current_path, dialog_input);
-    if (make_dir) {
-        if ((long)icda_mkdir(full) < 0) {
-            set_status("Could not create folder");
+    if (it->is_wav) {
+        icda_settings_t opt;
+        icda_settings_load(&opt);
+        if (!opt.audio) {
+            ex_status("Sound is off. Turn it on in Settings.");
             return;
         }
-        set_status("Folder created");
-    } else {
-        if ((long)icda_create(full) < 0) {
-            set_status("Could not create file");
-            return;
-        }
-        set_status("File created");
-    }
-    dialog = DIALOG_NONE;
-    browser_refresh();
-}
-
-static void perform_goto(void) {
-    icda_stat_t st;
-    if (!dialog_input[0]) return;
-    if ((long)icda_stat(dialog_input, &st) < 0 || st.type != 2) {
-        set_status("Path is not a folder");
+        if ((long)icda_play_audio_file(it->path) < 0) ex_status("That track could not be played");
+        else ex_status("Playing");
         return;
     }
-    dialog = DIALOG_NONE;
-    navigate_to(dialog_input, 1);
-}
-
-static void draw_dialog(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int x = (w - 390) / 2;
-    int y = (h - 150) / 2;
-    ic_canvas_t c;
-    if (dialog == DIALOG_NONE) return;
-    c.px = gui_pixel_buffer();
-    c.w = gui_window_width();
-    c.h = gui_window_height();
-    ic_rect_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x001E293B);
-    ic_outline_r(&c, x, y, 390, 150, IC_RADIUS_PANEL, 0x00334155);
-    ic_rect_r(&c, x + 1, y + 1, 388, 34, IC_RADIUS_BUTTON, 0x000F172A);
-    draw_text_clip(x + 12, y + 9, dialog_title, 0x00F1F5F9, 0x000F172A, 260);
-    ic_rect_r(&c, x + 20, y + 58, 350, 28, IC_RADIUS_BUTTON, 0x000F172A);
-    ic_outline_r(&c, x + 20, y + 58, 350, 28, IC_RADIUS_BUTTON, 0x0038BDF8);
-    draw_text_clip(x + 28, y + 64, dialog_input, 0x00F1F5F9, 0x000F172A, 320);
-    gui_fill_rect(x + 28 + dialog_cursor * 8, y + 63, 2, 18, 0x0038BDF8);
-    draw_button(x + 210, y + 108, 72, 25, "OK", 1);
-    draw_button(x + 292, y + 108, 78, 25, "Cancel", 0);
-}
-
-static uint64_t editor_line_start(uint64_t pos) {
-    if (pos > editor_len) pos = editor_len;
-    while (pos > 0 && editor_buf[pos - 1] != '\n') pos--;
-    return pos;
-}
-
-static uint64_t editor_line_end(uint64_t pos) {
-    if (pos > editor_len) pos = editor_len;
-    while (pos < editor_len && editor_buf[pos] != '\n') pos++;
-    return pos;
-}
-
-static uint64_t editor_cursor_row(void) {
-    uint64_t row = 0;
-    for (uint64_t i = 0; i < editor_cursor && i < editor_len; i++) {
-        if (editor_buf[i] == '\n') row++;
-    }
-    return row;
-}
-
-static uint64_t editor_find_row_start(uint64_t row) {
-    uint64_t pos = 0;
-    uint64_t r = 0;
-    while (pos < editor_len && r < row) {
-        if (editor_buf[pos++] == '\n') r++;
-    }
-    return pos;
-}
-
-static uint64_t editor_column(void) {
-    return editor_cursor - editor_line_start(editor_cursor);
-}
-
-static void editor_ensure_visible(void) {
-    int h = gui_window_height();
-    int rows = (h - 130) / FONT_CELL_HEIGHT;
-    int row = (int)editor_cursor_row();
-    if (rows < 1) rows = 1;
-    if (row < editor_top_row) editor_top_row = row;
-    if (row >= editor_top_row + rows) editor_top_row = row - rows + 1;
-    if (editor_top_row < 0) editor_top_row = 0;
-}
-
-static void editor_insert(char ch) {
-    if (editor_len + 1 >= EDIT_CAP) {
-        set_status("Editor buffer full");
+    if (it->is_app) {
+        if ((long)icda_spawn(it->path) < 0) ex_status("That app could not be launched");
+        else ex_status("App launched");
         return;
     }
-    for (uint64_t i = editor_len; i > editor_cursor; i--) {
-        editor_buf[i] = editor_buf[i - 1];
-    }
-    editor_buf[editor_cursor++] = ch;
-    editor_len++;
-    editor_buf[editor_len] = 0;
-    editor_modified = 1;
-    editor_ensure_visible();
-}
-
-static void editor_backspace(void) {
-    if (editor_cursor == 0) return;
-    for (uint64_t i = editor_cursor - 1; i < editor_len; i++) {
-        editor_buf[i] = editor_buf[i + 1];
-    }
-    editor_cursor--;
-    editor_len--;
-    editor_modified = 1;
-    editor_ensure_visible();
-}
-
-static void editor_delete(void) {
-    if (editor_cursor >= editor_len) return;
-    for (uint64_t i = editor_cursor; i < editor_len; i++) {
-        editor_buf[i] = editor_buf[i + 1];
-    }
-    editor_len--;
-    editor_modified = 1;
-    editor_ensure_visible();
-}
-
-static void editor_move_vertical(int down) {
-    uint64_t start = editor_line_start(editor_cursor);
-    uint64_t col = editor_cursor - start;
-    uint64_t target_start;
-    uint64_t target_end;
-
-    if (down) {
-        uint64_t end = editor_line_end(editor_cursor);
-        if (end >= editor_len) return;
-        target_start = end + 1;
-        target_end = editor_line_end(target_start);
-    } else {
-        if (start == 0) return;
-        target_end = start - 1;
-        target_start = editor_line_start(target_end);
-    }
-    editor_cursor = target_start + col;
-    if (editor_cursor > target_end) editor_cursor = target_end;
-    editor_ensure_visible();
-}
-
-static void editor_save(void) {
-    if ((long)icda_write_file(editor_path, editor_buf, editor_len) < 0) {
-        set_status("Save failed");
+    if ((long)icda_spawn_args("/apps/editor.app", it->path) < 0) {
+        ex_status("The editor could not be launched");
         return;
     }
-    editor_modified = 0;
-    set_status("Saved");
-    browser_refresh();
+    ex_status("Opened in the editor");
 }
 
-static void open_editor_path(const char *path) {
-    long rc;
-    if (!path || !*path) return;
-    rc = (long)icda_read_file(path, editor_buf, sizeof(editor_buf) - 1);
-    if (rc < 0) {
-        set_status("Could not open file");
+static void open_in_editor(int index) {
+    ex_item_t *it;
+    if (index < 0 || index >= ex.count || ex.items[index].is_dir) {
+        ex_status("Select a file to edit");
         return;
     }
-    editor_len = (uint64_t)rc;
-    editor_buf[editor_len] = 0;
-    editor_cursor = editor_len;
-    editor_top_row = 0;
-    editor_modified = 0;
-    d_copy(editor_path, path, sizeof(editor_path));
-    mode = MODE_EDITOR;
-    set_status("Editing file");
-    editor_ensure_visible();
+    it = &ex.items[index];
+    if ((long)icda_spawn_args("/apps/editor.app", it->path) < 0) {
+        ex_status("The editor could not be launched");
+        return;
+    }
+    ex_status("Opened in the editor");
 }
 
-static void open_selected(void) {
-    if (selected_item < 0 || selected_item >= item_count) {
-        set_status("Select an item first");
+static void create_entry(int make_dir) {
+    char path[PATH_CAP];
+    uint64_t n;
+    if (!valid_name(ex.dialog_buf)) {
+        ex_status("That name cannot be used");
         return;
     }
-    if (items[selected_item].is_dir) {
-        navigate_to(items[selected_item].path, 1);
+    path_join(path, sizeof(path), ex.path, ex.dialog_buf);
+    if (make_dir) n = icda_mkdir(path);
+    else n = icda_write_file(path, "", 0);
+    if (n == (uint64_t)-1) {
+        ex_status("That name is already taken");
         return;
     }
-    if (items[selected_item].is_wav) {
-        icda_settings_t audio_opt;
-        /* Slice C master mute: skip audio paths when disabled. */
-        icda_settings_load(&audio_opt);
-        if (!audio_opt.audio) {
-            set_status("Audio disabled - enable in Settings");
-        } else if ((long)icda_play_audio_file(items[selected_item].path) < 0) {
-            set_status("Could not play WAV");
-        } else {
-            set_status("Playing WAV");
-        }
-        return;
+    refresh();
+    for (int i = 0; i < ex.count; i++) {
+        if (d_streq(ex.items[i].name, ex.dialog_buf)) ex.selected = i;
     }
-    if (items[selected_item].is_app) {
-        if ((long)icda_spawn(items[selected_item].path) < 0) set_status("Could not launch app");
-        else set_status("App launched");
-        return;
-    }
-    open_editor_path(items[selected_item].path);
+    ex_status(make_dir ? "Folder created" : "File created");
 }
 
-static void play_selected(void) {
-    icda_settings_t audio_opt;
-    if (selected_item < 0 || selected_item >= item_count || !items[selected_item].is_wav) {
-        set_status("Select a WAV file");
+/* Rename is copy-then-truncate: the VFS has no rename primitive and the
+ * native ABI is frozen, so the old name is emptied rather than removed.
+ * The status line says so rather than pretending the file is gone. */
+static void perform_rename(void) {
+    char from[PATH_CAP];
+    char to[PATH_CAP];
+    char data[4096];
+    long n;
+    if (ex.menu_item < 0 || ex.menu_item >= ex.count) {
+        ex_status("Select something to rename");
         return;
     }
-    /* Slice C master mute: skip audio paths when disabled. */
-    icda_settings_load(&audio_opt);
-    if (!audio_opt.audio) {
-        set_status("Audio disabled - enable in Settings");
+    if (!valid_name(ex.dialog_buf)) {
+        ex_status("That name cannot be used");
         return;
     }
-    if ((long)icda_play_audio_file(items[selected_item].path) < 0) set_status("Could not play WAV");
-    else set_status("Playing WAV");
-}
-
-static void draw_editor(void) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int area_x = 14;
-    int area_y = 84;
-    int area_w = w - 28;
-    int area_h = h - area_y - STATUS_H - 12;
-    int rows = area_h / FONT_CELL_HEIGHT;
-    int cols = (area_w - 58) / FONT_CELL_WIDTH;
-    uint64_t pos = editor_find_row_start((uint64_t)editor_top_row);
-    uint64_t cursor_row = editor_cursor_row();
-    uint64_t cursor_col = editor_column();
-
-    if (rows < 1) rows = 1;
-    if (cols < 8) cols = 8;
-
-    gui_fill_rect(0, 0, w, h, 0x000F172A);
-    gui_fill_rect(0, 0, w, 70, 0x001E293B);
-    gui_draw_hline(0, 70, w, 0x00334155);
-    draw_text_clip(14, 12, "ICDA Notepad", 0x00F1F5F9, 0x001E293B, 160);
-    draw_text_clip(14, 36, editor_path, 0x0094A3B8, 0x001E293B, w - 220);
-    draw_button(w - 176, 24, 72, 26, "Save", editor_modified);
-    draw_button(w - 94, 24, 76, 26, "Back", 0);
-    draw_panel(area_x, area_y, area_w, area_h, 0x001E293B, 0x00334155);
-    for (int r = 0; r < rows; r++) {
-        char nbuf[16];
-        uint64_t line_end;
-        uint64_t line_no = (uint64_t)(editor_top_row + r + 1);
-        int y = area_y + 4 + r * FONT_CELL_HEIGHT;
-        int x = area_x + 8;
-        uint_to_text(line_no, nbuf, sizeof(nbuf));
-        draw_text_clip(x, y, nbuf, 0x0064758B, 0x001E293B, 40);
-        x += 50;
-        line_end = editor_line_end(pos);
-        for (int c = 0; c < cols; c++) {
-            uint64_t at = pos + (uint64_t)c;
-            char ch = ' ';
-            int is_cursor = ((uint64_t)(editor_top_row + r) == cursor_row && (uint64_t)c == cursor_col);
-            if (at < line_end) {
-                ch = editor_buf[at];
-                if (ch < 32 || ch > 126) ch = '.';
-            }
-            if (is_cursor) {
-                gui_fill_rect(x + c * FONT_CELL_WIDTH, y, FONT_CELL_WIDTH, FONT_CELL_HEIGHT, 0x0038BDF8);
-                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x000F172A, 0x0038BDF8);
-            } else {
-                gui_draw_char(x + c * FONT_CELL_WIDTH, y, ch, 0x00F1F5F9, 0x001E293B);
-            }
-        }
-        pos = line_end;
-        if (pos < editor_len && editor_buf[pos] == '\n') pos++;
+    d_copy(from, ex.items[ex.menu_item].path, sizeof(from));
+    path_join(to, sizeof(to), ex.path, ex.dialog_buf);
+    if (d_streq(from, to)) return;
+    n = (long)icda_read_file(from, data, sizeof(data) - 1);
+    if (n < 0) {
+        ex_status("That item could not be read");
+        return;
     }
-    gui_fill_rect(0, h - STATUS_H, w, STATUS_H, 0x00111D2E);
-    gui_draw_hline(0, h - STATUS_H, w, 0x00334155);
-    draw_text_clip(12, h - 25, editor_modified ? "Modified" : "Saved", editor_modified ? 0x00F59E0B : 0x0034D399, 0x00111D2E, 92);
-    draw_text_clip(112, h - 25, status_text, 0x0094A3B8, 0x00111D2E, w - 130);
+    if (icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
+        ex_status("The new name is already taken");
+        return;
+    }
+    refresh();
+    ex_status(ex.items[ex.menu_item].is_dir ? "Folders cannot be renamed yet"
+                                           : "Renamed (the old name is now empty)");
 }
+
+/* ------------------------------------------------------------- dialog */
 
 static void open_dialog(int kind, const char *title, const char *initial) {
-    ctx_close();
-    props_close();
-    dialog = kind;
-    d_copy(dialog_title, title, sizeof(dialog_title));
-    d_copy(dialog_input, initial ? initial : "", sizeof(dialog_input));
-    dialog_cursor = (int)d_strlen(dialog_input);
+    ex.dialog = kind;
+    d_copy(ex.dialog_title, title, sizeof(ex.dialog_title));
+    d_copy(ex.dialog_buf, initial ? initial : "", DIALOG_CAP);
+    ex.dialog_cursor = (int)d_strlen(ex.dialog_buf);
+    ex.dialog_scroll = 0;
 }
 
-static void browser_select_move(int dx, int dy) {
-    int next;
-    if (item_count <= 0) return;
-    if (selected_item < 0) selected_item = 0;
-    next = selected_item + dx + dy * layout_cols;
-    if (next < 0) next = 0;
-    if (next >= item_count) next = item_count - 1;
-    selected_item = next;
-    if (selected_item < page_offset) page_offset = (selected_item / layout_visible) * layout_visible;
-    if (selected_item >= page_offset + layout_visible) page_offset = (selected_item / layout_visible) * layout_visible;
+static void close_dialog(void) {
+    ex.dialog = DLG_NONE;
+    ex.dialog_buf[0] = 0;
+    ex.dialog_cursor = 0;
 }
 
-static void browser_special_key(int special) {
-    if (special == SPECIAL_LEFT) browser_select_move(-1, 0);
-    else if (special == SPECIAL_RIGHT) browser_select_move(1, 0);
-    else if (special == SPECIAL_UP) browser_select_move(0, -1);
-    else if (special == SPECIAL_DOWN) browser_select_move(0, 1);
-}
-
-static void editor_special_key(int special) {
-    if (special == SPECIAL_LEFT) {
-        if (editor_cursor > 0) editor_cursor--;
-        editor_ensure_visible();
-    } else if (special == SPECIAL_RIGHT) {
-        if (editor_cursor < editor_len) editor_cursor++;
-        editor_ensure_visible();
-    } else if (special == SPECIAL_UP) {
-        editor_move_vertical(0);
-    } else if (special == SPECIAL_DOWN) {
-        editor_move_vertical(1);
-    } else if (special == SPECIAL_DELETE) {
-        editor_delete();
+static void commit_dialog(void) {
+    int kind = ex.dialog;
+    close_dialog();
+    switch (kind) {
+    case DLG_NEW_FILE:    create_entry(0); break;
+    case DLG_NEW_FOLDER:  create_entry(1); break;
+    case DLG_GOTO:        navigate_to(ex.dialog_buf, 1); break;
+    case DLG_RENAME:      perform_rename(); break;
+    default: break;
     }
 }
 
-static void handle_dialog_key(uint32_t key);
+/* ------------------------------------------------------------ drawing */
 
-static void handle_special_key(int special) {
-    if (dialog != DIALOG_NONE) {
-        /* The dialog's text field understands the same special keys
-         * (arrows, Delete); Up/Down are ignored there. */
-        handle_dialog_key((uint32_t)special);
-        return;
-    }
-    if (mode == MODE_EDITOR) editor_special_key(special);
-    else browser_special_key(special);
+static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t b = toolbar_rect(app);
+    const ic_palette_t *p = ic_palette();
+
+    ic_ui_toolbar(c, b);
+    ic_ui_icon_button(c, back_rect(app), IC_SYM_CHEVRON_LEFT,
+                      !can_go_back() ? IC_STATE_DISABLED
+                                     : (ex.hover_back ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_icon_button(c, up_rect(app), IC_SYM_CHEVRON_UP,
+                      !can_go_up() ? IC_STATE_DISABLED
+                                  : (ex.hover_up ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_text_draw_in(c, ic_font(IC_FONT_BODY), path_rect(app), ex.path, p->label,
+                    IC_ALIGN_LEFT);
+    ic_ui_icon_button(c, view_rect(app), ex.view == VIEW_GRID ? IC_SYM_GRID : IC_SYM_DOCUMENT,
+                      ex.hover_view ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_ui_button(c, new_folder_rect(app), "New Folder", IC_SYM_FOLDER, IC_BUTTON_DEFAULT,
+                 ex.hover_new_folder ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_ui_button(c, new_file_rect(app), "New File", IC_SYM_PLUS, IC_BUTTON_DEFAULT,
+                 ex.hover_new_file ? IC_STATE_HOVER : IC_STATE_NORMAL);
 }
 
-static int feed_escape_sequence(uint32_t key) {
-    if (key_seq_state == 0) {
-        if (key == 27) {
-            key_seq_state = 1;
-            return 1;
-        }
-        return 0;
-    }
-    if (key_seq_state == 1) {
-        key_seq_state = key == '[' ? 2 : 0;
-        return 1;
-    }
-    if (key_seq_state == 2) {
-        key_seq_state = 0;
-        if (key == 'A') handle_special_key(SPECIAL_UP);
-        else if (key == 'B') handle_special_key(SPECIAL_DOWN);
-        else if (key == 'C') handle_special_key(SPECIAL_RIGHT);
-        else if (key == 'D') handle_special_key(SPECIAL_LEFT);
-        else if (key == '3') key_seq_state = 3;
-        return 1;
-    }
-    if (key_seq_state == 3) {
-        key_seq_state = 0;
-        if (key == '~') handle_special_key(SPECIAL_DELETE);
-        return 1;
-    }
-    key_seq_state = 0;
-    return 0;
-}
-
-static void dialog_remove_at(int at) {
-    uint64_t len = d_strlen(dialog_input);
-    for (uint64_t i = (uint64_t)at; i + 1 < sizeof(dialog_input) && i < len; i++) {
-        dialog_input[i] = dialog_input[i + 1];
+static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t s = sidebar_rect(app);
+    const ic_palette_t *p = ic_palette();
+    ic_ui_sidebar_bg(c, s);
+    ic_text_draw_in(c, ic_font(IC_FONT_CAPTION_EMPH),
+                    ic_rect_make(s.x + IC_SP_3, s.y + IC_SP_3, s.w - IC_SP_4, 14),
+                    "PLACES", p->label_tertiary, IC_ALIGN_LEFT);
+    for (int i = 0; i < PLACE_COUNT; i++) {
+        const char *label = PLACES[i];
+        /* Trim the leading slash for display: "/" stays as "Disk". */
+        char shown[NAME_CAP];
+        if (d_streq(PLACES[i], "/")) d_copy(shown, "Disk", sizeof(shown));
+        else d_copy(shown, PLACES[i] + 1, sizeof(shown));
+        ic_ui_sidebar_item(c, place_rect(app, i), PLACE_SYMBOLS[i], shown,
+                           d_streq(ex.path, label),
+                           i == ex.hover_sidebar ? 1.0f : 0.0f);
     }
 }
 
-static void handle_dialog_key(uint32_t key) {
-    uint64_t len;
-    if (key == 27) {
-        dialog = DIALOG_NONE;
-        return;
-    }
-    if (key == '\r' || key == '\n') {
-        if (dialog == DIALOG_NEW_FILE) perform_create(0);
-        else if (dialog == DIALOG_NEW_FOLDER) perform_create(1);
-        else if (dialog == DIALOG_GOTO) perform_goto();
-        return;
-    }
-    if (key == '\b') {
-        if (dialog_cursor > 0) {
-            dialog_cursor--;
-            dialog_remove_at(dialog_cursor);
-        }
-        return;
-    }
-    if (key == SPECIAL_LEFT) {
-        if (dialog_cursor > 0) dialog_cursor--;
-        return;
-    }
-    if (key == SPECIAL_RIGHT) {
-        len = d_strlen(dialog_input);
-        if ((uint64_t)dialog_cursor < len) dialog_cursor++;
-        return;
-    }
-    if (key == SPECIAL_DELETE) {
-        len = d_strlen(dialog_input);
-        if ((uint64_t)dialog_cursor < len) dialog_remove_at(dialog_cursor);
-        return;
-    }
-    if (key >= 32 && key <= 126 && dialog_cursor + 1 < (int)sizeof(dialog_input)) {
-        len = d_strlen(dialog_input);
-        if ((uint64_t)dialog_cursor > len) dialog_cursor = (int)len;
-        for (uint64_t i = len; i > (uint64_t)dialog_cursor; i--) {
-            if (i + 1 < sizeof(dialog_input)) dialog_input[i] = dialog_input[i - 1];
-        }
-        dialog_input[dialog_cursor++] = (char)key;
-        dialog_input[(uint64_t)dialog_cursor] = 0;
-    }
+/* A folder, an app, a track or a document: pick the glyph by type. */
+static ic_symbol_t item_symbol(const ex_item_t *it) {
+    if (it->is_dir) return IC_SYM_FOLDER;
+    if (it->is_wav) return IC_SYM_MUSIC;
+    if (it->is_app) return IC_SYM_GRID;
+    return IC_SYM_DOCUMENT;
 }
 
-static void handle_editor_key(uint32_t key) {
-    if (key == 19) {
-        editor_save();
-        return;
-    }
-    if (key == 24) {
-        mode = MODE_BROWSER;
-        browser_refresh();
-        return;
-    }
-    if (key == '\b') {
-        editor_backspace();
-        return;
-    }
-    if (key == '\r' || key == '\n') {
-        editor_insert('\n');
-        return;
-    }
-    if (key >= 32 && key <= 126) {
-        editor_insert((char)key);
-    }
-}
+static void draw_grid(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t area = content_rect(app);
+    const ic_palette_t *p = ic_palette();
+    int first = ex.scroll;
+    int last = ex.scroll + ex.cols * ex.rows;
+    const ic_icon_t *icon;
 
-static void handle_browser_key(uint32_t key) {
-    if (key == '\r' || key == '\n') open_selected();
-    else if (key == '\b') navigate_up();
-    else if (key == 'r' || key == 'R') browser_refresh();
-    else if (key == 'n' || key == 'N') open_dialog(DIALOG_NEW_FILE, "Create new file", "");
-    else if (key == 'f' || key == 'F') open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "");
-    else if (key == 'e' || key == 'E') {
-        if (selected_item >= 0 && !items[selected_item].is_dir) open_editor_path(items[selected_item].path);
-        else set_status("Select a file to edit");
-    } else if (key == 'p' || key == 'P') play_selected();
-    else if (key == 't' || key == 'T') icda_spawn("/apps/terminal.app");
-}
+    if (last > ex.count) last = ex.count;
+    ic_gfx_fill(c, area.x, area.y, area.w, area.h, p->content);
 
-static void handle_key(uint32_t key) {
-    if (dialog != DIALOG_NONE) {
-        /* Parse arrow/delete escape sequences first so the dialog can
-         * edit like a real text field; without this the ESC of an arrow
-         * key closes the dialog and '[' 'A' get typed into the name. */
-        if (feed_escape_sequence(key)) return;
-        handle_dialog_key(key);
-        return;
-    }
-    if (feed_escape_sequence(key)) return;
-    if (mode == MODE_EDITOR) handle_editor_key(key);
-    else handle_browser_key(key);
-}
+    for (int i = first; i < last; i++) {
+        ic_rect_t r = item_rect(app, i);
+        ex_item_t *it = &ex.items[i];
+        int sel = i == ex.selected;
+        ic_rect_t plate = ic_rect_make(r.x, r.y, r.w, r.h - 14);
+        float hover = i == ex.hover ? 1.0f : 0.0f;
 
-static void handle_dialog_click(int mx, int my) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int x = (w - 390) / 2;
-    int y = (h - 150) / 2;
-    if (hit_rect(mx, my, x + 210, y + 108, 72, 25)) {
-        if (dialog == DIALOG_NEW_FILE) perform_create(0);
-        else if (dialog == DIALOG_NEW_FOLDER) perform_create(1);
-        else if (dialog == DIALOG_GOTO) perform_goto();
-    } else if (hit_rect(mx, my, x + 292, y + 108, 78, 25)) {
-        dialog = DIALOG_NONE;
-    }
-}
-
-static void handle_editor_click(int mx, int my) {
-    int w = gui_window_width();
-    int area_x = 14;
-    int area_y = 84;
-    int area_w = w - 28;
-    if (hit_rect(mx, my, w - 176, 24, 72, 26)) {
-        editor_save();
-        return;
-    }
-    if (hit_rect(mx, my, w - 94, 24, 76, 26)) {
-        mode = MODE_BROWSER;
-        browser_refresh();
-        return;
-    }
-    if (hit_rect(mx, my, area_x, area_y, area_w, gui_window_height() - area_y - STATUS_H - 12)) {
-        int col = (mx - area_x - 58) / FONT_CELL_WIDTH;
-        int row = (my - area_y - 4) / FONT_CELL_HEIGHT;
-        uint64_t line_start;
-        uint64_t line_end;
-        if (col < 0) col = 0;
-        if (row < 0) row = 0;
-        line_start = editor_find_row_start((uint64_t)(editor_top_row + row));
-        line_end = editor_line_end(line_start);
-        editor_cursor = line_start + (uint64_t)col;
-        if (editor_cursor > line_end) editor_cursor = line_end;
-        editor_ensure_visible();
-    }
-}
-
-/* ---- context menu actions (open / activate / press) ---- */
-static void ctx_open_at(int x, int y, int item_idx) {
-    ic_menu_t m;
-    int w = gui_window_width();
-    int h = gui_window_height();
-    int mw, mh;
-    int i = 0;
-
-    ctx_item = item_idx;
-    if (item_idx >= 0 && item_idx < item_count) {
-        /* item context menu */
-        ctx_set_item(i++, CTX_OPEN, "Open");
-        if (!items[item_idx].is_dir)
-            ctx_set_item(i++, CTX_EDIT, "Edit");
-        if (items[item_idx].is_wav) {
-            if (is_audio_playing())
-                ctx_set_item(i++, CTX_PLAY_STOP, "Stop");
-            else
-                ctx_set_item(i++, CTX_PLAY_STOP, "Play");
-        }
-        ctx_set_item(i++, CTX_PROPERTIES, "Properties");
-    } else {
-        /* background context menu */
-        ctx_set_item(i++, CTX_RELOAD, "Reload");
-        ctx_set_item(i++, CTX_NEW_FILE, "New File");
-        ctx_set_item(i++, CTX_NEW_FOLDER, "New Folder");
-        ctx_set_item(i++, CTX_GOTO, "Open Path");
-        ctx_set_item(i++, CTX_TERMINAL, "Terminal");
-        ctx_set_item(i++, CTX_DISKMAN, "Diskman");
-    }
-    ctx_nitems = i;
-    if (ctx_nitems <= 0) return;
-
-    ctx_menu_fill(&m);
-    mw = ic_menu_width(&m);
-    mh = ic_menu_height(&m);
-    if (x + mw > w) x = w - mw;
-    if (x < 0) x = 0;
-    if (y + mh > h) y = h - mh;
-    if (y < 0) y = 0;
-    ctx_x = x;
-    ctx_y = y;
-    ctx_open = 1;
-}
-
-static void explorer_ctx_activate(int which) {
-    int a;
-    if (which < 0 || which >= ctx_nitems) {
-        ctx_close();
-        return;
-    }
-    a = ctx_actions[which];
-    if (a == CTX_OPEN) {
-        open_selected();
-    } else if (a == CTX_EDIT) {
-        if (ctx_item >= 0 && !items[ctx_item].is_dir)
-            open_editor_path(items[ctx_item].path);
-        else
-            set_status("Select a file to edit");
-    } else if (a == CTX_PLAY_STOP) {
-        if (is_audio_playing()) {
-            icda_stop_audio();
-            set_status("Audio stopped");
+        if (sel) ic_gfx_rrect(c, plate.x, plate.y, plate.w, plate.h, IC_R_TILE, p->accent_soft);
+        else if (hover > 0.0f) ic_gfx_rrect(c, plate.x, plate.y, plate.w, plate.h, IC_R_TILE,
+                                            p->fill_hover);
+        icon = ic_icon_builtin(it->is_dir ? "folder" : (it->is_app ? "desktop" : "document"));
+        if (icon && ic_icon_valid(icon)) {
+            ic_gfx_image_rgba(c, plate.x + (plate.w - 48) / 2, plate.y + 8, 48, 48,
+                             icon->rgba, icon->w, icon->h, 255);
         } else {
-            play_selected();
+            ic_symbol_draw(c, item_symbol(it), (float)(plate.x + plate.w / 2),
+                           (float)(plate.y + plate.h / 2), 32.0f, p->label_secondary);
         }
-    } else if (a == CTX_PROPERTIES) {
-        if (ctx_item >= 0 && ctx_item < item_count) {
-            int pos = 0;
-            d_copy(props_body, items[ctx_item].path, sizeof(props_body));
-            pos = (int)d_strlen(props_body);
-            if (pos < (int)sizeof(props_body) - 2) {
-                props_body[pos++] = '\n';
-                props_body[pos] = 0;
-            }
-            uint_to_text(items[ctx_item].size, props_body + pos,
-                         sizeof(props_body) - (uint64_t)pos);
-        } else {
-            d_copy(props_body, current_path, sizeof(props_body));
-        }
-        props_open = 1;
-    } else if (a == CTX_RELOAD) {
-        browser_refresh();
-    } else if (a == CTX_NEW_FILE) {
-        open_dialog(DIALOG_NEW_FILE, "Create new file", "");
-    } else if (a == CTX_NEW_FOLDER) {
-        open_dialog(DIALOG_NEW_FOLDER, "Create new folder", "");
-    } else if (a == CTX_GOTO) {
-        open_dialog(DIALOG_GOTO, "Open path", current_path);
-    } else if (a == CTX_TERMINAL) {
-        icda_spawn("/apps/terminal.app");
-    } else if (a == CTX_DISKMAN) {
-        icda_spawn("/apps/diskman.app");
+        ic_text_draw_in(c, ic_font(IC_FONT_CAPTION),
+                        ic_rect_make(r.x, plate.y + plate.h + 1, r.w, 13), it->name,
+                        sel ? p->label : (hover > 0.0f ? p->label : p->label_secondary),
+                        IC_ALIGN_CENTER);
     }
-    ctx_close();
+
+    if (ex.count == 0) {
+        ic_ui_empty_state(c, area, IC_SYM_FOLDER, "This folder is empty",
+                          "Use New Folder or New File to add something here.");
+    } else if (ex.count > ex.cols * ex.rows) {
+        ic_ui_scrollbar(c, area, ex.scroll, ex.count, 1.0f);
+    }
 }
 
-/* Left-press routing while a context menu or properties dialog is open.
- * Returns 1 when the press was consumed (caller must skip normal handling).
- * Mirrors wm.c ctx_press (960-974). */
-static int explorer_ctx_press(int mx, int my) {
-    if (props_open) {
-        props_close();
-        return 1;
+static void draw_list(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t area = content_rect(app);
+    const ic_palette_t *p = ic_palette();
+    const ic_face_t *body = ic_font(IC_FONT_BODY);
+    const ic_face_t *meta = ic_font(IC_FONT_CAPTION);
+    const ic_face_t *mono = ic_font(IC_FONT_MONO_SMALL);
+    char sz[32];
+    int name_w;
+
+    ic_gfx_fill(c, area.x, area.y, area.w, area.h, p->content);
+    name_w = area.w - 2 * IC_SP_3 - 32 - 90 - 110;
+
+    for (int i = ex.first_item; i < ex.last_item; i++) {
+        ic_rect_t r = item_rect(app, i);
+        ex_item_t *it = &ex.items[i];
+        ic_color_t text = ic_ui_list_row(c, r, i == ex.selected, ex.list_focused,
+                                         i == ex.hover ? 1.0f : 0.0f);
+        ic_symbol_draw(c, item_symbol(it), (float)(r.x + IC_SP_3 + 8), (float)(r.y + r.h / 2),
+                       16.0f, p->label_secondary);
+        ic_text_draw_in(c, body, ic_rect_make(r.x + IC_SP_3 + 24, r.y, name_w, r.h), it->name,
+                        text, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, meta, ic_rect_make(r.x + IC_SP_3 + 24 + name_w, r.y, 80, r.h),
+                        it->is_dir ? "Folder" : (it->is_app ? "App"
+                                                : (it->is_wav ? "Audio" : "Text")),
+                        p->label_tertiary, IC_ALIGN_LEFT);
+        if (it->is_dir) d_copy(sz, "-", sizeof(sz));
+        else size_text(it->size, sz, sizeof(sz));
+        ic_text_draw_in(c, mono, ic_rect_make(r.x + r.w - 110, r.y, 100, r.h), sz, text,
+                        IC_ALIGN_RIGHT);
+        if (it->readonly) {
+            ic_symbol_draw(c, IC_SYM_INFO, (float)(r.x + r.w - 20), (float)(r.y + r.h / 2),
+                           14.0f, p->warning);
+        }
     }
-    if (!ctx_open) return 0;
+
+    if (ex.count == 0) {
+        ic_ui_empty_state(c, area, IC_SYM_FOLDER, "This folder is empty",
+                          "Use New Folder or New File to add something here.");
+    } else if (ex.count > ex.rows) {
+        ic_ui_scrollbar(c, area, ex.first_item, ex.count, 1.0f);
+    }
+}
+
+static void draw_content(ic_app_t *app, ic_canvas_t *c) {
+    if (ex.view == VIEW_LIST) draw_list(app, c);
+    else draw_grid(app, c);
+}
+
+static void draw_status(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t s = status_rect(app);
+    const ic_palette_t *p = ic_palette();
+    char left[STATUS_CAP];
+
+    ic_ui_statusbar(c, s, ex.status);
+    left[0] = 0;
+    ic_strlcat(left, ex.path, sizeof(left));
+    ic_strlcat(left, "   ", sizeof(left));
+    if (ex.count == 1) ic_strlcat(left, "1 item", sizeof(left));
+    else {
+        char n[24];
+        ic_snprintf_u64(n, sizeof(n), (uint64_t)ex.count);
+        ic_strlcat(left, n, sizeof(left));
+        ic_strlcat(left, " items", sizeof(left));
+    }
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
+                    ic_rect_make(s.x + s.w - 320, s.y, 320 - IC_SP_3, s.h), left,
+                    p->label_tertiary, IC_ALIGN_RIGHT);
+}
+
+static void draw_dialog(ic_app_t *app, ic_canvas_t *c) {
+    const ic_palette_t *p = ic_palette();
+    int w = 420, h = 150;
+    ic_rect_t r = ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
+    ic_textfield_t tf;
+    char buf[DIALOG_CAP];
+
+    ic_ui_panel(c, r, IC_R_PANEL, IC_ELEV_MENU, 0, 0);
+    ic_text_draw_in(c, ic_font(IC_FONT_TITLE3), ic_rect_make(r.x + IC_SP_5, r.y + IC_SP_4,
+                                                             r.w - 2 * IC_SP_5, 20),
+                    ex.dialog_title, p->label, IC_ALIGN_LEFT);
+    d_copy(buf, ex.dialog_buf, sizeof(buf));
+    tf.text = buf;
+    tf.cursor = ex.dialog_cursor;
+    tf.sel_start = tf.sel_end = ex.dialog_cursor;
+    tf.focused = 1;
+    tf.caret_on = ic_app_caret_visible(app);
+    tf.placeholder = "Name";
+    tf.leading = IC_SYM_NONE;
+    tf.scroll_px = ex.dialog_scroll;
+    ic_ui_textfield(c, ic_rect_make(r.x + IC_SP_5, r.y + IC_SP_4 + 24, r.w - 2 * IC_SP_5,
+                                    IC_H_CONTROL), &tf);
     {
-        ic_menu_t m;
-        int hit;
-        ctx_menu_fill(&m);
-        hit = ic_menu_hit(&m, ctx_x, ctx_y, mx, my);
-        explorer_ctx_activate(hit);
+        int bw = ic_ui_button_width("Create", IC_SYM_NONE);
+        int cw = ic_ui_button_width("Cancel", IC_SYM_NONE);
+        int by = r.y + r.h - IC_H_CONTROL - IC_SP_4;
+        ic_ui_button(c, ic_rect_make(r.x + r.w - bw - IC_SP_5, by, bw, IC_H_CONTROL),
+                     ex.dialog == DLG_GOTO ? "Go" : "Create", IC_SYM_NONE, IC_BUTTON_PRIMARY,
+                     IC_STATE_NORMAL);
+        ic_ui_button(c, ic_rect_make(r.x + r.w - bw - cw - IC_SP_5 - IC_SP_3, by, cw,
+                                     IC_H_CONTROL),
+                     "Cancel", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
     }
-    return 1;
 }
 
-static void handle_browser_click(int mx, int my) {
-    int w = gui_window_width();
-    int h = gui_window_height();
-    uint64_t now = icda_ticks();
+static void draw_info(ic_app_t *app, ic_canvas_t *c) {
+    const ic_palette_t *p = ic_palette();
+    int w = 380, h = 190;
+    ic_rect_t r = ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
+    char line[STATUS_CAP];
+    char sz[32];
+    int y = r.y + IC_SP_4;
+    int iw = r.w - 2 * IC_SP_5;
+    const ex_item_t *it = (ex.menu_item >= 0 && ex.menu_item < ex.count)
+                              ? &ex.items[ex.menu_item] : 0;
 
-    if (hit_rect(mx, my, 12, 12, w - 24, 26)) {
-        open_dialog(DIALOG_GOTO, "Open path", current_path);
-        return;
-    }
-    if (hit_rect(mx, my, 12, 50, 50, 25)) { navigate_back(); return; }
-    if (hit_rect(mx, my, 68, 50, 42, 25)) { navigate_up(); return; }
+    ic_ui_panel(c, r, IC_R_PANEL, IC_ELEV_MENU, 0, 0);
+    ic_text_draw_in(c, ic_font(IC_FONT_TITLE3), ic_rect_make(r.x + IC_SP_5, y, iw, 20),
+                    it ? it->name : ex.path, p->label, IC_ALIGN_LEFT);
+    y += 26;
 
-    if (hit_rect(mx, my, 12, TOP_H + 42, SIDE_W - 24, 26)) { navigate_to("/", 1); return; }
-    if (hit_rect(mx, my, 12, TOP_H + 74, SIDE_W - 24, 26)) { navigate_to("/home", 1); return; }
-    if (hit_rect(mx, my, 12, TOP_H + 106, SIDE_W - 24, 26)) { navigate_to("/apps", 1); return; }
-    if (hit_rect(mx, my, 12, TOP_H + 138, SIDE_W - 24, 26)) { navigate_to("/usr/share/audio", 1); return; }
-    if (hit_rect(mx, my, 12, TOP_H + 170, SIDE_W - 24, 26)) { navigate_to("/volumes", 1); return; }
-    if (hit_rect(mx, my, 12, h - STATUS_H - 42, SIDE_W - 24, 26)) { open_dialog(DIALOG_GOTO, "Open path", current_path); return; }
-
-    if (page_offset > 0 && hit_rect(mx, my, w - 176, h - STATUS_H - 30, 72, 22)) {
-        page_offset -= layout_visible;
-        if (page_offset < 0) page_offset = 0;
-        return;
-    }
-    if (page_offset + layout_visible < item_count && hit_rect(mx, my, w - 94, h - STATUS_H - 30, 72, 22)) {
-        page_offset += layout_visible;
-        return;
-    }
-
-    for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
-        if (hit_rect(mx, my, items[i].x, items[i].y, items[i].w, items[i].h)) {
-            int double_click = (last_click_item == i && now - last_click_tick < 35);
-            selected_item = i;
-            set_status(items[i].is_dir ? "Folder selected" : "File selected");
-            if (double_click) open_selected();
-            last_click_item = i;
-            last_click_tick = now;
-            return;
+    if (it) {
+        d_copy(line, it->path, sizeof(line));
+        ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL), ic_rect_make(r.x + IC_SP_5, y, iw, 16),
+                        line, p->label_secondary, IC_ALIGN_LEFT);
+        y += 22;
+        if (it->is_dir) d_copy(sz, "Folder", sizeof(sz));
+        else size_text(it->size, sz, sizeof(sz));
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + IC_SP_5, y, iw, 16),
+                        sz, p->label_secondary, IC_ALIGN_LEFT);
+        y += 20;
+        d_copy(line, it->readonly ? "Read-only" : "Read and write", sizeof(line));
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + IC_SP_5, y, iw, 16),
+                        line, p->label_secondary, IC_ALIGN_LEFT);
+    } else {
+        d_copy(line, ex.path, sizeof(line));
+        ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL), ic_rect_make(r.x + IC_SP_5, y, iw, 16),
+                        line, p->label_secondary, IC_ALIGN_LEFT);
+        y += 22;
+        if (ex.count == 1) d_copy(line, "1 item", sizeof(line));
+        else {
+            char n[24];
+            ic_snprintf_u64(n, sizeof(n), (uint64_t)ex.count);
+            d_copy(line, n, sizeof(line));
+            ic_strlcat(line, " items", sizeof(line));
         }
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + IC_SP_5, y, iw, 16),
+                        line, p->label_secondary, IC_ALIGN_LEFT);
     }
-    selected_item = -1;
+    {
+        int bw = ic_ui_button_width("OK", IC_SYM_NONE);
+        ic_ui_button(c, ic_rect_make(r.x + r.w - bw - IC_SP_5, r.y + r.h - IC_H_CONTROL - IC_SP_4,
+                                     bw, IC_H_CONTROL),
+                     "OK", IC_SYM_NONE, IC_BUTTON_PRIMARY, IC_STATE_NORMAL);
+    }
 }
 
-static void handle_mouse(gui_msg_t *msg) {
-    int mx = msg->mouse.x;
-    int my = msg->mouse.y;
-    int w = gui_window_width();
-    int h = gui_window_height();
+static void draw(ic_app_t *app, ic_canvas_t *c) {
+    layout(app);
+    ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
+    draw_toolbar(app, c);
+    draw_sidebar(app, c);
+    draw_content(app, c);
+    draw_status(app, c);
 
-    last_mouse_x = mx;
-    last_mouse_y = my;
-
-    if (mode == MODE_BROWSER) {
-        hover_item = -1;
-        layout_items(w, h);
-        for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
-            if (hit_rect(mx, my, items[i].x, items[i].y, items[i].w, items[i].h)) {
-                hover_item = i;
-                break;
-            }
-        }
+    if (ex.info_open) draw_info(app, c);
+    if (ex.dialog != DLG_NONE) draw_dialog(app, c);
+    if (ex.menu_open) {
+        ex.menu.hover = ic_ui_menu_hit(&ex.menu, ex.menu_x, ex.menu_y,
+                                       app->mouse_x, app->mouse_y);
+        ic_ui_menu(c, &ex.menu, ex.menu_x, ex.menu_y, 0, 0);
     }
+    if (app->focused) ic_app_animate(app);
+}
 
-    /* ---- left-click routing ---- */
-    if (msg->mouse.buttons & GUI_BTN_LEFT) {
-        /* B2: dialog/editor/menu precedence */
-        if (dialog != DIALOG_NONE) {
-            ctx_close();
-            props_close();
-            handle_dialog_click(mx, my);
-        } else if (mode == MODE_EDITOR) {
-            ctx_close();
-            props_close();
-            handle_editor_click(mx, my);
-        } else if (ctx_open || props_open) {
-            /* Menu/props open: swallow held levels, act on the rising
-             * edge only. Otherwise the same held press that opens the
-             * Properties dialog would instantly close it again on the
-             * next motion message, and held drags would click through
-             * to the browser behind the menu. */
-            if (!prev_left) explorer_ctx_press(mx, my);
-        } else {
-            handle_browser_click(mx, my);
+/* -------------------------------------------------------------- events */
+
+static int item_at(ic_app_t *app, int x, int y) {
+    if (ex.view == VIEW_LIST) {
+        for (int i = ex.first_item; i < ex.last_item; i++) {
+            if (ic_ui_hit(item_rect(app, i), x, y)) return i;
         }
+        return -1;
     }
-    prev_left = (msg->mouse.buttons & GUI_BTN_LEFT) ? 1 : 0;
+    {
+        ic_rect_t c = content_rect(app);
+        int col = (x - c.x - IC_SP_3) / GRID_CELL_W;
+        int row = (y - c.y - IC_SP_3) / GRID_CELL_H;
+        int idx;
+        if (col < 0 || col >= ex.cols || row < 0 || row >= ex.rows) return -1;
+        idx = ex.scroll + row * ex.cols + col;
+        return (idx >= 0 && idx < ex.count) ? idx : -1;
+    }
+}
 
-    /* ---- right-click: edge-detect (C1) ---- */
-    if (msg->mouse.buttons & GUI_BTN_RIGHT) {
-        if (!prev_right && mode == MODE_BROWSER && dialog == DIALOG_NONE) {
-            int hit = -1;
-            ctx_close();
-            props_close();
-            for (int i = page_offset; i < item_count && i < page_offset + layout_visible; i++) {
-                if (hit_rect(mx, my, items[i].x, items[i].y, items[i].w, items[i].h)) {
-                    hit = i;
-                    break;
+static int place_at(ic_app_t *app, int x, int y) {
+    for (int i = 0; i < PLACE_COUNT; i++) {
+        if (ic_ui_hit(place_rect(app, i), x, y)) return i;
+    }
+    return -1;
+}
+
+static void build_menu(void) {
+    int n = 0;
+    ex.menu.count = 0;
+    ex.menu.hover = -1;
+    if (ex.menu_item >= 0 && ex.menu_item < ex.count) {
+        ex_item_t *it = &ex.items[ex.menu_item];
+        ex.menu.labels[n] = "Open";
+        ex.menu.shortcuts[n] = 0;
+        ex.menu.disabled[n] = 0;
+        n++;
+        if (!it->is_dir) {
+            ex.menu.labels[n] = "Open in Editor";
+            ex.menu.shortcuts[n] = 0;
+            ex.menu.disabled[n] = 0;
+            n++;
+        }
+        ex.menu.labels[n] = "Rename";
+        ex.menu.shortcuts[n] = 0;
+        ex.menu.disabled[n] = it->is_dir;
+        n++;
+        ex.menu.labels[n] = "Get Info";
+        ex.menu.shortcuts[n] = 0;
+        ex.menu.disabled[n] = 0;
+        n++;
+        ex.menu.labels[n] = IC_MENU_SEPARATOR;
+        n++;
+    }
+    ex.menu.labels[n] = "New Folder";
+    ex.menu.shortcuts[n] = 0;
+    ex.menu.disabled[n] = 0;
+    n++;
+    ex.menu.labels[n] = "New File";
+    ex.menu.shortcuts[n] = 0;
+    ex.menu.disabled[n] = 0;
+    n++;
+    ex.menu.labels[n] = "Open in Terminal";
+    ex.menu.shortcuts[n] = 0;
+    ex.menu.disabled[n] = 0;
+    n++;
+    ex.menu.labels[n] = "Refresh";
+    ex.menu.shortcuts[n] = 0;
+    ex.menu.disabled[n] = 0;
+    n++;
+    ex.menu.count = n;
+}
+
+static void open_menu_at(ic_app_t *app, int x, int y) {
+    int mw, mh;
+    build_menu();
+    mw = ic_ui_menu_width(&ex.menu);
+    mh = ic_ui_menu_height(&ex.menu);
+    if (x + mw > app->width - IC_SP_2) x = app->width - IC_SP_2 - mw;
+    if (y + mh > app->height - IC_SP_2) y = app->height - IC_SP_2 - mh;
+    if (x < IC_SP_2) x = IC_SP_2;
+    if (y < IC_SP_2) y = IC_SP_2;
+    ex.menu_x = x;
+    ex.menu_y = y;
+    ex.menu_open = 1;
+}
+
+static void menu_activate(ic_app_t *app, int index) {
+    int i = index;
+    int item = ex.menu_item;
+    ex.menu_open = 0;
+    /* The leading item count depends on whether an item was targeted. */
+    if (item >= 0 && item < ex.count) {
+        if (i == 0) { open_item(item); return; }
+        if (!ex.items[item].is_dir) {
+            if (i == 1) { open_in_editor(item); return; }
+            i--;
+        }
+        if (i == 1) { ex.menu_item = item; open_dialog(DLG_RENAME, "Rename", ex.items[item].name); return; }
+        if (i == 2) { ex.info_open = 1; return; }
+        i = 3; /* past the separator */
+    }
+    switch (i) {
+    case 3: open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
+    case 4: open_dialog(DLG_NEW_FILE, "New File", ""); break;
+    case 5: icda_spawn("/apps/terminal.app"); break;
+    case 6: refresh(); break;
+    default: break;
+    }
+    (void)app;
+}
+
+static void event(ic_app_t *app, const ic_event_t *ev) {
+    switch (ev->type) {
+    case IC_EV_MOUSE_MOVE:
+        if (ex.dialog != DLG_NONE || ex.info_open) break;
+        if (ex.menu_open) {
+            ex.menu.hover = ic_ui_menu_hit(&ex.menu, ex.menu_x, ex.menu_y, ev->x, ev->y);
+            break;
+        }
+        ex.hover_back = ic_ui_hit(back_rect(app), ev->x, ev->y);
+        ex.hover_up = ic_ui_hit(up_rect(app), ev->x, ev->y);
+        ex.hover_view = ic_ui_hit(view_rect(app), ev->x, ev->y);
+        ex.hover_new_folder = ic_ui_hit(new_folder_rect(app), ev->x, ev->y);
+        ex.hover_new_file = ic_ui_hit(new_file_rect(app), ev->x, ev->y);
+        ex.hover_sidebar = place_at(app, ev->x, ev->y);
+        ex.hover = item_at(app, ev->x, ev->y);
+        break;
+    case IC_EV_MOUSE_DOWN: {
+        int i;
+        if (ev->button == GUI_BTN_RIGHT) {
+            if (ex.dialog != DLG_NONE || ex.info_open) break;
+            ex.menu_item = item_at(app, ev->x, ev->y);
+            if (ex.menu_item >= 0) ex.selected = ex.menu_item;
+            open_menu_at(app, ev->x, ev->y);
+            break;
+        }
+        if (ev->button != GUI_BTN_LEFT) break;
+        if (ex.dialog != DLG_NONE) {
+            int w = 420, h = 150;
+            ic_rect_t r = ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
+            int bw = ic_ui_button_width("Create", IC_SYM_NONE);
+            int cw = ic_ui_button_width("Cancel", IC_SYM_NONE);
+            int by = r.y + r.h - IC_H_CONTROL - IC_SP_4;
+            if (ic_ui_hit(ic_rect_make(r.x + r.w - bw - IC_SP_5, by, bw, IC_H_CONTROL),
+                          ev->x, ev->y)) {
+                commit_dialog();
+            } else if (ic_ui_hit(ic_rect_make(r.x + r.w - bw - cw - IC_SP_5 - IC_SP_3, by, cw,
+                                             IC_H_CONTROL), ev->x, ev->y)) {
+                close_dialog();
+            } else {
+                ic_rect_t f = ic_rect_make(r.x + IC_SP_5, r.y + IC_SP_4 + 24,
+                                           r.w - 2 * IC_SP_5, IC_H_CONTROL);
+                if (ic_ui_hit(f, ev->x, ev->y)) {
+                    ex.dialog_cursor = ic_ui_textfield_index_at(f, &(ic_textfield_t){
+                        .text = ex.dialog_buf, .cursor = ex.dialog_cursor,
+                        .sel_start = ex.dialog_cursor, .sel_end = ex.dialog_cursor
+                    }, ev->x);
                 }
             }
-            selected_item = hit;
-            ctx_open_at(mx, my, hit);
+            break;
         }
-        prev_right = 1;
-    } else {
-        prev_right = 0;
+        if (ex.info_open) {
+            int w = 380, h = 190;
+            ic_rect_t r = ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
+            int bw = ic_ui_button_width("OK", IC_SYM_NONE);
+            if (ic_ui_hit(ic_rect_make(r.x + r.w - bw - IC_SP_5,
+                                       r.y + r.h - IC_H_CONTROL - IC_SP_4, bw, IC_H_CONTROL),
+                          ev->x, ev->y) ||
+                !ic_ui_hit(r, ev->x, ev->y)) {
+                ex.info_open = 0;
+            }
+            break;
+        }
+        if (ex.menu_open) {
+            int hit = ic_ui_menu_hit(&ex.menu, ex.menu_x, ex.menu_y, ev->x, ev->y);
+            if (hit >= 0) menu_activate(app, hit);
+            else ex.menu_open = 0;
+            break;
+        }
+        if (ex.hover_back) { go_back(); break; }
+        if (ex.hover_up) { go_up(); break; }
+        if (ex.hover_view) { ex.view = ex.view == VIEW_GRID ? VIEW_LIST : VIEW_GRID; break; }
+        if (ex.hover_new_folder) { open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break; }
+        if (ex.hover_new_file) { open_dialog(DLG_NEW_FILE, "New File", ""); break; }
+        i = place_at(app, ev->x, ev->y);
+        if (i >= 0) { navigate_to(PLACES[i], 1); break; }
+        i = item_at(app, ev->x, ev->y);
+        if (i >= 0) {
+            ex.selected = i;
+            ex.list_focused = 1;
+        } else {
+            ex.selected = -1;
+            ex.list_focused = 0;
+        }
+        break;
     }
+    case IC_EV_MOUSE_UP:
+        break;
+    case IC_EV_MOUSE_LEAVE:
+        ex.hover = -1;
+        ex.hover_sidebar = -1;
+        ex.hover_back = ex.hover_up = ex.hover_view = 0;
+        ex.hover_new_folder = ex.hover_new_file = 0;
+        break;
+    case IC_EV_KEY:
+        if (ex.info_open) {
+            if (ev->key == IC_KEY_ESCAPE || ev->key == IC_KEY_ENTER) ex.info_open = 0;
+            break;
+        }
+        if (ex.dialog != DLG_NONE) {
+            int len = (int)d_strlen(ex.dialog_buf);
+            ic_rect_t f = ic_rect_make((app->width - 420) / 2 + IC_SP_5,
+                                       (app->height - 150) / 2 + IC_SP_4 + 24,
+                                       420 - 2 * IC_SP_5, IC_H_CONTROL);
+            switch (ev->key) {
+            case IC_KEY_ENTER:  commit_dialog(); break;
+            case IC_KEY_ESCAPE: close_dialog(); break;
+            case IC_KEY_LEFT:   if (ex.dialog_cursor > 0) ex.dialog_cursor--; break;
+            case IC_KEY_RIGHT:  if (ex.dialog_cursor < len) ex.dialog_cursor++; break;
+            case IC_KEY_HOME:   ex.dialog_cursor = 0; break;
+            case IC_KEY_END:    ex.dialog_cursor = len; break;
+            case IC_KEY_BACKSPACE:
+                if (ex.dialog_cursor > 0) {
+                    for (int k = ex.dialog_cursor; k < len; k++) {
+                        ex.dialog_buf[k - 1] = ex.dialog_buf[k];
+                    }
+                    ex.dialog_buf[len - 1] = 0;
+                    ex.dialog_cursor--;
+                }
+                break;
+            case IC_KEY_DELETE:
+                if (ex.dialog_cursor < len) {
+                    for (int k = ex.dialog_cursor; k < len - 1; k++) {
+                        ex.dialog_buf[k] = ex.dialog_buf[k + 1];
+                    }
+                    ex.dialog_buf[len - 1] = 0;
+                }
+                break;
+            default:
+                if (ev->key >= 32 && ev->key < 127 && len + 1 < DIALOG_CAP) {
+                    for (int k = len; k > ex.dialog_cursor; k--) {
+                        ex.dialog_buf[k] = ex.dialog_buf[k - 1];
+                    }
+                    ex.dialog_buf[ex.dialog_cursor++] = (char)ev->key;
+                    ex.dialog_buf[len + 1] = 0;
+                }
+                break;
+            }
+            (void)f;
+            break;
+        }
+        if (ex.menu_open) { ex.menu_open = 0; break; }
+        switch (ev->key) {
+        case IC_KEY_ENTER:
+            if (ex.selected >= 0) open_item(ex.selected);
+            break;
+        case IC_KEY_UP:
+            if (ex.selected > 0) ex.selected--;
+            else if (ex.view == VIEW_GRID && ex.scroll > 0) ex.scroll -= ex.cols;
+            break;
+        case IC_KEY_DOWN:
+            if (ex.selected + 1 < ex.count) ex.selected++;
+            break;
+        case IC_KEY_LEFT:
+            if (ex.view == VIEW_GRID && ex.selected % ex.cols > 0) ex.selected--;
+            break;
+        case IC_KEY_RIGHT:
+            if (ex.view == VIEW_GRID && ex.selected % ex.cols + 1 < ex.cols &&
+                ex.selected + 1 < ex.count) {
+                ex.selected++;
+            }
+            break;
+        case IC_KEY_PAGE_UP:
+            ex.scroll -= ex.cols * ex.rows;
+            if (ex.scroll < 0) ex.scroll = 0;
+            break;
+        case IC_KEY_PAGE_DOWN: ex.scroll += ex.cols * ex.rows; break;
+        case IC_KEY_ESCAPE:
+            ex.menu_item = ex.selected;
+            open_menu_at(app, app->mouse_x, app->mouse_y);
+            break;
+        case IC_KEY_DELETE:
+            /* No unlink in the VFS, so say so instead of faking it. */
+            ex_status("Deleting is not available yet: the file system has no remove");
+            break;
+        case IC_KEY_HOME: ex.selected = 0; break;
+        case IC_KEY_END:  if (ex.count) ex.selected = ex.count - 1; break;
+        case 'v': case 'V': ex.view = ex.view == VIEW_GRID ? VIEW_LIST : VIEW_GRID; break;
+        case 'r': case 'R': refresh(); break;
+        case 'n': case 'N': open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
+        case 'g': case 'G': open_dialog(DLG_GOTO, "Go to Folder", ex.path); break;
+        default: break;
+        }
+        break;
+    case IC_EV_RESIZE:
+        layout(app);
+        break;
+    case IC_EV_BLUR:
+        ex.list_focused = 0;
+        break;
+    case IC_EV_FOCUS:
+    case IC_EV_APPEARANCE:
+    default:
+        break;
+    }
+    ic_app_invalidate(app);
 }
 
-static void draw_all(void) {
-    if (mode == MODE_EDITOR) draw_editor();
-    else draw_browser();
-    draw_dialog();
-    gui_flush();
+static void init(ic_app_t *app) {
+    (void)app;
+    ex.count = 0;
+    ex.selected = -1;
+    ex.hover = -1;
+    ex.view = VIEW_GRID;
+    ex.scroll = 0;
+    ex.history_count = 0;
+    ex.history_pos = -1;
+    ex.dialog = DLG_NONE;
+    ex.menu_open = 0;
+    ex.menu_item = -1;
+    ex.menu_hover = -1;
+    ex.info_open = 0;
+    ex.list_focused = 1;
+    ex.hover_back = ex.hover_up = ex.hover_view = 0;
+    ex.hover_new_folder = ex.hover_new_file = 0;
+    ex.hover_sidebar = -1;
+    d_copy(ex.path, "/", PATH_CAP);
+    ex.status[0] = 0;
+    refresh();
+    if (app->user) {
+        const char *arg = (const char *)app->user;
+        if (arg[0]) navigate_to(arg, 0);
+    }
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    if (gui_open_window("ICDA Explorer", DESKTOP_W, DESKTOP_H) != 0) {
-        return -1;
+    static const ic_app_desc_t desc = { "Explorer", WIN_W, WIN_H, init, draw, event, 0 };
+    const char *arg = (argc > 1 && argv) ? argv[1] : 0;
+    if (ic_app_run(&desc, (void *)arg) != 0) {
+        icda_write("explorer requires the desktop (Ctrl+Alt+F1)\n");
+        return 1;
     }
-
-    /* File/folder icons come from /usr/share/icons when present. */
-    ic_icon_load_folder("/usr/share/icons");
-
-    browser_refresh();
-    draw_all();
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            if (msg.type == GUI_MSG_MOUSE_EVENT) {
-                handle_mouse(&msg);
-            } else if (msg.type == GUI_MSG_KEY_EVENT && msg.key.pressed) {
-                handle_key(msg.key.keycode);
-            } else if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        /* Redraw only on input or when the selection-blink phase
-         * actually changes (every ~8 ticks).  The old ticks%8 check
-         * fired every 8 ticks regardless of blink phase, forcing the
-         * WM to composite a full Explorer frame even when idle. */
-        {
-            int blink = (int)((icda_ticks() / 8) & 1);
-            int blink_changed = (blink != last_blink_state);
-            last_blink_state = blink;
-            if (changed || blink_changed) {
-                draw_all();
-            }
-        }
-        icda_sleep(1);
-    }
+    return 0;
 }

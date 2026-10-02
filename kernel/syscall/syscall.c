@@ -186,6 +186,21 @@ static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
         return (uint64_t)-U_EFAULT;
     }
 
+    /* Readable device nodes produce their contents on demand. */
+    {
+        const dev_calls_t *node = path[0] == '/' ? devops_lookup(path) : 0;
+        if (node && node->node_read) {
+            char snap[64];
+            size = node->node_read(snap, cap < sizeof(snap) ? cap : sizeof(snap));
+            if (size >= cap) {
+                size = cap - 1;
+            }
+            copy_bytes(buf, snap, size);
+            buf[size] = '\0';
+            return size;
+        }
+    }
+
     data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), path, &size);
     if (!data) {
         return (uint64_t)-1;

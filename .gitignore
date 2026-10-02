@@ -118,3 +118,16 @@ qemu-hda-*.wav
 # AI-agent IDE config (opencode)
 /.opencode/
 /opencode.json
+
+# Local LSP database (absolute host paths; regenerate with
+# scripts\gen-compile-commands.ps1). Shared LSP config is .clangd.
+compile_commands.json
+.cache/clangd/
+
+# GUI verification scratch: QMP screendumps, driver state, serial logs.
+# Produced by scripts/qmp-screendump.ps1 and scripts/qmp-input.ps1, which
+# write into .verify/. Nothing here is a build input.
+.verify/
+*.ppm
+*.log
+gui-cursor.txt

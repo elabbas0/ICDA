@@ -2,7 +2,6 @@
 
 #include "../drivers/console/console.h"
 #include "../drivers/input/input.h"
-#include "../drivers/usb/xhci.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
@@ -122,7 +121,7 @@ static void tty_reset_line(void) {
 }
 
 static void tty_print_help(void) {
-    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo run reboot usb\n", CONSOLE_STYLE_MUTED);
+    console_write("commands: help clear mem pid pwd cd ls cat mkdir touch write stat echo run reboot\n", CONSOLE_STYLE_MUTED);
     console_write("examples: run /apps/hello.app, run /bin/hello.elf\n", CONSOLE_STYLE_MUTED);
 }
 
@@ -224,67 +223,6 @@ static void tty_print_stat(const char *path) {
     console_write(" readonly=", CONSOLE_STYLE_MUTED);
     console_write(stat.readonly ? "yes" : "no", CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
-}
-
-static void tty_print_hex4(uint16_t value) {
-    static const char hexd[] = "0123456789abcdef";
-    console_write("0x", CONSOLE_STYLE_INFO);
-    console_write_char(hexd[(value >> 12) & 0xF], CONSOLE_STYLE_INFO);
-    console_write_char(hexd[(value >> 8) & 0xF], CONSOLE_STYLE_INFO);
-    console_write_char(hexd[(value >> 4) & 0xF], CONSOLE_STYLE_INFO);
-    console_write_char(hexd[value & 0xF], CONSOLE_STYLE_INFO);
-}
-
-static const char *tty_usb_speed_name(uint8_t speed) {
-    switch (speed) {
-    case 1:
-        return "full";
-    case 2:
-        return "low";
-    case 3:
-        return "high";
-    case 4:
-        return "super";
-    case 5:
-        return "super+";
-    default:
-        return "unknown";
-    }
-}
-
-static void tty_print_usb(void) {
-    uint32_t count = xhci_device_count();
-    uint32_t i;
-    if (!xhci_present()) {
-        console_write("no xhci controller\n", CONSOLE_STYLE_WARN);
-        return;
-    }
-    console_write("usb devices=", CONSOLE_STYLE_MUTED);
-    console_write_dec64(count, CONSOLE_STYLE_INFO);
-    console_write("\n", CONSOLE_STYLE_INFO);
-    for (i = 0; i < count; i++) {
-        uint16_t vid = 0;
-        uint16_t pid = 0;
-        uint8_t cls = 0;
-        uint8_t speed = 0;
-        uint8_t slot = 0;
-        if (xhci_device_info(i, &vid, &pid, &cls, &speed, &slot) != 0) {
-            continue;
-        }
-        console_write("usb", CONSOLE_STYLE_MUTED);
-        console_write_dec64(i, CONSOLE_STYLE_INFO);
-        console_write(" slot=", CONSOLE_STYLE_MUTED);
-        console_write_dec64(slot, CONSOLE_STYLE_INFO);
-        console_write(" speed=", CONSOLE_STYLE_MUTED);
-        console_write(tty_usb_speed_name(speed), CONSOLE_STYLE_INFO);
-        console_write(" vid=", CONSOLE_STYLE_MUTED);
-        tty_print_hex4(vid);
-        console_write(" pid=", CONSOLE_STYLE_MUTED);
-        tty_print_hex4(pid);
-        console_write(" class=", CONSOLE_STYLE_MUTED);
-        console_write_dec64(cls, CONSOLE_STYLE_INFO);
-        console_write("\n", CONSOLE_STYLE_INFO);
-    }
 }
 
 static int tty_dispatch_line(void) {
@@ -444,10 +382,6 @@ static int tty_dispatch_line(void) {
     }
     if (streq(line, "reboot")) {
         tty_reboot();
-        return 0;
-    }
-    if (streq(line, "usb")) {
-        tty_print_usb();
         return 0;
     }
 

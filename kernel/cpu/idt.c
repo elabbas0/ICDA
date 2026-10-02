@@ -6,24 +6,14 @@
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr   ip;
 
-void idt_set_entry_ist(int vec, uint64_t handler, uint8_t flags, uint8_t ist) {
-    if (vec < 0 || vec >= IDT_ENTRIES) {
-        return;
-    }
-    if (ist > 7) {
-        ist = 0;
-    }
-    idt[vec].offset_low  = handler & 0xFFFF;
-    idt[vec].offset_mid  = (handler >> 16) & 0xFFFF;
-    idt[vec].offset_high = (handler >> 32) & 0xFFFFFFFF;
-    idt[vec].selector    = 0x08;      // kernel code segment
-    idt[vec].ist         = (uint8_t)(ist & 0x7);
-    idt[vec].flags       = flags;
-    idt[vec].zero        = 0;
-}
-
 void idt_set_entry(int index, uint64_t handler, uint8_t flags) {
-    idt_set_entry_ist(index, handler, flags, 0);
+    idt[index].offset_low  = handler & 0xFFFF;
+    idt[index].offset_mid  = (handler >> 16) & 0xFFFF;
+    idt[index].offset_high = (handler >> 32) & 0xFFFFFFFF;
+    idt[index].selector    = 0x08;      // kernel code segment
+    idt[index].ist         = 0;
+    idt[index].flags       = flags;
+    idt[index].zero        = 0;
 }
 
 extern void idt_flush(uint64_t idt_ptr);

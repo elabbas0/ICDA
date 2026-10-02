@@ -127,13 +127,6 @@ int virtio_gpu_init(void);
 /* Transfer + flush full framebuffer to host.  Returns 0 on success, -1 on error. */
 int virtio_gpu_present(void);
 
-/* Transfer + flush one rectangle to host (dirty-rect present).
- * Clipped to the live display size; rejects w/h <= 0 and fully
- * off-screen rects with -1. A rect covering the full screen issues
- * the same commands as virtio_gpu_present(). Returns 0 on success,
- * -1 when the device is not ready or a command fails. */
-int virtio_gpu_present_rect(int x, int y, int w, int h);
-
 /* 1 when the virtio-gpu device is initialized and the scanout is live. */
 int virtio_gpu_ready(void);
 
