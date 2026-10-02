@@ -136,29 +136,46 @@ static ic_rect_t up_rect(ic_app_t *app) {
     return ic_rect_make(r.x + r.w + IC_SP_1, r.y, IC_H_CONTROL, IC_H_CONTROL);
 }
 
-static ic_rect_t path_rect(ic_app_t *app) {
-    ic_rect_t r = up_rect(app);
-    int x = r.x + r.w + IC_SP_2;
-    int w = app->width - x - 2 * (IC_H_CONTROL + IC_SP_2) - 2 * IC_SP_3;
-    if (w < 60) w = 60;
-    return ic_rect_make(x, (toolbar_rect(app).h - IC_H_CONTROL) / 2, w, IC_H_CONTROL);
+/* The action buttons are right-aligned and the path field takes what is
+ * left, rather than the reverse: sizing the path from the full width
+ * first pushed them off the right edge at the default window size.
+ *
+ * Labels are full words only when they fit; on a small screen (the VM
+ * boots at 800x600) they shorten rather than truncating to "New Fol...". */
+static const char *toolbar_label(int wide, const char *long_label, const char *short_label) {
+    return wide ? long_label : short_label;
 }
 
-static ic_rect_t view_rect(ic_app_t *app) {
-    ic_rect_t p = path_rect(app);
-    return ic_rect_make(p.x + p.w + IC_SP_2, p.y, IC_H_CONTROL, IC_H_CONTROL);
-}
-
-static ic_rect_t new_folder_rect(ic_app_t *app) {
-    ic_rect_t v = view_rect(app);
-    return ic_rect_make(v.x + v.w + IC_SP_2, v.y,
-                        ic_ui_button_width("New Folder", IC_SYM_NONE), IC_H_CONTROL);
+static int toolbar_wide(ic_app_t *app) {
+    return app->width >= 880;
 }
 
 static ic_rect_t new_file_rect(ic_app_t *app) {
+    ic_rect_t b = toolbar_rect(app);
+    const char *label = toolbar_label(toolbar_wide(app), "New File", "File");
+    int w = ic_ui_button_width(label, IC_SYM_PLUS);
+    return ic_rect_make(b.w - IC_SP_3 - w, (b.h - IC_H_CONTROL) / 2, w, IC_H_CONTROL);
+}
+
+static ic_rect_t new_folder_rect(ic_app_t *app) {
+    ic_rect_t n = new_file_rect(app);
+    const char *label = toolbar_label(toolbar_wide(app), "New Folder", "Folder");
+    int w = ic_ui_button_width(label, IC_SYM_FOLDER);
+    return ic_rect_make(n.x - IC_SP_2 - w, n.y, w, IC_H_CONTROL);
+}
+
+static ic_rect_t view_rect(ic_app_t *app) {
     ic_rect_t n = new_folder_rect(app);
-    return ic_rect_make(n.x + n.w + IC_SP_2, n.y,
-                        ic_ui_button_width("New File", IC_SYM_NONE), IC_H_CONTROL);
+    return ic_rect_make(n.x - IC_SP_2 - IC_H_CONTROL, n.y, IC_H_CONTROL, IC_H_CONTROL);
+}
+
+static ic_rect_t path_rect(ic_app_t *app) {
+    ic_rect_t r = up_rect(app);
+    ic_rect_t v = view_rect(app);
+    int x = r.x + r.w + IC_SP_2;
+    int w = v.x - IC_SP_2 - x;
+    if (w < 60) w = 60;
+    return ic_rect_make(x, (toolbar_rect(app).h - IC_H_CONTROL) / 2, w, IC_H_CONTROL);
 }
 
 /* Places in the sidebar. */
@@ -172,9 +189,14 @@ static const ic_symbol_t PLACE_SYMBOLS[PLACE_COUNT] = {
     IC_SYM_GEAR
 };
 
+/* The sidebar caption sits above the first item, so items start below it
+ * rather than at the same offset. */
+#define PLACE_HEADER_H 18
+
 static ic_rect_t place_rect(ic_app_t *app, int i) {
     ic_rect_t s = sidebar_rect(app);
-    return ic_rect_make(s.x, s.y + IC_SP_3 + i * (IC_H_ROW + 2), s.w, IC_H_ROW);
+    return ic_rect_make(s.x, s.y + IC_SP_3 + PLACE_HEADER_H + i * (IC_H_ROW + 2),
+                        s.w, IC_H_ROW);
 }
 
 static ic_rect_t item_rect(ic_app_t *app, int index) {
@@ -557,9 +579,11 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
                     IC_ALIGN_LEFT);
     ic_ui_icon_button(c, view_rect(app), ex.view == VIEW_GRID ? IC_SYM_GRID : IC_SYM_DOCUMENT,
                       ex.hover_view ? IC_STATE_HOVER : IC_STATE_NORMAL);
-    ic_ui_button(c, new_folder_rect(app), "New Folder", IC_SYM_FOLDER, IC_BUTTON_DEFAULT,
+    ic_ui_button(c, new_folder_rect(app), toolbar_label(toolbar_wide(app), "New Folder", "Folder"),
+                 IC_SYM_FOLDER, IC_BUTTON_DEFAULT,
                  ex.hover_new_folder ? IC_STATE_HOVER : IC_STATE_NORMAL);
-    ic_ui_button(c, new_file_rect(app), "New File", IC_SYM_PLUS, IC_BUTTON_DEFAULT,
+    ic_ui_button(c, new_file_rect(app), toolbar_label(toolbar_wide(app), "New File", "File"),
+                 IC_SYM_PLUS, IC_BUTTON_DEFAULT,
                  ex.hover_new_file ? IC_STATE_HOVER : IC_STATE_NORMAL);
 }
 
@@ -568,7 +592,8 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
     const ic_palette_t *p = ic_palette();
     ic_ui_sidebar_bg(c, s);
     ic_text_draw_in(c, ic_font(IC_FONT_CAPTION_EMPH),
-                    ic_rect_make(s.x + IC_SP_3, s.y + IC_SP_3, s.w - IC_SP_4, 14),
+                    ic_rect_make(s.x + IC_SP_3, s.y + IC_SP_3, s.w - IC_SP_4,
+                                 PLACE_HEADER_H - IC_SP_2),
                     "PLACES", p->label_tertiary, IC_ALIGN_LEFT);
     for (int i = 0; i < PLACE_COUNT; i++) {
         const char *label = PLACES[i];

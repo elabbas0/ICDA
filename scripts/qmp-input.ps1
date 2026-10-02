@@ -288,7 +288,10 @@ try {
                 Start-Sleep -Milliseconds 700
                 return (Test-Path -LiteralPath $path)
             }
-            [int]$jig = 12
+            # A small jiggle is itself liable to be dropped by the PS/2
+            # mouse, which reads as "no motion".  Use a delta large enough
+            # to survive; the centroid correction scales with it.
+            [int]$jig = 60
             for ($attempt = 1; $attempt -le 4; $attempt++) {
                 if (-not (Dump-To $frameA)) { Write-Host "sync: screendump failed"; break }
                 Send-Rel "x" $jig
