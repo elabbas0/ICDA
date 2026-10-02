@@ -365,8 +365,8 @@ int ahci_init(void) {
 
         abar = (hba_mem_t *)vmm_map_physical(abar_phys, PAGE_SIZE_4K * 2, VMM_FLAGS_KERNEL_RW | PTE_NO_CACHE);
         if (!abar) continue;
-        /* Controller not responding (BAR reads all-ones): skip instead of
-         * poking 32 phantom ports through the bounded waits. */
+        
+
         if (abar->pi == 0xFFFFFFFFU || abar->cap == 0) continue;
         abar->ghc |= HBA_GHC_AE;
         pi = abar->pi;

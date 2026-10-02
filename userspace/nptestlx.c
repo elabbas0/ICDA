@@ -1,16 +1,16 @@
-/* Linux-personality syscall test (runs as /bin/nptestlx.elf).
- *
- * Exercises linux_syscall_dispatch through real Linux syscall numbers:
- * open/read/write/close/fstat/getdents/brk/mmap/munmap/mprotect and the
- * arch_prctl stub. Suites:
- *   - normal mode: behavioural + negative tests, exit code = failures
- *   - "suicide" argv mode: mprotect a page read-only, then write it;
- *     the kernel must kill us (-11). Survival exits 42.
- * The native nptest.app spawns the suicide mode and checks the -11.
- *
- * Run headless via the boot self-test hook:
- *   kernel cmdline += icda.test=nptestlx
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "icda_sys.h"
 
 #define LX_READ      0
@@ -41,7 +41,7 @@
 #define U_ENOENT 2
 #define U_ENOMEM 12
 
-/* Kernel vfs_stat_t layout (see kernel/fs/vfs.h). */
+
 typedef struct {
     uint64_t st_inode;
     uint64_t st_size;
@@ -88,10 +88,10 @@ int nptestlx_main(int argc, char **argv) {
     long fd;
     long n;
 
-    /* Suicide mode: used by native nptest to verify the W^X kill path.
-     * mprotect a fresh mapping read-only, then store through it. The
-     * kernel must terminate us with -11. Reaching the exit below with
-     * 42 means protection did NOT fire. */
+    
+
+
+
     if (argc > 1 && lx_streq(argv[1], "suicide")) {
         uint64_t addr = sys_call6(LX_MMAP, 0, 8192, 3,
                                   LX_MAP_PRIVATE | LX_MAP_ANON,
@@ -126,7 +126,7 @@ int nptestlx_main(int argc, char **argv) {
         check("fstat size > 0", st.st_size > 0 ? 1 : 0, 1);
         check("fstat type file", st.st_type, 1);
         check("close ok", (long)sys_call1(LX_CLOSE, (uint64_t)fd), 0);
-        /* Double close must fail, not silently succeed. */
+        
         check("close twice -> EBADF",
               (long)sys_call1(LX_CLOSE, (uint64_t)fd), -(long)U_EBADF);
     }
@@ -148,7 +148,7 @@ int nptestlx_main(int argc, char **argv) {
           (long)sys_call3(LX_READ, 1, (uint64_t)(uintptr_t)buf, 64),
           -(long)U_EBADF);
 
-    /* getdents pages through the fd offset. */
+    
     fd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)"/",
                          LX_O_RDONLY, 0);
     check("open dir >= 3", fd >= 3 ? 1 : fd, 1);
@@ -170,7 +170,7 @@ int nptestlx_main(int argc, char **argv) {
           (long)sys_call3(LX_GETDENTS, 1, (uint64_t)(uintptr_t)buf, 64),
           -(long)U_EBADF);
 
-    /* brk ladder. */
+    
     {
         uint64_t b0 = sys_call1(LX_BRK, 0);
         uint64_t b1;
@@ -183,7 +183,7 @@ int nptestlx_main(int argc, char **argv) {
         check("brk page touchback", pb[0] == 'B' ? 1 : 0, 1);
     }
 
-    /* mmap / mprotect / munmap incl. W^X and guard windows. */
+    
     {
         uint64_t addr = sys_call6(LX_MMAP, 0, 8192, 3,
                                   LX_MAP_PRIVATE | LX_MAP_ANON,
@@ -222,8 +222,8 @@ int nptestlx_main(int argc, char **argv) {
               -(long)U_EINVAL);
     }
 
-    /* arch_prctl stub documents itself: returns 0, programs nothing
-     * (real FSBASE is a later compat-ladder rung). */
+    
+
     check("arch_prctl stub ok",
           (long)sys_call2(LX_ARCH_PRCTL, LX_ARCH_SET_FS, 0x70000000), 0);
 

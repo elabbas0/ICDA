@@ -7,10 +7,10 @@
 #define PIT_CHANNEL2_PORT  0x42
 #define SPEAKER_PORT       0x61
 
-/* Slice C audio hardening: the tone duration comes straight from a
- * userspace syscall argument, so it must be capped - an unbounded
- * busy-spin here would hang the calling thread (and, on real HW,
- * needlessly blast the speaker). 500 ticks = 5 s at 100 Hz. */
+
+
+
+
 #define SPEAKER_MAX_TICKS  500U
 #define SPEAKER_MIN_HZ     30U
 #define SPEAKER_MAX_HZ     8000U
@@ -42,8 +42,8 @@ void speaker_play(uint32_t frequency_hz) {
         speaker_stop();
         return;
     }
-    /* Clamp out-of-range requests instead of programming garbage
-     * divisors into the PIT. */
+    
+
     if (frequency_hz < SPEAKER_MIN_HZ) {
         frequency_hz = SPEAKER_MIN_HZ;
     }
@@ -83,8 +83,8 @@ void speaker_play_for(uint32_t frequency_hz, uint64_t ticks) {
         return;
     }
 
-    /* Bounded busy-wait only: cap the duration so a bad/huge argument
-     * can never spin the CPU (or the speaker) indefinitely. */
+    
+
     if (ticks > SPEAKER_MAX_TICKS) {
         ticks = SPEAKER_MAX_TICKS;
     }

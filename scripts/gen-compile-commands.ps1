@@ -1,4 +1,4 @@
-<#
+<
 .SYNOPSIS
   Regenerate compile_commands.json (clangd LSP database) from the Makefile.
 
@@ -24,7 +24,7 @@
 
   Requires: Docker engine running, image icda-toolchain (scripts\icda.cmd
   image builds it). No Python / bear / compiledb needed on the host.
-#>
+
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -73,8 +73,8 @@ try {
     foreach ($line in (Get-MakeDryRun @("CI_SELFTEST=1", "CI_IMAGE=1"))) { Add-CompileEntry $byFile $dirJson $line }
     foreach ($line in (Get-MakeDryRun @("sb16.o"))) { Add-CompileEntry $byFile $dirJson $line }
 
-    # Sources with no Makefile rule: clone the userspace flags from a
-    # parsed entry, swapping only the input/output paths.
+    
+    
     $template = @($byFile.Values | Where-Object { $_.file -match '/userspace/' } | Select-Object -First 1)
     if ($template.Count -gt 0) {
         $csrcs = Get-ChildItem -Recurse -Filter *.c -Path (Join-Path $RepoRoot "userspace") |
@@ -90,7 +90,7 @@ try {
                 if ($tok -like '/tmp/icda-*.o') { $newArgs += "/tmp/icda-$base.o"; continue }
                 $newArgs += $tok
             }
-            # Sanity: template substitution must have replaced the source.
+            
             if ($newArgs -notcontains $rel) { continue }
             $byFile[$abs] = [pscustomobject]@{
                 directory = $dirJson
@@ -106,7 +106,7 @@ try {
     }
 
     $json = @($byFile.Values) | ConvertTo-Json -Depth 10
-    # UTF-8 without BOM: clangd and most editors prefer it.
+    
     [System.IO.File]::WriteAllText($OutFile, $json + [Environment]::NewLine,
         (New-Object System.Text.UTF8Encoding $false))
     Write-Host "Wrote $OutFile with $($byFile.Count) translation units."

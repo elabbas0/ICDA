@@ -1,6 +1,6 @@
-/*
- * ic_app.c - the application runtime (see ic_app.h).
- */
+
+
+
 #include "ic_app.h"
 #include "ic_time.h"
 #include "ic_theme.h"
@@ -10,10 +10,10 @@
 #define IC_CARET_PERIOD_MS 1060u
 #define IC_APPEARANCE_POLL_MS 1000u
 
-/* Escape-sequence decoder for keys the terminal-style keyboard driver
- * delivers as "ESC [ x". */
+
+
 typedef struct {
-    int     state;     /* 0 idle, 1 got ESC, 2 got ESC[, 3 got ESC[n */
+    int     state;     
     uint32_t param;
 } ic_keydec_t;
 
@@ -175,7 +175,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
                 ic_app_caret_reset(&app);
                 break;
             case GUI_MSG_RESIZE:
-                /* gui_poll_event already switched the buffer. */
+                
                 app.width = gui_window_width();
                 app.height = gui_window_height();
                 ic_app_emit(&app, IC_EV_RESIZE, 0, 0, 0);
@@ -186,7 +186,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
             if (app.quit) break;
         }
         if (app.quit) break;
-        /* A lone ESC with nothing after it in this batch is the Esc key. */
+        
         if (keys.state == 1 && events == 0) {
             keys.state = 0;
             ic_app_emit_key(&app, IC_KEY_ESCAPE);

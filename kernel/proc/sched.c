@@ -400,8 +400,8 @@ static void schedule_inner(int force) {
 void schedule(struct registers *regs) {
     (void)regs;
     uptime_ticks++;
-    /* Per-process CPU accounting: the timer fires at 100 Hz, so each
-     * tick a thread runs counts as one cpu_tick for its owner. */
+    
+
     if (current_thread_ptr && current_thread_ptr->owner) {
         current_thread_ptr->owner->cpu_ticks++;
     }
@@ -600,11 +600,11 @@ int sched_resume_process(uint64_t pid) {
     return 0;
 }
 
-/* Reap EXITED processes nobody will ever wait on: children whose
- * parent is gone or already dead (B2 — e.g. init's VT-app child after
- * a VT switch force-exits the whole tree and the kernel reaps only
- * init). Live parents still reap their own children; this touches
- * only orphans. */
+
+
+
+
+
 void sched_reap_orphans(void) {
     process_t *p = process_list;
 
@@ -658,11 +658,11 @@ void sched_force_exit_current_with_children(uint64_t exit_code) {
         return;
     }
 
-    /* The timer IRQ that triggers a VT switch can fire while the
-     * foreground app is blocked (e.g. the WM waiting for input), with
-     * the idle thread current.  So force-exit every user process -
-     * the foreground app and all its descendants - rather than only
-     * the current thread's owner. */
+    
+
+
+
+
     sched_force_exit_all_user_processes(exit_code);
 }
 

@@ -11,7 +11,7 @@
 #include "../memory/heap.h"
 
 #define TLS_VERSION_MAJOR 3
-#define TLS_VERSION_MINOR 3  /* TLS 1.2 = 3.3 */
+#define TLS_VERSION_MINOR 3  
 
 #define TLS_CONTENT_CHANGE_CIPHER_SPEC 20
 #define TLS_CONTENT_ALERT              21
@@ -64,7 +64,7 @@ typedef struct {
 
 typedef struct {
     uint8_t type;
-    uint32_t length;  // 3 bytes
+    uint32_t length;  
 } __attribute__((packed)) tls_handshake_hdr_t;
 
 struct tls_conn {
@@ -106,7 +106,7 @@ struct tls_conn {
     uint8_t enc_client;
     uint8_t enc_server;
 
-    /* TLS 1.3 state */
+    
     uint8_t tls13;
     uint8_t x25519_priv[32];
     uint8_t tls13_server_share[32];
@@ -205,12 +205,12 @@ static uint32_t tls_prf(const uint8_t *secret, int secret_len,
     return 0;
 }
 
-/* ---- TLS 1.3 (RFC 8446) ------------------------------------------------ */
+
 
 static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, uint16_t len);
 static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks);
 
-/* HKDF-Expand-Label; out_len <= 32 so a single HMAC block suffices. */
+
 static void tls13_expand_label(const uint8_t secret[32], const char *label,
                                const uint8_t *ctx, uint32_t ctx_len,
                                uint8_t *out, uint32_t out_len) {
@@ -229,7 +229,7 @@ static void tls13_expand_label(const uint8_t secret[32], const char *label,
     info[i++] = (uint8_t)ctx_len;
     for (uint32_t j = 0; j < ctx_len; j++) info[i++] = ctx[j];
 
-    /* HKDF-Expand with one iteration: T(1) = HMAC(prk, info || 0x01) */
+    
     uint8_t hmac_in[sizeof(info) + 1];
     for (uint32_t j = 0; j < i; j++) hmac_in[j] = info[j];
     hmac_in[i] = 0x01;
@@ -248,7 +248,7 @@ static void tls13_nonce(const uint8_t iv[12], uint64_t seq, uint8_t nonce[12]) {
     for (int i = 0; i < 8; i++) nonce[11 - i] ^= (uint8_t)(seq >> (i * 8));
 }
 
-/* Encrypt one TLS 1.3 record: inner = data || type, wire type 23. */
+
 static int tls13_send_record(tls_conn_t *conn, const uint8_t exp[176], const uint8_t iv[12],
                              uint64_t *seq_io, uint8_t inner_type, const uint8_t *data, uint16_t len) {
     if ((uint32_t)len + 1 + 16 > TLS_CAP) return -1;
@@ -272,8 +272,8 @@ static int tls13_send_record(tls_conn_t *conn, const uint8_t exp[176], const uin
     (*seq_io)++;
     kfree(plain);
 
-    /* Reuse the raw TCP sender of tls_send_record by inlining it here is not
-     * possible; build the ethernet frame the same way it does. */
+    
+
     uint16_t frame_len = (uint16_t)(5 + ct_len);
 
     uint8_t eth_frame[NET_FRAME_CAP];
@@ -314,8 +314,8 @@ static int tls13_send_record(tls_conn_t *conn, const uint8_t exp[176], const uin
     return rc;
 }
 
-/* Read and decrypt the next TLS 1.3 record. Plaintext CCS records are
- * skipped. On success returns 1 with the inner content type and plaintext. */
+
+
 static int tls13_recv_record(tls_conn_t *conn, const uint8_t exp[176], const uint8_t iv[12],
                              uint64_t *seq_io, uint8_t *type_out, uint8_t *out, uint16_t *out_len,
                              uint32_t out_cap) {
@@ -366,10 +366,10 @@ static int tls13_recv_record(tls_conn_t *conn, const uint8_t exp[176], const uin
     return -1;
 }
 
-/* Finish the TLS 1.3 handshake after the ServerHello selected TLS 1.3.
- * conn->handshake_hash holds the transcript over CH||SH, the server key
- * share is in conn->tls13_server_share and the client private key in
- * conn->x25519_priv. */
+
+
+
+
 static int tls13_handshake(tls_conn_t *conn) {
     uint8_t shared[32];
     if (x25519_shared(shared, conn->x25519_priv, conn->tls13_server_share) != 0) {
@@ -408,15 +408,15 @@ static int tls13_handshake(tls_conn_t *conn) {
     aes128_expand_key(conn->s_hs_key, conn->s_hs_exp);
     tls_log("hs keys derived");
 
-    /* Middlebox compatibility: dummy change_cipher_spec. */
+    
     {
         uint8_t ccs = 1;
         if (tls_send_record(conn, TLS_CONTENT_CHANGE_CIPHER_SPEC, &ccs, 1) != 0) return -1;
     }
 
-    /* Read the encrypted server flight: EncryptedExtensions, Certificate,
-     * CertificateVerify, Finished.  Messages may span records, so they are
-     * accumulated in a heap buffer. */
+    
+
+
     uint8_t *acc = (uint8_t *)kmalloc(128 * 1024);
     if (!acc) return -1;
     uint32_t acc_len = 0;
@@ -472,15 +472,15 @@ static int tls13_handshake(tls_conn_t *conn) {
                 }
                 got_finished = 1;
             } else if (ht == TLS_HANDSHAKE_ENCRYPTED_EXTENSIONS) {
-                /* Stateless extensions need no verification. */
+                
             } else if (ht == TLS_HANDSHAKE_CERTIFICATE ||
                        ht == TLS_HANDSHAKE_CERTIFICATE_VERIFY) {
-                /* P0 fail-closed: there is no CA trust store and no
-                 * signature verification, so accepting any certificate
-                 * would be a silent MITM. Refuse the handshake until a
-                 * CA bundle + x509 verify path lands. Every legitimate
-                 * server sends these messages, so this disables HTTPS
-                 * entirely for now — by design, loudly. */
+                
+
+
+
+
+
                 tls_log("FAIL-CLOSED: server certificate cannot be verified (no CA store), refusing TLS");
                 rc_fail = 1;
                 break;
@@ -505,7 +505,7 @@ static int tls13_handshake(tls_conn_t *conn) {
     kfree(acc);
     if (rc_fail) return -1;
 
-    /* Application traffic secrets over transcript CH..server Finished. */
+    
     uint8_t master[32], c_ap[32], s_ap[32];
     tls13_derive_secret(hs_secret, "derived", empty_hash, derived);
     hmac_sha256(derived, 32, zero32, 32, master);
@@ -522,7 +522,7 @@ static int tls13_handshake(tls_conn_t *conn) {
     aes128_expand_key(conn->c_ap_key, conn->c_ap_exp);
     aes128_expand_key(conn->s_ap_key, conn->s_ap_exp);
 
-    /* Client Finished (transcript hash is the same CH..server Finished). */
+    
     uint8_t fin_key_c[32], verify[32];
     uint8_t fin_msg[4 + 32];
     tls13_expand_label(c_hs, "finished", NULL, 0, fin_key_c, 32);
@@ -547,7 +547,7 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
     if (conn->tls13 && conn->handshake_done && type != TLS_CONTENT_CHANGE_CIPHER_SPEC) {
         return tls13_send_record(conn, conn->c_ap_exp, conn->c_ap_iv, &conn->ap_seq_out, type, data, len);
     }
-    /* Heap-allocate large buffers to avoid stack overflow (kernel stack = 16KB) */
+    
     uint8_t *frame = (uint8_t *)kmalloc(TLS_CAP + 256);
     if (!frame) return -1;
     uint8_t *payload;
@@ -675,7 +675,7 @@ static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
     uint16_t len = 0;
     uint64_t deadline = sched_ticks() + timeout_ticks;
 
-    /* Compact the reassembly buffer so long transfers don't fill it. */
+    
     if (conn->rx_offset == conn->rx_len) {
         conn->rx_offset = 0;
         conn->rx_len = 0;
@@ -874,8 +874,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     conn->mac_key_len = 32;
     conn->mac_len = 32;
 
-    /* x25519 keypair for a possible TLS 1.3 handshake (generated up front so
-     * the key share can go into the ClientHello). */
+    
+
     uint32_t rand_seed = sched_ticks();
     for (int i = 0; i < 32; i++) {
         conn->x25519_priv[i] = (uint8_t)(rand_seed + i * 29 + (sched_ticks() & 0xFF) + i * i);
@@ -893,12 +893,12 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         conn->client_random[i] = (uint8_t)(rand_seed + i * 17 + (sched_ticks() & 0xFF));
         ch[ch_len++] = conn->client_random[i];
     }
-    /* 32-byte legacy session id (TLS 1.3 middlebox compatibility mode) */
+    
     ch[ch_len++] = 32;
     for (int i = 0; i < 32; i++) {
         ch[ch_len++] = (uint8_t)(rand_seed + i * 7 + 0xA5);
     }
-    /* cipher suites: TLS 1.3 GCM first, then the legacy TLS 1.2 RSA suites */
+    
     ch[ch_len++] = 0;
     ch[ch_len++] = 8;
     ch[ch_len++] = (uint8_t)(TLS13_CIPHER_AES128_GCM_SHA256 >> 8);
@@ -908,7 +908,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA >> 8);
     ch[ch_len++] = (uint8_t)(TLS_CIPHER_RSA_AES128_CBC_SHA & 0xFF);
     ch[ch_len++] = 0x00;
-    ch[ch_len++] = 0xFF; /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV */
+    ch[ch_len++] = 0xFF; 
     ch[ch_len++] = 1;
     ch[ch_len++] = 0;
 
@@ -935,21 +935,21 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
             }
         }
 
-        /* signature_algorithms */
+        
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x0d;
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x0e;
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x0c;
-        ch[ch_len++] = 0x04; ch[ch_len++] = 0x03; // ecdsa_secp256r1_sha256
-        ch[ch_len++] = 0x08; ch[ch_len++] = 0x04; // rsa_pss_rsae_sha256
-        ch[ch_len++] = 0x04; ch[ch_len++] = 0x01; // rsa_pkcs1_sha256
-        ch[ch_len++] = 0x05; ch[ch_len++] = 0x01; // rsa_pkcs1_sha384
-        ch[ch_len++] = 0x06; ch[ch_len++] = 0x01; // rsa_pkcs1_sha512
-        ch[ch_len++] = 0x02; ch[ch_len++] = 0x01; // rsa_pkcs1_sha1
+        ch[ch_len++] = 0x04; ch[ch_len++] = 0x03; 
+        ch[ch_len++] = 0x08; ch[ch_len++] = 0x04; 
+        ch[ch_len++] = 0x04; ch[ch_len++] = 0x01; 
+        ch[ch_len++] = 0x05; ch[ch_len++] = 0x01; 
+        ch[ch_len++] = 0x06; ch[ch_len++] = 0x01; 
+        ch[ch_len++] = 0x02; ch[ch_len++] = 0x01; 
 
-        /* supported_versions: TLS 1.3 and TLS 1.2 */
+        
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x2b;
         ch[ch_len++] = 0x00;
@@ -958,7 +958,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         ch[ch_len++] = 0x03; ch[ch_len++] = 0x04;
         ch[ch_len++] = 0x03; ch[ch_len++] = 0x03;
 
-        /* supported_groups: x25519, secp256r1 */
+        
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x0a;
         ch[ch_len++] = 0x00;
@@ -968,7 +968,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         ch[ch_len++] = 0x00; ch[ch_len++] = 0x1d;
         ch[ch_len++] = 0x00; ch[ch_len++] = 0x17;
 
-        /* psk_key_exchange_modes: psk_dhe_ke */
+        
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x2d;
         ch[ch_len++] = 0x00;
@@ -976,7 +976,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         ch[ch_len++] = 0x01;
         ch[ch_len++] = 0x01;
 
-        /* key_share: x25519 public key */
+        
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x33;
         ch[ch_len++] = (uint8_t)((2 + 2 + 2 + 32) >> 8);
@@ -1021,8 +1021,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         while (1) {
             int ret = tls_parse_record(conn, &ctype, payload, &plen);
             if (ret <= 0) break;
-            /* Once TLS 1.3 is selected, the following records are encrypted;
-             * leave them in rx_buf for the 1.3 handshake continuation. */
+            
+
             if (conn->tls13) break;
 
             if (ctype == TLS_CONTENT_HANDSHAKE) {
@@ -1041,7 +1041,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                     sha256_update(&conn->handshake_hash, payload + off, 4 + hs_len);
 
                     if (ht == TLS_HANDSHAKE_SERVER_HELLO) {
-                        /* version(2) + random(32) + sid_len(1) + sid + cipher(2) + comp(1) [+ exts] */
+                        
                         for (int i = 0; i < 32 && (uint32_t)(2 + i) < hs_len; i++)
                             conn->server_random[i] = hs_data[2 + i];
                         if (hs_len >= 39) {
@@ -1059,8 +1059,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                                     conn->mac_len = 32;
                                 }
                             }
-                            /* Scan extensions for TLS 1.3 selection and the
-                             * server key share. */
+                            
+
                             uint32_t ext_pos = comp_off + 1;
                             if (ext_pos + 2 <= hs_len) {
                                 uint32_t ext_end = ext_pos + 2 + r16(hs_data + ext_pos);
@@ -1090,18 +1090,18 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
                         }
                         tls_log("got server hello");
                     } else if (ht == TLS_HANDSHAKE_CERTIFICATE) {
-                        /* P0 fail-closed (TLS 1.2 path): the certificate
-                         * is parsed below but never verified against any
-                         * trust store — accepting it would be a silent
-                         * MITM. Refuse until CA verification lands. */
+                        
+
+
+
                         tls_log("FAIL-CLOSED: server certificate cannot be verified (no CA store), refusing TLS");
                         kfree(payload);
                         kfree(conn);
                         return -1;
 #if 0
-                        /* P0: cert parsing preserved for the future CA
-                         * verification work. Unreachable while
-                         * fail-closed above. */
+                        
+
+
                         {
                         int cert_list_len = r24(hs_data);
                         (void)cert_list_len;
@@ -1218,7 +1218,7 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     for (uint32_t i = 0; i < conn->mac_key_len; i++) conn->server_write_mac_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->client_write_key[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->server_write_key[i] = key_block[kb++];
-    /* TLS 1.2 key_block layout: client_mac, server_mac, client_key, server_key, client_iv, server_iv */
+    
     for (int i = 0; i < 16; i++) conn->client_write_iv[i] = key_block[kb++];
     for (int i = 0; i < 16; i++) conn->server_write_iv[i] = key_block[kb++];
 
@@ -1300,7 +1300,7 @@ int tls_write(tls_conn_t *conn, const uint8_t *data, uint32_t len) {
 }
 
 int tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *out_len) {
-    /* Heap-allocate payload to avoid stack overflow (TLS_CAP=16K, kernel stack=16K) */
+    
     uint8_t *payload = (uint8_t *)kmalloc(TLS_CAP);
     if (!payload) return -1;
     uint64_t deadline = sched_ticks() + 1000;

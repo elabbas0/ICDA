@@ -1,10 +1,10 @@
 bits 64
 
-; void switch_context(thread_t *prev, thread_t *next)
-;                      rdi              rsi
-;
-; thread_t layout:
-;   offset 0 : kernel_rsp
+
+
+
+
+
 
 global switch_context
 switch_context:

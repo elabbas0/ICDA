@@ -1,9 +1,7 @@
-#include "libicda.h"
-#include "font.h"
-#include "font_atlas.h"
+﻿#include "libicda.h"
 #include "icon_data.h"
 
-/* ================================ memory ============================== */
+
 
 void ic_memcpy(void *dst, const void *src, uint64_t n) {
     uint8_t *d;
@@ -56,7 +54,7 @@ void ic_memzero(void *dst, uint64_t n) {
     ic_memset(dst, 0, n);
 }
 
-/* ============================== strings ============================== */
+
 
 uint64_t ic_strlen(const char *s) {
     uint64_t n = 0;
@@ -155,7 +153,7 @@ int ic_parse_uint(const char *s, uint64_t *out) {
     return 1;
 }
 
-/* =========================== extended strings ========================== */
+
 
 uint64_t ic_strnlen(const char *s, uint64_t cap) {
     uint64_t n = 0;
@@ -200,7 +198,7 @@ uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val) {
     uint64_t i = 0;
 
     if (cap == 0) {
-        /* Still need to compute how many chars we would write. */
+        
         if (val == 0) return 1;
         while (val) { len++; val /= 10; }
         return len;
@@ -217,7 +215,7 @@ uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val) {
         tmp[len++] = (char)('0' + (val % 10));
         val /= 10;
     }
-    /* len is the number of significant digits; write them in forward order. */
+    
     i = 0;
     while (i < len && i + 1 < cap) {
         buf[i] = tmp[len - 1 - i];
@@ -229,7 +227,7 @@ uint64_t ic_snprintf_u64(char *buf, uint64_t cap, uint64_t val) {
 
 uint64_t ic_snprintf_hex(char *buf, uint64_t cap, uint64_t val) {
     static const char hexdigits[] = "0123456789abcdef";
-    char tmp[16];  /* 64-bit hex fits in 16 chars */
+    char tmp[16];  
     uint64_t len = 0;
     uint64_t i;
 
@@ -268,10 +266,10 @@ int ic_ato_u64(const char *s, uint64_t *out) {
         uint64_t d;
         if (s[i] < '0' || s[i] > '9') return 0;
         d = (uint64_t)(s[i] - '0');
-        /* Check for overflow: v > MAX/10, or v == MAX/10 and digit > MAX%10 (5). */
+        
         if (v > UINT64_MAX / 10 || (v == UINT64_MAX / 10 && d > 5)) {
             v = UINT64_MAX;
-            /* consume remaining digits */
+            
             i++;
             while (s[i] >= '0' && s[i] <= '9') i++;
             *out = v;
@@ -284,7 +282,7 @@ int ic_ato_u64(const char *s, uint64_t *out) {
     return 1;
 }
 
-/* ========================= character classification ==================== */
+
 
 int ic_is_digit(char c) {
     unsigned char uc = (unsigned char)c;
@@ -302,7 +300,7 @@ int ic_is_alpha(char c) {
     return (uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z');
 }
 
-/* ================================ UTF-8 ================================ */
+
 
 uint64_t ic_utf8_len(const char *s) {
     uint64_t count = 0;
@@ -311,7 +309,7 @@ uint64_t ic_utf8_len(const char *s) {
     if (!s) return 0;
     while (s[i]) {
         unsigned char b = (unsigned char)s[i];
-        /* A codepoint leader is any byte that does NOT start with 10xxxxxx. */
+        
         if ((b & 0xC0) != 0x80) count++;
         i++;
     }
@@ -321,7 +319,7 @@ uint64_t ic_utf8_len(const char *s) {
 int ic_utf8_valid(const char *s) {
     uint64_t i = 0;
 
-    if (!s) return 1; /* NULL is "empty" */
+    if (!s) return 1; 
     while (s[i]) {
         unsigned char b = (unsigned char)s[i];
         uint64_t need;
@@ -329,7 +327,7 @@ int ic_utf8_valid(const char *s) {
         uint64_t j;
 
         if (b < 0x80) {
-            /* ASCII — always valid. */
+            
             i++;
             continue;
         } else if ((b & 0xE0) == 0xC0) {
@@ -339,27 +337,27 @@ int ic_utf8_valid(const char *s) {
         } else if ((b & 0xF8) == 0xF0) {
             need = 4; cp = b & 0x07;
         } else {
-            return 0; /* invalid leader byte */
+            return 0; 
         }
 
-        /* Collect continuation bytes. */
+        
         for (j = 1; j < need; j++) {
             unsigned char c2;
-            if (s[i + j] == 0) return 0; /* truncated */
+            if (s[i + j] == 0) return 0; 
             c2 = (unsigned char)s[i + j];
-            if ((c2 & 0xC0) != 0x80) return 0; /* not a continuation */
+            if ((c2 & 0xC0) != 0x80) return 0; 
             cp = (cp << 6) | (c2 & 0x3F);
         }
 
-        /* Reject overlong encodings. */
+        
         if (need == 2 && cp < 0x80) return 0;
         if (need == 3 && cp < 0x800) return 0;
         if (need == 4 && cp < 0x10000) return 0;
 
-        /* Reject surrogate halves (U+D800..U+DFFF). */
+        
         if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
 
-        /* Reject codepoints above U+10FFFF. */
+        
         if (cp > 0x10FFFF) return 0;
 
         i += need;
@@ -367,7 +365,7 @@ int ic_utf8_valid(const char *s) {
     return 1;
 }
 
-/* ============================ arena allocator ========================== */
+
 
 int ic_arena_init(ic_arena_t *a, uint8_t *buf, uint64_t cap) {
     if (!a) return -1;
@@ -383,15 +381,15 @@ void *ic_arena_alloc(ic_arena_t *a, uint64_t size, uint64_t align) {
     void *ptr;
 
     if (!a || !a->buf || size == 0 || align == 0) return NULL;
-    /* align must be a power of two and within IC_ARENA_ALIGN_MAX */
+    
     if (align & (align - 1)) return NULL;
     if (align > IC_ARENA_ALIGN_MAX) return NULL;
-    /* Sanity: bump pointer must not have overrun capacity. */
+    
     if (a->offset > a->cap) return NULL;
 
-    /* Align the bump pointer up to the requested alignment. */
+    
     pad = (align - (a->offset % align)) % align;
-    /* Stepwise overflow check: pad must fit, then size must fit in remaining. */
+    
     if (pad > a->cap - a->offset) return NULL;
     if (size > a->cap - a->offset - pad) return NULL;
 
@@ -415,7 +413,7 @@ uint64_t ic_arena_remaining(const ic_arena_t *a) {
     return a->cap - a->offset;
 }
 
-/* ============================= ring buffer ============================= */
+
 
 int ic_ring_u8_init(ic_ring_u8_t *r, uint8_t *buf, uint64_t cap) {
     if (!r) return -1;
@@ -432,7 +430,7 @@ int ic_ring_u8_push(ic_ring_u8_t *r, uint8_t byte) {
     if (!r || !r->buf) return -1;
     if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return -1;
     next = (r->tail + 1) % r->cap;
-    if (next == r->head) return -1; /* full */
+    if (next == r->head) return -1; 
     r->buf[r->tail] = byte;
     r->tail = next;
     return 0;
@@ -441,7 +439,7 @@ int ic_ring_u8_push(ic_ring_u8_t *r, uint8_t byte) {
 int ic_ring_u8_pop(ic_ring_u8_t *r, uint8_t *byte_out) {
     if (!r || !r->buf || !byte_out) return -1;
     if (r->cap < 2 || r->head >= r->cap || r->tail >= r->cap) return -1;
-    if (r->head == r->tail) return -1; /* empty */
+    if (r->head == r->tail) return -1; 
     *byte_out = r->buf[r->head];
     r->head = (r->head + 1) % r->cap;
     return 0;
@@ -466,307 +464,7 @@ void ic_ring_u8_reset(ic_ring_u8_t *r) {
     r->tail = 0;
 }
 
-/* ============================== canvas =============================== */
 
-uint32_t ic_blend(uint32_t a, uint32_t b, int n, int d) {
-    int ar, ag, ab, br, bg, bb, r, g, bl;
-    if (d == 0) return a;
-    ar = (int)((a >> 16) & 0xFF);
-    ag = (int)((a >> 8) & 0xFF);
-    ab = (int)(a & 0xFF);
-    br = (int)((b >> 16) & 0xFF);
-    bg = (int)((b >> 8) & 0xFF);
-    bb = (int)(b & 0xFF);
-    r = ar + ((br - ar) * n) / d;
-    g = ag + ((bg - ag) * n) / d;
-    bl = ab + ((bb - ab) * n) / d;
-    return (uint32_t)((r << 16) | (g << 8) | bl);
-}
-
-static int ic_in_bounds(const ic_canvas_t *c, int x, int y) {
-    return c && c->px && x >= 0 && y >= 0 && x < c->w && y < c->h;
-}
-
-/* A canvas dimension can never legitimately exceed the 2560x1600 back
- * buffer; the window manager has been observed passing wildly corrupted
- * dims (tens of millions of pixels) when its stack frame is disturbed,
- * which turns every draw into an out-of-bounds write past the buffer
- * and panics the kernel.  Reject anything implausible outright. */
-static int ic_canvas_sane(const ic_canvas_t *c) {
-    return c && c->px && c->w > 0 && c->h > 0 && c->w <= 8192 && c->h <= 8192;
-}
-
-void ic_fill(ic_canvas_t *c, uint32_t color) {
-    if (!ic_canvas_sane(c)) return;
-    for (int i = 0; i < c->w * c->h; i++) c->px[i] = color;
-}
-
-void ic_rect(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color) {
-    if (!ic_canvas_sane(c)) return;
-    int x1 = x;
-    int y1 = y;
-    int x2 = x + w;
-    int y2 = y + h;
-    if (x1 < 0) x1 = 0;
-    if (y1 < 0) y1 = 0;
-    if (x2 > c->w) x2 = c->w;
-    if (y2 > c->h) y2 = c->h;
-    for (int cy = y1; cy < y2; cy++) {
-        for (int cx = x1; cx < x2; cx++) {
-            c->px[cy * c->w + cx] = color;
-        }
-    }
-}
-
-void ic_hline(ic_canvas_t *c, int x, int y, int len, uint32_t color) {
-    if (!ic_canvas_sane(c) || y < 0 || y >= c->h) return;
-    int x1 = x;
-    int x2 = x + len;
-    if (x1 < 0) x1 = 0;
-    if (x2 > c->w) x2 = c->w;
-    for (int cx = x1; cx < x2; cx++) c->px[y * c->w + cx] = color;
-}
-
-void ic_vline(ic_canvas_t *c, int x, int y, int len, uint32_t color) {
-    if (!ic_canvas_sane(c) || x < 0 || x >= c->w) return;
-    int y1 = y;
-    int y2 = y + len;
-    if (y1 < 0) y1 = 0;
-    if (y2 > c->h) y2 = c->h;
-    for (int cy = y1; cy < y2; cy++) c->px[cy * c->w + x] = color;
-}
-
-void ic_outline(ic_canvas_t *c, int x, int y, int w, int h, uint32_t color) {
-    ic_hline(c, x, y, w, color);
-    ic_hline(c, x, y + h - 1, w, color);
-    ic_vline(c, x, y, h, color);
-    ic_vline(c, x + w - 1, y, h, color);
-}
-
-/* Is (dx,dy) within a rounded rect of size w x h and corner radius r?
- * (dx,dy) are offsets from the rect origin; used for both fill and outline. */
-static int ic_in_round(const int dx, const int dy, const int w, const int h, const int r) {
-    if (dx < 0 || dy < 0 || dx >= w || dy >= h) return 0;
-    int cx, cy;
-    if (dx < r && dy < r) { cx = r - 1; cy = r - 1; }
-    else if (dx >= w - r && dy < r) { cx = w - r; cy = r - 1; }
-    else if (dx < r && dy >= h - r) { cx = r - 1; cy = h - r; }
-    else if (dx >= w - r && dy >= h - r) { cx = w - r; cy = h - r; }
-    else return 1;
-    {
-        int ox = dx - cx;
-        int oy = dy - cy;
-        return ox * ox + oy * oy <= r * r;
-    }
-}
-
-/* Soft drop shadow: a real blurred-feel falloff (quadratic alpha ramp)
- * around a rounded rect, blended over whatever is already in the canvas.
- * Only the perimeter band is iterated (2r*(w+h) pixels), so it is cheap
- * enough to redraw per frame.  This is the "actual shadow" - not a flat
- * grey outline - modern desktops draw under windows. */
-void ic_draw_shadow(ic_canvas_t *c, int x, int y, int w, int h, int radius, uint32_t color) {
-    int m = radius;
-    int sh_r;
-    uint32_t sr, sg, sb;
-
-    if (!ic_canvas_sane(c) || m <= 0) return;
-    if (m > 24) m = 24;
-    if (w <= 0 || h <= 0) return;
-    sh_r = m < 10 ? m : 10;      /* corner radius of the shadow body */
-    sr = (color >> 16) & 0xFF;
-    sg = (color >> 8) & 0xFF;
-    sb = color & 0xFF;
-
-    /* Row loop over the expanded rect; the band is the outer m pixels. */
-    for (int yy = y - m; yy < y + h + m; yy++) {
-        int x0, x1;
-        if (yy < 0 || yy >= c->h) continue;
-        if (yy >= y && yy < y + h) {
-            /* Side bands only */
-            x0 = x - m; x1 = x;
-        } else {
-            /* Top/bottom strips span the full width */
-            x0 = x - m; x1 = x + w + m;
-        }
-        for (int xx = x0; xx < x1; xx++) {
-            int dx, dy, d2;
-            int ax;
-            if (xx < 0 || xx >= c->w) continue;
-            if (xx >= x && xx < x + w && yy >= y && yy < y + h) continue;
-
-            /* Distance to the rounded-rect body (Euclidean at corners). */
-            dx = 0; dy = 0;
-            if (xx < x) dx = x - xx; else if (xx >= x + w) dx = xx - (x + w - 1);
-            if (yy < y) dy = y - yy; else if (yy >= y + h) dy = yy - (y + h - 1);
-            d2 = dx * dx + dy * dy;
-            /* In the corner regions subtract the body radius for a
-             * rounded-corner shadow silhouette. */
-            if (dx > 0 && dy > 0 && d2 <= (sh_r - 1) * (sh_r - 1)) continue;
-            {
-                int dist = 0;
-                while (d2 > dist * dist) dist++;
-                if (dist <= 0) continue;
-                if (dist >= m) continue;
-                /* Quadratic falloff: sharp near the window, soft far out. */
-                ax = (m - dist) * (m - dist) * 255 / (m * m);
-                if (ax > 255) ax = 255;
-                if (ax < 4) continue;
-                {
-                    uint32_t old = c->px[yy * c->w + xx];
-                    uint32_t r = (((old >> 16) & 0xFF) * (255 - ax) + sr * ax) / 255;
-                    uint32_t g = (((old >> 8) & 0xFF) * (255 - ax) + sg * ax) / 255;
-                    uint32_t b = ((old & 0xFF) * (255 - ax) + sb * ax) / 255;
-                    c->px[yy * c->w + xx] = (r << 16) | (g << 8) | b;
-                }
-            }
-        }
-    }
-}
-
-void ic_rect_r(ic_canvas_t *c, int x, int y, int w, int h, int r, uint32_t color) {
-    if (!ic_canvas_sane(c) || r < 0) return;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    for (int dy = 0; dy < h; dy++) {
-        int yy = y + dy;
-        if (yy < 0 || yy >= c->h) continue;
-        for (int dx = 0; dx < w; dx++) {
-            int xx = x + dx;
-            if (xx < 0 || xx >= c->w) continue;
-            if (ic_in_round(dx, dy, w, h, r)) {
-                c->px[yy * c->w + xx] = color;
-            }
-        }
-    }
-}
-
-void ic_outline_r(ic_canvas_t *c, int x, int y, int w, int h, int r, uint32_t color) {
-    if (!c || !c->px || r < 0) return;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    for (int dy = 0; dy < h; dy++) {
-        int yy = y + dy;
-        if (yy < 0 || yy >= c->h) continue;
-        for (int dx = 0; dx < w; dx++) {
-            int xx = x + dx;
-            if (xx < 0 || xx >= c->w) continue;
-            if (ic_in_round(dx, dy, w, h, r)) {
-                int edge = dx == 0 || dy == 0 || dx == w - 1 || dy == h - 1;
-                if (!edge) {
-                    /* 1px in from each edge */
-                    edge = dx == 1 || dy == 1 || dx == w - 2 || dy == h - 2;
-                    if (!edge) continue;
-                }
-                c->px[yy * c->w + xx] = color;
-            }
-        }
-    }
-}
-
-void ic_gradient_v(ic_canvas_t *c, int x, int y, int w, int h, uint32_t top, uint32_t bottom) {
-    if (!c || !c->px || h <= 0) return;
-    if (h == 1) {
-        ic_rect(c, x, y, w, 1, top);
-        return;
-    }
-    for (int row = 0; row < h; row++) {
-        ic_rect(c, x, y + row, w, 1, ic_blend(top, bottom, row, h - 1));
-    }
-}
-
-void ic_gradient_h(ic_canvas_t *c, int x, int y, int w, int h, uint32_t left, uint32_t right) {
-    if (!c || !c->px || w <= 0) return;
-    if (w == 1) {
-        ic_rect(c, x, y, 1, h, left);
-        return;
-    }
-    for (int col = 0; col < w; col++) {
-        ic_rect(c, x + col, y, 1, h, ic_blend(left, right, col, w - 1));
-    }
-}
-
-void ic_blend_px(ic_canvas_t *c, int x, int y, uint32_t color) {
-    if (!ic_in_bounds(c, x, y)) return;
-    uint32_t a = (color >> 24) & 0xFF;
-    if (a == 0) return;
-    if (a == 255) {
-        c->px[y * c->w + x] = color;
-        return;
-    }
-    {
-        uint32_t dst = c->px[y * c->w + x];
-        int dr = (int)((dst >> 16) & 0xFF);
-        int dg = (int)((dst >> 8) & 0xFF);
-        int db = (int)(dst & 0xFF);
-        int sr = (int)((color >> 16) & 0xFF);
-        int sg = (int)((color >> 8) & 0xFF);
-        int sb = (int)(color & 0xFF);
-        int inv = 255 - (int)a;
-        c->px[y * c->w + x] = (uint32_t)(
-            (((sr * (int)a + dr * inv) / 255) << 16) |
-            (((sg * (int)a + dg * inv) / 255) << 8) |
-            ((sb * (int)a + db * inv) / 255));
-    }
-}
-
-int ic_text_width(const char *s) {
-    return (int)(ic_strlen(s) * FONT_CELL_WIDTH);
-}
-
-void ic_text(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg) {
-    if (!ic_canvas_sane(c) || !s) return;
-    int cx = x;
-    while (*s) {
-        font_draw_char(c->px, c->w, c->h, c->w, cx, y, *s, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        s++;
-    }
-}
-
-void ic_text_clip(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg, uint32_t bg, int max_px) {
-    if (!ic_canvas_sane(c) || !s || max_px <= 0) return;
-    int cx = x;
-    while (*s && cx + FONT_CELL_WIDTH <= x + max_px) {
-        font_draw_char(c->px, c->w, c->h, c->w, cx, y, *s, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        s++;
-    }
-}
-
-/* Proportional atlas sibling of ic_text_clip: fills the background
- * rect, then draws as many whole glyphs as fit in max_px. Falls back
- * to the bitmap font when the atlas face is NULL. */
-void ic_text_font(ic_canvas_t *c, int x, int y, const char *s, uint32_t fg,
-                  uint32_t bg, int max_px, const ic_atlas_font_t *font,
-                  int fill_bg) {
-    const ic_atlas_font_t *f = font ? font : &ic_font_regular;
-    int cx = x;
-    uint64_t i = 0;
-
-    if (!ic_canvas_sane(c) || !s || max_px <= 0) return;
-    while (s[i]) {
-        unsigned char c2 = (unsigned char)s[i];
-        const ic_glyph_t *g;
-        if (c2 < 32 || c2 > 126) c2 = 63;
-        g = &f->glyphs[c2 - 32];
-        if (cx + g->advance > x + max_px) break;
-        cx += g->advance;
-        i++;
-    }
-    if (cx > x && fill_bg) ic_rect(c, x, y, cx - x, (int)f->line_height, bg);
-    {
-        /* Draw the fitting prefix through a bounded copy. Titles and
-         * labels are short; the stack buffer covers them all. */
-        char buf[256];
-        uint64_t n = i < sizeof(buf) - 1 ? i : sizeof(buf) - 1;
-        for (uint64_t k = 0; k < n; k++) buf[k] = s[k];
-        buf[n] = 0;
-        ic_font_draw(c, x, y, buf, fg, f);
-    }
-}
-
-/* =============================== icons =============================== */
 
 #define ICON_MAGIC0 'I'
 #define ICON_MAGIC1 'C'
@@ -799,7 +497,7 @@ int ic_icon_valid(const ic_icon_t *icon) {
 }
 
 void ic_icon_draw(ic_canvas_t *c, int x, int y, int dw, int dh, const ic_icon_t *icon) {
-    if (!ic_canvas_sane(c) || !ic_icon_valid(icon) || dw <= 0 || dh <= 0) return;
+    if (!c || !c->px || c->w <= 0 || c->h <= 0 || !ic_icon_valid(icon) || dw <= 0 || dh <= 0) return;
     for (int dy = 0; dy < dh; dy++) {
         int yy = y + dy;
         if (yy < 0 || yy >= c->h) continue;
@@ -812,17 +510,18 @@ void ic_icon_draw(ic_canvas_t *c, int x, int y, int dw, int dh, const ic_icon_t 
             if (sx >= icon->w) sx = icon->w - 1;
             {
                 const uint8_t *p = icon->rgba + (uint64_t)(sy * icon->w + sx) * 4;
-                ic_blend_px(c, xx, yy, (uint32_t)((p[3] << 24) | (p[0] << 16) | (p[1] << 8) | p[2]));
+                uint32_t src = (uint32_t)((p[3] << 24) | (p[0] << 16) | (p[1] << 8) | p[2]);
+                c->px[yy * c->w + xx] = ic_color_over(c->px[yy * c->w + xx], src);
             }
         }
     }
 }
 
-/* ========================= .ico files =============================== */
-/* Icons dropped into a folder (e.g. /usr/share/icons) as .ico files are
- * parsed at runtime and take precedence over the builtin set.  A plain
- * 32-bit BMP-compressed ICO is supported; PNG-compressed entries are
- * skipped so the largest decodable size is always chosen. */
+
+
+
+
+
 
 #define IC_FOLDER_ICON_MAX 24
 #define IC_ICO_DECODE_MAX  128
@@ -858,7 +557,7 @@ static void ic_lower_copy(char *dst, uint64_t cap, const char *src) {
     dst[i] = 0;
 }
 
-/* Little-endian 16/32-bit readers for the binary formats. */
+
 static uint16_t ico_u16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t ico_u32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static int32_t ico_i32(const uint8_t *p) { return (int32_t)ico_u32(p); }
@@ -892,13 +591,13 @@ int ic_ico_parse(const uint8_t *blob, uint64_t size, int max_decode,
     uint64_t i;
 
     if (!blob || !out || !rgba_out || size < 6) return -1;
-    if (ico_u16(blob) != 0 || ico_u16(blob + 2) != 1) return -1;   /* reserved + type */
+    if (ico_u16(blob) != 0 || ico_u16(blob + 2) != 1) return -1;   
     count = ico_u16(blob + 4);
     if (count == 0) return -1;
     if (6 + (uint64_t)count * 16 > size) return -1;
 
-    /* Pick the largest decodable BMP entry that fits max_decode, so
-     * multi-size .ico files keep their best quality. */
+    
+
     for (i = 0; i < count; i++) {
         const uint8_t *e = blob + 6 + i * 16;
         int ew = e[0] == 0 ? 256 : (int)e[0];
@@ -913,7 +612,7 @@ int ic_ico_parse(const uint8_t *blob, uint64_t size, int max_decode,
         if (bytes < 40 || off + bytes > size) continue;
         if (blob[off] == 0x89 && blob[off + 1] == 0x50 &&
             blob[off + 2] == 0x4E && blob[off + 3] == 0x47) {
-            continue;   /* PNG-compressed entry: not supported */
+            continue;   
         }
         bi_size = ico_u32(blob + off);
         if (bi_size < 40 || bi_size + 12 > bytes) continue;
@@ -923,7 +622,7 @@ int ic_ico_parse(const uint8_t *blob, uint64_t size, int max_decode,
             uint16_t planes = ico_u16(blob + off + 12);
             bpp = ico_u16(blob + off + 14);
             if (planes != 1 || (bpp != 24 && bpp != 32)) continue;
-            if (ico_u32(blob + off + 16) != 0) continue;   /* BI_RGB only */
+            if (ico_u32(blob + off + 16) != 0) continue;   
         }
         if ((int)ico_u32(blob + off + 4) > max_decode) continue;
         if (dib_h < 0 && -dib_h > max_decode) continue;
@@ -952,7 +651,7 @@ int ic_ico_parse(const uint8_t *blob, uint64_t size, int max_decode,
 
             if (w <= 0 || h <= 0 || w > max_decode || h > max_decode) return -1;
             if (need > rgba_cap) return -1;
-            /* Guard against malformed files walking off the entry. */
+            
             {
                 uint32_t entry_bytes = ico_u32(e + 8);
                 if ((uint64_t)(h - 1) * row_bytes + (uint64_t)w * (uint64_t)(bpp / 8)
@@ -961,13 +660,13 @@ int ic_ico_parse(const uint8_t *blob, uint64_t size, int max_decode,
                 }
             }
             for (y = 0; y < h; y++) {
-                int src_row = dib_h > 0 ? (h - 1 - y) : y;   /* ICO DIBs are bottom-up */
+                int src_row = dib_h > 0 ? (h - 1 - y) : y;   
                 const uint8_t *row = xor_data + (uint64_t)src_row * row_bytes;
                 uint8_t *dst = rgba_out + (uint64_t)y * w * 4;
                 for (int x = 0; x < w; x++) {
                     const uint8_t *p = row + (uint64_t)x * (bpp / 8);
                     if (bpp == 32) {
-                        dst[x * 4 + 0] = p[2];   /* B G R A -> R G B A */
+                        dst[x * 4 + 0] = p[2];   
                         dst[x * 4 + 1] = p[1];
                         dst[x * 4 + 2] = p[0];
                         dst[x * 4 + 3] = p[3];
@@ -1017,8 +716,8 @@ int ic_icon_load_folder(const char *dir) {
 
         ic_lower_copy(stem, sizeof(stem), entry);
         stem_len = ic_strlen(stem);
-        if (stem_len <= 4) continue;                /* just ".ico" */
-        stem[stem_len - 4] = 0;                     /* strip extension */
+        if (stem_len <= 4) continue;                
+        stem[stem_len - 4] = 0;                     
         if (stem[0] == 0) continue;
 
         ic_strcpy(path, dir, sizeof(path));
@@ -1042,431 +741,7 @@ int ic_icon_load_folder(const char *dir) {
     return folder_icon_count > 0 ? 0 : -1;
 }
 
-/* =============================== theme =============================== */
 
-const ic_theme_t *ic_theme_default(void) {
-    /* Dark slate + electric-blue accent — charcoal surfaces, one vivid
-     * highlight, rounded corners everywhere. */
-    static const ic_theme_t t = {
-        .title_top = 0x001E293B,
-        .title_bottom = 0x001E293B,
-        .title_top_active = 0x0023344D,
-        .title_bottom_active = 0x0023344D,
-        .border = 0x00334155,
-        .border_active = 0x0038BDF8,
-        .shadow = 0x00000000,
-        .taskbar_top = 0x00111D2E,
-        .taskbar_bottom = 0x00111D2E,
-        .accent = 0x0038BDF8,
-        .accent_hi = 0x000EA5E9,
-        .accent_lo = 0x000284BE,
-        .panel = 0x001E293B,
-        .panel_edge = 0x00334155,
-        .text = 0x00F1F5F9,
-        .text_muted = 0x0094A3B8,
-        .text_on_accent = 0x000F172A,
-        .wall_top = IC_WALL_TOP,
-        .wall_bottom = IC_WALL_BOTTOM,
-        .desktop_bg = 0x000F172A,
-        .surface = 0x001E293B,
-        .surface_hover = 0x0023344D,
-        .surface_active = 0x0038BDF8
-    };
-    return &t;
-}
-
-/* =========================== window chrome =========================== */
-
-/* ---- single-pixel helper (private to chrome glyphs) ---- */
-static void ic_px(ic_canvas_t *c, int x, int y, uint32_t color) {
-    if (!c || !c->px || x < 0 || y < 0 || x >= c->w || y >= c->h) return;
-    c->px[y * c->w + x] = color;
-}
-
-/* ---- vector caption-button glyphs (1.3.1) ---- */
-/* All glyphs target the 18×16 button rect (IC_BTN_W × IC_BTN_H) with
- * ≥3 px padding on every side.  (bx,by) is the button top-left. */
-
-/* Minimize: 2 px-thick horizontal bar, centered in the button. */
-static void ic_caption_min(ic_canvas_t *c, int bx, int by, uint32_t color) {
-    /* 8 px wide, 2 px tall, centred: bx+5..bx+12, by+7..by+8 */
-    ic_rect(c, bx + 5, by + 7, 8, 2, color);
-}
-
-/* Maximize: 2 px-thick outline rect, 8×8, centred in the button.
- * Outer rect: bx+5..bx+12, by+4..by+11  (8×8)                      */
-static void ic_caption_max(ic_canvas_t *c, int bx, int by, uint32_t color) {
-    /* top edge  (2 px thick) */
-    ic_rect(c, bx + 5, by + 4,  8, 2, color);
-    /* bottom edge */
-    ic_rect(c, bx + 5, by + 10, 8, 2, color);
-    /* left edge (between top/bottom, already drawn by corners) */
-    ic_rect(c, bx + 5, by + 6,  2, 4, color);
-    /* right edge */
-    ic_rect(c, bx + 11, by + 6, 2, 4, color);
-}
-
-/* Close: 2 px-thick X, 8×8, centred in the button.
- * Two diagonals, each drawn as a pair of adjacent 1-px lines for
- * consistent thickness without floating-point math.                */
-static void ic_caption_close(ic_canvas_t *c, int bx, int by, uint32_t color) {
-    int i;
-    /* 8×8 area: bx+5..bx+12, by+4..by+11  */
-    for (i = 0; i < 8; i++) {
-        /* \ diagonal (top-left → bottom-right) */
-        ic_px(c, bx + 5 + i, by + 4 + i, color);
-        /* / diagonal (top-right → bottom-left) */
-        ic_px(c, bx + 12 - i, by + 4 + i, color);
-    }
-    /* 2nd pixel of each diagonal for thickness: shift right on \,
-     * shift left on /, skip the very last row (would overflow).      */
-    for (i = 0; i < 7; i++) {
-        ic_px(c, bx + 6 + i, by + 4 + i, color);   /* \ +1 col */
-        ic_px(c, bx + 11 - i, by + 4 + i, color);   /* / −1 col */
-    }
-}
-
-void ic_draw_chrome(ic_canvas_t *c, const ic_theme_t *t, const ic_window_t *win,
-                    const ic_icon_t *icon_close, const ic_icon_t *icon_min,
-                    const ic_icon_t *icon_max) {
-    int anim = win->anim;
-    int wx, wy;
-    uint32_t title_bg;
-    uint32_t title_fg;
-    uint32_t border;
-    int max_x;
-    int max_y;
-    int min_x;
-    int min_y;
-    int cls_x;
-    int cls_y;
-
-    if (!c || !t || !win || win->minimized) return;
-    if (anim < 0) anim = 0;
-    if (anim > IC_ANIM_MAX) anim = IC_ANIM_MAX;
-    wx = win->x;
-    wy = win->y;
-
-    border = win->focused ? t->border_active : t->border;
-    title_bg = win->focused ? t->title_top_active : t->title_top;
-    title_fg = win->focused ? t->text : t->text_muted;
-
-    max_x = wx + win->w - IC_BTN_MAX_OFF;
-    max_y = wy - IC_TITLE_H + 5;
-    min_x = wx + win->w - IC_BTN_MIN_OFF;
-    min_y = wy - IC_TITLE_H + 5;
-    cls_x = wx + win->w - IC_BTN_CLS_OFF;
-    cls_y = wy - IC_TITLE_H + 5;
-
-    ic_draw_shadow(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, win->h + IC_TITLE_H + 2, IC_SHADOW_RADIUS, IC_SHADOW_COLOR);
-    ic_rect_r(c, wx - 1, wy - IC_TITLE_H - 1, win->w + 2, IC_TITLE_H + 2, IC_RADIUS_WINDOW, border);
-    /* Fake glass: vertical gradient + top highlight line over the base. */
-    ic_gradient_v(c, wx, wy - IC_TITLE_H, win->w, IC_TITLE_H,
-                  win->focused ? t->title_top_active : t->title_top,
-                  win->focused ? t->title_bottom_active : t->title_bottom);
-    ic_hline(c, wx + IC_RADIUS_WINDOW, wy - IC_TITLE_H + 1,
-             win->w - IC_RADIUS_WINDOW * 2,
-             win->focused ? 0x0050667A : 0x0023344D);
-    if (win->focused) ic_hline(c, wx + IC_RADIUS_WINDOW, wy - 1, win->w - IC_RADIUS_WINDOW*2, t->accent);
-    ic_text_font(c, wx + 12, wy - IC_TITLE_H + 6, win->title, title_fg, title_bg,
-                 win->w > 104 ? win->w - 104 : win->w, NULL, 0);
-    ic_vline(c, wx - 1, wy, win->h + 1, border);
-    ic_vline(c, wx + win->w, wy, win->h + 1, border);
-    ic_hline(c, wx - 1, wy + win->h, win->w + 2, border);
-
-    /* ---- caption-button glyphs (vector, 1.3.1) ----
-     * icon_close / icon_min / icon_max are legacy builtins passed by
-     * the WM; caption buttons now draw vector glyphs unconditionally
-     * because the built-in .ico set is placeholder data.  The three
-     * icon parameters are kept for ABI compatibility and are unused. */
-    (void)icon_close; (void)icon_min; (void)icon_max;
-
-    if (win->hover_max) {
-        ic_rect_r(c, max_x, max_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, t->accent);
-    }
-    ic_caption_max(c, max_x, max_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
-
-    if (win->hover_min) {
-        ic_rect_r(c, min_x, min_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, t->accent);
-    }
-    ic_caption_min(c, min_x, min_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
-
-    if (win->hover_close) {
-        ic_rect_r(c, cls_x, cls_y, IC_BTN_W, IC_BTN_H, IC_RADIUS_BUTTON, 0x00EF4444);
-        ic_caption_close(c, cls_x, cls_y, 0x00FFFFFF);
-    } else {
-        ic_caption_close(c, cls_x, cls_y, win->focused ? 0x00E2E8F0 : 0x0094A3B8);
-    }
-}
-
-int ic_hit_title(const ic_window_t *win, int mx, int my) {
-    return win && mx >= win->x && my >= win->y - IC_TITLE_H &&
-           mx < win->x + win->w && my < win->y;
-}
-
-int ic_hit_minimize(const ic_window_t *win, int mx, int my) {
-    return win && mx >= win->x + win->w - IC_BTN_MIN_OFF &&
-           my >= win->y - IC_TITLE_H + 5 &&
-           mx < win->x + win->w - IC_BTN_MIN_OFF + IC_BTN_W &&
-           my < win->y - IC_TITLE_H + 5 + IC_BTN_H;
-}
-
-int ic_hit_maximize(const ic_window_t *win, int mx, int my) {
-    return win && mx >= win->x + win->w - IC_BTN_MAX_OFF &&
-           my >= win->y - IC_TITLE_H + 5 &&
-           mx < win->x + win->w - IC_BTN_MAX_OFF + IC_BTN_W &&
-           my < win->y - IC_TITLE_H + 5 + IC_BTN_H;
-}
-
-int ic_hit_close(const ic_window_t *win, int mx, int my) {
-    return win && mx >= win->x + win->w - IC_BTN_CLS_OFF &&
-           my >= win->y - IC_TITLE_H + 5 &&
-           mx < win->x + win->w - IC_BTN_CLS_OFF + IC_BTN_W &&
-           my < win->y - IC_TITLE_H + 5 + IC_BTN_H;
-}
-
-int ic_hit_client(const ic_window_t *win, int mx, int my) {
-    return win && mx >= win->x && my >= win->y &&
-           mx < win->x + win->w && my < win->y + win->h;
-}
-
-/* ============================== widgets ============================== */
-
-int ic_hit_rect(int mx, int my, ic_rect_t r) {
-    return mx >= r.x && my >= r.y && mx < r.x + r.w && my < r.y + r.h;
-}
-
-ic_btn_state_t ic_button_state(int enabled, int hover, int pressed) {
-    if (!enabled) return IC_BTN_DISABLED;
-    if (pressed) return IC_BTN_ACTIVE;
-    if (hover) return IC_BTN_HOVER;
-    return IC_BTN_NORMAL;
-}
-
-void ic_draw_button(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
-                    const char *label, ic_btn_state_t state) {
-    uint32_t fill, edge, fg;
-    int tw, tx, ty;
-
-    if (!c || !t) return;
-    switch (state) {
-        case IC_BTN_ACTIVE:
-            fill = t->accent;
-            edge = t->accent_hi;
-            fg = t->text_on_accent;
-            break;
-        case IC_BTN_HOVER:
-            fill = 0x0023344D;
-            edge = t->accent;
-            fg = t->text;
-            break;
-        case IC_BTN_DISABLED:
-            fill = 0x001E293B;
-            edge = 0x00334155;
-            fg = t->text_muted;
-            break;
-        default:
-            fill = 0x001E293B;
-            edge = 0x00334155;
-            fg = t->text;
-            break;
-    }
-
-    ic_rect_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_BUTTON, fill);
-    ic_outline_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_BUTTON, edge);
-
-    tw = ic_text_width(label);
-    tx = r.x + (r.w - tw) / 2;
-    ty = r.y + (r.h - FONT_HEIGHT) / 2;
-    if (tx < r.x + 4) tx = r.x + 4;
-    ic_text(c, tx, ty, label, fg, fill);
-}
-
-/* ============================ menu / dialog / slider ================= */
-
-int ic_menu_row_h(void) {
-    return FONT_HEIGHT + 8;
-}
-
-int ic_menu_width(const ic_menu_t *m) {
-    int w = 0;
-    int i;
-
-    if (!m) return 0;
-    for (i = 0; i < m->count && i < IC_MENU_MAX_ITEMS; i++) {
-        int tw;
-        if (!m->items[i]) continue;
-        tw = ic_text_width(m->items[i]);
-        if (tw > w) w = tw;
-    }
-    return w + 32;
-}
-
-int ic_menu_height(const ic_menu_t *m) {
-    int n;
-
-    if (!m) return 0;
-    n = m->count;
-    if (n < 0) n = 0;
-    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
-    return n * ic_menu_row_h() + 12;
-}
-
-void ic_menu_draw(ic_canvas_t *c, const ic_theme_t *t, int x, int y,
-                  const ic_menu_t *m) {
-    int w;
-    int h;
-    int row;
-    int i;
-    int n;
-
-    if (!c || !t || !m) return;
-    n = m->count;
-    if (n <= 0) return;
-    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
-    w = ic_menu_width(m);
-    h = ic_menu_height(m);
-    if (w <= 0 || h <= 0) return;
-    row = ic_menu_row_h();
-
-    ic_rect_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel);
-    ic_outline_r(c, x, y, w, h, IC_RADIUS_MENU, t->panel_edge);
-    for (i = 0; i < n; i++) {
-        int iy = y + 6 + i * row;
-        if (!m->items[i]) continue;
-        if (i == m->selected) {
-            ic_rect_r(c, x + 4, iy, w - 8, row, 6, t->accent);
-            ic_text(c, x + 16, iy + 4, m->items[i], t->text_on_accent, t->accent);
-        } else {
-            ic_text(c, x + 16, iy + 4, m->items[i], t->text, t->panel);
-        }
-    }
-}
-
-int ic_menu_hit(const ic_menu_t *m, int x, int y, int mx, int my) {
-    int row;
-    int n;
-    int i;
-
-    if (!m) return -1;
-    n = m->count;
-    if (n <= 0) return -1;
-    if (n > IC_MENU_MAX_ITEMS) n = IC_MENU_MAX_ITEMS;
-    row = ic_menu_row_h();
-    for (i = 0; i < n; i++) {
-        ic_rect_t r;
-        r.x = x + 4;
-        r.y = y + 6 + i * row;
-        r.w = ic_menu_width(m) - 8;
-        r.h = row;
-        if (ic_hit_rect(mx, my, r)) return i;
-    }
-    return -1;
-}
-
-void ic_dialog_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
-                    const char *title, const char *body) {
-    if (!c || !t) return;
-    if (r.w <= 0 || r.h <= 0) return;
-    ic_rect_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel);
-    ic_outline_r(c, r.x, r.y, r.w, r.h, IC_RADIUS_MENU, t->panel_edge);
-    if (title) {
-        ic_text(c, r.x + 16, r.y + 12, title, t->text, t->panel);
-        ic_rect(c, r.x + 16, r.y + 12 + FONT_HEIGHT + 6, r.w - 32, 1,
-                t->panel_edge);
-    }
-    if (body) {
-        ic_text_clip(c, r.x + 16, r.y + 12 + FONT_HEIGHT + 6 + 10, body,
-                     t->text_muted, t->panel, r.w - 32);
-    }
-}
-
-void ic_slider_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t track,
-                    int value, int vmin, int vmax) {
-    int span;
-    int frac_num;
-    int thumb_x;
-    int fill_w;
-
-    if (!c || !t) return;
-    if (track.w < 32 || track.h < 16) return;
-    span = vmax - vmin;
-    if (span <= 0) {
-        value = vmin;
-        span = 1;
-    }
-    if (value < vmin) value = vmin;
-    if (value > vmax) value = vmax;
-    frac_num = (value - vmin) * (track.w - 16);
-
-    ic_rect_r(c, track.x, track.y + track.h / 2 - 4, track.w, 8, 4,
-              t->surface_hover);
-    ic_outline_r(c, track.x, track.y + track.h / 2 - 4, track.w, 8, 4,
-                 t->border);
-    fill_w = frac_num / span;
-    if (fill_w > 0) {
-        ic_rect_r(c, track.x, track.y + track.h / 2 - 4, fill_w, 8, 4,
-                  t->accent);
-    }
-    thumb_x = track.x + frac_num / span;
-    ic_rect_r(c, thumb_x, track.y, 16, track.h, 6, t->text);
-    ic_outline_r(c, thumb_x, track.y, 16, track.h, 6, t->accent);
-}
-
-int ic_slider_hit(ic_rect_t track, int mx, int my) {
-    ic_rect_t big;
-    big.x = track.x - 8;
-    big.y = track.y - 8;
-    big.w = track.w + 16;
-    big.h = track.h + 16;
-    return ic_hit_rect(mx, my, big);
-}
-
-int ic_slider_value_from_x(ic_rect_t track, int vmin, int vmax, int mx) {
-    int span = vmax - vmin;
-    int denom = track.w - 16;
-    int rel;
-
-    if (span <= 0 || denom <= 0) return vmin;
-    rel = mx - (track.x + 8);
-    if (rel < 0) rel = 0;
-    if (rel > denom) rel = denom;
-    return vmin + rel * span / denom;
-}
-
-/* ============================ app skeleton =========================== */
-
-int ic_run_app(const char *title, int w, int h,
-               ic_event_fn on_event, ic_draw_fn on_draw, void *ud) {
-    if (!on_draw) return -1;
-    if (gui_open_window(title, w, h) != 0) return -1;
-
-    on_draw(ud); /* initial paint */
-
-    for (;;) {
-        gui_msg_t msg;
-        int changed = 0;
-        while (gui_poll_event(&msg)) {
-            changed = 1;
-            if (msg.type == GUI_MSG_CLOSE_WINDOW) {
-                gui_close_window();
-                return 0;
-            }
-            if (on_event && !on_event(ud, &msg)) {
-                gui_close_window();
-                return 0;
-            }
-        }
-        /* Repaint after input, and on the 8-tick cadence so nothing
-         * animates the WM at a fixed 20fps while idle. */
-        if (changed || (icda_ticks() % 8) == 0) {
-            on_draw(ud);
-        }
-        icda_sleep(1);
-    }
-}
-
-/* ================================ ic_io ================================ */
 
 int ic_read_file_b(const char *path, char *buf, uint64_t cap, uint64_t *len_out) {
     uint64_t rc;
@@ -1687,7 +962,7 @@ int ic_dir_next(ic_dir_cursor_t *cur, const char **name_out,
     return 1;
 }
 
-/* ================================ ic_app ================================ */
+
 
 uint64_t ic_spawn_b(const char *path) {
     if (!path || !*path) return (uint64_t)(-((long)U_EINVAL));
@@ -1775,7 +1050,7 @@ int ic_msg_poll_b(uint64_t handle) {
     return icda_msg_poll(handle);
 }
 
-/* ================================ ic_http ================================ */
+
 
 static int ic_try_parse_ipv4(const char *host, uint32_t *ip_out) {
     const char *p = host;
@@ -1929,7 +1204,7 @@ int ic_http_fetch_mem(const char *url, char *buf, uint64_t cap,
     return rc;
 }
 
-/* ============================ gui2 layout ============================== */
+
 
 int ic_layout_row(ic_rect_t parent, int pad, int gap,
                   const int *widths, int count,
@@ -1997,432 +1272,4 @@ int ic_layout_col(ic_rect_t parent, int pad, int gap,
         if (i + 1 < count) y += gap;
     }
     return 0;
-}
-
-/* ============================ gui2 scroll ============================= */
-
-void ic_scroll_clamp(ic_scroll_t *s) {
-    int max_off;
-    if (!s) return;
-    max_off = s->content_h - s->view_h;
-    if (max_off < 0) max_off = 0;
-    if (s->offset < 0) s->offset = 0;
-    if (s->offset > max_off) s->offset = max_off;
-}
-
-void ic_scrollbar_draw(ic_canvas_t *c, ic_rect_t track,
-                       const ic_theme_t *t, const ic_scroll_t *s) {
-    int thumb_h, thumb_y;
-    if (!c || !t || !s) return;
-    if (s->content_h <= 0 || s->view_h <= 0) return;
-    if (s->content_h <= s->view_h) return;
-    if (track.w < 4 || track.h < 8) return;
-
-    /* Track background */
-    ic_rect_r(c, track.x, track.y, track.w, track.h, 4, t->surface_hover);
-
-    /* Thumb */
-    thumb_h = (int)((long)s->view_h * track.h / s->content_h);
-    if (thumb_h < 16) thumb_h = 16;
-    if (thumb_h > track.h) thumb_h = track.h;
-
-    {
-        int range = s->content_h - s->view_h;
-        if (range <= 0) range = 1;
-        thumb_y = track.y + (int)((long)s->offset * (track.h - thumb_h) / range);
-    }
-
-    ic_rect_r(c, track.x, thumb_y, track.w, thumb_h, 4, t->text_muted);
-    ic_outline_r(c, track.x, thumb_y, track.w, thumb_h, 4, t->border);
-}
-
-int ic_scroll_hit(ic_rect_t track, int mx, int my, ic_scroll_t *s) {
-    int max_off, thumb_h;
-    if (!s) return 0;
-    if (mx < track.x || mx >= track.x + track.w) return 0;
-    if (my < track.y || my >= track.y + track.h) return 0;
-    if (s->content_h <= 0 || s->view_h <= 0) return 0;
-
-    max_off = s->content_h - s->view_h;
-    if (max_off <= 0) return 0;
-
-    thumb_h = (int)((long)s->view_h * track.h / s->content_h);
-    if (thumb_h < 16) thumb_h = 16;
-
-    {
-        int track_range = track.h - thumb_h;
-        if (track_range <= 0) track_range = 1;
-        s->offset = (int)((long)(my - track.y - thumb_h / 2) * max_off / track_range);
-    }
-    ic_scroll_clamp(s);
-    return 1;
-}
-
-/* ============================ gui2 widgets ============================ */
-
-void ic_textfield_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
-                       const char *buf, uint64_t buf_cap,
-                       uint64_t cursor_pos, int focused,
-                       const char *placeholder) {
-    uint32_t border;
-    uint64_t len;
-    if (!c || !t) return;
-
-    border = focused ? t->accent : t->border;
-
-    /* Background + border */
-    ic_rect_r(c, r.x, r.y, r.w, r.h, 6, t->surface);
-    ic_outline_r(c, r.x, r.y, r.w, r.h, 6, border);
-
-    /* Inner highlight when focused */
-    if (focused) {
-        ic_rect_r(c, r.x + 1, r.y + 1, r.w - 2, r.h - 2, 5, t->surface);
-    }
-
-    len = buf ? ic_strnlen(buf, buf_cap) : 0;
-
-    /* Text or placeholder */
-    if (len == 0 && placeholder) {
-        ic_text_clip(c, r.x + 8, r.y + (r.h - FONT_HEIGHT) / 2,
-                     placeholder, t->text_muted,
-                     focused ? t->surface : t->surface, r.w - 16);
-    } else if (buf && len > 0) {
-        ic_text_clip(c, r.x + 8, r.y + (r.h - FONT_HEIGHT) / 2,
-                     buf, t->text, t->surface, r.w - 16);
-    }
-
-    /* Block cursor when focused */
-    if (focused && cursor_pos <= len) {
-        int cx = r.x + 8 + (int)cursor_pos * FONT_CELL_WIDTH;
-        int cy = r.y + (r.h - FONT_HEIGHT) / 2;
-        if (cx >= r.x + 2 && cx + 2 <= r.x + r.w - 2) {
-            ic_rect(c, cx, cy, 2, FONT_HEIGHT, t->accent);
-        }
-    }
-}
-
-int ic_textfield_insert(char *buf, uint64_t cap,
-                        uint64_t *len_io, uint64_t *cursor_io, char ch) {
-    uint64_t len, cursor, i;
-    if (!buf || !len_io || !cursor_io || cap == 0) return -1;
-    len = *len_io;
-    cursor = *cursor_io;
-    if (len >= cap - 1 || cursor > len) return -1;
-
-    /* Shift bytes right */
-    for (i = len; i > cursor; i--) {
-        buf[i] = buf[i - 1];
-    }
-    buf[cursor] = ch;
-    *len_io = len + 1;
-    *cursor_io = cursor + 1;
-    buf[len + 1] = 0;
-    return 0;
-}
-
-int ic_textfield_backspace(char *buf, uint64_t cap,
-                           uint64_t *len_io, uint64_t *cursor_io) {
-    uint64_t len, cursor, i;
-    if (!buf || !len_io || !cursor_io) return -1;
-    len = *len_io;
-    cursor = *cursor_io;
-    if (len >= cap) return -1;
-    if (cursor == 0 || cursor > len) return -1;
-
-    /* Shift bytes left */
-    for (i = cursor; i < len; i++) {
-        buf[i] = buf[i + 1];
-    }
-    *len_io = len - 1;
-    *cursor_io = cursor - 1;
-    return 0;
-}
-
-void ic_listview_draw(ic_canvas_t *c, const ic_theme_t *t, ic_rect_t r,
-                      int row_h, int count, int selected,
-                      const ic_scroll_t *scroll,
-                      ic_listview_label_fn get_label, void *ud) {
-    int first_row, last_row, i, ry, scroll_off;
-    if (!c || !t || row_h <= 0) return;
-
-    /* Background */
-    ic_rect(c, r.x, r.y, r.w, r.h, t->surface);
-
-    if (count <= 0 || !get_label) return;
-
-    scroll_off = scroll ? scroll->offset : 0;
-    if (scroll_off < 0) scroll_off = 0;
-
-    /* Visible row range */
-    first_row = scroll_off / row_h;
-    if (first_row < 0) first_row = 0;
-    last_row = first_row + (r.h + row_h - 1) / row_h;
-    if (last_row >= count) last_row = count - 1;
-
-    for (i = first_row; i <= last_row; i++) {
-        const char *label;
-        ry = r.y + i * row_h - scroll_off;
-        if (ry + row_h <= r.y || ry >= r.y + r.h) continue;
-
-        if (i == selected) {
-            ic_rect(c, r.x, ry, r.w, row_h, t->accent);
-        }
-
-        label = get_label(i, ud);
-        if (label) {
-            ic_text_clip(c, r.x + 8, ry + (row_h - FONT_HEIGHT) / 2,
-                         label,
-                         i == selected ? t->text_on_accent : t->text,
-                         i == selected ? t->accent : t->surface,
-                         r.w - 16);
-        }
-    }
-}
-
-int ic_listview_hit(ic_rect_t r, int row_h, int count,
-                    const ic_scroll_t *scroll, int mx, int my) {
-    int row, scroll_off;
-    if (mx < r.x || mx >= r.x + r.w) return -1;
-    if (my < r.y || my >= r.y + r.h) return -1;
-    if (row_h <= 0 || count <= 0) return -1;
-
-    scroll_off = scroll ? scroll->offset : 0;
-    if (scroll_off < 0) scroll_off = 0;
-    row = (my - r.y + scroll_off) / row_h;
-    if (row < 0 || row >= count) return -1;
-    return row;
-}
-
-/* =========================== gui2 text wrap =========================== */
-
-int ic_text_measure_wrap(const char *s, int max_px, int *lines_out) {
-    int max_chars, lines, col, first_word;
-    const char *p;
-
-    if (!s || max_px <= 0) { if (lines_out) *lines_out = 0; return 0; }
-
-    max_chars = max_px / FONT_CELL_WIDTH;
-    if (max_chars < 1) max_chars = 1;
-
-    p = s;
-    lines = 1;
-    col = 0;
-    first_word = 1;
-
-    while (*p) {
-        int wlen;
-
-        while (*p == ' ') p++;
-
-        if (*p == '\n') {
-            col = 0;
-            lines++;
-            first_word = 1;
-            p++;
-            continue;
-        }
-
-        if (!*p) break;
-
-        wlen = 0;
-        while (*p && *p != ' ' && *p != '\n') { wlen++; p++; }
-
-        {
-            int needed = (first_word ? 0 : 1) + wlen;
-            if (col + needed > max_chars) {
-                /* For words wider than a row the chunking loop below
-                   counts every additional row; only count the normal
-                   wrap here for words that fit on the next line.        */
-                if (wlen <= max_chars) lines++;
-                col = 0;
-                first_word = 1;
-            }
-        }
-
-        if (!first_word) col++;
-        first_word = 0;
-
-        /* Chunk long words across rows exactly like ic_text_draw_wrap. */
-        {
-            while (wlen > 0) {
-                int avail = max_chars - col;
-                int take = wlen;
-                if (take > avail) take = avail;
-                col += take;
-                wlen -= take;
-                if (wlen > 0) {
-                    lines++;
-                    col = 0;
-                }
-            }
-        }
-    }
-
-    if (lines_out) *lines_out = lines;
-    return lines;
-}
-
-void ic_text_draw_wrap(ic_canvas_t *c, int x, int y, int max_px,
-                       const char *s, uint32_t fg, uint32_t bg,
-                       int max_rows) {
-    int max_chars, col, row, first_word;
-    const char *p;
-
-    if (!c || !s || max_px <= 0 || max_rows <= 0) return;
-
-    max_chars = max_px / FONT_CELL_WIDTH;
-    if (max_chars < 1) max_chars = 1;
-
-    p = s;
-    col = 0;
-    row = 0;
-    first_word = 1;
-
-    while (*p && row < max_rows) {
-        int wlen;
-        const char *wp;
-
-        while (*p == ' ') p++;
-
-        if (*p == '\n') {
-            col = 0;
-            row++;
-            first_word = 1;
-            p++;
-            continue;
-        }
-
-        if (!*p) break;
-
-        /* Measure word */
-        wp = p;
-        wlen = 0;
-        while (*p && *p != ' ' && *p != '\n') { wlen++; p++; }
-
-        /* Does word (+ optional preceding space) fit? */
-        {
-            int needed = (first_word ? 0 : 1) + wlen;
-            if (col + needed > max_chars) {
-                row++;
-                col = 0;
-                first_word = 1;
-                if (row >= max_rows) break;
-            }
-        }
-
-        /* Draw space before word (if not first on line) */
-        if (!first_word) {
-            int py = y + row * FONT_CELL_HEIGHT;
-            if (py >= 0 && py + FONT_CELL_HEIGHT <= c->h &&
-                x + col * FONT_CELL_WIDTH >= 0 &&
-                x + col * FONT_CELL_WIDTH < c->w) {
-                font_draw_char(c->px, c->w, c->h, c->w,
-                               x + col * FONT_CELL_WIDTH, py,
-                               ' ', fg, bg);
-            }
-            col++;
-        }
-        first_word = 0;
-
-        /* Draw word, chunking across rows when wider than remaining space */
-        {
-            int j = 0;
-            while (j < wlen && row < max_rows) {
-                int avail = max_chars - col;
-                int draw_len = wlen - j;
-                if (draw_len > avail) draw_len = avail;
-                if (draw_len < 1) { draw_len = 0; }
-                {
-                    int k;
-                    for (k = 0; k < draw_len; k++) {
-                        int py = y + row * FONT_CELL_HEIGHT;
-                        int px = x + col * FONT_CELL_WIDTH;
-                        if (py >= 0 && py + FONT_CELL_HEIGHT <= c->h &&
-                            px >= 0 && px < c->w) {
-                            font_draw_char(c->px, c->w, c->h, c->w,
-                                           px, py, wp[j + k], fg, bg);
-                        }
-                        col++;
-                    }
-                }
-                j += draw_len;
-                if (j < wlen) {
-                    row++;
-                    col = 0;
-                    first_word = 1;
-                }
-            }
-        }
-    }
-}
-
-/* ============================ font atlas ============================== */
-
-const ic_atlas_font_t *ic_font_default(void) {
-    return &ic_font_regular;
-}
-
-int ic_font_text_width(const ic_atlas_font_t *font, const char *s) {
-    int width = 0;
-    uint64_t i;
-    if (!font || !s) return 0;
-    for (i = 0; s[i]; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c < 32 || c > 126) c = 63; /* '?' */
-        width += font->glyphs[c - 32].advance;
-    }
-    return width;
-}
-
-void ic_font_draw(ic_canvas_t *c, int x, int y, const char *s,
-                  uint32_t fg_rgb, const ic_atlas_font_t *font) {
-    int cx = x;
-    uint64_t i;
-    uint32_t fg_r, fg_g, fg_b;
-    uint64_t alpha_size;
-
-    if (!c || !font || !s) return;
-
-    fg_r = (fg_rgb >> 16) & 0xFF;
-    fg_g = (fg_rgb >> 8) & 0xFF;
-    fg_b = fg_rgb & 0xFF;
-
-    /* Total alpha buffer size: last glyph (char 126) end offset */
-    alpha_size = (uint64_t)font->glyphs[94].data_offset +
-                 (uint64_t)font->glyphs[94].w * (uint64_t)font->glyphs[94].h;
-
-    for (i = 0; s[i]; i++) {
-        unsigned char c2 = (unsigned char)s[i];
-        const ic_glyph_t *g;
-        int gx, gy;
-
-        if (c2 < 32 || c2 > 126) c2 = 63; /* '?' */
-        g = &font->glyphs[c2 - 32];
-
-        if (g->w <= 0 || g->h <= 0) { cx += g->advance; continue; }
-
-        for (gy = 0; gy < g->h; gy++) {
-            int py = y + g->off_y + gy;
-            if (py < 0 || py >= c->h) continue;
-            for (gx = 0; gx < g->w; gx++) {
-                int px = cx + g->off_x + gx;
-                unsigned char a;
-                uint32_t color;
-                uint64_t idx;
-                if (px < 0 || px >= c->w) continue;
-                idx = g->data_offset + (uint64_t)gy * g->w + gx;
-                if (idx >= alpha_size) continue;
-                a = font->alpha[idx];
-                if (a == 0) continue;
-                color = ((uint32_t)a << 24) | (fg_r << 16) | (fg_g << 8) | fg_b;
-                ic_blend_px(c, px, py, color);
-            }
-        }
-        cx += g->advance;
-    }
-}
-
-int ic_font_line_height(const ic_atlas_font_t *font) {
-    if (!font) return 0;
-    return (int)font->line_height;
 }

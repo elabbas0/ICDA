@@ -1,10 +1,10 @@
-/*
- * wm_shell.c - wallpaper, desktop icons, taskbar, launcher, overlays
- * (see wm_shell.h).
- */
+
+
+
+
 #include "wm_shell.h"
 
-/* ------------------------------------------------------------ apps */
+
 
 const wm_app_t wm_apps[] = {
     { "Explorer",     "explorer", "/apps/desktop.app" },
@@ -40,11 +40,11 @@ const ic_icon_t *wm_app_icon_for_title(const char *title) {
     return icon ? icon : ic_icon_builtin("app");
 }
 
-/* ------------------------------------------------------------ wallpaper */
+
 
 typedef struct {
-    float cx, cy;       /* centre, fraction of screen */
-    float radius;       /* fraction of the screen diagonal */
+    float cx, cy;       
+    float radius;       
     uint32_t rgb;
     float strength;
 } wm_glow_t;
@@ -99,7 +99,7 @@ void wm_wallpaper_paint(ic_canvas_t *c, int sw, int sh) {
                     b += (wm_chan(glows[i].rgb, 0) - b) * k;
                 }
             }
-            /* Deterministic dither kills 8-bit banding in the gradients. */
+            
             hash = (uint32_t)x * 0x9E3779B1u ^ (uint32_t)y * 0x85EBCA77u;
             hash ^= hash >> 15;
             hash *= 0x2C1B3C6Du;
@@ -113,7 +113,7 @@ void wm_wallpaper_paint(ic_canvas_t *c, int sw, int sh) {
     }
 }
 
-/* ------------------------------------------------------------ desktop icons */
+
 
 #define WM_DESK_ICON     48
 #define WM_DESK_ICON_Y    8
@@ -148,8 +148,8 @@ void wm_desk_icon_draw(ic_canvas_t *c, ic_rect_t cell, const char *label,
             ic_gfx_rrect(c, lx - 6, ly, lw + 12, 18, 5.0f, p->accent);
             ic_text_draw_in(c, f, lr, label, p->label_on_accent, IC_ALIGN_LEFT);
         } else {
-            /* Labels float on the wallpaper; in dark appearance a soft
-             * drop shadow keeps them legible over the bright glows. */
+            
+
             if (p->dark) {
                 ic_rect_t sr = lr;
                 sr.y += 1;
@@ -160,7 +160,7 @@ void wm_desk_icon_draw(ic_canvas_t *c, ic_rect_t cell, const char *label,
     }
 }
 
-/* ------------------------------------------------------------ taskbar */
+
 
 #define WM_BAR_PAD        8
 #define WM_BAR_BTN_H     36
@@ -223,7 +223,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
     ic_gfx_hline(c, bar.x, bar.y, bar.w, p->bar_edge);
     ic_gfx_hline(c, bar.x, bar.y + 1, bar.w, p->highlight);
 
-    /* Launcher button. */
+    
     {
         int open = b && b->launcher_open;
         int hover = b && b->hover == WM_BAR_LAUNCHER;
@@ -236,7 +236,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
                        open ? p->accent : p->label);
     }
 
-    /* Running windows. */
+    
     for (int i = 0; b && i < b->count; i++) {
         const wm_task_t *t = &b->tasks[i];
         ic_rect_t r = wm_bar_task_rect(sw, sh, b->count, i);
@@ -264,7 +264,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         }
     }
 
-    /* Status: now playing + clock. */
+    
     {
         int right = status.x + status.w;
         const ic_face_t *ft = ic_font(IC_FONT_BODY_EMPH);
@@ -294,7 +294,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
     }
 }
 
-/* ------------------------------------------------------------ launcher */
+
 
 #define WM_LAUNCH_COLS     4
 #define WM_LAUNCH_TILE_W  88
@@ -392,7 +392,7 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
     }
 }
 
-/* ------------------------------------------------------------ overlays */
+
 
 void wm_rubber_band_draw(ic_canvas_t *c, int x0, int y0, int x1, int y1) {
     const ic_palette_t *p = ic_palette();

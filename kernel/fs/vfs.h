@@ -30,8 +30,8 @@ int vfs_getcwd(vfs_node_t *node, char *buf, size_t size);
 int vfs_mkdir(vfs_node_t *cwd, const char *path);
 int vfs_create(vfs_node_t *cwd, const char *path);
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size);
-/* Offset write directly against a node (fd layer). Grows the file when
- * off+size exceeds it, zero-filling the gap. Returns 0 or -1. */
+
+
 int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
                       uint64_t size);
 int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char *data, uint64_t size,

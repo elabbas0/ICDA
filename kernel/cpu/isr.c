@@ -107,11 +107,11 @@ void irq_register(int irq, irq_handler_t handler) {
     }
 }
 
-// called from isr.asm when a cpu exception fires
+
 void isr_handler(struct registers* regs) {
     uint64_t num = regs->int_no;
 
-    // if a C handler is registered for this vector, call it and return
+    
     if (num < 32 && isr_handlers[num]) {
         isr_handlers[num](regs);
         return;
@@ -123,16 +123,16 @@ void isr_handler(struct registers* regs) {
     __asm__ volatile ("cli; hlt");
 }
 
-// called from isr.asm when a hardware irq fires
+
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
 
-    /* The timer handler may context-switch away and not return here
-     * until this thread is scheduled again.  Acknowledge it first: a
-     * deferred EOI would mask the timer for as long as the interrupted
-     * thread waits (forever, when that is the idle thread and another
-     * task keeps yielding).  IF stays clear until iretq, so this cannot
-     * nest. */
+    
+
+
+
+
+
     if (irq == 0) {
         irq_controller_eoi(irq);
         if (irq_handlers[0]) {

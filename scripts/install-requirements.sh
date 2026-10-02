@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then

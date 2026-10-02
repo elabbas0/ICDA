@@ -10,7 +10,7 @@ void idt_set_entry(int index, uint64_t handler, uint8_t flags) {
     idt[index].offset_low  = handler & 0xFFFF;
     idt[index].offset_mid  = (handler >> 16) & 0xFFFF;
     idt[index].offset_high = (handler >> 32) & 0xFFFFFFFF;
-    idt[index].selector    = 0x08;      // kernel code segment
+    idt[index].selector    = 0x08;      
     idt[index].ist         = 0;
     idt[index].flags       = flags;
     idt[index].zero        = 0;
@@ -22,7 +22,7 @@ void idt_init() {
     ip.limit = sizeof(idt) - 1;
     ip.base  = (uint64_t)&idt;
 
-    // cpu exceptions 0-31
+    
     idt_set_entry(0,  (uint64_t)isr0,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(1,  (uint64_t)isr1,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(2,  (uint64_t)isr2,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
@@ -56,7 +56,7 @@ void idt_init() {
     idt_set_entry(30, (uint64_t)isr30, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(31, (uint64_t)isr31, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
 
-    // hardware irqs 32-47
+    
     idt_set_entry(32, (uint64_t)irq0,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(33, (uint64_t)irq1,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(34, (uint64_t)irq2,  IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);

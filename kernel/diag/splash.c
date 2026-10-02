@@ -12,11 +12,11 @@ static const uint32_t splash_track   = 0x001E293B;
 static const uint32_t splash_muted   = 0x0094A3B8;
 static const uint32_t splash_white   = 0x00F1F5F9;
 
-static uint32_t splash_last_fill = 0;                /* bar fill permille */
-static uint32_t splash_frame = 0;                    /* tick-driven anim frame */
+static uint32_t splash_last_fill = 0;                
+static uint32_t splash_frame = 0;                    
 
-/* Draw one ASCII glyph scaled by `scale` (integer pixels per font pixel),
- * centered horizontally around the caller-provided pixel origin. */
+
+
 static void splash_glyph_scaled(int x0, int y0, char c, int scale,
                                 uint32_t fg, uint32_t bg) {
     unsigned char uc = (unsigned char)c;
@@ -49,7 +49,7 @@ static void splash_wordmark(const char *text, int center_x, int y, int scale) {
     }
 }
 
-/* Small centered 1x line (normal font size). */
+
 static void splash_text_center(const char *text, int center_x, int y,
                                uint32_t color) {
     int len = 0;
@@ -64,7 +64,7 @@ static void splash_text_center(const char *text, int center_x, int y,
 
 static uint32_t splash_progress_permille(uint32_t stage) {
     if (stage >= 120 && stage <= 125) {
-        /* network / hda / audio / nvme / ahci / ata live in the S12 gap */
+        
         return 380 + (stage - 119) * 50;
     }
     if (stage >= 13 && stage <= 21) {
@@ -93,11 +93,11 @@ void splash_init(void) {
 
     fb_clear(splash_bg);
 
-    /* Wordmark + tagline + version, vertically balanced around the upper third. */
+    
     splash_wordmark("ICDA", w / 2, h / 2 - 190, 8);
     splash_text_center("operating system", w / 2, h / 2 - 40, splash_muted);
-    /* Show "v" + ICDA_VERSION_STRING centered below the tagline.
-     * Bounds-safe: strlen("v" ICDA_VERSION_STRING) <= 16. */
+    
+
     {
         char ver[24];
         int vi = 0;
@@ -109,7 +109,7 @@ void splash_init(void) {
         splash_text_center(ver, w / 2, h / 2 - 10, splash_muted);
     }
 
-    /* Progress bar track. */
+    
     bar_w = w / 2;
     if (bar_w > 640) bar_w = 640;
     bar_x = (w - bar_w) / 2;
@@ -125,19 +125,19 @@ void splash_init(void) {
     splash_progress(1, "serial");
 }
 
-/* Tick-driven spinner: 8 dots on a small ring under the stage label.
- * Each splash_progress call advances one frame (bootstage-driven, no
- * timer needed, ~22 frames total). Cost is 9 tiny fill_rects per call
- * (one clear + 8 dots) — microseconds, no measurable boot slowdown. */
+
+
+
+
 static void splash_spinner(int cx, int cy, uint32_t frame) {
     static const int off_x[8] = { 0, 10, 14, 10, 0, -10, -14, -10 };
     static const int off_y[8] = { -14, -10, 0, 10, 14, 10, 0, -10 };
     uint32_t active = frame % 8U;
     int i;
 
-    /* Clear the spinner cell to the splash background first so the
-     * previous frame's lit dot is erased. Bounds-safe: fill_rect
-     * clips, and the cell is 36x36 centered at (cx,cy). */
+    
+
+
     fb_fill_rect(cx - 18, cy - 18, 36, 36, splash_bg);
     for (i = 0; i < 8; i++) {
         uint32_t color = ((uint32_t)i == active) ? splash_accent : splash_track;
@@ -174,9 +174,9 @@ void splash_progress(uint32_t stage, const char *label) {
     if (permille < splash_last_fill) permille = splash_last_fill;
     fill = (uint32_t)((uint64_t)bar_w * permille / 1000);
     if (fill > splash_last_fill) {
-        /* Eased leading edge: paint the newest chunk with a brighter
-         * pulse on alternating frames so motion reads as smooth
-         * rather than stepped. */
+        
+
+
         uint32_t lead = (splash_frame & 1U) ? 0x007DD3FC : splash_accent;
         uint32_t chunk = fill - splash_last_fill;
         if (chunk > 8) {
@@ -190,14 +190,14 @@ void splash_progress(uint32_t stage, const char *label) {
         splash_last_fill = fill;
     }
 
-    /* Stage label under the bar - the one piece of boot telemetry kept
-     * on screen, so a hang still names the failing subsystem. */
+    
+
     if (label && *label) {
         splash_text_center(label, w / 2, bar_y + 40, splash_muted);
     }
 
-    /* Spinner below the label. Gated on screen height so small modes
-     * never draw off-screen. */
+    
+
     if (h > 0 && bar_y + 78 + 18 < h && bar_y + 78 - 18 > 0) {
         splash_spinner(w / 2, bar_y + 78, splash_frame);
     }

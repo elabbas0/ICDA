@@ -1,12 +1,12 @@
-/*
- * rtc.c - CMOS real-time clock reader.
- *
- * The RTC updates its registers once a second; reading while an update
- * is in progress can mix old and new fields.  We wait for the
- * update-in-progress flag to clear, read everything, and repeat until
- * two consecutive reads agree.  Register B tells whether values are BCD
- * and whether the hour is 12-hour with a PM flag in bit 7.
- */
+
+
+
+
+
+
+
+
+
 #include "rtc.h"
 
 #define CMOS_ADDR 0x70
@@ -18,7 +18,7 @@
 #define RTC_DAY     0x07
 #define RTC_MONTH   0x08
 #define RTC_YEAR    0x09
-#define RTC_CENTURY 0x32   /* ACPI FADT default; 0 on many boards */
+#define RTC_CENTURY 0x32   
 #define RTC_REG_A   0x0A
 #define RTC_REG_B   0x0B
 
@@ -33,7 +33,7 @@ static inline uint8_t rtc_inb(uint16_t port) {
 }
 
 static uint8_t cmos_read(uint8_t reg) {
-    /* Bit 7 of the address port keeps NMIs disabled while selecting. */
+    
     rtc_outb(CMOS_ADDR, (uint8_t)(0x80 | reg));
     return rtc_inb(CMOS_DATA);
 }
@@ -92,7 +92,7 @@ int rtc_read(rtc_time_t *out) {
         a.c = bcd(a.c);
     }
     if (!(reg_b & 0x02)) {
-        /* 12-hour mode: 12 AM is 0, 12 PM is 12. */
+        
         if (a.h == 12) a.h = 0;
         if (pm) a.h = (uint8_t)(a.h + 12);
     }

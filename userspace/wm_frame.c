@@ -1,6 +1,6 @@
-/*
- * wm_frame.c - window frame drawing and hit-testing (see wm_frame.h).
- */
+
+
+
 #include "wm_frame.h"
 
 #define WM_BTN_W       28
@@ -9,8 +9,8 @@
 #define WM_BTN_MARGIN   7
 #define WM_BTN_SYMBOL  13.0f
 #define WM_TITLE_PAD   14
-#define WM_GRIP_OUT     5    /* resize grip reach outside the frame */
-#define WM_GRIP_IN      3    /* ... and inside it */
+#define WM_GRIP_OUT     5    
+#define WM_GRIP_IN      3    
 #define WM_GRIP_CORNER 16
 
 ic_rect_t wm_frame_rect(const wm_frame_t *f) {
@@ -105,14 +105,14 @@ void wm_frame_draw(ic_canvas_t *c, const wm_frame_t *f,
     float r = wm_frame_radius(f);
     int top = fr.y;
 
-    /* Title bar. */
+    
     ic_gfx_rrect4(c, fr.x, top, fr.w, WM_TITLE_H, r, r, 0.0f, 0.0f, p->titlebar);
     if (p->dark && r > 0.0f) {
         ic_gfx_hline(c, fr.x + (int)r, top + 1, fr.w - 2 * (int)r, p->highlight);
     }
     ic_gfx_hline(c, fr.x, f->y - 1, fr.w, p->bar_edge);
 
-    /* Title: centred on the frame, clear of the caption buttons. */
+    
     if (f->title && f->title[0]) {
         const ic_face_t *face = ic_font(IC_FONT_HEADLINE);
         ic_rect_t minr = wm_frame_button_rect(f, WM_HIT_MINIMIZE);
@@ -132,8 +132,8 @@ void wm_frame_draw(ic_canvas_t *c, const wm_frame_t *f,
     wm_frame_caption_button(c, f, WM_HIT_MAXIMIZE, f->maximized ? IC_SYM_RESTORE : IC_SYM_MAXIMIZE);
     wm_frame_caption_button(c, f, WM_HIT_CLOSE, IC_SYM_CLOSE);
 
-    /* Client content: the app buffer, masked to the frame's bottom
-     * corners; uncovered space (mid-resize) shows the window colour. */
+    
+
     {
         int cw = pw < f->w ? pw : f->w;
         int ch = ph < f->h ? ph : f->h;
@@ -147,8 +147,8 @@ void wm_frame_draw(ic_canvas_t *c, const wm_frame_t *f,
         }
     }
 
-    /* Hairline around the whole frame (outside), crisp against any
-     * background. */
+    
+
     if (r > 0.0f) {
         ic_gfx_rrect_stroke(c, fr.x - 1, fr.y - 1, fr.w + 2, fr.h + 2, r + 1.0f, 1.0f, p->frame);
     }

@@ -105,11 +105,11 @@ static int hda_present = 0;
 static int hda_error = 0;
 static int hda_generic_fallback = 0;
 
-/* Slice C no-hang guarantee: every terminal audio failure logs exactly
- * one serial line and returns an error. No path spins forever, executes
- * cli/hlt, or panics - the system keeps running with audio disabled.
- * (Per-verb timeouts live in wait_mask16/wait_mask32/hda_exec_verb;
- * per-chunk write errors propagate to the playback layer, which logs.) */
+
+
+
+
+
 static int hda_fail(int code, const char *msg) {
     hda_error = code;
     serial_write(msg);
@@ -205,9 +205,9 @@ static int hda_exec_verb(uint8_t codec, uint8_t nid, uint16_t verb, uint16_t par
     mmio_write32(HDA_REG_ICOI, hda_build_cmd(codec, nid, verb, parm));
     mmio_write16(HDA_REG_ICIS, HDA_ICIS_ICB);
 
-    /* Bounded hard: a codec that is present but unresponsive must not
-     * hold the boot hostage for minutes.  A healthy codec answers the
-     * first poll, so the cap only bites on wedged hardware. */
+    
+
+
     for (uint32_t i = 0; i < 200000U; i++) {
         status = mmio_read16(HDA_REG_ICIS);
         if ((status & HDA_ICIS_ICB) == 0 && (status & HDA_ICIS_IRV) != 0) {
@@ -302,10 +302,10 @@ static int hda_get_connections(uint8_t nid, uint8_t *out, uint8_t *count_out) {
             return -1;
         }
 
-        /* Real codecs (e.g. Realtek ALC-series mixers) can report far
-         * more connections than the caller's buffer holds, and ranges
-         * expand on top of that.  Cap the output so a large connection
-         * list cannot overflow the stack and corrupt the graph walk. */
+        
+
+
+
         if (long_form) {
             for (uint8_t slot = 0; slot < 2 && idx < count && conns < HDA_MAX_CONNECTIONS; slot++, idx++) {
                 uint16_t raw = (uint16_t)((resp >> (slot * 16U)) & 0xFFFFU);
@@ -391,11 +391,11 @@ static int hda_find_dac_path_from(uint8_t nid, uint8_t *visited, hda_path_t *pat
 static int hda_pin_priority(uint32_t cfg_default) {
     uint8_t device = (uint8_t)((cfg_default >> 20) & 0x0FU);
     switch (device) {
-        case 0x1: return 4; /* speaker */
-        case 0x2: return 3; /* headphone */
-        case 0x0: return 2; /* line out */
-        case 0x4: return 1; /* SPDIF out */
-        case 0x5: return 1; /* digital other out */
+        case 0x1: return 4; 
+        case 0x2: return 3; 
+        case 0x0: return 2; 
+        case 0x4: return 1; 
+        case 0x5: return 1; 
         default: return 0;
     }
 }
@@ -516,12 +516,12 @@ static int hda_find_output_path(hda_path_t *out_path) {
     }
 
     if (best_score < 0) {
-        /*
-         * Some VBox HDA codec graphs do not expose a clean pin->DAC path
-         * through the connection-list walk we use for QEMU. Fall back to a
-         * coarse first-pin/first-output choice so the rest of the codec setup
-         * can still attempt broad enablement.
-         */
+        
+
+
+
+
+
         uint8_t fallback_pin = 0;
         uint8_t fallback_dac = 0;
 
@@ -695,11 +695,11 @@ static int hda_wait_for_codec_graph(void) {
     hda_path_t dummy = {0};
     uint32_t probe_resp = 0;
 
-    /* Liveness check first.  Each failed verb costs up to 200k MMIO
-     * polls, and a full graph walk issues hundreds of verbs, so a codec
-     * that never answers would otherwise hold the boot silent for
-     * minutes.  If the codec cannot answer a single root-node read, it
-     * is wedged - skip the expensive walk entirely. */
+    
+
+
+
+
     {
         int alive = 0;
         for (uint32_t retry = 0; retry < 8U; retry++) {
@@ -718,9 +718,9 @@ static int hda_wait_for_codec_graph(void) {
         }
     }
 
-    /* A live codec answers the graph walk quickly; a codec that misses
-     * the first attempts will not magically appear later, so a couple of
-     * retries are plenty. */
+    
+
+
     for (uint32_t attempt = 0; attempt < 4U; attempt++) {
         if (hda_find_output_path(&dummy) == 0) {
             return 0;
@@ -795,7 +795,7 @@ int hda_init(void) {
     hda_generic_fallback = 0;
     hda_pci = pci_find_class(HDA_CLASS_CODE, HDA_SUBCLASS);
     if (!hda_pci) {
-        /* No HDA hardware (headless/VM without audio): skip init cleanly. */
+        
         return hda_fail(1, "hda: no pci audio device, skipping\n");
     }
 

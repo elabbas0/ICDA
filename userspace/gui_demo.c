@@ -1,15 +1,15 @@
-/*
- * gui_demo.app - ICDA Demo.
- *
- * The control gallery from docs/DESIGN.md: every ic_ui control on one
- * scrollable page, grouped the way the real apps group them.  It exists
- * for visual review - when a token or control changes, this is where you
- * look at it - so it stays in the CI test image rather than the product
- * image.
- *
- * Layout is a column of groups built from one list of descriptors, so
- * adding a control is one entry rather than another draw function.
- */
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W  620
@@ -18,19 +18,19 @@
 #define GROUP_PAD  IC_SP_5
 #define ROW_H      IC_H_ROW_TALL
 
-/* A gallery row: a left-hand label and a right-hand control. */
+
 typedef enum {
-    ROW_BUTTONS = 0,   /* a row of buttons of every style */
-    ROW_TOGGLE,         /* one switch */
-    ROW_SEGMENTED,      /* a two-option segmented control */
-    ROW_SLIDER,         /* a slider with its value */
-    ROW_PROGRESS,       /* a determinate progress bar */
-    ROW_TEXTFIELD,      /* an editable single-line field */
-    ROW_LIST,           /* a short list with a selection */
-    ROW_TABLE,          /* a table header plus two rows */
-    ROW_SIDEBAR,        /* a source list */
-    ROW_SYMBOLS,        /* the symbol set */
-    ROW_MENU            /* a rendered menu, for review */
+    ROW_BUTTONS = 0,   
+    ROW_TOGGLE,         
+    ROW_SEGMENTED,      
+    ROW_SLIDER,         
+    ROW_PROGRESS,       
+    ROW_TEXTFIELD,      
+    ROW_LIST,           
+    ROW_TABLE,          
+    ROW_SIDEBAR,        
+    ROW_SYMBOLS,        
+    ROW_MENU            
 } row_kind_t;
 
 typedef struct {
@@ -60,7 +60,7 @@ static struct {
     int         scroll;
     int         content_h;
     int         view_h;
-    int         selected_row;        /* ROW_LIST selection */
+    int         selected_row;        
     int         hover_list;
     int         hover_toggle;
     int         hover_segment;
@@ -83,11 +83,11 @@ static struct {
     char        status[64];
 } gd;
 
-/* Menu rendering needs a scratch buffer for the backdrop blur. */
+
 #define GD_SCRATCH_PX (400 * 300)
 static uint32_t scratch[GD_SCRATCH_PX];
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t view_rect(ic_app_t *app) {
     return ic_rect_make(0, IC_H_TITLEBAR, app->width, app->height - IC_H_TITLEBAR);
@@ -97,8 +97,8 @@ static ic_rect_t status_rect(ic_app_t *app) {
     return ic_rect_make(0, app->height - 24, app->width, 24);
 }
 
-/* The y of group i, from the row heights above it.  Every group is one
- * label row plus a control row, so the table is regular. */
+
+
 static int group_y(int i) {
     int y = GROUP_PAD;
     for (int k = 0; k < i; k++) y += ROW_H + 8 + ROW_H + IC_SP_4;
@@ -117,7 +117,7 @@ static int group_at(int y) {
 
 static int control_top(int i) { return group_y(i) + ROW_H + 8; }
 
-/* Control rects inside a group, all derived from the group's top. */
+
 static ic_rect_t control_rect(ic_app_t *app, int i) {
     int top = control_top(i) - gd.scroll;
     return ic_rect_make(GROUP_PAD, top, app->width - 2 * GROUP_PAD, ROW_H);
@@ -174,7 +174,7 @@ static void layout(ic_app_t *app) {
     if (gd.scroll < 0) gd.scroll = 0;
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_buttons(ic_app_t *app, ic_canvas_t *c, int i) {
     ic_rect_t r = control_rect(app, i);
@@ -221,7 +221,7 @@ static void draw_group(ic_app_t *app, ic_canvas_t *c, int i) {
     float hover = ic_tween_value(&gd.row_tw[i]);
     int h = group_h();
 
-    if (ctrl + h < 0 || top > gd.view_h) return;      /* off screen */
+    if (ctrl + h < 0 || top > gd.view_h) return;      
 
     ic_ui_group(c, ic_rect_make(GROUP_PAD, ctrl, app->width - 2 * GROUP_PAD, h));
     ic_ui_group_row(c, ic_rect_make(GROUP_PAD, top, app->width - 2 * GROUP_PAD, ROW_H), 0, 1,
@@ -352,7 +352,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     layout(app);
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
 
-    /* The gallery scrolls under a small title strip. */
+    
     ic_ui_toolbar(c, ic_rect_make(0, 0, app->width, IC_H_TITLEBAR));
     ic_text_draw_in(c, ic_font(IC_FONT_HEADLINE), ic_rect_make(GROUP_PAD, 0,
                                                                  app->width - 2 * GROUP_PAD,
@@ -375,11 +375,11 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
         if (ic_tween_running(&gd.row_tw[i])) ic_app_animate(app);
     }
     if (ic_tween_running(&gd.toggle_tw) || ic_tween_running(&gd.segment_tw)) ic_app_animate(app);
-    /* The indeterminate progress stripe and the caret both keep moving. */
+    
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static int row_of_kind(row_kind_t kind) {
     for (int i = 0; i < ROW_COUNT; i++) {
@@ -576,7 +576,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         layout(app);
         break;
     case IC_EV_APPEARANCE:
-        /* The gallery is a live preview: nothing to reload. */
+        
         break;
     case IC_EV_BLUR:
         gd.list_focused = 0;

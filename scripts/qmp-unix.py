@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Talk to QEMU QMP over a unix socket file.
 
 Usage:
@@ -18,10 +18,10 @@ import sys
 import time
 
 if sys.platform == "win32":
-    import win32file  # type: ignore
-    from pywintypes import OVERLAPPED  # type: ignore
-    import win32event  # type: ignore
-    import winerror  # type: ignore
+    import win32file  
+    from pywintypes import OVERLAPPED  
+    import win32event  
+    import winerror  
 
     def connect_unix(path):
         handle = win32file.CreateFile(

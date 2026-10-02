@@ -1,6 +1,6 @@
 #ifndef VGA_H
 #define VGA_H
-// ============================================================
+
 #define VGA_WIDTH    80
 #define VGA_HEIGHT   25
 #define VGA_MEMORY ((volatile char*)(0xFFFF800000000000ULL + 0xB8000))
@@ -22,18 +22,18 @@
 #define VGA_YELLOW       0xE
 #define VGA_BRIGHT_WHITE 0xF
 
-// combine foreground + background into one attribute byte
+
 #define VGA_COLOR(fg, bg) ((bg << 4) | fg)
 
-// common combos
+
 #define VGA_WHITE_ON_BLACK  VGA_COLOR(VGA_WHITE,       VGA_BLACK)
 #define VGA_RED_ON_BLACK    VGA_COLOR(VGA_RED,         VGA_BLACK)
 #define VGA_GREEN_ON_BLACK  VGA_COLOR(VGA_GREEN,       VGA_BLACK)
 #define VGA_CYAN_ON_BLACK   VGA_COLOR(VGA_CYAN,        VGA_BLACK)
 #define VGA_YELLOW_ON_BLACK VGA_COLOR(VGA_YELLOW,      VGA_BLACK)
 #define VGA_BLACK_ON_WHITE  VGA_COLOR(VGA_BLACK,       VGA_WHITE)
-// ============================================================
-// Functions
+
+
 void vga_init();
 void vga_clear();
 void vga_putchar(char c, unsigned char color);

@@ -1,8 +1,8 @@
 bits 64
 
-; CI_IMAGE selects the test-image extras (gui_demo, nptest, nptestlx).
-; The Makefile passes -DCI_IMAGE=0 for production, =1 for CI.
-; Production builds embed product apps only.
+
+
+
 %ifndef CI_IMAGE
 %define CI_IMAGE 0
 %endif

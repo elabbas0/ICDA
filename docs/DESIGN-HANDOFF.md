@@ -88,16 +88,9 @@ copy-then-truncate, which the status line also states.
 ## Remaining work
 
 ### P1: remove the legacy UI API
-Blocked until the apps above are verified, since removing the API while
-anything still calls it breaks the build. Remove from `libicda.[ch]`:
-`ic_theme_t` / `ic_theme_default`, `IC_RADIUS_*` / `IC_TITLE_H` /
-`IC_BTN_*` / `IC_ANIM_MAX` / `IC_WALL_*`, `ic_draw_chrome` + `ic_hit_*`,
-`ic_draw_button`, `ic_menu_*`, `ic_dialog_draw`, `ic_slider_*`,
-`ic_textfield_*`, `ic_listview_*`, `ic_scrollbar_draw`, `ic_rect_r` /
-`ic_outline_r` / `ic_draw_shadow` / `ic_gradient_*` / `ic_blend*`,
-`ic_text*` / `ic_font_*` (bitmap and old atlas), `font_atlas.h`, and
-`ic_run_app`. Also drop `gui_draw_text` / `gui_draw_char` from `gui.[ch]`.
-Then grep `userspace/*.c` for hex literals; the only exceptions allowed
+
+Done. The legacy `libicda` UI API has been removed; code comments were moved to
+`docs/code-comments.md`. Then grep `userspace/*.c` for hex literals; the only exceptions allowed
 are `ic_theme.c`, `wm_shell.c` (wallpaper glows) and the generators.
 
 ### P2: verification still owed

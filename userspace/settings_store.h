@@ -1,25 +1,25 @@
 #ifndef USERSPACE_SETTINGS_STORE_H
 #define USERSPACE_SETTINGS_STORE_H
 
-/* Slice C shared settings store (WM + Settings app + audio clients).
- *
- * Canonical path: /cfg/icda-settings (persistfs-backed, writable;
- * same best-effort persistence as /cfg/desktop.cfg - RAM-only on the
- * live ISO). Read falls back to /etc/icda-settings (seeded defaults).
- *
- * File format: one "key=value" per line, '#' comments and blank lines
- * ignored, unknown keys ignored. Values are single digits; anything
- * else leaves the default in place:
- *
- *   vsync=1        tick-paced present (tear-free-ish) vs immediate
- *   animations=1   window open/close/min/max animations vs instant
- *   boot_anim=1    boot/power transition animation vs instant
- *   audio=1        audio enabled vs master mute (skip audio paths)
- *   appearance=0   0 = dark, 1 = light (ic_theme.h palettes)
- *   accent=0       accent colour index (ic_accent_t, 0..6)
- *
- * All helpers are bounds-checked and freestanding-safe (no libc).
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include "icda_sys.h"
 
@@ -200,4 +200,4 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     return 0;
 }
 
-#endif /* USERSPACE_SETTINGS_STORE_H */
+#endif 

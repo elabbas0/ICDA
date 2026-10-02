@@ -13,8 +13,8 @@
 #define INITRAMFS_INCLUDE_ICON_ASSETS 1
 #endif
 
-/* CI test-image extras (nptest/nptestlx/gui_demo). Default off:
- * `make` builds the production image; CI builds with CI_IMAGE=1. */
+
+
 #ifndef CI_IMAGE
 #define CI_IMAGE 0
 #endif
@@ -143,8 +143,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/sbin/init.app", 0, 0 }
 };
 
-/* Seed one blob entry and advance the cursor. Keeps initramfs_init
- * correct when CI_IMAGE entries are compiled out. */
+
+
 static void initramfs_seed_at(uint64_t *cursor, const char *start, const char *end) {
     uint64_t n;
 
@@ -161,9 +161,9 @@ static void initramfs_seed_at(uint64_t *cursor, const char *start, const char *e
 }
 
 int initramfs_init(void) {
-    /* Cursor walks the table in order, so gated-out entries cannot
-     * desynchronize the blob assignments. Production entries first,
-     * then the CI-only test apps in table order. */
+    
+
+
     uint64_t n = 4;
 
     initramfs_seed_at(&n, userprog_hello_start, userprog_hello_end);

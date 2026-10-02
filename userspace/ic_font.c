@@ -1,23 +1,23 @@
-/*
- * ic_font.c - text layout and rendering over the generated atlases.
- *
- * Layout runs in 1/64 px: advances and kerning accumulate fractionally
- * and each glyph picks the pre-rendered subpixel phase closest to its
- * pen position, so spacing stays even at every size.
- */
+
+
+
+
+
+
+
 #include "ic_font.h"
 #include "ic_fonts_gen.h"
 
 #define IC_GLYPH_QUESTION ('?' - 32)
-#define IC_GLYPH_ELLIPSIS (95)          /* first extra: U+2026 */
+#define IC_GLYPH_ELLIPSIS (95)          
 
 const ic_face_t *ic_font(ic_font_style_t style) {
     if ((int)style < 0 || style >= IC_FONT_STYLE_COUNT) style = IC_FONT_BODY;
     return ic_faces[style];
 }
 
-/* Decode one UTF-8 sequence at s (at most n bytes); returns glyph index
- * and stores the byte length consumed. */
+
+
 static int ic_next_glyph(const char *s, int n, int *len) {
     const unsigned char *u = (const unsigned char *)s;
     uint32_t cp;
@@ -62,7 +62,7 @@ static int ic_strlen_i(const char *s) {
     return n;
 }
 
-/* Pen advance of the first n bytes in 1/64 px. */
+
 static int ic_measure_q6(const ic_face_t *f, const char *s, int n) {
     int pen = 0, prev = -1, i = 0;
     while (i < n && s[i]) {
@@ -100,8 +100,8 @@ int ic_text_fit(const ic_face_t *f, const char *s, int max_w) {
     return i;
 }
 
-/* Light text on dark backgrounds reads thin with plain sRGB blending;
- * a gentle coverage lift compensates (macOS-style stem darkening). */
+
+
 static const uint8_t *ic_coverage_lut(ic_color_t color) {
     static uint8_t lift[256];
     static int ready;
@@ -110,8 +110,8 @@ static const uint8_t *ic_coverage_lut(ic_color_t color) {
     if (luma < 150) return 0;
     if (!ready) {
         for (int i = 0; i < 256; i++) {
-            /* x^0.8 via x * x^-0.2 approximation is overkill here; a
-             * blend towards sqrt reproduces the curve closely enough. */
+            
+
             float x = (float)i / 255.0f;
             float y = 0.55f * x + 0.45f * ic_sqrtf(x);
             if (y > 1.0f) y = 1.0f;
@@ -159,7 +159,7 @@ int ic_text_draw(ic_canvas_t *c, const ic_face_t *f, int x, int y, const char *s
 
 int ic_text_center_baseline(const ic_face_t *f, int y, int h) {
     if (!f) return y + h;
-    /* Centre the cap height; round so odd leftovers go below. */
+    
     return y + (h + f->cap_h + 1) / 2;
 }
 
@@ -171,7 +171,7 @@ void ic_text_draw_in(ic_canvas_t *c, const ic_face_t *f, ic_rect_t r, const char
     w = ic_text_measure_n(f, s, n);
     base = ic_text_center_baseline(f, r.y, r.h);
     if (w > r.w) {
-        /* Truncate at the widest prefix that leaves room for "…". */
+        
         static const char ell[] = "\xE2\x80\xA6";
         int ew = ic_text_measure(f, ell);
         int keep = ic_text_fit(f, s, r.w - ew);
@@ -195,7 +195,7 @@ int ic_text_draw_wrapped(ic_canvas_t *c, const ic_face_t *f, ic_rect_t r, const 
     while (s[i]) {
         int fit, brk, start = i;
         if (r.h > 0 && used + f->line_h > r.h) break;
-        /* Hard line breaks end the line early. */
+        
         {
             int nl = start;
             while (s[nl] && s[nl] != '\n') nl++;

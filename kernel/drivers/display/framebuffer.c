@@ -5,24 +5,24 @@
 #include "../../memory/vmm.h"
 #include <stdint.h>
 
-// internal state
+
 static volatile uint32_t* fb_addr   = 0;
 static uint64_t           fb_phys   = 0;
 static uint32_t           fb_pitch  = 0;
 static uint32_t           fb_bpp    = 0;
 static int                fb_ready  = 0;
 static int                fb_hhdm   = 0;
-/* 1 when 24-bit pixels are BGR-ordered on the wire (byte 0 = blue),
- * decided from the VBE color masks at init. All 24-bit writers below
- * honor this; 32-bit native writes are unaffected. */
+
+
+
 static int                fb_bgr_order = 0;
-/* When flip page-flipping is active the compositor needs a 2-frame
- * mapping; fb_phys_size() doubles accordingly.  The kernel console
- * (fb_addr, fb_width, fb_height) is unaffected — it only touches
- * the first frame. */
+
+
+
+
 static int                fb_double_frame = 0;
 
-// cursor position in characters
+
 static int cursor_x = 0;
 static int cursor_y = 0;
 static kernel_device_t framebuffer_device;
@@ -96,13 +96,13 @@ static void framebuffer_device_backspace(void *context, uint32_t bg) {
     fb_backspace(bg);
 }
 
-// public screen dimensions
+
 int fb_width  = 0;
 int fb_height = 0;
 
 
-// ============================================================
-// parse multiboot2 info to find framebuffer tag
+
+
 int fb_init(void* multiboot_info) {
     if (!multiboot_info) return 0;
 
@@ -128,22 +128,22 @@ int fb_init(void* multiboot_info) {
             fb_width  = (int)fb_tag->framebuffer_width;
             fb_height = (int)fb_tag->framebuffer_height;
             fb_ready  = 1;
-            /* 24-bit color order comes from the VBE masks, not from the
-             * bpp alone: QEMU/Bochs report red at bit 16, i.e. byte
-             * order [B,G,R] on the wire. Writing [R,G,B] (the naive
-             * order) shows every color R/B-swapped system-wide, which
-             * is exactly what happened before this flag existed. */
+            
+
+
+
+
             if (fb_bpp == 24 && (uint64_t)tag->size >= 38) {
                 const uint8_t *ci = (const uint8_t *)fb_tag + 32;
                 uint8_t rpos = ci[0];
                 uint8_t bpos = ci[4];
-                /* Byte 0 carries the channel at bit position 0. */
+                
                 fb_bgr_order = (rpos == 16 && bpos == 0) ? 1 : 0;
             } else if (fb_bpp == 24) {
-                /* No mask info: assume the common BGR 24-bit layout. */
+                
                 fb_bgr_order = 1;
             } else {
-                /* 32-bit native uint32 writes are order-correct. */
+                
                 fb_bgr_order = 0;
             }
             fb_hhdm   = 0;
@@ -175,10 +175,10 @@ int fb_available() {
     return fb_ready;
 }
 
-/* Adopt a new physical framebuffer (e.g. virtio-gpu backing).
- * Called after a paravirtualised display is initialised so that all
- * fb_print / fb_phys_addr / fb_phys_size / devnodes claim-map code
- * sees the new buffer without reinitialising the console. */
+
+
+
+
 void fb_adopt(uint64_t phys, uint32_t pitch_val, int width, int height, int bpp_val) {
     fb_phys       = phys;
     fb_addr       = (volatile uint32_t *)(PHYS_TO_VIRT(phys));
@@ -186,22 +186,22 @@ void fb_adopt(uint64_t phys, uint32_t pitch_val, int width, int height, int bpp_
     fb_bpp        = (uint32_t)bpp_val;
     fb_width      = width;
     fb_height     = height;
-    fb_bgr_order  = 0;      /* 32-bit native XRGB8888 */
-    fb_hhdm       = 1;      /* already mapped through HHDM */
+    fb_bgr_order  = 0;      
+    fb_hhdm       = 1;      
     fb_ready      = 1;
 }
 
-// return the raw physical address of the framebuffer (0 if not ready)
+
 uint64_t fb_phys_addr(void) {
     return fb_ready ? fb_phys : 0;
 }
 
-// Enable/disable double-frame mode for page-flipping compositor.
+
 void fb_set_double_frame(int enable) {
     if (fb_ready) fb_double_frame = enable;
 }
 
-// return the size of the framebuffer in bytes
+
 uint64_t fb_phys_size(void) {
     uint64_t sz = fb_ready ? (uint64_t)fb_pitch * (uint64_t)fb_height : 0;
     return fb_double_frame ? sz * 2 : sz;
@@ -215,22 +215,22 @@ uint32_t fb_pitch_value(void) {
     return fb_ready ? fb_pitch : 0;
 }
 
-// adjust fb_addr to point through the HHDM; call once after vmm_init
+
 void fb_remap(uint64_t physical_base) {
     if (!fb_ready || fb_hhdm) return;
     fb_addr = (volatile uint32_t *)(fb_phys + physical_base);
     fb_hhdm = 1;
 }
 
-// ============================================================
-// pixel operations
+
+
 void fb_put_pixel(int x, int y, uint32_t color) {
     volatile uint8_t *p;
 
     if (!fb_ready) return;
     if (x < 0 || x >= fb_width || y < 0 || y >= fb_height) return;
-    /* Byte-wise store: a 32-bit store overlaps into the next pixel on
-     * 24-bit layouts, and must honor the BGR wire order there. */
+    
+
     p = (volatile uint8_t *)fb_addr + (uint64_t)y * fb_pitch +
         (uint64_t)x * (fb_bpp / 8);
     if (fb_bpp == 32) {
@@ -276,8 +276,8 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t color) {
         }
         return;
     }
-    /* 24-bit: byte stores honoring the BGR wire order. Previously this
-     * function silently did nothing below 32bpp. */
+    
+
     {
         uint8_t b0;
         uint8_t b1;
@@ -344,8 +344,8 @@ void fb_clear(uint32_t color) {
     cursor_y = 0;
 }
 
-// ============================================================
-// render font
+
+
 void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
     unsigned char uc = (unsigned char)c;
     if (!fb_ready) return;
@@ -382,27 +382,27 @@ void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
     for (int row = 0; row < FONT_HEIGHT; row++) {
         unsigned char bits = glyph[row];
         for (int col = 0; col < FONT_WIDTH; col++) {
-            // MSB is leftmost pixel
+            
             uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
             fb_put_pixel(x + col, y + row, color);
         }
     }
 }
 
-// ============================================================
-// scroll
+
+
 static void fb_scroll() {
     if (!fb_ready) return;
     uint64_t row_bytes = (uint64_t)FONT_CELL_HEIGHT * (uint64_t)fb_pitch;
 
-    // move all rows up by one character height
+    
     uint8_t* dst = (uint8_t*)fb_addr;
     uint8_t* src = (uint8_t*)fb_addr + row_bytes;
     uint64_t copy_size = (uint64_t)fb_pitch * (uint64_t)(fb_height - FONT_CELL_HEIGHT);
 
     fb_copy_bytes(dst, src, copy_size);
 
-    // clear last row
+    
     uint8_t* last_row = (uint8_t*)fb_addr + fb_pitch * (fb_height - FONT_CELL_HEIGHT);
     fb_fill_bytes(last_row, 0, (uint64_t)fb_pitch * (uint64_t)FONT_CELL_HEIGHT);
 
@@ -410,8 +410,8 @@ static void fb_scroll() {
     if (cursor_y < 0) cursor_y = 0;
 }
 
-// ============================================================
-// char and string output
+
+
 void fb_newline() {
     cursor_x = 0;
     cursor_y++;

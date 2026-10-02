@@ -2,19 +2,19 @@ bits 64
 
 global gdt_flush
 
-; rdi = pointer to gdt_ptr struct
-gdt_flush:
-    lgdt [rdi]          ; load new GDT
 
-    ; reload code segment via far return
-    push 0x08           ; kernel code selector
+gdt_flush:
+    lgdt [rdi]          
+
+    
+    push 0x08           
     lea rax, [rel .done]
     push rax
-    retfq               ; far return reloads CS
+    retfq               
 
 .done:
-    ; reload all data segment registers
-    mov ax, 0x10        ; kernel data selector
+    
+    mov ax, 0x10        
     mov ds, ax
     mov es, ax
     mov fs, ax

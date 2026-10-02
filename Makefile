@@ -5,15 +5,15 @@ OVMF_CODE = /usr/share/OVMF/OVMF_CODE.fd
 DOCKER_IMAGE = icda-toolchain
 DOCKER_RUN = docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(DOCKER_IMAGE)
 SGDISK ?= /usr/sbin/sgdisk
-# Slice A product cleanup: production `make` builds the product image
-# only (no demo/self-test apps, no verbose serial logs). CI builds the
-# test image with CI_SELFTEST=1 CI_IMAGE=1 (see .github/workflows).
+
+
+
 CI_SELFTEST ?= 0
 CI_IMAGE ?= 0
 SERIAL_VERBOSE ?= 0
 SERIAL_SHELL_MIRROR ?= 0
-# Only git-tracked UI sounds are baked into the kernel. Large media
-# (userspace/*.wav gitignored, e.g. ilove.wav) stays out: use Releases/LFS.
+
+
 AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody.wav userspace/hava_clip.wav)
 ICON_ICOS := $(wildcard resources/icons/*.ico)
 
@@ -24,17 +24,17 @@ CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -DCI_SELFTEST=$(CI_SELFTEST) -DCI_IMAGE=$(CI_IMAGE) \
          -DSERIAL_VERBOSE=$(SERIAL_VERBOSE)
 
-# Userspace (the whole GUI stack - WM compositing, libicda drawing, apps)
-# runs optimized: at -O0 the 1920x1080 compositing math made real hardware
-# crawl, which read as "1 fps".  Kernel stays -O0 (boot path is short).
-# SSE2 is the x86-64 baseline; the kernel saves x87/SSE state per thread
-# (kernel/cpu/fpu.c), so the GUI stack may use float math and XMM loops.
+
+
+
+
+
 USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -Wpedantic -Wno-unused-command-line-argument -fno-pie -no-pie -mcmodel=large \
              -fno-asynchronous-unwind-tables -fno-stack-protector \
              -msse2 -mfpmath=sse -Iuserspace -I.
 
-# Design-system modules partially linked into libicda.o (see below), and
-# the headers every GUI object depends on through libicda.h.
+
+
 IC_MODULES = ic_time ic_anim ic_gfx ic_font ic_theme ic_ui ic_symbols ic_app
 IC_MODULE_OBJS = $(addsuffix .o,$(IC_MODULES))
 IC_HEADERS = userspace/libicda.h userspace/ic_time.h userspace/ic_anim.h userspace/ic_gfx.h \
@@ -539,9 +539,9 @@ crt0.o: userspace/crt0.asm
 	$(ASM) -f elf64 userspace/crt0.asm -o /tmp/icda-crt0.o
 	cp -f /tmp/icda-crt0.o crt0.o
 
-# libicda.o is one relocatable object partially linked from the core
-# library and the design-system modules, so every app keeps linking the
-# single libicda.o.
+
+
+
 
 libicda_core.o: userspace/libicda.c $(IC_HEADERS) userspace/icon_data.h userspace/font.h \
                 userspace/ic_version.h version.h
@@ -600,9 +600,9 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-terminal.app crt0.o terminal.o gui.o libicda.o
 	cp -f /tmp/icda-terminal.app userspace/terminal.app
 
-# Product image embeds product apps only. The CI test image additionally
-# embeds gui_demo/nptest/nptestlx (mirrors the CI_IMAGE gate in
-# kernel/fs/initramfs.c and kernel/proc/user_programs.asm).
+
+
+
 USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
@@ -639,7 +639,7 @@ kernel.iso: kernel.bin
 	cp boot/grub/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkstandalone -O x86_64-efi -o isodir/EFI/BOOT/BOOTX64.EFI "boot/grub/grub.cfg=boot/grub/grub.cfg"
 	grub-mkrescue -o /tmp/kernel.iso isodir
-	# Docker Desktop 9p: EEXIST from lingering cache; mv fails if host holds lock
+	
 	cp /tmp/kernel.iso $@.tmp
 	mv -f $@.tmp $@
 
@@ -686,16 +686,16 @@ qemu-uefi: kernel.iso
 qemu-smoke: kernel.iso
 	sh scripts/qemu-smoke.sh kernel.iso
 
-# Slice B real-power test (NOT for CI/smoke): boots WITHOUT -no-reboot /
-# -no-shutdown so ACPI S5 / 8042 / CF9 actually power off or reboot the VM.
-# Needs isa-debug-exit for the QEMU fallback path:
-#   make qemu-power          # shutdown path: VM must exit (not hang at cli;hlt)
-#   make qemu-power-reboot   # reboot path: VM must reboot, not triple-fault-hang
-# Manual check: Start menu -> Shutdown / Restart -> ~700ms fade overlay ->
-# QEMU exits (shutdown) or reboots (reboot). scripts/qemu-smoke.sh and CI
-# keep -no-reboot/-no-shutdown and are unaffected.
-# NOTE: the kernel's isa-debug-exit fallback writes port 0x501, so the
-# test device maps iobase=0x501 (QEMU default 0xf4 would not catch it).
+
+
+
+
+
+
+
+
+
+
 qemu-power: kernel.iso
 	$(QEMU) -cdrom kernel.iso -m 256M -serial stdio -display none -monitor none \
 		-device isa-debug-exit,iobase=0x501,iosize=0x04
@@ -725,9 +725,9 @@ docker-qemu-uefi-headless: docker-image
 docker-smoke: docker-image
 	$(DOCKER_RUN) make qemu-smoke
 
-# Ventoy test stick: if a mounted Ventoy USB already carries a kernel.iso,
-# every full build replaces it with the fresh one (old file deleted first).
-# No-op when the stick is absent. Use `make usb-sync` to run it alone.
+
+
+
 VENTOY_ISO := $(firstword $(wildcard /run/media/*/Ventoy/kernel.iso /media/*/Ventoy/kernel.iso))
 
 usb-sync: kernel.iso

@@ -1,13 +1,13 @@
-/* Tiny QMP client over a unix socket.  Usage:
- *   qmpc <sock> screendump <ppm-path>
- *   qmpc <sock> key <qcode>
- *   qmpc <sock> keydown <qcode>
- *   qmpc <sock> keyup <qcode>
- *   qmpc <sock> mousemove <x> <y>
- *   qmpc <sock> click
- *   qmpc <sock> mousedown
- *   qmpc <sock> mouseup
- */
+
+
+
+
+
+
+
+
+
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,8 +69,8 @@ int main(int argc, char **argv) {
         perror("connect");
         return 1;
     }
-    /* QMP sends a greeting immediately on connect; consume it, then
-     * negotiate capabilities and consume that reply too. */
+    
+
     read_until_return();
     send_cmd("{\"execute\":\"qmp_capabilities\"}");
     read_until_return();
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
                  atoi(argv[3]), atoi(argv[4]));
         cmd(buf);
     } else if (strcmp(op, "rel") == 0) {
-        /* PS/2 mouse: relative motion, sent as separate events */
+        
         char buf[512];
         snprintf(buf, sizeof(buf),
                  "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["

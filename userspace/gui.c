@@ -12,14 +12,14 @@ static int win_h = 0;
 static uint32_t win_id = 0;
 static uint64_t win_reply_queue = 0;
 
-/* Staging buffer.  Apps draw into this private copy instead of the shared
- * window buffer so the WM never composites a half-painted frame: the WM
- * re-samples window buffers on its own timer, and an app's multi-step draw
- * (background first, then panels, then items) showed up as a flash of
- * partial content whenever the two clocks crossed.  gui_flush() commits
- * the finished frame to shared memory with one copy, then asks the WM to
- * repaint.  Sized for any window the engine will hand out on a 1280x800
- * screen; larger requests fall back to drawing straight into the SHM. */
+
+
+
+
+
+
+
+
 #define GUI_STAGING_PIXELS (1280 * 800)
 static uint32_t gui_staging[GUI_STAGING_PIXELS];
 
@@ -127,8 +127,8 @@ int gui_open_window(const char *title, int w, int h) {
         return -1;
     }
     win_shm_pixels = (uint32_t*)addr;
-    /* Draw into the staging copy when it fits (the normal case); the
-     * WM sees only committed frames via gui_flush(). */
+    
+
     gui_use_pixel_buffer();
 
     return 0;
@@ -142,8 +142,8 @@ void gui_flush(void) {
     gui_msg_t msg;
     if (!win_reply_queue) return;
     if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
-        /* Commit the finished frame: one tight copy beats the WM
-         * catching us between draw steps. */
+        
+
         gui_copy_pixels(win_shm_pixels, win_pixels, (uint64_t)win_w * (uint64_t)win_h);
     }
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
@@ -178,11 +178,11 @@ void gui_close_window(void) {
         icda_msg_send(win_reply_queue, &msg);
     }
     if (win_shm_handle) {
-        /* Unmap our side only.  The WM also has this region mapped (it
-         * composites from it), so closing the handle here would drop the
-         * refcount to zero and free the physical pages while the WM is
-         * still looking at them - a page fault.  The WM releases its own
-         * mapping and closes the region when it processes CLOSE_WINDOW. */
+        
+
+
+
+
         icda_shm_unmap(win_shm_handle);
         win_shm_handle = 0;
     }
@@ -208,23 +208,6 @@ void gui_fill_rect(int x, int y, int w, int h, uint32_t color) {
         for (int cx = x1; cx < x2; cx++) {
             win_pixels[cy * win_w + cx] = color;
         }
-    }
-}
-
-#include "font.h"
-
-void gui_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
-    if (!win_pixels) return;
-    font_draw_char(win_pixels, win_w, win_h, win_w, x, y, c, fg, bg);
-}
-
-void gui_draw_text(int x, int y, const char *str, uint32_t fg, uint32_t bg) {
-    if (!win_pixels || !str) return;
-    int cx = x;
-    while (*str) {
-        gui_draw_char(cx, y, *str, fg, bg);
-        cx += FONT_CELL_WIDTH;
-        str++;
     }
 }
 

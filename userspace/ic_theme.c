@@ -1,6 +1,6 @@
-/*
- * ic_theme.c - palettes and elevation for the ICDA design system.
- */
+
+
+
 #include "ic_theme.h"
 #include "settings_store.h"
 
@@ -10,21 +10,21 @@ typedef struct {
 } ic_accent_pair_t;
 
 static const ic_accent_pair_t ic_accents[IC_ACCENT_COUNT] = {
-    { 0x3A8BFF, 0x2F7BF0 },   /* blue */
-    { 0xA46BF5, 0x8E52E3 },   /* purple */
-    { 0xF0609E, 0xDC437C },   /* pink */
-    { 0xF2555A, 0xE0434A },   /* red */
-    { 0xF5923A, 0xE27A1F },   /* orange */
-    { 0x3CC46A, 0x2DA25A },   /* green */
-    { 0x8E8E93, 0x77777D },   /* graphite */
+    { 0x3A8BFF, 0x2F7BF0 },   
+    { 0xA46BF5, 0x8E52E3 },   
+    { 0xF0609E, 0xDC437C },   
+    { 0xF2555A, 0xE0434A },   
+    { 0xF5923A, 0xE27A1F },   
+    { 0x3CC46A, 0x2DA25A },   
+    { 0x8E8E93, 0x77777D },   
 };
 
 static const ic_shadow_spec_t ic_shadow_dark[IC_ELEV_COUNT][2] = {
-    /* contact,              ambient */
-    { { 1, 1, 0x50 },       { 3, 1, 0x28 } },   /* control */
-    { { 2, 1, 0x60 },       { 16, 8, 0x68 } },  /* menu */
-    { { 3, 1, 0x70 },       { 28, 16, 0x78 } }, /* window */
-    { { 3, 1, 0x50 },       { 18, 10, 0x4C } }, /* window idle */
+    
+    { { 1, 1, 0x50 },       { 3, 1, 0x28 } },   
+    { { 2, 1, 0x60 },       { 16, 8, 0x68 } },  
+    { { 3, 1, 0x70 },       { 28, 16, 0x78 } }, 
+    { { 3, 1, 0x50 },       { 18, 10, 0x4C } }, 
 };
 
 static const ic_shadow_spec_t ic_shadow_light[IC_ELEV_COUNT][2] = {

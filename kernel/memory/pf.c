@@ -9,9 +9,9 @@
 #include "../proc/process.h"
 #include "../fs/fd.h"
 
-// scheduler hook 
-// the page fault handler needs the address space of the currently running process so it can map the new page into the right PML4.
-// before the scheduler exists this is NULL, meaning "use the kernel AS".
+
+
+
 static addr_space_t *current_as = NULL;
 
 void pf_set_current_as(addr_space_t *as) {
@@ -22,9 +22,9 @@ static inline addr_space_t *active_as(void) {
     return current_as ? current_as : vmm_kernel_address_space();
 }
 
-// helpers 
 
-// read CR2 — the cpu stores the faulting virtual address there
+
+
 static inline uint64_t read_cr2(void) {
     uint64_t val;
     __asm__ volatile("mov %%cr2, %0" : "=r"(val));
@@ -46,11 +46,11 @@ static void console_print_hex(uint64_t v) {
     console_write_hex64(v, CONSOLE_STYLE_ERROR);
 }
 
-//  panic helper 
 
-/* Fault details always go straight to the serial port too: the console
- * mirror can be disabled by the time the GUI is running, and a panic on
- * a headless box is otherwise invisible. */
+
+
+
+
 static void pf_serial_hex(uint64_t v) {
     char buf[17];
     const char *hex = "0123456789abcdef";
@@ -156,58 +156,58 @@ static void pf_panic(struct registers *regs, uint64_t cr2) {
     __asm__ volatile("cli; hlt");
 }
 
-// Conditions that must ALL be true:
-//   1. Not-present fault (P=0) — the page hasn't been mapped yet, not a
-//      protection violation.
-//   2. Write access (W=1) — pushing onto the stack is always a write.
-//   3. The faulting address is inside the user stack region
-//      [USER_STACK_LIMIT, USER_STACK_TOP).
-//   4. The faulting page is at most one page below the current RSP page —
-//      a correct program should only extend the stack one page at a time
-//      (the ABI guarantees this for the standard call sequence).
-//      We allow a small slack (4 pages) to handle red zones and alloca.
-// NOTE: once we have a PCB we can also check against per-process stack limits.
+
+
+
+
+
+
+
+
+
+
+
 
 #define STACK_SLACK_PAGES 4ULL
 
 static int is_stack_growth(struct registers *regs, uint64_t cr2) {
     uint64_t e = regs->err_code;
 
-    if (e & PF_PRESENT)  return 0;  // protection fault, not missing page
-    if (!(e & PF_WRITE)) return 0;  // read fault can't be stack growth
+    if (e & PF_PRESENT)  return 0;  
+    if (!(e & PF_WRITE)) return 0;  
 
-    // must be in the user stack region
+    
     if (cr2 < USER_STACK_LIMIT || cr2 >= USER_STACK_TOP) return 0;
 
-    /* Kernel-mode fault (PF_USER clear): the kernel legitimately writes
-     * into user stack buffers passed as syscall arguments (e.g. a
-     * directory listing copied into an app's stack array).  The app's
-     * frame can straddle a page boundary that hasn't been mapped yet;
-     * RSP here is the *kernel* stack, so the distance check below does
-     * not apply - bound by process kind and the stack region instead. */
+    
+
+
+
+
+
     if (!(e & PF_USER)) {
         process_t *proc = sched_current_process();
         return proc && proc->kind == PROCESS_USER;
     }
 
-    // must be within SLACK pages below rsp's current page
+    
     uint64_t rsp_page   = regs->rsp & ~0xFFFULL;
     uint64_t fault_page = cr2       & ~0xFFFULL;
     uint64_t slack      = STACK_SLACK_PAGES * PAGE_SIZE_4K;
 
-    if (fault_page > rsp_page) return 0;               // above rsp — weird
-    if (rsp_page - fault_page > slack) return 0;        // too far below
+    if (fault_page > rsp_page) return 0;               
+    if (rsp_page - fault_page > slack) return 0;        
 
     return 1;
 }
 
-//  main page fault handler 
+
 
 static void page_fault_handler(struct registers *regs) {
     uint64_t cr2 = read_cr2();
 
     if (is_stack_growth(regs, cr2)) {
-        // allocate a fresh physical frame
+        
         uint64_t phys = pmm_alloc();
         if (!phys) {
             fb_print("\n*** PAGE FAULT: OOM during stack growth ***\n", FB_WHITE, FB_RED);
@@ -215,7 +215,7 @@ static void page_fault_handler(struct registers *regs) {
             return;
         }
 
-        // map the page into the current address space as user read-write
+        
         uint64_t page_va = cr2 & ~0xFFFULL;
         int ok = vmm_map_page(active_as(), page_va, phys, VMM_FLAGS_USER_RW);
         if (ok != 0) {
@@ -225,19 +225,19 @@ static void page_fault_handler(struct registers *regs) {
             return;
         }
 
-        // zero the new page so the process sees clean memory
+        
         uint64_t *vaddr = (uint64_t *)page_va;
         for (int i = 0; i < (int)(PAGE_SIZE_4K / sizeof(uint64_t)); i++)
             vaddr[i] = 0;
 
-        // return from the handler — the cpu will re-execute the faulting instruction
+        
         return;
     }
 
-    /* A user-mode fault kills the offending process instead of halting
-     * the machine: the desktop (or text shell) stays alive and the
-     * parent is woken so it can reap the child.  Kernel faults still
-     * panic - they indicate a kernel bug and are not recoverable. */
+    
+
+
+
     if (regs->err_code & PF_USER) {
         process_t *proc = sched_current_process();
         thread_t *thread = sched_current_thread();
@@ -246,8 +246,8 @@ static void page_fault_handler(struct registers *regs) {
             pf_serial_dump(regs, cr2);
             serial_write("  user process killed\n");
             proc->state = PROCESS_EXITED;
-            /* SIGSEGV analog (-11).  Deliberately distinct from the
-             * U_EFAULT (-14) syscall error in syscall.h. */
+            
+
             proc->exit_code = (uint64_t)-11;
             thread->state = THREAD_ZOMBIE;
             thread->block_reason = THREAD_BLOCK_NONE;
@@ -261,8 +261,8 @@ static void page_fault_handler(struct registers *regs) {
                     proc->parent->state = PROCESS_READY;
                 }
             }
-            /* Switch away; the zombie thread is never rescheduled, so the
-             * faulting instruction is never re-executed. */
+            
+
             sched_yield();
             for (;;) {
                 __asm__ volatile("hlt");
@@ -270,11 +270,11 @@ static void page_fault_handler(struct registers *regs) {
         }
     }
 
-    // not a recoverable fault — panic with full details
+    
     pf_panic(regs, cr2);
 }
 
-// init 
+
 
 void pf_init(void) {
     isr_register(14, page_fault_handler);

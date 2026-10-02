@@ -1,10 +1,10 @@
-/*
- * virtio-net.c — Virtio Network Device Driver
- *
- * Supports virtio-net-pci for VirtualBox (paravirtualized NIC),
- * QEMU virtio, and real hardware with virtio support.
- * Falls back gracefully if no virtio device is found.
- */
+
+
+
+
+
+
+
 #include "virtio_net.h"
 #include "../pci/pci.h"
 #include "../serial/serial.h"
@@ -13,8 +13,8 @@
 #include "../../proc/sched.h"
 #include <stdint.h>
 
-/* Verbose serial tracing for probe/negotiation steps. Default off;
- * the single "[virtio] ready" line and all error lines always log. */
+
+
 #ifndef VIRTIO_NET_DEBUG
 #define VIRTIO_NET_DEBUG 0
 #endif
@@ -27,11 +27,11 @@ static void vn_log(const char *text) {
 #endif
 }
 
-/* Virtio PCI capability offsets */
+
 #define VIRTIO_PCI_CAP_VENDOR       0x09
 #define VIRTIO_PCI_CFG_CAP_OFFSET   0x34
 
-/* Virtio register offsets (modern, capability-based) */
+
 #define VIRTIO_REG_DEVICE_FEATURES  0x00
 #define VIRTIO_REG_DRIVER_FEATURES  0x04
 #define VIRTIO_REG_QUEUE_SIZE        0x0C
@@ -40,19 +40,19 @@ static void vn_log(const char *text) {
 #define VIRTIO_REG_DEVICE_STATUS    0x12
 #define VIRTIO_REG_ISR_STATUS       0x13
 
-/* Status bits */
+
 #define VIRTIO_STATUS_ACK           0x01
 #define VIRTIO_STATUS_DRIVER        0x02
 #define VIRTIO_STATUS_FEATURES_OK   0x08
 #define VIRTIO_STATUS_DRIVER_OK     0x04
 #define VIRTIO_STATUS_FAILED        0x80
 
-/* Descriptor flags */
+
 #define VIRTIO_DESC_F_NEXT          0x01
 #define VIRTIO_DESC_F_WRITE         0x02
 #define VIRTIO_DESC_F_INDIRECT      0x04
 
-/* Feature bits */
+
 #define VIRTIO_F_NOTIFY_ON_EMPTY    (1 << 24)
 
 typedef struct {
@@ -62,7 +62,7 @@ typedef struct {
     uint8_t mac[6];
     uint16_t status;
 
-    /* TX queue (queue 0) */
+    
     virtio_net_desc_t  *tx_desc;
     virtio_net_avail_t *tx_avail;
     virtio_net_used_t  *tx_used;
@@ -74,7 +74,7 @@ typedef struct {
     uint32_t tx_next_desc;
     uint32_t tx_last_used;
 
-    /* RX queue (queue 1) */
+    
     virtio_net_desc_t  *rx_desc;
     virtio_net_avail_t *rx_avail;
     virtio_net_used_t  *rx_used;
@@ -86,7 +86,7 @@ typedef struct {
     uint32_t rx_next_free;
     uint32_t rx_last_used;
 
-    volatile uint8_t *cfg;  /* MMIO base for device-specific config */
+    volatile uint8_t *cfg;  
 
     int ready;
 } virtio_net_state_t;
@@ -129,17 +129,17 @@ static int vn_alloc_page(uint64_t *phys_out, void **virt_out) {
     if (!phys) return -1;
     *phys_out = phys;
     *virt_out = (void *)PHYS_TO_VIRT(phys);
-    /* Zero the page */
+    
     uint8_t *v = (uint8_t *)*virt_out;
     for (uint32_t i = 0; i < 4096; i++) v[i] = 0;
     return 0;
 }
 
-/*
- * Scan the Virtio PCI capability list for a modern (virtio 1.0) device.
- * Returns the MMIO base for a given capability type, or 0 if not found.
- * cap_type: 1 = common config, 4 = device config
- */
+
+
+
+
+
 static volatile uint8_t *vn_find_pci_cap(const pci_device_t *pci, uint8_t cap_type) {
     uint8_t cap_off = pci_read_config8(pci, VIRTIO_PCI_CFG_CAP_OFFSET);
 #if VIRTIO_NET_DEBUG
@@ -192,20 +192,20 @@ static volatile uint8_t *vn_find_pci_cap(const pci_device_t *pci, uint8_t cap_ty
     return 0;
 }
 
-/*
- * Legacy (transitional) virtio: MMIO at BAR0 offset 0x20.
- */
+
+
+
 static volatile uint8_t *vn_legacy_mmio(const pci_device_t *pci) {
     uint32_t bar0 = pci_read_config32(pci, 0x10);
     if (bar0 == 0) return 0;
-    if (bar0 & 0x01) return 0; /* I/O BAR */
+    if (bar0 & 0x01) return 0; 
     uint64_t mmio_phys = (uint64_t)(bar0 & ~0xFU);
     if (mmio_phys == 0) return 0;
     return (volatile uint8_t *)vmm_map_physical(mmio_phys, 0x1000, VMM_FLAGS_KERNEL_RW);
 }
 
 static int vn_init_queues(void) {
-    /* TX queue (queue 0) */
+    
     if (vn_alloc_page(&vn.tx_desc_phys, (void **)&vn.tx_desc) != 0) return -1;
     if (vn_alloc_page(&vn.tx_avail_phys, (void **)&vn.tx_avail) != 0) return -1;
     if (vn_alloc_page(&vn.tx_used_phys, (void **)&vn.tx_used) != 0) return -1;
@@ -214,14 +214,14 @@ static int vn_init_queues(void) {
         if (vn_alloc_page(&vn.tx_buf_phys[i], (void **)&vn.tx_bufs[i]) != 0) return -1;
         vn.tx_desc[i].addr = vn.tx_buf_phys[i];
         vn.tx_desc[i].len = 0;
-        vn.tx_desc[i].flags = VIRTIO_DESC_F_WRITE;  /* host reads */
+        vn.tx_desc[i].flags = VIRTIO_DESC_F_WRITE;  
         vn.tx_desc[i].next = 0;
     }
     vn.tx_next_desc = 0;
     vn.tx_last_used = 0;
     vn.tx_avail->idx = 0;
 
-    /* RX queue (queue 1) */
+    
     if (vn_alloc_page(&vn.rx_desc_phys, (void **)&vn.rx_desc) != 0) return -1;
     if (vn_alloc_page(&vn.rx_avail_phys, (void **)&vn.rx_avail) != 0) return -1;
     if (vn_alloc_page(&vn.rx_used_phys, (void **)&vn.rx_used) != 0) return -1;
@@ -232,7 +232,7 @@ static int vn_init_queues(void) {
         vn.rx_desc[i].len = 4096;
         vn.rx_desc[i].flags = VIRTIO_DESC_F_WRITE;
         vn.rx_desc[i].next = 0;
-        /* Pre-fill the available ring */
+        
         vn.rx_avail->ring[i] = i;
     }
     vn.rx_next_free = 0;
@@ -278,7 +278,7 @@ int virtio_net_init(void) {
     }
     vn_log("[virtio] busmaster OK\n");
 
-    /* Read BAR0 value */
+    
 #if VIRTIO_NET_DEBUG
     uint32_t bar0_val = pci_read_config32(pci, 0x10);
     serial_write("[virtio] BAR0=");
@@ -335,10 +335,10 @@ int virtio_net_init(void) {
     vn_pause();
     vn_log("[virtio] features negotiated\n");
 
-    /* Setup queues */
-    vn_select_queue(0); /* TX */
+    
+    vn_select_queue(0); 
     uint16_t tx_size = vn_read16(vn.mmio, VIRTIO_REG_QUEUE_SIZE);
-    vn_select_queue(1); /* RX */
+    vn_select_queue(1); 
     uint16_t rx_size = vn_read16(vn.mmio, VIRTIO_REG_QUEUE_SIZE);
 
     if (tx_size == 0 || rx_size == 0) {
@@ -353,31 +353,31 @@ int virtio_net_init(void) {
         return -1;
     }
 
-    /* Tell device about TX queue */
+    
     vn_select_queue(0);
-    vn_write32(vn.mmio, 0x08, (uint32_t)vn.tx_desc_phys);  /* Queue PFN (legacy) */
+    vn_write32(vn.mmio, 0x08, (uint32_t)vn.tx_desc_phys);  
     vn_write32(vn.mmio, 0x0C, (uint32_t)(vn.tx_desc_phys >> 32));
     vn_pause();
 
-    /* Tell device about RX queue */
+    
     vn_select_queue(1);
     vn_write32(vn.mmio, 0x08, (uint32_t)vn.rx_desc_phys);
     vn_write32(vn.mmio, 0x0C, (uint32_t)(vn.rx_desc_phys >> 32));
     vn_pause();
 
-    /* Read MAC address from device config */
+    
     if (vn.cfg && (wanted & VIRTIO_NET_F_MAC)) {
         for (int i = 0; i < 6; i++) {
             vn.mac[i] = vn_read8(vn.cfg, i);
         }
     } else {
-        /* Fallback: use a fixed MAC for testing */
+        
         vn.mac[0] = 0x52; vn.mac[1] = 0x54;
         vn.mac[2] = 0x00; vn.mac[3] = 0x12;
         vn.mac[4] = 0x34; vn.mac[5] = 0x56;
     }
 
-    /* Set driver OK */
+    
     vn_write8(vn.mmio, VIRTIO_REG_DEVICE_STATUS,
               VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
     vn_pause();
@@ -409,7 +409,7 @@ int virtio_net_send_frame(const void *data, uint16_t len) {
 
     if (total_len > 4096) return -1;
 
-    /* Prepend virtio-net header */
+    
     virtio_net_hdr_t *hdr = (virtio_net_hdr_t *)vn.tx_bufs[desc_idx];
     hdr->flags = 0;
     hdr->gso_type = 0;
@@ -418,28 +418,28 @@ int virtio_net_send_frame(const void *data, uint16_t len) {
     hdr->csum_start = 0;
     hdr->csum_offset = 0;
 
-    /* Copy frame data after header */
+    
     uint8_t *dst = vn.tx_bufs[desc_idx] + sizeof(virtio_net_hdr_t);
     const uint8_t *src = (const uint8_t *)data;
     for (uint16_t i = 0; i < len; i++) dst[i] = src[i];
 
-    /* Setup descriptor */
+    
     vn.tx_desc[desc_idx].addr = vn.tx_buf_phys[desc_idx];
     vn.tx_desc[desc_idx].len = total_len;
-    vn.tx_desc[desc_idx].flags = 0;  /* host reads */
+    vn.tx_desc[desc_idx].flags = 0;  
     vn.tx_desc[desc_idx].next = 0;
 
-    /* Add to available ring */
+    
     uint16_t avail_idx = vn.tx_avail->idx;
     vn.tx_avail->ring[avail_idx % VIRTIO_NET_QUEUE_SIZE] = desc_idx;
     __asm__ volatile("" ::: "memory");
     vn.tx_avail->idx = avail_idx + 1;
     __asm__ volatile("" ::: "memory");
 
-    /* Notify device */
+    
     vn_notify_queue(0);
 
-    /* Advance to next descriptor */
+    
     vn.tx_next_desc = (desc_idx + 1) % VIRTIO_NET_QUEUE_SIZE;
 
     return 0;
@@ -448,32 +448,32 @@ int virtio_net_send_frame(const void *data, uint16_t len) {
 int virtio_net_recv_frame(void *data, uint16_t cap, uint16_t *len_out) {
     if (!vn.ready || !data || !len_out) return -1;
 
-    /* Check if there are new used buffers */
+    
     uint16_t used_idx = vn.rx_used->idx;
-    if (vn.rx_last_used == used_idx) return 0; /* No new data */
+    if (vn.rx_last_used == used_idx) return 0; 
 
     __asm__ volatile("" ::: "memory");
 
-    /* Process the oldest used buffer */
+    
     uint16_t slot = vn.rx_last_used % VIRTIO_NET_QUEUE_SIZE;
     virtio_net_used_elem_t *elem = &vn.rx_used->ring[slot];
     uint32_t desc_id = elem->id;
     uint32_t recv_len = elem->len;
 
-    /* Skip the virtio-net header */
+    
     uint16_t data_offset = sizeof(virtio_net_hdr_t);
     uint16_t data_len = (recv_len > data_offset) ? (uint16_t)(recv_len - data_offset) : 0;
 
     if (data_len > cap) data_len = cap;
 
-    /* Copy data from receive buffer */
+    
     uint8_t *src = vn.rx_bufs[desc_id] + data_offset;
     uint8_t *dst = (uint8_t *)data;
     for (uint16_t i = 0; i < data_len; i++) dst[i] = src[i];
 
     *len_out = data_len;
 
-    /* Re-arm the descriptor: reset it and put it back on the available ring */
+    
     vn.rx_desc[desc_id].addr = vn.rx_buf_phys[desc_id];
     vn.rx_desc[desc_id].len = 4096;
     vn.rx_desc[desc_id].flags = VIRTIO_DESC_F_WRITE;
@@ -484,7 +484,7 @@ int virtio_net_recv_frame(void *data, uint16_t cap, uint16_t *len_out) {
     vn.rx_avail->idx = avail_idx + 1;
     __asm__ volatile("" ::: "memory");
 
-    /* Notify device that buffers are available */
+    
     vn_notify_queue(1);
 
     vn.rx_last_used = used_idx + 1;

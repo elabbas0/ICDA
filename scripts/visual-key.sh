@@ -1,11 +1,11 @@
-#!/bin/sh
-# Diagnostic: does QMP input reach the guest at all?
-# Ctrl+Alt+F2 should switch to the text-shell VT (very visible).
+
+
+
 rm -f /workspace/d1.ppm /workspace/wm-serial.log
 ( sleep 13
   echo '{"execute":"qmp_capabilities"}'
   sleep 0.5
-  # hold ctrl+alt, tap f2
+  
   echo '{"execute":"input-send-event","data":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"ctrl"}}}]}}'
   echo '{"execute":"input-send-event","data":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"alt"}}}]}}'
   echo '{"execute":"input-send-event","data":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"f2"}}}]}}'

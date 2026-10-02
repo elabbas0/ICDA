@@ -1,4 +1,4 @@
-<#
+<
 .SYNOPSIS
   Minimal QMP input driver: move the mouse, click, press keys, screendump.
 
@@ -20,25 +20,25 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\qmp-input.ps1 -Port 4444 -Click 63,150 -Double -Shot term.png
-#>
+
 param(
     [int]$Port = 4444,
-    [string]$Move = "",            # "x,y"
+    [string]$Move = "",            
     [switch]$Click,
     [switch]$Double,
     [switch]$Right,
-    [string]$Key = "",             # QEMU qcode, e.g. ret, esc, spc, t
+    [string]$Key = "",             
     [string]$Shot = "",
     [int]$SettleMs = 4000,
-    # Pacing between deltas.  gui-check.py sleeps 1.2 s per step because
-    # the guest drops rel events that arrive faster than it can service
-    # them; under TCG a much shorter delay silently loses motion and the
-    # cursor lands somewhere else than requested.
+    
+    
+    
+    
     [int]$StepMs = 400,
-    # PS/2 motion is lossy: a long move can land short, so a blind click
-    # after -Move may miss its target.  -Sync re-reads the cursor out of
-    # the framebuffer and corrects until it agrees, instead of trusting
-    # gui-cursor.txt to still be accurate.
+    
+    
+    
+    
     [switch]$Sync
 )
 
@@ -53,10 +53,10 @@ function Get-Cursor {
             if ($parts.Count -eq 2) { return @([int]$parts[0], [int]$parts[1]) }
         } catch { }
     }
-    return @(512, 384)   # where the OS centers the pointer
+    return @(512, 384)   
 }
 
-<#
+<
   Locate the pointer by differencing two consecutive screendumps.  On an
   idle desktop the pointer is the only thing that changes, so the pixels
   that differ are the old and new cursor positions - which is immune to
@@ -64,7 +64,7 @@ function Get-Cursor {
   where the guest thinks the cursor is.
 
   Returns a list of @{X;Y;N} clusters, largest first.
-#>
+
 function Find-CursorByDiff([string]$a, [string]$b) {
     $ba = [System.IO.File]::ReadAllBytes($a)
     $bb = [System.IO.File]::ReadAllBytes($b)
@@ -95,8 +95,8 @@ function Find-CursorByDiff([string]$a, [string]$b) {
     SkipWs2 $ba ([ref]$i)
     $pix = $i
 
-    # Bucket changed pixels into 16x16 cells, then merge adjacent cells
-    # into clusters by flood fill over the occupied grid.
+    
+    
     $cw = 16
     $cols = [int][Math]::Ceiling($w / $cw)
     $rows = [int][Math]::Ceiling($h / $cw)
@@ -112,7 +112,7 @@ function Find-CursorByDiff([string]$a, [string]$b) {
         }
     }
 
-    # Flood fill the occupied cells.
+    
     $seen = New-Object 'bool[,]' $rows, $cols
     $clusters = @()
     for ([int]$gy = 0; $gy -lt $rows; $gy++) {
@@ -148,11 +148,11 @@ function Find-CursorByDiff([string]$a, [string]$b) {
     return @($clusters | Sort-Object -Property N -Descending)
 }
 
-<#
+<
   Locate the pointer in a P6 screendump by looking for a near-white
   cluster.  This UI is full of light text, so this is only a fallback -
   prefer Find-CursorByDiff, which cannot be confused by text.
-#>
+
 function Find-CursorInPpm([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
     if ($bytes.Length -lt 10 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x36) { return $null }
@@ -176,13 +176,13 @@ function Find-CursorInPpm([string]$path) {
         return $s
     }
     $w = [int](Token $bytes ([ref]$i)); $h = [int](Token $bytes ([ref]$i))
-    [void](Token $bytes ([ref]$i))     # maxval
+    [void](Token $bytes ([ref]$i))     
     SkipWs $bytes ([ref]$i)
     $pix = $i
-    # The ICDA cursor is a solid white arrow over a dark rim, so scan a
-    # coarse grid for near-white clusters.  The arrow's tip is its
-    # topmost-leftmost white pixel, so scanning top-down and keeping the
-    # first strong block finds the tip rather than the wider tail.
+    
+    
+    
+    
     [int]$bestX = -1
     [int]$bestY = -1
     for ([int]$by = 0; $by -lt $h; $by += 8) {
@@ -216,10 +216,10 @@ try {
     $writer.NewLine = "`n"
 
     $script:id = 0
-    # NOTE: the parameter must not be called $args - that is a PowerShell
-    # automatic variable, and shadowing it makes the value arrive as an
-    # object[] that serializes to a JSON array, which QMP rejects with
-    # "input member 'arguments' must be an object".
+    
+    
+    
+    
     function Send-Qmp([string]$exec, $qmpArgs) {
         $script:id++
         $obj = @{ execute = $exec; id = $script:id }
@@ -249,7 +249,7 @@ try {
     [void](Send-Qmp "qmp_capabilities" $null)
 
     if ($Move) {
-        # Warm-up: QEMU sometimes drops the first rel event after boot.
+        
         Send-Rel "x" -5; Start-Sleep -Milliseconds 200
         Send-Rel "x" 5;  Start-Sleep -Milliseconds 200
 
@@ -273,11 +273,11 @@ try {
         Step-To $tx $ty
 
         if ($Sync) {
-            # Measure where the guest really put the pointer instead of
-            # trusting our arithmetic: jiggle by a known delta and diff
-            # two frames.  The changed pixels are the old and new cursor
-            # spots, so their centroid is our position plus half the
-            # jiggle.  Immune to the light text all over this UI.
+            
+            
+            
+            
+            
             $frameA = Join-Path $RepoRoot ".verify\_sync_a.ppm"
             $frameB = Join-Path $RepoRoot ".verify\_sync_b.ppm"
             New-Item -ItemType Directory -Force (Split-Path -Parent $frameA) | Out-Null
@@ -288,9 +288,9 @@ try {
                 Start-Sleep -Milliseconds 700
                 return (Test-Path -LiteralPath $path)
             }
-            # A small jiggle is itself liable to be dropped by the PS/2
-            # mouse, which reads as "no motion".  Use a delta large enough
-            # to survive; the centroid correction scales with it.
+            
+            
+            
             [int]$jig = 60
             for ($attempt = 1; $attempt -le 4; $attempt++) {
                 if (-not (Dump-To $frameA)) { Write-Host "sync: screendump failed"; break }
@@ -320,9 +320,9 @@ try {
         Send-Btn "left" $false; Start-Sleep -Milliseconds 60
     }
     if ($Double) {
-        # wm.c uses DBLCLICK_TICKS 40 at a 100 Hz tick, i.e. 400 ms
-        # between the two button-down events.  Keep the whole pair well
-        # inside that or the WM reads it as two single clicks.
+        
+        
+        
         Start-Sleep -Milliseconds 60
         Send-Btn "left" $true;  Start-Sleep -Milliseconds 80
         Send-Btn "left" $false; Start-Sleep -Milliseconds 200

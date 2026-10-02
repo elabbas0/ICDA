@@ -1,12 +1,12 @@
-#!/usr/bin/env sh
-# scripts/run-selftest-gates.sh - run the CI self-test gates locally.
-#
-# The CI gates in .github/workflows/qemu.yml assume a fresh checkout:
-# CI_SELFTEST=1 / CI_IMAGE=1 are make *variables*, not file dependencies,
-# so on an already-built tree `make kernel.iso CI_SELFTEST=1` reports
-# "up to date" and silently reuses a kernel.bin built with the self-test
-# compiled out.  This script therefore cleans first, which is what makes
-# the NPTEST output appear at all.
+
+
+
+
+
+
+
+
+
 set -eu
 
 image="${ICDA_DOCKER_IMAGE:-icda-toolchain}"
@@ -14,11 +14,11 @@ gate() {
     name="$1"
     flag="$2"
     echo "=== gate: $name ($flag) ==="
-    # The patch is undone by a trap, not at the end of the body: if this
-    # script is killed mid-gate (timeout, OOM, Ctrl-C) the container's
-    # /tmp dies with it and the bind-mounted grub.cfg would be left
-    # patched.  Saving the pristine text in a variable keeps the undo
-    # independent of any file that lives only inside the container.
+    
+    
+    
+    
+    
     pristine="$(cat boot/grub/grub.cfg)"
     trap 'printf "%s\n" "$pristine" > boot/grub/grub.cfg' EXIT INT TERM HUP
     sed -i "s|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=$flag|" boot/grub/grub.cfg

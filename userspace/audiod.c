@@ -1,18 +1,18 @@
-/*
- * audiod - the ICDA audio daemon (user space).
- *
- * Owns everything about audio EXCEPT the DMA device: WAV parsing,
- * rate conversion, track naming and playback policy.  The kernel
- * exposes only a PCM device (claim / read_chunk / finish) and this
- * daemon is its sole producer.
- *
- * Streams straight off the VFS with positioned reads - no giant
- * buffers, a song never touches memory as a whole.
- *
- * Interface (well-known queue "/audiod", 64-byte messages):
- *   'P' + path  play that file (aborts the current one)
- *   'S'         stop playback
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "icda_sys.h"
 #include "gui_proto.h"
 
@@ -35,8 +35,8 @@ static char     pending_name[64];
 
 static uint64_t out_total;
 static uint64_t out_pos;
-static uint32_t win_start;      /* source frame of window start */
-static uint32_t win_frames;     /* frames actually read into window */
+static uint32_t win_start;      
+static uint32_t win_frames;     
 static uint64_t token;
 static int      streaming;
 static int      claimed;
@@ -60,8 +60,8 @@ static void s_copy(char *dst, const char *src, uint64_t cap) {
 static void dbg(const char *stage, int64_t v) {
     (void)stage;
     (void)v;
-    /* no file logging in production - keeps the root directory clean
-     * and avoids a VFS write on every state transition. */
+    
+
 }
 
 static const char *basename_of(const char *path) {
@@ -74,7 +74,7 @@ static const char *basename_of(const char *path) {
     return base;
 }
 
-/* Minimal RIFF/WAVE reader over the header buffer. */
+
 static int wav_parse(void) {
     uint8_t *data = hdr_buf;
     uint64_t pos = 12;
@@ -133,7 +133,7 @@ static int16_t win_sample(uint32_t frame) {
     return (int16_t)(acc / (int32_t)src_channels);
 }
 
-/* Make sure source frames [frame, frame + needed) are in the window. */
+
 static int window_fill(uint32_t frame, uint32_t needed) {
     if (frame >= win_start && frame + needed <= win_start + win_frames) return 0;
     win_start = frame;

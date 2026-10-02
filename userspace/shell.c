@@ -162,7 +162,7 @@ static void shell_play_wav_path(const char *path) {
         return;
     }
 
-    /* Slice C master mute: skip audio paths when disabled. */
+    
     icda_settings_load(&audio_opt);
     if (!audio_opt.audio) {
         icda_write("audio disabled (enable in Settings)\n");

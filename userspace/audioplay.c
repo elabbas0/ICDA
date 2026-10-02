@@ -1,15 +1,15 @@
-/*
- * audioplay.app - ICDA Music.
- *
- * The list + now-playing bar from docs/DESIGN.md: a source list of
- * tracks found in the media folders, a transport row, and a now-playing
- * bar pinned to the bottom with real progress from icda_audio_info.
- *
- * Discovery walks /usr/share/audio and /home for .wav files, plus any
- * path passed on the command line (the Explorer "Open With" path).  The
- * `audio` setting is a master switch: with it off, Play explains itself
- * instead of failing silently.
- */
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 #include "settings_store.h"
 
@@ -34,12 +34,12 @@ static struct {
     int        selected;
     int        scroll;
 
-    /* view */
+    
     int rows;
     int first_row;
     int last_row;
 
-    /* pointer */
+    
     int hover_row;
     int hover_play;
     int hover_stop;
@@ -47,10 +47,10 @@ static struct {
     int list_focused;
 
     char status[AP_STATUS_CAP];
-    int  playing;              /* the kernel reports an active stream */
+    int  playing;              
 } ap;
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t toolbar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
@@ -109,7 +109,7 @@ static void layout(ic_app_t *app) {
     if (ap.last_row > ap.count) ap.last_row = ap.count;
 }
 
-/* ------------------------------------------------------------ helpers */
+
 
 static void ap_status(const char *text) {
     ic_strcpy(ap.status, text, AP_STATUS_CAP);
@@ -176,7 +176,7 @@ static void scan(void) {
     add_dir("/usr/share/audio");
     add_dir("/home");
     ap.selected = 0;
-    /* Keep pointing at the same file across a rescan. */
+    
     if (keep[0]) {
         for (int i = 0; i < ap.count; i++) {
             if (ic_streq(ap.tracks[i].path, keep)) { ap.selected = i; break; }
@@ -186,7 +186,7 @@ static void scan(void) {
     else ap_status("Select a track, then press Play");
 }
 
-/* ------------------------------------------------------------- actions */
+
 
 static void play_selected(void) {
     icda_settings_t opt;
@@ -211,7 +211,7 @@ static void stop_playback(void) {
     ap_status("Stopped");
 }
 
-/* Progress of the active stream, 0..1, or -1 when nothing is playing. */
+
 static float playback_progress(char *name, int name_cap, uint64_t *seconds_left) {
     icda_audio_info_t info;
     name[0] = 0;
@@ -234,7 +234,7 @@ static void refresh_status(void) {
     ap.playing = p >= 0.0f;
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -343,11 +343,11 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_list(app, c);
     draw_now_playing(app, c);
     draw_status(app, c);
-    /* The progress bar moves while a track plays. */
+    
     if (ap.playing || app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static int row_at(ic_app_t *app, int x, int y) {
     ic_rect_t l = list_rect(app);
@@ -375,7 +375,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         if (i >= 0) {
             ap.selected = i;
             ap.list_focused = 1;
-            /* A plain click plays, like every other music player. */
+            
             play_selected();
         } else {
             ap.list_focused = 0;
@@ -432,7 +432,7 @@ static void init(ic_app_t *app) {
     ap.playing = 0;
     ap.status[0] = 0;
     scan();
-    /* `user` carries argv[1] when the shell opened a specific file. */
+    
     if (app->user) {
         const char *arg = (const char *)app->user;
         if (arg[0]) {

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """gen_icons.py - draw ICDA's icon set (no external art).
 
 Every icon is drawn at 4x on a 64 px grid and box-filtered down, so edges
@@ -30,14 +30,14 @@ import sys
 from PIL import Image, ImageDraw, ImageFilter
 
 SIZE = 64
-S = 4                      # supersampling factor
+S = 4                      
 BIG = SIZE * S
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICON_DIR = os.path.join(REPO, "resources", "icons")
 HEADER_PATH = os.path.join(REPO, "userspace", "icon_data.h")
 
 WHITE = (255, 255, 255, 255)
-TILE = (6, 5, 58, 57)      # x0, y0, x1, y1 on the 64 grid
+TILE = (6, 5, 58, 57)      
 TILE_R = 12
 STROKE = 4
 
@@ -94,7 +94,7 @@ def tile(top, bottom):
     img = shadow(img, m)
     fill = gradient(top, bottom, TILE[1], TILE[3])
     img.paste(fill, (0, 0), m)
-    # 1 px inner highlight along the top edge, fading down the sides.
+    
     hl = new_layer()
     d = ImageDraw.Draw(hl)
     d.rounded_rectangle(box(TILE[0] + 0.5, TILE[1] + 0.5, TILE[2] - 0.5, TILE[3] - 0.5),
@@ -107,7 +107,7 @@ def tile(top, bottom):
             fp[x, y] = v
     hl.putalpha(Image.composite(hl.getchannel("A"), Image.new("L", (BIG, BIG), 0), fade))
     img = Image.alpha_composite(img, hl)
-    # Hairline edge so light tiles hold their shape on light wallpapers.
+    
     edge = new_layer()
     ImageDraw.Draw(edge).rounded_rectangle(box(*TILE), radius=sc(TILE_R),
                                            outline=(0, 0, 0, 38), width=max(1, S // 2))
@@ -144,7 +144,7 @@ def glyph_shadow(img, draw_fn, alpha=0.22):
     return over(over(img, dark), g)
 
 
-# --------------------------------------------------------------- app icons
+
 
 def draw_explorer():
     img = tile((92, 170, 255), (30, 110, 235))
@@ -191,7 +191,7 @@ def draw_editor():
     img = over(img, lines)
 
     def pencil(d):
-        # Pencil at 45 degrees: orange body, dark tip.
+        
         ax, ay, bx, by = 47, 17, 29, 35
         d.line([sc(ax), sc(ay), sc(bx), sc(by)], fill=(255, 159, 10, 255), width=sc(7))
         d.line([sc(ax + 1.5), sc(ay - 1.5), sc(ax + 4), sc(ay - 4)], fill=(255, 105, 97, 255),
@@ -268,7 +268,7 @@ def draw_app():
     return glyph_shadow(img, g)
 
 
-# ----------------------------------------------------------- object icons
+
 
 def draw_folder():
     img = new_layer()
@@ -349,12 +349,12 @@ def write_ico(path, img):
     dib = struct.pack("<IIIHHIIIIII", 40, SIZE, SIZE * 2, 1, 32, 0,
                       SIZE * SIZE * 4, 0, 0, 0, 0)
     body = bytearray()
-    for y in range(SIZE - 1, -1, -1):  # bottom-up, BGRA
+    for y in range(SIZE - 1, -1, -1):  
         for x in range(SIZE):
             o = (y * SIZE + x) * 4
             r, g, b, a = px[o:o + 4]
             body += bytes((b, g, r, a))
-    body += bytes(SIZE * SIZE // 8)  # AND mask: alpha channel decides
+    body += bytes(SIZE * SIZE // 8)  
     data = dib + bytes(body)
     hdr = struct.pack("<HHH", 0, 1, 1)
     entry = struct.pack("<BBBBHHII", SIZE, SIZE, 0, 0, 1, 32, len(data), 6 + 16)

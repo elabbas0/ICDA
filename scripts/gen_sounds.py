@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Slice C: generate the bundled UI sounds from scratch.
 
 All three WAVs are short ORIGINAL synthesized tones (no sampled audio,
@@ -79,7 +79,7 @@ def write_wav(name, buf):
 
 
 def gen_boot():
-    # Warm power-on: E5 (659.25) then B5 (987.77) overlapping, soft 3rd.
+    
     buf = []
     mix_into(buf, sine_note(659.25, 1.1, vol=0.50, decay=3.0, harmonic=0.25), 0.00)
     mix_into(buf, sine_note(830.61, 0.9, vol=0.22, decay=3.5), 0.12)
@@ -89,7 +89,7 @@ def gen_boot():
 
 
 def gen_chime():
-    # Soft notification ping: A5 + octave shimmer, fast bloom, ~1 s tail.
+    
     buf = []
     mix_into(buf, sine_note(880.0, 1.0, vol=0.55, decay=5.0, harmonic=0.30), 0.00)
     mix_into(buf, sine_note(1760.0, 0.6, vol=0.18, decay=7.0), 0.02)
@@ -98,10 +98,10 @@ def gen_chime():
 
 
 def gen_melody():
-    # Original music-box arpeggio (own melody, 8 eighth-notes at 100 bpm):
-    #   C5 E5 G5 B5 A5 G5 E5 D5, gentle overlap + sparkle octave.
+    
+    
     seq = [523.25, 659.25, 783.99, 987.77, 880.0, 783.99, 659.25, 587.33]
-    step = 60.0 / 100.0 / 2.0  # eighth note (~0.30 s) -> ~3.0 s total
+    step = 60.0 / 100.0 / 2.0  
     buf = []
     for k, f in enumerate(seq):
         mix_into(buf, sine_note(f, 0.9, vol=0.45, decay=4.5, harmonic=0.35), k * step)

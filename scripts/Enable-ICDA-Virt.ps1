@@ -1,7 +1,7 @@
-# Enable-ICDA-Virt.ps1 - enable virtualization stack for Docker Desktop WSL backend
-# Works without winget (IoT LTSC has no Store). Must run elevated.
-# Usage (elevated PowerShell): powershell -ExecutionPolicy Bypass -File Enable-ICDA-Virt.ps1
-# Optional Hyper-V fallback:  powershell -ExecutionPolicy Bypass -File Enable-ICDA-Virt.ps1 -HyperV
+
+
+
+
 param([switch]$HyperV)
 
 $ErrorActionPreference = "Stop"

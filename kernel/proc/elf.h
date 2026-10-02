@@ -29,7 +29,7 @@
 #define PF_W 0x2
 #define PF_R 0x4
 
-// Dynamic section tags
+
 #define DT_NULL 0
 #define DT_NEEDED 1
 #define DT_STRTAB 5
@@ -45,17 +45,17 @@
 #define DT_RELASZ 8
 #define DT_RELAENT 9
 
-// x86-64 relocation types
+
 #define R_X86_64_64       1
 #define R_X86_64_RELATIVE 8
 
-/* ELF64 Rel (implicit addend) entry: 16 bytes */
+
 typedef struct {
     uint64_t r_offset;
     uint64_t r_info;
 } __attribute__((packed)) elf64_rel_t;
 
-/* ELF64 Rela (explicit addend) entry: 24 bytes */
+
 typedef struct {
     uint64_t r_offset;
     uint64_t r_info;

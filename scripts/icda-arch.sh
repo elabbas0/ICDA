@@ -1,23 +1,23 @@
-#!/usr/bin/env sh
-# scripts/icda-arch.sh — native Arch Linux workflow (no Docker needed).
-#
-# Mirrors the scripts/icda.cmd surface for Arch:
-#   ./scripts/icda-arch.sh ready [--headless] [--uefi]   check, build, smoke, run qemu
-#   ./scripts/icda-arch.sh check                          verify host dependencies
-#   ./scripts/icda-arch.sh install                        sudo pacman -S the missing deps
-#   ./scripts/icda-arch.sh build                          make kernel.iso kernel-usb.img
-#   ./scripts/icda-arch.sh smoke                          build + QEMU smoke test
-#   ./scripts/icda-arch.sh qemu [--headless] [--uefi] [--sdl|--gtk|--vnc]
-#                                                         interactive QEMU run
-#   ./scripts/icda-arch.sh clean                          make clean
-#
-# Run GUI targets (qemu/ready) as YOUR USER, never under sudo: root has
-# no access to your Wayland/X11 session, so QEMU silently falls back to
-# a VNC server ("VNC server running on ::1:5900") instead of a window.
-# Only `install` needs root (it re-execs sudo itself).
-#
-# Speed: KVM is used automatically when /dev/kvm is accessible,
-# otherwise QEMU falls back to TCG (slow but works).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 PKGS="qemu-system-x86 qemu-ui-gtk qemu-ui-sdl libisoburn mtools gptfdisk dosfstools edk2-ovmf nasm grub gcc make"
 QEMU_BIN="qemu-system-x86_64"
 
-# GUI actions must not run as root (no display access -> silent VNC).
+
 require_user() {
     if [ "$(id -u)" = "0" ]; then
         echo "icda-arch: do not run '$1' as root (sudo) — QEMU cannot open" >&2
@@ -47,11 +47,11 @@ find_ovmf() {
     return 1
 }
 
-# Display backend selection. QEMU's default (GTK) is flaky on Wayland
-# compositors such as Hyprland and, worse, QEMU silently falls back to
-# a VNC server when no display opens. So: SDL on Wayland (solid
-# Wayland backend), GTK elsewhere, explicit --sdl/--gtk/--vnc override.
-# Prints e.g. `-display sdl` (empty for GTK default).
+
+
+
+
+
 display_flag() {
     case "${BACKEND:-auto}" in
         sdl) printf '%s' '-display sdl' ;;
@@ -63,9 +63,9 @@ display_flag() {
     esac
 }
 
-# Fail fast when a local window is requested but no display session is
-# reachable (instead of booting into an invisible desktop). Skipped for
-# headless runs and explicit --vnc.
+
+
+
 need_display() {
     case "${BACKEND:-auto}" in
         vnc) return 0 ;;
@@ -87,10 +87,10 @@ need_display() {
     exit 1
 }
 
-# Extra make overrides: KVM accel + display backend when available,
-# Arch OVMF path for UEFI.
-# NOTE: the QEMU assignment contains spaces, so call sites must expand
-# it quoted:  make target "$(qemu_assign)" $(ovmf_assign)
+
+
+
+
 qemu_assign() {
     qemu_cmd="qemu-system-x86_64"
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
@@ -152,7 +152,7 @@ case "$action" in
         fi
         ;;
     install)
-        # shellcheck disable=SC2086
+        
         sudo pacman -S --needed $PKGS
         ;;
     build)
@@ -206,7 +206,7 @@ case "$action" in
         missing="$(need)"
         if [ -n "$missing" ]; then
             echo "icda-arch: missing:$missing — installing."
-            # shellcheck disable=SC2086
+            
             sudo pacman -S --needed $PKGS
         fi
         make kernel.iso kernel-usb.img "$(qemu_assign)" $(ovmf_assign)

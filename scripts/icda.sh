@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+
 set -eu
 
 image="${ICDA_DOCKER_IMAGE:-icda-toolchain}"

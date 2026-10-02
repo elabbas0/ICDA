@@ -1,21 +1,21 @@
-/*
- * ic_symbols.c - ICDA's vector symbol set (see ic_ui.h).
- *
- * Symbols are described in a unit box ([-0.5, 0.5] on both axes) and
- * rasterised into an 8-bit coverage mask with max-accumulation, then
- * blended once.  Overlapping strokes therefore never double-blend at
- * their joints, which keeps translucent symbols clean.
- */
+
+
+
+
+
+
+
+
 #include "ic_ui.h"
 
 #define SYM_MAX 64
 
 typedef struct {
     uint8_t cov[SYM_MAX * SYM_MAX];
-    int     n;        /* mask edge in px */
-    float   scale;    /* px per unit */
-    float   ox, oy;   /* mask-space origin of the unit box centre */
-    float   stroke;   /* stroke width in px */
+    int     n;        
+    float   scale;    
+    float   ox, oy;   
+    float   stroke;   
 } sym_mask_t;
 
 static inline float sym_clamp01(float v) {
@@ -34,7 +34,7 @@ static inline void sym_erase(sym_mask_t *m, int x, int y, float cov) {
     m->cov[y * m->n + x] = (uint8_t)((float)m->cov[y * m->n + x] * (1.0f - sym_clamp01(cov)));
 }
 
-/* Unit-space -> mask-space. */
+
 static inline float sx(const sym_mask_t *m, float u) { return m->ox + u * m->scale; }
 static inline float sy(const sym_mask_t *m, float v) { return m->oy + v * m->scale; }
 
@@ -71,7 +71,7 @@ static void sym_poly(sym_mask_t *m, const float *pts, int n, int closed) {
     if (closed && n > 2) sym_line(m, pts[(n - 1) * 2], pts[(n - 1) * 2 + 1], pts[0], pts[1]);
 }
 
-/* Filled disc (unit coords). */
+
 static void sym_disc(sym_mask_t *m, float cu, float cv, float r) {
     float cx = sx(m, cu), cy = sy(m, cv), rp = r * m->scale;
     for (int y = (int)(cy - rp) - 1; y <= (int)(cy + rp) + 1; y++) {
@@ -92,7 +92,7 @@ static void sym_disc_erase(sym_mask_t *m, float cu, float cv, float r) {
     }
 }
 
-/* Ring (stroke of a circle). */
+
 static void sym_ring(sym_mask_t *m, float cu, float cv, float r) {
     float cx = sx(m, cu), cy = sy(m, cv), rp = r * m->scale, hw = m->stroke * 0.5f;
     for (int y = (int)(cy - rp - hw) - 1; y <= (int)(cy + rp + hw) + 1; y++) {
@@ -105,21 +105,21 @@ static void sym_ring(sym_mask_t *m, float cu, float cv, float r) {
     }
 }
 
-/* Arc from angle a0 to a1 (radians, clockwise from +x in screen space),
- * approximated by short segments; max-accumulation hides the joints. */
+
+
 static void sym_arc(sym_mask_t *m, float cu, float cv, float r, float a0, float a1) {
-    /* Rotate a unit vector incrementally: no libm needed. */
+    
     int steps = 24;
     float da = (a1 - a0) / (float)steps;
     float c = 1.0f - da * da / 2.0f + da * da * da * da / 24.0f;
     float s = da - da * da * da / 6.0f + da * da * da * da * da / 120.0f;
-    /* cos/sin of a0 by the same series after range reduction */
+    
     float ang = a0, px, py;
     float c0, s0;
     while (ang > 3.14159265f) ang -= 6.2831853f;
     while (ang < -3.14159265f) ang += 6.2831853f;
     {
-        /* Taylor to 10th order is plenty on [-pi, pi] after halving. */
+        
         float h = ang * 0.5f, h2 = h * h;
         float ch = 1 - h2 / 2 + h2 * h2 / 24 - h2 * h2 * h2 / 720 + h2 * h2 * h2 * h2 / 40320;
         float shv = h * (1 - h2 / 6 + h2 * h2 / 120 - h2 * h2 * h2 / 5040 + h2 * h2 * h2 * h2 / 362880);
@@ -137,7 +137,7 @@ static void sym_arc(sym_mask_t *m, float cu, float cv, float r, float a0, float 
     }
 }
 
-/* Filled convex polygon via 4x4 supersampling (small shapes only). */
+
 static void sym_fill_convex(sym_mask_t *m, const float *pts, int n) {
     float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
     float P[16];
@@ -171,7 +171,7 @@ static void sym_fill_convex(sym_mask_t *m, const float *pts, int n) {
     }
 }
 
-/* Rounded-rect outline in unit coords (radius in units). */
+
 static void sym_rrect(sym_mask_t *m, float x0, float y0, float x1, float y1, float r) {
     const float k = 1.5707963f;
     sym_line(m, x0 + r, y0, x1 - r, y0);
@@ -186,14 +186,14 @@ static void sym_rrect(sym_mask_t *m, float x0, float y0, float x1, float y1, flo
     }
 }
 
-/* The globe's meridian: a narrow ellipse traced as a polyline. */
+
 static void sym_globe_meridian(sym_mask_t *m) {
     const int steps = 28;
     float prevx = 0.0f, prevy = -0.36f;
     for (int i = 1; i <= steps; i++) {
-        float t = (float)i / (float)steps;       /* 0..1 around half turn */
+        float t = (float)i / (float)steps;       
         float a = -1.5707963f + t * 3.1415926f;
-        /* cos/sin via short series on a in [-pi/2, pi/2] */
+        
         float a2 = a * a;
         float ca = 1 - a2 / 2 + a2 * a2 / 24 - a2 * a2 * a2 / 720 + a2 * a2 * a2 * a2 / 40320;
         float sa = a * (1 - a2 / 6 + a2 * a2 / 120 - a2 * a2 * a2 / 5040);
@@ -301,7 +301,7 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         break;
     }
     case IC_SYM_GEAR: {
-        /* 8 teeth as stubby radial strokes around a ring. */
+        
         const float dirs[8][2] = {
             { 1, 0 }, { 0.7071f, 0.7071f }, { 0, 1 }, { -0.7071f, 0.7071f },
             { -1, 0 }, { -0.7071f, -0.7071f }, { 0, -1 }, { 0.7071f, -0.7071f } };

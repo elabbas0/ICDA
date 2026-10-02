@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Locate the WM cursor tip in a screendump and click a target reliably.
 
 The emulated PS/2 mouse takes relative motion only and QEMU drops events
@@ -89,12 +89,12 @@ def find_cursor(w, h, px):
                     break
             if not ok:
                 continue
-            # black outline corner above-left of the tip
+            
             if all(max(at(mx + dx, my + dy)) < 60 for dx, dy in
                    ((-1, -1), (-1, 0), (0, -1), (1, -1), (-1, 1))):
                 cands.append((mx, my))
-    # the true tip is the uppermost-leftmost candidate; drop clusters that
-    # are just the diagonal body of another candidate
+    
+    
     cands.sort()
     return cands[0] if cands else None
 
@@ -129,7 +129,7 @@ def main():
         print("  moved, cursor now %s" % ((cx, cy),))
     if cx != tx or cy != ty:
         print("WARN: cursor at %s not target %s" % ((cx, cy), (tx, ty)))
-    # click: press + release at current spot
+    
     q.button(True)
     q.button(False)
     print("clicked at %s" % ((cx, cy),))

@@ -2,7 +2,7 @@
 #include "../cpu/multiboot2.h"
 #include "../drivers/console/console.h"
 
-// kernel_end is exported by the linker script
+
 extern uint8_t kernel_end[];
 
 static uint64_t *bitmap       = 0;
@@ -75,7 +75,7 @@ void pmm_init(void *multiboot_info) {
     uint64_t mem_top = 0;
     int saw_mmap = 0;
 
-    // pass 1: find max usable memory
+    
     for (uint8_t *p = tag_ptr; p < end_ptr; ) {
         struct multiboot_tag *tag = (struct multiboot_tag *)p;
         if (tag->type == MULTIBOOT_TAG_TYPE_END) break;
@@ -129,11 +129,11 @@ void pmm_init(void *multiboot_info) {
     bitmap      = (uint64_t *)bitmap_base;
     used_frames = total_frames;
 
-    // mark everything used initially
+    
     for (uint64_t i = 0; i < bitmap_words; i++)
         bitmap[i] = ~0ULL;
 
-    // pass 2: free usable regions
+    
     for (uint8_t *p = tag_ptr; p < end_ptr; ) {
         struct multiboot_tag *tag = (struct multiboot_tag *)p;
         if (tag->type == MULTIBOOT_TAG_TYPE_END) break;
@@ -158,14 +158,14 @@ void pmm_init(void *multiboot_info) {
         p += step;
     }
 
-    // protect reserved regions
+    
     frame_set(0);
     mark_used(0x0, 0x100000);
     mark_used(0x100000, (uint64_t)kernel_end - 0x100000);
     mark_used((uint64_t)bitmap, bitmap_bytes);
     mark_used((uint64_t)multiboot_info, info->total_size);
 
-    // find first free frame
+    
     next_free = 0;
     for (uint64_t i = 0; i < bitmap_words; i++) {
         if (bitmap[i] != ~0ULL) {

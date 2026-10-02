@@ -10,10 +10,10 @@
 #define AUDIO_OUTPUT_BYTES    4U
 #define AUDIO_OUTPUT_RATE     48000U
 
-/* WAV decode guards (Slice C audio hardening): reject anything outside
- * these bounds so a corrupt/malicious file can never wedge the player.
- * Total source duration is capped because playback resamples the whole
- * file up-front (no streaming path); longer files are refused. */
+
+
+
+
 #define AUDIO_MIN_RATE_HZ     8000U
 #define AUDIO_MAX_RATE_HZ     96000U
 #define AUDIO_MAX_WAV_BYTES   (8U * 1024U * 1024U)
@@ -125,8 +125,8 @@ static int parse_wav(const uint8_t *buf, uint64_t size,
         off = next;
     }
 
-    /* Strict header validation: PCM only, 1-2 channels, 8/16-bit,
-     * sane sample rate, internally consistent byte/block rates. */
+    
+
     if (!have_fmt || !data || fmt_tag != 1) return -1;
     if (channels < 1 || channels > 2) return -1;
     if (!(bits == 8 || bits == 16)) return -1;
@@ -135,8 +135,8 @@ static int parse_wav(const uint8_t *buf, uint64_t size,
     if (block_align != frame_bytes) return -1;
     if (byte_rate != rate * frame_bytes) return -1;
 
-    /* Data chunk must sit inside the file, be non-empty, frame-aligned,
-     * and bounded in absolute size and total duration. */
+    
+
     if ((uint64_t)(data - buf) + data_size > size) return -1;
     if (data_size == 0 || data_size > AUDIO_MAX_WAV_BYTES) return -1;
     if (data_size % frame_bytes != 0) return -1;

@@ -1,16 +1,16 @@
-/*
- * browser.app - ICDA Browser.
- *
- * The Document shell from docs/DESIGN.md: a toolbar (back, forward,
- * reload, address field, Go), a reading page, and a status bar.
- *
- * The page pipeline is unchanged from the working version: invisible
- * subtrees (<script>, <style>, <svg>, ...) are dropped, entities and
- * UTF-8 punctuation are mapped to ASCII, block tags force breaks, and
- * <a href> anchors are kept as byte ranges so the draw pass can
- * highlight and hit-test them.  The text is reflowed whenever the
- * window changes size, so the wrap width tracks the reading column.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W 900
@@ -25,8 +25,8 @@
 #define BR_STATUS_H  24
 #define BR_ADDR_W    420
 
-/* Links are byte ranges in the render text; the clickable rect is
- * computed at draw time from the proportional layout. */
+
+
 typedef struct {
     uint64_t start;
     uint64_t end;
@@ -51,29 +51,29 @@ static struct {
     br_link_t links[BR_LINKS];
     int       link_count;
 
-    int  scroll;               /* pixels scrolled down the page */
-    int  content_h;            /* full page height in pixels */
-    int  wrap_cols;            /* characters per wrapped line */
+    int  scroll;               
+    int  content_h;            
+    int  wrap_cols;            
 
     int  loading;
     int  addr_focused;
 
-    /* pointer */
+    
     int  hover_back;
     int  hover_forward;
     int  hover_reload;
     int  hover_go;
     int  hover_link;
 
-    /* The address field's text is const in ic_textfield_t, so the
-     * editable buffer lives here and the field points at it. */
+    
+
     char           addr_buf[BR_URL_CAP];
     ic_textfield_t addr;
     ic_tween_t     scrollbar;
     char           status[80];
 } br;
 
-/* --------------------------------------------------------------- HTML */
+
 
 static void strip_tags(char *dst, uint64_t dst_cap, const char *src) {
     uint64_t di = 0;
@@ -97,8 +97,8 @@ static void strip_tags(char *dst, uint64_t dst_cap, const char *src) {
 
 static void decode_entities(char *dst, uint64_t dst_cap, const char *src) {
     uint64_t di = 0;
-    /* Entity strings built char-by-char so the source survives any
-     * HTML-escaping in the editor/toolchain. */
+    
+
     static const char ent_amp[]  = { '&', 'a', 'm', 'p', ';', 0 };
     static const char ent_lt[]   = { '&', 'l', 't', ';', 0 };
     static const char ent_gt[]   = { '&', 'g', 't', ';', 0 };
@@ -164,12 +164,12 @@ static void extract_title(const char *html, char *title, uint64_t cap) {
     }
 }
 
-/* ------------------------------------------------- HTML -> render text */
 
-static uint64_t rt_i;            /* write index into br.text */
-static uint64_t rt_line_start;   /* where the current visual line began */
-static uint64_t rt_last_space;   /* offset of the last emitted space */
-static int      rt_cols;         /* wrap width in characters */
+
+static uint64_t rt_i;            
+static uint64_t rt_line_start;   
+static uint64_t rt_last_space;   
+static int      rt_cols;         
 
 static int match_word(const char *p, const char *w) {
     uint64_t i = 0;
@@ -184,7 +184,7 @@ static int match_word(const char *p, const char *w) {
     }
 }
 
-/* Tags whose whole subtree carries no displayable text. */
+
 static int tag_skips_content(const char *t) {
     return match_word(t, "script") || match_word(t, "style") ||
            match_word(t, "svg") || match_word(t, "head") ||
@@ -197,7 +197,7 @@ static int tag_skips_content(const char *t) {
            match_word(t, "title") || match_word(t, "!doctype");
 }
 
-/* Tags that introduce a line break in the text view. */
+
 static int tag_is_block(const char *t) {
     if (ic_lower(t[0]) == 'h' && t[1] >= '1' && t[1] <= '6') {
         char c = t[2];
@@ -220,7 +220,7 @@ static int tag_is_block(const char *t) {
 
 static void rt_newline(void) {
     if (rt_i == 0 || rt_i + 1 >= BR_TEXT_CAP) return;
-    if (br.text[rt_i - 1] == '\n') return;      /* collapse blank lines */
+    if (br.text[rt_i - 1] == '\n') return;      
     br.text[rt_i++] = '\n';
     rt_line_start = rt_i;
     rt_last_space = (uint64_t)-1;
@@ -244,11 +244,11 @@ static void rt_space(void) {
     rt_put(' ');
 }
 
-/* Map a Unicode codepoint to something the atlas can show. */
+
 static void rt_emit_cp(uint32_t cp) {
     char c;
     switch (cp) {
-        case 0x2013: case 0x2014: c = '-'; break;   /* en/em dash */
+        case 0x2013: case 0x2014: c = '-'; break;   
         case 0x2018: case 0x2019: c = '\''; break;  /* quotes */
         case 0x201C: case 0x201D: c = '"'; break;
         case 0x2026: c = '.'; break;                /* ellipsis */
@@ -318,7 +318,7 @@ static void extract_attr(const char *p, uint64_t ts, uint64_t te,
     }
 }
 
-/* Turn a raw href into an absolute URL against the current page. */
+
 static void resolve_href(const char *href, char *out, uint64_t cap) {
     uint16_t port;
     int use_tls;
@@ -337,7 +337,7 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
         return;
     }
     if (ic_strprefix(href, "//")) {
-        ic_strcpy(out, use_tls ? "https:" : "http:", cap);
+        ic_strcpy(out, use_tls ? "https://" : "http://", cap);
         ic_strcat(out, href, cap);
         return;
     }
@@ -348,7 +348,7 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
         return;
     }
     {
-        /* Relative to the current path's directory. */
+        
         uint64_t plen = ic_strlen(path);
         while (plen > 0 && path[plen - 1] != '/') plen--;
         if (plen > 1) {
@@ -361,7 +361,7 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
     }
 }
 
-/* Build the word-wrapped plain-text view of the fetched page. */
+
 static void build_render_text(void) {
     const char *p = br.html ? br.html : "";
     uint64_t len = br.html_len;
@@ -620,7 +620,7 @@ static void go_forward(void) {
     navigate_to(br.current_url);
 }
 
-/* ------------------------------------------------------------- layout */
+
 
 static const ic_face_t *reading(void) { return ic_font(IC_FONT_SUBHEAD); }
 
@@ -666,8 +666,8 @@ static ic_rect_t status_rect(ic_app_t *app) {
     return ic_rect_make(0, app->height - BR_STATUS_H, app->width, BR_STATUS_H);
 }
 
-/* One place for the reading column, the wrap width and the document
- * height: draw(), the resize reflow and the hit-test all use it. */
+
+
 static void layout(ic_app_t *app) {
     ic_rect_t p = page_rect(app);
     const ic_face_t *f = reading();
@@ -675,7 +675,7 @@ static void layout(ic_app_t *app) {
     int avg = ic_text_measure(f, "abcdefghijklmnopqrstuvwxyz ") / 27;
     int lines = 1;
     if (avg < 1) avg = 1;
-    if (col_w > 720) col_w = 720;              /* comfortable measure */
+    if (col_w > 720) col_w = 720;              
     br.wrap_cols = col_w / avg;
     if (br.wrap_cols < 20) br.wrap_cols = 20;
     if (br.text) {
@@ -688,7 +688,7 @@ static void layout(ic_app_t *app) {
     if (br.scroll < 0) br.scroll = 0;
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -720,7 +720,7 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     (void)p;
 }
 
-/* Byte offset of the start of absolute line `row` in the render text. */
+
 static uint64_t line_offset(uint64_t row) {
     uint64_t r = 0;
     uint64_t i = 0;
@@ -778,7 +778,7 @@ static void draw_page(ic_app_t *app, ic_canvas_t *c) {
         if (y + lh <= p.y || y >= p.y + p.h) continue;
         lc = *c;
         (void)lc;
-        /* Body copy, then the accent-coloured link spans on top. */
+        
         ic_text_draw_n(c, f, col_x, y + ic_text_center_baseline(f, 0, f->line_h),
                        br.text + ls, (int)(le - ls), pal->label);
         for (int li = 0; li < br.link_count; li++) {
@@ -834,7 +834,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (br.addr_focused || br.loading) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static void event(ic_app_t *app, const ic_event_t *ev) {
     ic_rect_t a = addr_rect(app);
@@ -842,7 +842,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
         if (br.addr_focused) {
-            /* Clicking elsewhere drops focus from the address field. */
+            
             if (!ic_ui_hit(a, ev->x, ev->y)) br.addr_focused = 0;
         }
         br.hover_back = ic_ui_hit(back_rect(app), ev->x, ev->y);
@@ -865,7 +865,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             ic_ui_textfield_scroll(a, &br.addr);
             break;
         }
-        /* Links. */
+        
         {
             ic_rect_t p = page_rect(app);
             const ic_face_t *f = reading();
@@ -883,7 +883,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 ls = line_offset((uint64_t)row);
                 le = ls;
                 while (le < br.text_len && br.text[le] != '\n') le++;
-                /* Walk the line to find the byte under the pointer. */
+                
                 {
                     int x = col_x;
                     target = le;
@@ -986,8 +986,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         }
         break;
     case IC_EV_RESIZE:
-        /* The wrap width changed, so reflow the page and re-derive the
-         * document height. */
+        
+
         layout(app);
         if (br.html) {
             build_render_text();
@@ -1028,8 +1028,8 @@ int main(int argc, char **argv) {
     static const ic_app_desc_t desc = { "Browser", WIN_W, WIN_H, init, draw, event, 0 };
     const char *arg = (argc > 1 && argv) ? argv[1] : 0;
 
-    /* Page buffers come from shared-memory regions: process-owned memory
-     * that is properly mapped. */
+    
+
     br.html_shm = icda_shm_create(BR_HTML_CAP);
     if (br.html_shm) br.html = (char *)(uintptr_t)icda_shm_map(br.html_shm);
     br.text_shm = icda_shm_create(BR_TEXT_CAP);

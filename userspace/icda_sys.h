@@ -240,7 +240,7 @@ static inline int icda_msg_poll(uint64_t handle) { return (int)sys_call1(SYS_MSG
 static inline uint64_t icda_map_framebuffer(icda_fb_info_t *info) { return sys_call1(SYS_MAP_FRAMEBUFFER, (uint64_t)(uintptr_t)info); }
 static inline int icda_input_read_mouse(icda_mouse_event_t *out) { return (int)sys_call1(SYS_INPUT_READ_MOUSE, (uint64_t)(uintptr_t)out); }
 
-/* Returns 1 once the window manager has claimed the framebuffer. */
+
 static inline int icda_gui_available(void) { return (int)sys_call0(SYS_GUI_AVAILABLE); }
 
 typedef struct {
@@ -252,8 +252,8 @@ typedef struct {
     uint32_t mode_count;
     uint32_t hw_cursor;
     uint32_t present_supported;
-    uint32_t flip_active;  /* 1 when tear-free page flipping is active */
-    uint32_t needs_present; /* append-only ABI: 1 when present() does real DMA work */
+    uint32_t flip_active;  
+    uint32_t needs_present; 
 } icda_gpu_info_t;
 
 typedef struct {
@@ -262,18 +262,18 @@ typedef struct {
     char     name[64];
 } icda_proc_stats_t;
 
-/* GPU device layer (DRM/KMS-shaped general GPU driver) */
+
 static inline uint64_t icda_gpu_query(icda_gpu_info_t *out) { return sys_call1(SYS_GPU_QUERY, (uint64_t)(uintptr_t)out); }
-/* Legacy present (flags=0, no vblank wait): equivalent to the old no-arg call. */
+
 static inline uint64_t icda_gpu_present(void) { return sys_call1(SYS_GPU_PRESENT, 0); }
-/* Present with flags: bit0 = WAIT_VBLANK (single sched_yield, never spin). */
+
 static inline uint64_t icda_gpu_present_flags(uint64_t flags) { return sys_call1(SYS_GPU_PRESENT, flags); }
 static inline uint64_t icda_gpu_cursor(int x, int y, const uint32_t *image, int w, int h) { return sys_call5(SYS_GPU_CURSOR, (uint64_t)x, (uint64_t)y, (uint64_t)(uintptr_t)image, (uint64_t)w, (uint64_t)h); }
 
-/* Power: 0 = shutdown, 1 = reboot.  Does not return. */
+
 static inline uint64_t icda_power(uint64_t action) { return sys_call1(SYS_POWER, action); }
 
-/* Task-manager stats for one process */
+
 static inline uint64_t icda_proc_stats(uint64_t pid, icda_proc_stats_t *out) { return sys_call2(SYS_PROC_STATS, pid, (uint64_t)(uintptr_t)out); }
 
 #endif

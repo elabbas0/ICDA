@@ -1,16 +1,16 @@
-/*
- * desktop.app - ICDA Explorer.
- *
- * The "browser of things" shell from docs/DESIGN.md: a toolbar, a
- * sidebar of places, and a content area that switches between an icon
- * grid and a detail list.
- *
- * Opening an item picks the right app by type: folders navigate, .app
- * and .elf files launch, .wav files play (respecting the `audio`
- * setting) and everything else opens in the Editor.  The context menu
- * carries Rename, Get Info and Delete; Delete is behind an ic_ui_alert
- * because it cannot be undone.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 #include "settings_store.h"
 
@@ -29,15 +29,15 @@
 #define GRID_CELL_H  88
 #define ROW_H        IC_H_ROW
 
-/* Icon grid vs detail list. */
+
 enum { VIEW_GRID = 0, VIEW_LIST };
 
-/* The small modal that asks for one line of text. */
+
 enum { DLG_NONE = 0, DLG_NEW_FILE, DLG_NEW_FOLDER, DLG_GOTO, DLG_RENAME };
 
-/* Context-menu actions.  Delete is deliberately absent: the VFS has no
- * unlink primitive and the native ABI is frozen at 70 calls
- * (scripts/check-abi.sh), so there is no honest way to offer it yet. */
+
+
+
 enum {
     CA_OPEN = 1,
     CA_EDIT,
@@ -62,22 +62,22 @@ typedef struct {
 static struct {
     ex_item_t items[MAX_ITEMS];
     int       count;
-    int       selected;          /* index into items, -1 none */
-    int       hover;              /* index under the pointer, -1 none */
+    int       selected;          
+    int       hover;              
 
     char      path[PATH_CAP];
     char      history[HISTORY_CAP][PATH_CAP];
     int       history_count;
-    int       history_pos;       /* where we are in the history list */
+    int       history_pos;       
 
     int       view;
-    int       scroll;             /* first visible row (grid) or item (list) */
-    int       rows;               /* visible grid rows / list rows */
-    int       cols;               /* grid columns */
-    int       first_item;         /* first drawn index (list view) */
+    int       scroll;             
+    int       rows;               
+    int       cols;               
+    int       first_item;         
     int       last_item;
 
-    /* pointer */
+    
     int hover_back;
     int hover_up;
     int hover_view;
@@ -86,28 +86,28 @@ static struct {
     int hover_sidebar;
     int list_focused;
 
-    /* modal text prompt */
+    
     int  dialog;
     char dialog_title[48];
     char dialog_buf[DIALOG_CAP];
     int  dialog_cursor;
     int  dialog_scroll;
 
-    /* context menu */
+    
     ic_menu_model_t menu;
     int  menu_x, menu_y;
     int  menu_open;
-    int  menu_item;               /* -1 = the folder itself */
+    int  menu_item;               
     int  menu_hover;
 
-    /* Get Info */
+    
     int  info_open;
 
     char list_buf[LIST_CAP];
     char status[STATUS_CAP];
 } ex;
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t toolbar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
@@ -136,12 +136,12 @@ static ic_rect_t up_rect(ic_app_t *app) {
     return ic_rect_make(r.x + r.w + IC_SP_1, r.y, IC_H_CONTROL, IC_H_CONTROL);
 }
 
-/* The action buttons are right-aligned and the path field takes what is
- * left, rather than the reverse: sizing the path from the full width
- * first pushed them off the right edge at the default window size.
- *
- * Labels are full words only when they fit; on a small screen (the VM
- * boots at 800x600) they shorten rather than truncating to "New Fol...". */
+
+
+
+
+
+
 static const char *toolbar_label(int wide, const char *long_label, const char *short_label) {
     return wide ? long_label : short_label;
 }
@@ -178,7 +178,7 @@ static ic_rect_t path_rect(ic_app_t *app) {
     return ic_rect_make(x, (toolbar_rect(app).h - IC_H_CONTROL) / 2, w, IC_H_CONTROL);
 }
 
-/* Places in the sidebar. */
+
 static const char *const PLACES[] = {
     "/", "/home", "/apps", "/usr/share/audio", "/usr/share/apps", "/etc", "/cfg"
 };
@@ -189,8 +189,8 @@ static const ic_symbol_t PLACE_SYMBOLS[PLACE_COUNT] = {
     IC_SYM_GEAR
 };
 
-/* The sidebar caption sits above the first item, so items start below it
- * rather than at the same offset. */
+
+
 #define PLACE_HEADER_H 18
 
 static ic_rect_t place_rect(ic_app_t *app, int i) {
@@ -241,7 +241,7 @@ static void layout(ic_app_t *app) {
         if (rows < 1) rows = 1;
         ex.cols = cols;
         ex.rows = rows;
-        /* Page the grid so the selection stays on screen. */
+        
         if (ex.selected < 0) ex.scroll = 0;
         else {
             int page = cols * rows;
@@ -251,7 +251,7 @@ static void layout(ic_app_t *app) {
     }
 }
 
-/* ------------------------------------------------------------ helpers */
+
 
 static uint64_t d_strlen(const char *s) {
     uint64_t n = 0;
@@ -340,7 +340,7 @@ static int valid_path(const char *path) {
     return path[0] == '/';
 }
 
-/* ---------------------------------------------------------- browsing */
+
 
 static void refresh(void) {
     uint64_t rc;
@@ -430,7 +430,7 @@ static void go_up(void) {
     navigate_to(parent, 1);
 }
 
-/* ------------------------------------------------------------ actions */
+
 
 static void open_item(int index) {
     ex_item_t *it;
@@ -501,9 +501,9 @@ static void create_entry(int make_dir) {
     ex_status(make_dir ? "Folder created" : "File created");
 }
 
-/* Rename is copy-then-truncate: the VFS has no rename primitive and the
- * native ABI is frozen, so the old name is emptied rather than removed.
- * The status line says so rather than pretending the file is gone. */
+
+
+
 static void perform_rename(void) {
     char from[PATH_CAP];
     char to[PATH_CAP];
@@ -534,7 +534,7 @@ static void perform_rename(void) {
                                            : "Renamed (the old name is now empty)");
 }
 
-/* ------------------------------------------------------------- dialog */
+
 
 static void open_dialog(int kind, const char *title, const char *initial) {
     ex.dialog = kind;
@@ -562,7 +562,7 @@ static void commit_dialog(void) {
     }
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -597,7 +597,7 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
                     "PLACES", p->label_tertiary, IC_ALIGN_LEFT);
     for (int i = 0; i < PLACE_COUNT; i++) {
         const char *label = PLACES[i];
-        /* Trim the leading slash for display: "/" stays as "Disk". */
+        
         char shown[NAME_CAP];
         if (d_streq(PLACES[i], "/")) d_copy(shown, "Disk", sizeof(shown));
         else d_copy(shown, PLACES[i] + 1, sizeof(shown));
@@ -607,7 +607,7 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
     }
 }
 
-/* A folder, an app, a track or a document: pick the glyph by type. */
+
 static ic_symbol_t item_symbol(const ex_item_t *it) {
     if (it->is_dir) return IC_SYM_FOLDER;
     if (it->is_wav) return IC_SYM_MUSIC;
@@ -831,7 +831,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static int item_at(ic_app_t *app, int x, int y) {
     if (ex.view == VIEW_LIST) {
@@ -843,11 +843,11 @@ static int item_at(ic_app_t *app, int x, int y) {
     {
         ic_rect_t c = content_rect(app);
         int col, row, idx;
-        /* Reject anything outside the content area *before* dividing.
-         * C truncates integer division toward zero, so a click on the
-         * toolbar or the sidebar yields (negative)/size == 0 rather than
-         * -1 and the bounds check below never fires - the click then
-         * selects a grid cell instead. */
+        
+
+
+
+
         if (!ic_ui_hit(c, x, y)) return -1;
         col = (x - c.x - IC_SP_3) / GRID_CELL_W;
         row = (y - c.y - IC_SP_3) / GRID_CELL_H;
@@ -928,7 +928,7 @@ static void menu_activate(ic_app_t *app, int index) {
     int i = index;
     int item = ex.menu_item;
     ex.menu_open = 0;
-    /* The leading item count depends on whether an item was targeted. */
+    
     if (item >= 0 && item < ex.count) {
         if (i == 0) { open_item(item); return; }
         if (!ex.items[item].is_dir) {
@@ -937,7 +937,7 @@ static void menu_activate(ic_app_t *app, int index) {
         }
         if (i == 1) { ex.menu_item = item; open_dialog(DLG_RENAME, "Rename", ex.items[item].name); return; }
         if (i == 2) { ex.info_open = 1; return; }
-        i = 3; /* past the separator */
+        i = 3; 
     }
     switch (i) {
     case 3: open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
@@ -1120,7 +1120,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             open_menu_at(app, app->mouse_x, app->mouse_y);
             break;
         case IC_KEY_DELETE:
-            /* No unlink in the VFS, so say so instead of faking it. */
+            
             ex_status("Deleting is not available yet: the file system has no remove");
             break;
         case IC_KEY_HOME: ex.selected = 0; break;

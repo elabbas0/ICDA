@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """gen_fonts.py - build ICDA's UI font atlases (userspace/ic_fonts_gen.h).
 
 The type system (see docs/DESIGN.md) uses Inter for UI text and
@@ -31,10 +31,10 @@ FONT_DIR = os.path.join(REPO, "resources", "fonts")
 OUT = os.path.join(REPO, "userspace", "ic_fonts_gen.h")
 
 OVERSAMPLE = 8
-SUBPIXEL = 2            # horizontal phases per pixel: 0, 1/2
-KERN_MIN_UNITS = 12     # drop pairs below ~0.6% em (invisible at UI sizes)
+SUBPIXEL = 2            
+KERN_MIN_UNITS = 12     
 
-# Codepoints beyond printable ASCII that UI strings may use (UTF-8).
+
 EXTRA_CPS = [0x2026, 0x2022, 0x2014, 0x2013, 0x00B7, 0x00A9, 0x00B0, 0x2019]
 CODEPOINTS = list(range(32, 127)) + EXTRA_CPS
 
@@ -47,7 +47,7 @@ FILES = {
     "mono_regular":   "JetBrainsMono-Regular.ttf",
 }
 
-# (enum suffix, file key, pixel size) - order defines ic_font_style_t.
+
 FACES = [
     ("CAPTION",     "inter_regular",    11),
     ("CAPTION_EMPH", "inter_medium",    11),
@@ -171,7 +171,7 @@ def build():
     out.append("#define IC_FONT_EXTRA_COUNT %d" % len(EXTRA_CPS))
     out.append("")
 
-    # Kerning per font file, in font units.
+    
     kern_names = {}
     for key, tt in fonts.items():
         if key.startswith("mono"):

@@ -1,16 +1,16 @@
-/*
- * fpu.c — x87/SSE enablement and per-thread state switching.
- *
- * Long mode guarantees SSE2, so no CPUID gate is needed for the base
- * feature set.  The OS has to opt in explicitly though: with
- * CR4.OSFXSR clear every SSE instruction raises #UD, and with CR0.EM
- * set every x87 instruction raises #NM.
- *
- * MXCSR 0x1F80 masks all SIMD exceptions (the SysV default), and
- * fninit loads the default x87 control word 0x037F.  A zeroed save
- * area would unmask every exception, so new threads copy the template
- * captured here instead of starting from zeroes.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "fpu.h"
 
 #define CR0_MP        (1ULL << 1)

@@ -1,13 +1,13 @@
-/*
- * ic_anim.c - easing curves, tweens and springs (see ic_anim.h).
- */
+
+
+
 #include "ic_anim.h"
 #include "ic_time.h"
 
-/* ------------------------------------------------------------ easing */
+
 
 static float ic_bezier_axis(float p1, float p2, float u) {
-    /* B(u) for a curve anchored at 0 and 1: 3(1-u)^2 u p1 + 3(1-u) u^2 p2 + u^3 */
+    
     float v = 1.0f - u;
     return 3.0f * v * v * u * p1 + 3.0f * v * u * u * p2 + u * u * u;
 }
@@ -21,7 +21,7 @@ float ic_cubic_bezier(float x1, float y1, float x2, float y2, float t) {
     float u = t;
     if (t <= 0.0f) return 0.0f;
     if (t >= 1.0f) return 1.0f;
-    /* Solve x(u) = t: Newton first, bisection if the slope flattens. */
+    
     for (int i = 0; i < 6; i++) {
         float err = ic_bezier_axis(x1, x2, u) - t;
         float d = ic_bezier_axis_slope(x1, x2, u);
@@ -53,7 +53,7 @@ float ic_ease(ic_ease_t ease, float t) {
     }
 }
 
-/* ------------------------------------------------------------- tween */
+
 
 void ic_tween_set(ic_tween_t *tw, float value) {
     if (!tw) return;
@@ -104,11 +104,11 @@ int ic_tween_running(ic_tween_t *tw) {
     return tw->active;
 }
 
-/* ------------------------------------------------------------ spring */
 
-#define IC_SPRING_STEP_S  0.004f   /* integrate in <=4 ms slices */
-#define IC_SPRING_MAX_DT  0.100f   /* a stalled frame must not explode */
-#define IC_SPRING_REST_X  0.0015f  /* in units of the animated value */
+
+#define IC_SPRING_STEP_S  0.004f   
+#define IC_SPRING_MAX_DT  0.100f   
+#define IC_SPRING_REST_X  0.0015f  
 #define IC_SPRING_REST_V  0.02f
 
 void ic_spring_init(ic_spring_t *s, float value, float response, float damping) {
@@ -151,7 +151,7 @@ float ic_spring_value(ic_spring_t *s) {
     if (dt > IC_SPRING_MAX_DT) dt = IC_SPRING_MAX_DT;
     while (dt > 0.0f) {
         float h = dt < IC_SPRING_STEP_S ? dt : IC_SPRING_STEP_S;
-        /* Semi-implicit Euler: stable for the stiffness range we use. */
+        
         float accel = -s->stiffness * (s->value - s->target) - s->friction * s->velocity;
         s->velocity += accel * h;
         s->value += s->velocity * h;

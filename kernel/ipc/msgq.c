@@ -68,12 +68,12 @@ int msgq_recv(uint64_t handle, void *out, int block) {
     if (block) {
         uint64_t spin = 0;
         while (q->count == 0) {
-            /* Sleep a tick between checks so a blocking reader does not
-             * busy-spin the whole scheduler at 100Hz. */
+            
+
             sched_sleep(1);
             spin++;
             if (spin > 10000000ULL) {
-                /* hard limit to avoid infinite hang */
+                
                 return -1;
             }
         }

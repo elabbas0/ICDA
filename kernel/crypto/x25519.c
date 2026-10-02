@@ -1,8 +1,8 @@
 #include "x25519.h"
 
-/* Curve25519 (RFC 7748) field arithmetic mod 2^255-19 using five 51-bit
- * limbs with unsigned __int128 accumulators (x86-64 gcc provides this even
- * in freestanding mode). */
+
+
+
 
 typedef unsigned __int128 u128;
 
@@ -25,7 +25,7 @@ static void fe_frombytes(fe h, const uint8_t s[32]) {
     h[1] = (ld8(s + 6) >> 3) & FE_MASK;
     h[2] = (ld8(s + 12) >> 6) & FE_MASK;
     h[3] = (ld8(s + 19) >> 1) & FE_MASK;
-    h[4] = (ld8(s + 24) >> 12) & FE_MASK; /* & FE_MASK also clears input bit 255 */
+    h[4] = (ld8(s + 24) >> 12) & FE_MASK; 
 }
 
 static void fe_tobytes(uint8_t s[32], fe h) {
@@ -61,7 +61,7 @@ static void fe_add(fe h, const fe f, const fe g) {
     for (int i = 0; i < 5; i++) h[i] = f[i] + g[i];
 }
 
-/* h = f - g; adds 2p first so limbs stay positive (results < 2^52). */
+
 static void fe_sub(fe h, const fe f, const fe g) {
     h[0] = f[0] + 0xFFFFFFFFFFFDAULL - g[0];
     h[1] = f[1] + 0xFFFFFFFFFFFFEULL - g[1];
@@ -110,7 +110,7 @@ static void fe_mul121665(fe h, const fe f) {
     fe_reduce(t0, t1, t2, t3, t4, h);
 }
 
-/* h = z^(2^255 - 21) = z^(p-2) = 1/z */
+
 static void fe_inv(fe out, const fe z) {
     fe t0, t1, t2, t3;
     int i;
@@ -118,37 +118,37 @@ static void fe_inv(fe out, const fe z) {
     fe_sqr(t0, z);
     fe_sqr(t1, t0);
     fe_sqr(t1, t1);
-    fe_mul(t1, z, t1);          /* z^9 */
-    fe_mul(t0, t0, t1);         /* z^11 */
+    fe_mul(t1, z, t1);          
+    fe_mul(t0, t0, t1);         
     fe_sqr(t2, t0);
-    fe_mul(t1, t1, t2);         /* z^31 = 2^5 - 1 */
+    fe_mul(t1, t1, t2);         
     fe_sqr(t2, t1);
     for (i = 1; i < 5; i++) fe_sqr(t2, t2);
-    fe_mul(t1, t2, t1);         /* 2^10 - 1 */
+    fe_mul(t1, t2, t1);         
     fe_sqr(t2, t1);
     for (i = 1; i < 10; i++) fe_sqr(t2, t2);
-    fe_mul(t2, t2, t1);         /* 2^20 - 1 */
+    fe_mul(t2, t2, t1);         
     fe_sqr(t3, t2);
     for (i = 1; i < 20; i++) fe_sqr(t3, t3);
-    fe_mul(t2, t3, t2);         /* 2^40 - 1 */
+    fe_mul(t2, t3, t2);         
     fe_sqr(t2, t2);
     for (i = 1; i < 10; i++) fe_sqr(t2, t2);
-    fe_mul(t1, t2, t1);         /* 2^50 - 1 */
+    fe_mul(t1, t2, t1);         
     fe_sqr(t2, t1);
     for (i = 1; i < 50; i++) fe_sqr(t2, t2);
-    fe_mul(t2, t2, t1);         /* 2^100 - 1 */
+    fe_mul(t2, t2, t1);         
     fe_sqr(t3, t2);
     for (i = 1; i < 100; i++) fe_sqr(t3, t3);
-    fe_mul(t2, t3, t2);         /* 2^200 - 1 */
+    fe_mul(t2, t3, t2);         
     fe_sqr(t2, t2);
     for (i = 1; i < 50; i++) fe_sqr(t2, t2);
-    fe_mul(t1, t2, t1);         /* 2^250 - 1 */
+    fe_mul(t1, t2, t1);         
     fe_sqr(t1, t1);
-    fe_sqr(t1, t1);             /* 2^252 - 4 */
-    fe_sqr(t1, t1);             /* 2^253 - 8 */
-    fe_sqr(t1, t1);             /* 2^254 - 16 */
-    fe_sqr(t1, t1);             /* 2^255 - 32 */
-    fe_mul(out, t1, t0);        /* 2^255 - 21 */
+    fe_sqr(t1, t1);             
+    fe_sqr(t1, t1);             
+    fe_sqr(t1, t1);             
+    fe_sqr(t1, t1);             
+    fe_mul(out, t1, t0);        
 }
 
 static void fe_cswap(fe f, fe g, unsigned int swap) {

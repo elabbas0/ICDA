@@ -1,6 +1,6 @@
 #include "gcm.h"
 
-/* GF(2^128) multiplication per NIST SP 800-38D (bit-serial, MSB first). */
+
 static void gcm_gf_mul(uint8_t x[16], const uint8_t y[16]) {
     uint8_t z[16];
     uint8_t v[16];

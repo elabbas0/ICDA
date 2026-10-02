@@ -71,14 +71,14 @@ void bootstage_set(uint32_t stage, const char *label) {
 
     if (fb_available()) {
         if (splash_active()) {
-            /* Boot splash: advance the progress bar instead of painting
-             * the raw stamp over the clean screen. */
+            
+
             splash_progress(stage, label);
         } else {
-            /* Draw the stamp in place without touching the console cursor:
-             * fb_print_at() would move the cursor to (8,8), so every boot
-             * line written after a stamp would overwrite the previous one
-             * on the same row and the real log would be invisible. */
+            
+
+
+
             fb_write_at_cells(8, 8, stamp, FB_YELLOW, FB_BLACK);
         }
     } else {

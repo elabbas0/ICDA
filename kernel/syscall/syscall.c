@@ -28,21 +28,21 @@
 #include "uaccess.h"
 #include "native_abi.h"
 
-/* Verbose serial tracing (per-mount / audio-claim identity logs).
- * Default off; enable with SERIAL_VERBOSE=1. Error paths always log. */
+
+
 #ifndef SERIAL_VERBOSE
 #define SERIAL_VERBOSE 0
 #endif
 
-/* ABI freeze (native_abi.h v1): the native numbers below are a stable
- * contract. The compiler enforces the bookends; scripts/check-abi.sh
- * enforces kernel/userspace sync. */
+
+
+
 _Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v1: first number moved");
 _Static_assert(SYS_PROC_STATS == 69, "native ABI v1: last number moved");
 _Static_assert(ICDA_NATIVE_SYS_MAX == 70, "native ABI v1: count changed");
 
-/* Framebuffer claim state lives in kernel/dev/devnodes.c alongside the
- * /dev/fb0 ops (moved out of the syscall gate in P0 OS-ification). */
+
+
 
 static int str_eq(const char *a, const char *b) {
     uint64_t i = 0;
@@ -115,8 +115,8 @@ static uint64_t sys_console_write(const char *text) {
     if (!text) {
         return (uint64_t)-1;
     }
-    /* P0 gate: probe the NUL-terminated string before the console
-     * layer scans it (unbounded read otherwise). */
+    
+
     len = strnlen_user(text, UACCESS_MAX_STR);
     if (len == (uint64_t)-1) {
         return (uint64_t)-U_EFAULT;
@@ -133,7 +133,7 @@ static uint64_t sys_get_pid(void) {
     return proc ? proc->pid : 0;
 }
 
-/* Minimal serial u64 printer for identity-gate logging (no printf). */
+
 #if SERIAL_VERBOSE
 static void ident_log_u64(uint64_t v) {
     char buf[21];
@@ -160,7 +160,7 @@ static void ident_log_u64(uint64_t v) {
 }
 #endif
 
-/* P0 gate helpers: validated path (512B cap) and buffer range. */
+
 static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
                                  uint64_t skip, uint64_t *emitted_out);
 
@@ -186,7 +186,7 @@ static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
         return (uint64_t)-U_EFAULT;
     }
 
-    /* Readable device nodes produce their contents on demand. */
+    
     {
         const dev_calls_t *node = path[0] == '/' ? devops_lookup(path) : 0;
         if (node && node->node_read) {
@@ -423,9 +423,9 @@ static uint64_t sys_list_dir(const char *path, char *buf, uint64_t cap) {
     return list_dir_entries(dir, buf, cap, 0, NULL);
 }
 
-/* Shared directory formatter: writes one-per-line child entries of `dir`
- * into `buf`, skipping the first `skip` children (fd offset support).
- * Returns bytes written; optionally reports emitted entry count. */
+
+
+
 static uint64_t list_dir_entries(vfs_node_t *dir, char *buf, uint64_t cap,
                                  uint64_t skip, uint64_t *emitted_out) {
     uint64_t count;
@@ -673,9 +673,9 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
     }
 
     out->cpu_ticks = proc->cpu_ticks;
-    /* Count the pages this process actually has mapped in its own
-     * address space (kernel and framebuffer pages are shared/global
-     * and excluded by the accounting in vmm_map_page). */
+    
+
+
     out->mem_bytes = proc->addr_space ? proc->addr_space->mapped_pages * PAGE_SIZE_4K : 0;
     {
         uint64_t i = 0;
@@ -711,9 +711,9 @@ static uint64_t sys_gpu_present(uint64_t flags) {
     if (dfb->gpu_present() != 0) {
         return (uint64_t)-1;
     }
-    /* WAIT_VBLANK (bit 0): single sched_yield, never spin.
-     * Non-blocking: no vsync IRQ on Bochs/QEMU, so we yield once
-     * to let the scheduler run and give the CRTC time to scan. */
+    
+
+
     if (flags & 1) {
         sched_yield();
     }
@@ -730,7 +730,7 @@ static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h
         return (uint64_t)-U_EINVAL;
     }
     pixels = (uint64_t)w * (uint64_t)h;
-    /* Overflow-guarded image range probe (w*h*4 bytes). */
+    
     if (pixels > UACCESS_MAX_LEN / 4) {
         return (uint64_t)-U_EINVAL;
     }
@@ -744,7 +744,7 @@ static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h
 }
 
 static uint64_t sys_power(uint64_t action) {
-    /* 0 = shutdown, 1 = reboot.  Neither returns. */
+    
     if (action == 1) {
         power_reboot();
     } else {
@@ -799,9 +799,9 @@ static uint64_t sys_mount(uint64_t partition_index, const char *path) {
     if (!*path) {
         return (uint64_t)-1;
     }
-    /* Identity gate, log-only (P0 step 2): record who mounts; no denial.
-     * Path is gate-probed above; print bounded to 64 chars.
-     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+    
+
+
 #if SERIAL_VERBOSE
     {
         int pi = 0;
@@ -1052,8 +1052,8 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
 }
 
 static uint64_t sys_sound_play(uint64_t frequency_hz, uint64_t ticks) {
-    /* Bounded at the gate as well as in the driver: a huge ticks value
-     * must never reach the speaker busy-wait (DoS via long spin). */
+    
+
     if (ticks > 500U) {
         ticks = 500U;
     }
@@ -1128,8 +1128,8 @@ static uint64_t sys_audio_claim(uint64_t *token_out, uint64_t *sample_rate_out) 
         !user_range_prepare_cur_w(sample_rate_out, sizeof(*sample_rate_out))) {
         return (uint64_t)-U_EFAULT;
     }
-    /* Identity gate, log-only (P0 step 2): record who claims; no denial.
-     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+    
+
 #if SERIAL_VERBOSE
     serial_write("[ident] op=audio-claim pid=");
     ident_log_u64(proc->pid);
@@ -1162,9 +1162,9 @@ static uint64_t sys_audio_finish(uint64_t token) {
     return 0;
 }
 
-/* P0 gate for the (host, path, out_path) string triple shared by the
- * HTTP/HTTPS fetch handlers. Paths into the network stack are the
- * classic remote-input vector, so bound them tightly. */
+
+
+
 static int gate_fetch_args(const char *host, const char *path,
                            const char *out_path, uint64_t *bytes_out) {
     if (!host || !path || !out_path) {
@@ -1243,7 +1243,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
     }
 
     switch (nr) {
-        case 0: { // read
+        case 0: { 
             int fd = (int)a0;
             char *buf = (char *)(uintptr_t)a1;
             uint64_t count = a2;
@@ -1287,7 +1287,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             fd_set_off(proc, fd, off + copy);
             return copy;
         }
-        case 1: { // write
+        case 1: { 
             int fd = (int)a0;
             const char *buf = (const char *)(uintptr_t)a1;
             uint64_t count = a2;
@@ -1296,8 +1296,8 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             int is_stdio = 0;
             if (!buf && count != 0) return (uint64_t)-U_EFAULT;
             if (count == 0) return 0;
-            /* Source buffer: read probe (a read-only source mapping is
-             * legitimate here; chunks are re-probed per copy). */
+            
+
             if (!user_range_prepare_cur(buf, count)) return (uint64_t)-U_EFAULT;
             if (fd_resolve(proc, fd, &node, &off, &is_stdio) != 0) {
                 return (uint64_t)-U_EBADF;
@@ -1310,8 +1310,8 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 if (!dcon || !dcon->con_write) {
                     return (uint64_t)-1;
                 }
-                /* NUL-safe chunked console output: con_write scans
-                 * for NUL, so never hand it raw user memory. */
+                
+
                 while (done < count) {
                     uint64_t chunk = count - done;
                     if (chunk > sizeof(kbuf) - 1) chunk = sizeof(kbuf) - 1;
@@ -1351,7 +1351,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return done;
             }
         }
-        case 2: { // open
+        case 2: { 
             const char *pathname = (const char *)(uintptr_t)a0;
             uint64_t flags = a1;
             uint64_t plen;
@@ -1369,9 +1369,9 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             if (fd < 0) return (uint64_t)(int64_t)fd;
             return (uint64_t)fd;
         }
-        case 3: // close
+        case 3: 
             return fd_close(proc, (int)a0) == 0 ? 0 : (uint64_t)-U_EBADF;
-        case 5: { // fstat
+        case 5: { 
             int fd = (int)a0;
             vfs_stat_t *st = (vfs_stat_t *)(uintptr_t)a1;
             struct vfs_node *node;
@@ -1405,7 +1405,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             return 0;
         }
-        case 9: { // mmap
+        case 9: { 
             uint64_t addr = a0;
             uint64_t length = a1;
             uint64_t prot = a2;
@@ -1435,7 +1435,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             return addr;
         }
-        case 10: { // mprotect — real implementation with W^X
+        case 10: { 
             uint64_t addr = a0;
             uint64_t length = a1;
             uint64_t prot = a2;
@@ -1445,10 +1445,10 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             uint64_t fb_size = fb_phys_size();
             uint64_t shm_end = SHM_VIRT_BASE + (uint64_t)SHM_MAX_REGIONS * SHM_SLOT_SIZE;
             uint64_t newflags;
-            /* Linux PROT_* bits. PROT_EXEC without PROT_READ is mapped
-             * to read-only (x86 cannot express execute-only); PROT_NONE
-             * is rejected — no caller needs it yet. W|X is always
-             * rejected: this kernel is W^X. */
+            
+
+
+
             if (length == 0 || (addr & 0xFFFULL)) {
                 return (uint64_t)-U_EINVAL;
             }
@@ -1480,7 +1480,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 if (!phys) {
                     return (uint64_t)-U_ENOMEM;
                 }
-                /* Re-map the same frame with new permissions. */
+                
                 if (vmm_map_page(proc->addr_space, page, phys & ~0xFFFULL,
                                  newflags) != 0) {
                     return (uint64_t)-U_ENOMEM;
@@ -1488,17 +1488,17 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             return 0;
         }
-        case 11: { // munmap — real implementation (P0/B3)
+        case 11: { 
             uint64_t addr = a0;
             uint64_t length = a1;
             uint64_t end;
             uint64_t page;
-            /* Shared framebuffer window: device memory, not PMM-owned.
-             * Never free it here; use SYS_MAP_FRAMEBUFFER/SYS_SHM_UNMAP. */
+            
+
             uint64_t fb_virt = 0x500000000ULL;
             uint64_t fb_size = fb_phys_size();
-            /* SHM window: ref-counted shared frames owned by shm.c.
-             * Detaching must go through SYS_SHM_UNMAP/SYS_SHM_CLOSE. */
+            
+
             uint64_t shm_end = SHM_VIRT_BASE + (uint64_t)SHM_MAX_REGIONS * SHM_SLOT_SIZE;
             if (length == 0 || (addr & 0xFFFULL)) {
                 return (uint64_t)-U_EINVAL;
@@ -1517,17 +1517,17 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return (uint64_t)-U_EINVAL;
             }
             for (page = addr; page < end; page += PAGE_SIZE_4K) {
-                /* Present user pages here are always PMM-owned: text,
-                 * stack, brk and mmap regions are privately allocated
-                 * per process, and the shared FB/SHM windows are
-                 * excluded above. Non-present pages are skipped. */
+                
+
+
+
                 if (vmm_virt_to_phys(proc->addr_space, page)) {
                     vmm_unmap_page(proc->addr_space, page, 1);
                 }
             }
             return 0;
         }
-        case 12: { // brk
+        case 12: { 
             uint64_t new_brk = a0;
             if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
             if (new_brk == 0) return proc->linux_brk_pos;
@@ -1548,11 +1548,11 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             proc->linux_brk_pos = new_brk;
             return new_brk;
         }
-        case 60: // exit
-        case 231: // exit_group
+        case 60: 
+        case 231: 
             user_request_exit_to_kernel(a0);
             return a0;
-        case 78: { // getdents — fd-based (P0/B2)
+        case 78: { 
             int fd = (int)a0;
             char *buf = (char *)(uintptr_t)a1;
             uint64_t count = a2;
@@ -1571,8 +1571,8 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return (uint64_t)-U_EINVAL;
             }
             if (count < 20) return 0;
-            /* List the fd's own directory (not cwd), honoring the fd
-             * offset so repeated calls page through entries. */
+            
+
             len = list_dir_entries(node, dirbuf, sizeof(dirbuf), 0, NULL);
             {
                 uint64_t written = 0;
@@ -1608,7 +1608,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                     dirent[11] = 0;
                     dirent[16] = (uint8_t)(name_len);
                     dirent[17] = (uint8_t)(name_len >> 8);
-                    dirent[18] = 0; // DT_UNKNOWN
+                    dirent[18] = 0; 
                     for (uint64_t i = 0; i < name_len && i < count - written - 19; i++) {
                         dirent[19 + i] = (uint8_t)dirbuf[name_start + i];
                     }
@@ -1620,17 +1620,17 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return written;
             }
         }
-        case 158: // arch_prctl
+        case 158: 
             return 0;
         default:
             return (uint64_t)-1;
     }
 }
 
-/* Thin trap gate (P0 OS-ification): personality routing lives here and
- * only here. The native switch below is frozen ABI — new capability
- * goes to userspace servers behind the SYS_MSG / SYS_SHM IPC calls,
- * never to new SYS numbers (see native_abi.h). */
+
+
+
+
 static uint64_t syscall_dispatch_native(struct registers *regs);
 
 uint64_t syscall_dispatch(struct registers *regs) {
@@ -1785,7 +1785,7 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
                                       (const char *)(uintptr_t)regs->r8,
                                       (uint64_t *)(uintptr_t)regs->r9);
 
-        /* ---- IPC / GUI syscalls ---- */
+        
         case SYS_SHM_CREATE:
             return shm_create(regs->rdi);
         case SYS_SHM_MAP:
@@ -1829,8 +1829,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
         case SYS_MAP_FRAMEBUFFER: {
             syscall_fb_info_t *info = (syscall_fb_info_t *)(uintptr_t)regs->rdi;
             const dev_calls_t *dfb = dev_fb();
-            /* Claim + mapping policy lives in /dev/fb0 (devnodes.c);
-             * the gate only validates the caller's info struct. */
+            
+
             if (info && !user_range_prepare_cur_w(info, sizeof(*info))) {
                 return (uint64_t)-U_EFAULT;
             }
@@ -1856,8 +1856,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
         }
         case SYS_GUI_AVAILABLE: {
             const dev_calls_t *dfb = dev_fb();
-            /* 1 once the window manager has claimed the framebuffer, so
-             * GUI-capable apps know the desktop is on screen. */
+            
+
             if (!dfb || !dfb->fb_claimed) {
                 return (uint64_t)-1;
             }
@@ -1866,8 +1866,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
         case SYS_GPU_QUERY:
             return sys_gpu_query((syscall_gpu_info_t *)(uintptr_t)regs->rdi);
         case SYS_GPU_PRESENT:
-            /* Mask to valid flag bits: sys_call0 does not set rdi,
-             * so garbage must be zeroed.  flags=0 = legacy no-op. */
+            
+
             return sys_gpu_present(regs->rdi & 0xFF);
         case SYS_GPU_CURSOR:
             return sys_gpu_cursor((int)regs->rdi, (int)regs->rsi,

@@ -56,9 +56,9 @@
 #define SERIAL_SHELL_MIRROR 0
 #endif
 
-/* CI-only boot self-test facility (default off). Build with
- * CI_SELFTEST=1 for the CI test image; production builds skip the
- * icda.test=* command-line hook entirely. */
+
+
+
 #ifndef CI_SELFTEST
 #define CI_SELFTEST 0
 #endif
@@ -93,8 +93,8 @@ static void pit_set_frequency(uint32_t hz) {
 
 static void timer_handler(struct registers *regs) {
     keyboard_pump();
-    /* Apply any Ctrl+Alt+F1..F6 virtual terminal switch requested by the
-     * keyboard driver (force-exits the foreground user app if needed). */
+    
+
     vt_tick();
     audio_playback_tick();
     schedule(regs);
@@ -179,13 +179,13 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(2, has_fb ? "framebuffer" : "vga");
     console_init(has_fb);
 
-    /* GPU device layer: registers the firmware framebuffer as the fbdev
-     * display driver (the same role efifb/simpledrm play on Linux). */
+    
+
     gpu_init(multiboot_info);
 
-    /* Boot splash: hides the raw probe log behind a clean loading screen
-     * (the full text still goes to the serial log).  Finished right
-     * before the shell starts so the text console works afterwards. */
+    
+
+
     if (has_fb) {
         splash_init();
     }
@@ -232,9 +232,9 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(pmm_total_frames(), CONSOLE_STYLE_INFO);
     console_write(" frames\n", CONSOLE_STYLE_INFO);
 
-    /* Program PAT MSR slot 4 to Write-Combining for framebuffer.
-     * Must run before vmm_init() which maps the fb through this slot.
-     * CPUID-gated: silently skips if PAT is not supported. */
+    
+
+
     pat_init_wc();
 
     if (vmm_init(fb_phys_addr(), fb_phys_size()) != 0) {
@@ -260,8 +260,8 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(9, "pf");
     boot_line("interrupts", "page fault handler armed");
 
-    /* Threads copy the default FPU/SSE image at creation, so the unit
-     * must be enabled before the scheduler builds its first thread. */
+    
+
     fpu_init();
     boot_line("cpu", "x87/sse state switching enabled");
 
@@ -304,8 +304,8 @@ void kernel_main(void *multiboot_info) {
         console_write("\n", CONSOLE_STYLE_WARN);
     }
 
-    /* virtio-gpu: only when no multiboot framebuffer is available.
-     * Must run AFTER pci_init so PCI devices are enumerated. */
+    
+
     if (!fb_available()) {
         bootstage_set(1201, "virtio-gpu");
         if (virtio_gpu_init() == 0) {
@@ -435,9 +435,9 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(20, "mounts");
     boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");
 
-    /* /dev nodes + ops registry for the syscall gate. Log-only on
-     * failure: handlers NULL-check the tables and fail closed, so a
-     * failed populate degrades syscalls instead of halting boot. */
+    
+
+
     if (dev_populate() != 0) {
         boot_line("devices", "/dev populate failed, device syscalls will fail closed");
     } else {
@@ -457,11 +457,11 @@ void kernel_main(void *multiboot_info) {
         splash_finish();
         if (has_fb) {
             console_clear();
-            /* Any stray console writes between here and the WM's first
-             * wallpaper present must land on black, never as TTY text:
-             * clear explicitly and, on the GUI VT, mute fb text
-             * (serial-only) until the WM claims fb (which re-mutes).
-             * Text VTs stay unmuted so the shell stays visible. */
+            
+
+
+
+
             fb_clear(FB_BLACK);
             if (vt_is_gui()) {
                 console_mute_fb(1);
@@ -469,23 +469,23 @@ void kernel_main(void *multiboot_info) {
         }
         bootstage_set(22, "shell");
 #if CI_SELFTEST
-        /* Boot self-test facility (CI + bring-up debugging). With
-         * `icda.test=nptest` (or `=nptestlx`) on the kernel command
-         * line, run that test app first and report its exit code on
-         * the serial line, then continue booting normally. Default
-         * boot (no flag) is unaffected. Physical/cmdline access
-         * already implies full control, so this adds no privilege. */
+        
+
+
+
+
+
         if (boot_cmdline_has_flag(multiboot_info, "icda.test=nptest") ||
             boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")) {
             const char *test_path =
                 boot_cmdline_has_flag(multiboot_info, "icda.test=nptestlx")
                 ? "/bin/nptestlx.elf"
                 : "/apps/nptest.app";
-            /* Mirror the console to serial for the duration so every
-             * PASS/FAIL line lands in the serial log (the mirror is
-             * otherwise off once the framebuffer is up). Note:
-             * user_run_path returns spawn/wait status (0/-1), NOT the
-             * app's exit code — that comes from user_last_exit_code. */
+            
+
+
+
+
             int test_st;
             int test_rc;
             console_set_serial_mirror(1);
@@ -517,12 +517,12 @@ void kernel_main(void *multiboot_info) {
 #endif
         int shell_failures = 0;
         for (;;) {
-            /* PID1 supervision (P0 step 2): the kernel runs init, init
-             * runs the VT app (desktop on F1, text shell on F2+). A VT
-             * switch force-exits the foreground tree, which lands us
-             * back here to restart with the app for the new VT.
-             * user_wait_pid reports status; the code comes from the
-             * out-param (B1) — nonzero init exit means failure. */
+            
+
+
+
+
+
             uint64_t init_pid = 0;
             uint64_t init_code = 0;
             int shell_rc;
@@ -534,8 +534,8 @@ void kernel_main(void *multiboot_info) {
             } else if (user_wait_pid(init_pid, &init_code) != 0) {
                 shell_rc = -1;
             } else {
-                /* Reap init's orphans (B2): only init itself is waited
-                 * on, so its force-exited children would leak. */
+                
+
                 sched_reap_orphans();
                 shell_rc = (init_code == 0) ? 0 : -1;
             }

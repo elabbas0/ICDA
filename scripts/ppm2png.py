@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Minimal P6 PPM -> PNG converter using only the stdlib (zlib + struct).
 
 Usage: python ppm2png.py in.ppm out.png

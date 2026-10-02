@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Drive a headless ICDA GUI session in QEMU and verify what renders.
 
 The QEMU guest must be started with:
@@ -29,7 +29,7 @@ def load_cursor():
             return (int(x), int(y))
         except (ValueError, OSError):
             pass
-    return (512, 384)  # where the OS centers the pointer
+    return (512, 384)  
 
 
 def save_cursor(pos):
@@ -79,12 +79,12 @@ class Qmp:
         time.sleep(0.4)
 
     def move(self, x, y, warmup=False):
-        # The emulated PS/2 mouse takes relative motion only, and each
-        # packet carries a signed 8-bit delta, so walk there in steps.
-        # Send each axis as its own input-send-event: QEMU 7.2's PS/2
-        # mouse silently drops the y event when x and y share a call.
-        # QEMU can also lose the very first rel event after a fresh
-        # boot, so the driver issues a throwaway warm-up move once.
+        
+        
+        
+        
+        
+        
         if warmup:
             self.cmd("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": -5}},
@@ -130,7 +130,7 @@ class Qmp:
         time.sleep(0.3)
 
     def key(self, name):
-        # QEMU 7.2 wants an object: {"type": "qcode", "data": name}
+        
         self.cmd("input-send-event", {"events": [
             {"type": "key", "data": {"key": {"type": "qcode", "data": name}, "down": True}},
             {"type": "key", "data": {"key": {"type": "qcode", "data": name}, "down": False}},

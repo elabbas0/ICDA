@@ -70,10 +70,10 @@ static void mouse_send(uint8_t cmd) {
     ps2_data_write(cmd);
 }
 
-/* Discard any bytes still queued after init (e.g. a late ACK on real
- * hardware). Otherwise a stray byte gets consumed as the first byte of
- * the next real packet (0xFA passes the bit-3 sync check), shifting
- * every packet by one byte. */
+
+
+
+
 static void mouse_drain_output(void) {
     uint32_t timeout = 2000000;
     while ((inb(PS2_STATUS) & PS2_STATUS_OUTPUT_FULL) && timeout--) {
@@ -88,42 +88,42 @@ void mouse_init(void) {
     mouse_x = screen_w / 2;
     mouse_y = screen_h / 2;
 
-    /* Enable auxiliary PS/2 port */
+    
     ps2_cmd(PS2_CMD_ENABLE_AUX);
 
-    /* Enable IRQ12 in PS/2 controller config byte */
+    
     ps2_cmd(PS2_CMD_READ_CONFIG);
     ps2_wait_read();
     config = inb(PS2_DATA);
-    config |= 0x02;    /* enable IRQ12 */
-    config &= ~0x20;   /* clear mouse clock disable bit */
+    config |= 0x02;    
+    config &= ~0x20;   
     ps2_cmd(PS2_CMD_WRITE_CONFIG);
     ps2_data_write(config);
 
-    /* Reset mouse */
+    
     mouse_send(MOUSE_CMD_RESET);
-    (void)ps2_read();   /* ACK 0xFA */
-    (void)ps2_read();   /* self-test 0xAA */
-    (void)ps2_read();   /* device id 0x00 */
+    (void)ps2_read();   
+    (void)ps2_read();   
+    (void)ps2_read();   
 
-    /* Set defaults */
+    
     mouse_send(MOUSE_CMD_SET_DEFAULTS);
     (void)ps2_read();
 
-    /* Enable data reporting (stream mode) */
+    
     mouse_send(MOUSE_CMD_ENABLE_STREAM);
     (void)ps2_read();
 
-    /* Discard any bytes that arrived late (see mouse_drain_output). */
+    
     mouse_drain_output();
 }
 
 void mouse_set_screen(int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (w != screen_w || h != screen_h) {
-        /* Resolution change: recenter so the pointer lands where the
-         * window manager initialized it instead of teleporting on the
-         * first event. */
+        
+
+
         screen_w = w;
         screen_h = h;
         mouse_x = w / 2;
@@ -139,9 +139,9 @@ void mouse_irq(struct registers *regs) {
     static uint64_t irq_cnt = 0;
     static uint64_t last_diag_tsc = 0;
     irq_cnt++;
-    /* Rate-limited diagnostic: at most once per ~500ms (5M TSC ticks
-     * at ~10MHz).  Replaces the old per-200-IRQ spam that flooded
-     * the serial port during heavy compositing. */
+    
+
+
     {
         uint32_t lo, hi;
         uint64_t now;
@@ -150,7 +150,7 @@ void mouse_irq(struct registers *regs) {
         if (now - last_diag_tsc > 5000000) {
             last_diag_tsc = now;
             serial_write("mouse: irq cnt=");
-            /* Minimal u64→decimal (no printf in kernel). */
+            
             {
                 char buf[21]; int n = 0; uint64_t v = irq_cnt;
                 if (v == 0) { buf[n++] = '0'; }
@@ -168,23 +168,23 @@ void mouse_irq(struct registers *regs) {
             serial_write("\n");
         }
     }
-    /* Drain every byte currently in the output buffer. One IRQ12 can
-     * cover several bytes (the PIC may coalesce edges under load), and
-     * some IRQs are spurious (e.g. an edge latched during init while the
-     * interrupt was still masked). Reading the data port when nothing is
-     * waiting returns stale data on real hardware and the last byte on
-     * QEMU, so always check the status port first. */
+    
+
+
+
+
+
     for (int guard = 0; guard < 64; guard++) {
         uint8_t status = inb(PS2_STATUS);
-        /* Real HW: some PS/2 controllers (AUX) don't reliably set
-         * status bit 5 under heavy IRQ load — only check OBF.
-         * We are in IRQ12 so the data port is mouse. */
+        
+
+
         if (!(status & PS2_STATUS_OUTPUT_FULL)) {
             break;
         }
         uint8_t byte = inb(PS2_DATA);
 
-        /* First byte must have bit 3 set; resync if not */
+        
         if (mouse_packet_idx == 0 && !(byte & 0x08)) {
             mouse_packet_idx = 0;
             continue;
@@ -200,10 +200,10 @@ void mouse_irq(struct registers *regs) {
             int32_t dy = (int32_t)(int8_t)mouse_packet[2];
 
 
-            /* Y axis is inverted for screen coords */
+            
             dy = -dy;
 
-            /* Ignore if overflow bits set */
+            
             if (flags & 0x40) dx = 0;
             if (flags & 0x80) dy = 0;
 
@@ -219,7 +219,7 @@ void mouse_irq(struct registers *regs) {
             uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
             int overflow = (next == mouse_buf_tail);
             if (overflow) {
-                // Real HW: ring overflow under heavy composite — keep newest event
+                
                 mouse_buf_tail = (mouse_buf_tail + 1) % MOUSE_BUF_CAP;
                 static uint64_t last_warn = 0;
                 uint64_t now = 0;
@@ -239,9 +239,9 @@ void mouse_irq(struct registers *regs) {
             mouse_buf[mouse_buf_head].dy      = dy;
             mouse_buf[mouse_buf_head].buttons = mouse_btn;
             mouse_buf_head = next;
-            /* Wake any process blocked on input (e.g. the window manager
-             * waiting for events) so a mouse move is handled immediately
-             * instead of on the next scheduler tick. */
+            
+
+
             sched_wake_input_waiters();
         }
     }

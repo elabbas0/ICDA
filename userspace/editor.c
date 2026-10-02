@@ -1,16 +1,16 @@
-/*
- * editor.app - ICDA Editor.
- *
- * The Document shell from docs/DESIGN.md: a toolbar, a monospaced text
- * area with a line-number gutter, and a status bar.  Keys arrive
- * already decoded from ic_app (IC_KEY_* for navigation, plain bytes for
- * text), so there is no escape-sequence decoder here.
- *
- * The document is one flat buffer with newlines.  Rows and columns come
- * from a single layout() pass, so a resize reflows the gutter and the
- * text together.  Soft wrapping is deliberately off: a code editor
- * keeps the authored line breaks and scrolls horizontally instead.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W 700
@@ -26,26 +26,26 @@ static struct {
     char     path[EDIT_PATH_CAP];
     char     buf[EDIT_BUF_CAP];
     uint64_t len;
-    uint64_t cursor;          /* byte offset */
-    uint64_t want_col;        /* sticky column for vertical moves */
+    uint64_t cursor;          
+    uint64_t want_col;        
     int      modified;
     int      scroll_row;
     int      scroll_col;
 
-    /* view */
+    
     int rows;
     int cols;
     int text_x, text_y, text_w, text_h;
     int ch, cw;
 
-    /* pointer */
+    
     int hover_save;
     int hover_new;
 
     char status[EDIT_STATUS_CAP];
 } ed;
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t toolbar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
@@ -70,7 +70,7 @@ static ic_rect_t save_rect(ic_app_t *app) {
 
 static const ic_face_t *mono(void) { return ic_font(IC_FONT_MONO); }
 
-/* Everything geometric, from one place. */
+
 static void layout(ic_app_t *app) {
     ic_rect_t t = text_rect(app);
     const ic_face_t *f = mono();
@@ -87,7 +87,7 @@ static void layout(ic_app_t *app) {
     if (ed.cols < 8) ed.cols = 8;
 }
 
-/* ----------------------------------------------------- buffer helpers */
+
 
 static uint64_t line_start(uint64_t pos) {
     if (pos > ed.len) pos = ed.len;
@@ -126,7 +126,7 @@ static void ed_status(const char *text) {
     ic_strcpy(ed.status, text, EDIT_STATUS_CAP);
 }
 
-/* Keep the cursor inside the visible area, both ways. */
+
 static void scroll_to_cursor(void) {
     uint64_t row = row_of(ed.cursor);
     int col = (int)column_of(ed.cursor);
@@ -138,7 +138,7 @@ static void scroll_to_cursor(void) {
     if (ed.scroll_col < 0) ed.scroll_col = 0;
 }
 
-/* ------------------------------------------------------------ editing */
+
 
 static void insert_char(char ch) {
     if (ed.len + 1 >= EDIT_BUF_CAP) {
@@ -215,7 +215,7 @@ static void open_file(const char *path) {
 }
 
 static void save(void) {
-    /* The write returns a byte count, or (uint64_t)-1 on failure. */
+    
     if (icda_write_file(ed.path, ed.buf, ed.len) != (uint64_t)-1) {
         ed.modified = 0;
         ed_status("Saved");
@@ -224,7 +224,7 @@ static void save(void) {
     }
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -255,7 +255,7 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
 
     ic_canvas_push_clip(c, t.x, t.y, t.w, t.h, &saved);
 
-    /* Gutter background, then the line numbers of the visible rows. */
+    
     ic_gfx_fill(c, t.x, t.y, EDIT_GUTTER_W, t.h, p->sidebar);
     for (int r = 0; r < ed.rows; r++) {
         uint64_t row = (uint64_t)(ed.scroll_row + r);
@@ -274,9 +274,9 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
     }
     ic_gfx_vline(c, EDIT_GUTTER_W, t.y, t.h, p->separator);
 
-    /* Text rows, clipped horizontally to the viewport.  Rows are drawn
-     * as runs of same-colour bytes rather than per glyph: one text call
-     * per visible run keeps a full 1920x1080 document cheap. */
+    
+
+
     for (int r = 0; r < ed.rows; r++) {
         uint64_t row = (uint64_t)(ed.scroll_row + r);
         uint64_t start = offset_of_row(row);
@@ -294,7 +294,7 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
                 pos++;
                 continue;
             }
-            /* Extend the run while the bytes are printable and on screen. */
+            
             while (run_end < end) {
                 int vis = run_start_col + (int)(run_end - pos);
                 unsigned char ch = (unsigned char)ed.buf[run_end];
@@ -303,7 +303,7 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
                 run_end++;
             }
             if (run_end > pos) {
-                /* The run ends at screen column `end_col` (exclusive). */
+                
                 int end_col = run_start_col + (int)(run_end - pos);
                 int from = ed.scroll_col > run_start_col ? ed.scroll_col - run_start_col : 0;
                 int to = end_col - ed.scroll_col;
@@ -387,9 +387,9 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
 
-/* Map a click inside the text area to a byte offset. */
+
+
 static void click_to_cursor(int mx, int my) {
     int r = (my - ed.text_y) / ed.ch;
     int col = (mx - ed.text_x) / ed.cw + ed.scroll_col;
@@ -473,7 +473,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
 static void init(ic_app_t *app) {
     long n = (long)icda_read_file("/home/.edit.request", ed.path, sizeof(ed.path));
     if (app->user) {
-        /* Explorer "Open With Editor" passes the file on the command line. */
+        
         const char *arg = (const char *)app->user;
         if (arg[0]) {
             open_file(arg);

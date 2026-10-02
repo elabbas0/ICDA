@@ -15,10 +15,10 @@ typedef enum {
 void console_init(int has_framebuffer);
 void console_set_serial_mirror(int enabled);
 void console_clear(void);
-/* Slice B: mute framebuffer text while the GUI owns the screen (or
- * before the WM's first present) so pre/post-WM console writes go
- * serial-only and never flash over the splash/wallpaper. Text VTs
- * leave this unmuted. */
+
+
+
+
 void console_mute_fb(int muted);
 int console_fb_muted(void);
 void console_set_cursor(int x, int y);

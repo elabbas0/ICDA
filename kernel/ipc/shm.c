@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SHM_PAGE_SZ   4096ULL
-#define SHM_MAX_PAGES 4096   /* 4096*4096 = 16 MiB max per region */
+#define SHM_MAX_PAGES 4096   
 
 typedef struct {
     int      valid;
@@ -35,7 +35,7 @@ uint64_t shm_create(uint64_t size) {
             for (uint64_t j = 0; j < i; j++) pmm_free(r->phys_pages[j]);
             return 0;
         }
-        /* zero page */
+        
         uint8_t *p = (uint8_t *)PHYS_TO_VIRT(phys);
         for (uint64_t b = 0; b < SHM_PAGE_SZ; b++) p[b] = 0;
         r->phys_pages[i] = phys;
@@ -45,7 +45,7 @@ uint64_t shm_create(uint64_t size) {
     r->size      = size;
     r->num_pages = num_pages;
     r->ref_count = 0;
-    return idx + 1; /* 1-based handle */
+    return idx + 1; 
 }
 
 uint64_t shm_map(uint64_t handle) {
@@ -63,7 +63,7 @@ uint64_t shm_map(uint64_t handle) {
                          virt_base + i * SHM_PAGE_SZ,
                          r->phys_pages[i],
                          VMM_FLAGS_USER_RW) != 0) {
-            /* unmap already-mapped pages on failure */
+            
             for (uint64_t j = 0; j < i; j++)
                 vmm_unmap_page(proc->addr_space, virt_base + j * SHM_PAGE_SZ, 0);
             return 0;

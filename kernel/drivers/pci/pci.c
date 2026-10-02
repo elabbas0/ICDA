@@ -110,12 +110,12 @@ static uint64_t pci_cfg_phys(const struct acpi_mcfg_entry *entry, uint8_t bus,
 
 static void pci_enumerate_bus(const struct acpi_mcfg_entry *entry, uint8_t bus) {
     for (uint8_t dev = 0; dev < 32; dev++) {
-        /* Every probe must carry the bus/device/function it intends to
-         * read: pci_read_config* builds the CONFIG1 address from those
-         * fields (cfg_phys is recorded for MMIO use but reads go through
-         * CONFIG1).  Leaving them zero probed device 0:0:0 for every
-         * slot, which both invented phantom devices with vendor 0xFFFF
-         * and mis-read the multi-function flag of every device. */
+        
+
+
+
+
+
         pci_device_t probe = {
             .bus = bus,
             .device = dev,

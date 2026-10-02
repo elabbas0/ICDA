@@ -680,7 +680,7 @@ static int dns_skip_name(const uint8_t *buf, uint16_t size, uint16_t offset, uin
 }
 
 int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
-    /* Use DHCP-provided DNS first, then fallbacks */
+    
     uint32_t dns_servers[4];
     uint32_t dns_count = 0;
     if (net_state.dns) {
@@ -805,7 +805,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
     return -1;
 }
 
-/* ---- DHCP client ---- */
+
 
 #define DHCP_OP_BOOTREQUEST  1
 #define DHCP_OP_BOOTREPLY   2
@@ -849,48 +849,48 @@ static int net_dhcp_discover(void) {
     uint32_t offered_dns = 0;
     int got_offer = 0;
 
-    /* Build DHCP DISCOVER */
+    
     zero_bytes(packet, sizeof(packet));
     packet[0] = DHCP_OP_BOOTREQUEST;
     packet[1] = DHCP_HTYPE_ETHERNET;
     packet[2] = DHCP_HLEN_ETHERNET;
-    packet[4] = 0x00; /* xid - use ticks as transaction id */
+    packet[4] = 0x00; 
     packet[5] = 0x00;
     packet[6] = (uint8_t)(sched_ticks() & 0xFF);
     packet[7] = (uint8_t)((sched_ticks() >> 8) & 0xFF);
-    /* flags = broadcast */
+    
     packet[10] = 0x80;
     packet[11] = 0x00;
-    /* ciaddr = 0 (discover) */
-    /* chaddr = our MAC */
+    
+    
     for (int i = 0; i < 6; i++) {
         packet[28 + i] = net_state.mac[i];
     }
-    /* magic cookie */
+    
     dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
-    /* options: message type = DISCOVER */
+    
     packet[240] = DHCP_OPT_MSG_TYPE;
     packet[241] = 1;
     packet[242] = DHCP_MSG_DISCOVER;
-    /* end option */
+    
     packet[243] = DHCP_OPT_END;
 
-    /* Broadcast MAC */
+    
     for (int i = 0; i < 6; i++) dst_mac[i] = 0xFF;
 
-    /* Send DISCOVER on UDP port 68 -> 67 */
+    
     if (send_udp_packet(dst_mac, 0xFFFFFFFFU, 68, 67, packet, 244) != 0) {
         return -1;
     }
 
-    /* Wait for OFFER (up to 2 seconds) */
+    
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline && !got_offer) {
         int rc = net_drv_recv_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
-        /* Parse DHCP manually: expect UDP from port 67 to broadcast:68 */
+        
         {
             const eth_hdr_t *eth = (const eth_hdr_t *)frame_buf;
             if (ntohs16(eth->type_be) != ETH_TYPE_IPV4) continue;
@@ -904,7 +904,7 @@ static int net_dhcp_discover(void) {
             const uint8_t *dhcp_payload = (const uint8_t *)udp + sizeof(udp_hdr_t);
             if (dhcp_read32(dhcp_payload + 236) != DHCP_MAGIC_COOKIE) continue;
 
-        /* Parse options */
+        
         const uint8_t *opts = dhcp_payload + 240;
         uint8_t msg_type = 0;
         uint32_t srv_id = 0;
@@ -926,13 +926,13 @@ static int net_dhcp_discover(void) {
             server_ip = srv_id;
             got_offer = 1;
         }
-        } /* end parse block */
-    } /* end while */
+        } 
+    } 
     if (!got_offer) {
         return -1;
     }
 
-    /* Build DHCP REQUEST */
+    
     zero_bytes(packet, sizeof(packet));
     packet[0] = DHCP_OP_BOOTREQUEST;
     packet[1] = DHCP_HTYPE_ETHERNET;
@@ -947,16 +947,16 @@ static int net_dhcp_discover(void) {
     dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
     {
         uint32_t opt_off = 240;
-        /* message type = REQUEST */
+        
         packet[opt_off++] = DHCP_OPT_MSG_TYPE;
         packet[opt_off++] = 1;
         packet[opt_off++] = DHCP_MSG_REQUEST;
-        /* requested IP */
+        
         packet[opt_off++] = DHCP_OPT_REQUESTED_IP;
         packet[opt_off++] = 4;
         dhcp_write32(packet + opt_off, offered_ip);
         opt_off += 4;
-        /* server id */
+        
         packet[opt_off++] = DHCP_OPT_SERVER_ID;
         packet[opt_off++] = 4;
         dhcp_write32(packet + opt_off, server_ip);
@@ -968,7 +968,7 @@ static int net_dhcp_discover(void) {
         return -1;
     }
 
-    /* Wait for ACK (up to 2 seconds) */
+    
 
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline) {
@@ -976,7 +976,7 @@ static int net_dhcp_discover(void) {
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
-        /* Parse DHCP manually: UDP from port 67 to broadcast:68 */
+        
         const eth_hdr_t *eth2 = (const eth_hdr_t *)frame_buf;
         if (ntohs16(eth2->type_be) != ETH_TYPE_IPV4) continue;
         const ipv4_hdr_t *ip2 = (const ipv4_hdr_t *)(frame_buf + sizeof(eth_hdr_t));
@@ -1031,12 +1031,12 @@ int net_init(void) {
         net_error = NET_ERR_NO_NIC;
         return -1;
     }
-    /* Try DHCP first */
+    
     if (net_dhcp_discover() == 0) {
         net_state.ready = 1;
         net_error = 0;
     } else {
-        /* Fallback to QEMU static config */
+        
         net_state.ip = NET_LOCAL_IP;
         net_state.gateway = NET_GATEWAY_IP;
         net_state.netmask = NET_NETMASK;
@@ -1138,9 +1138,9 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
             return -1;
         }
         if (pkt.payload_len && pkt.seq == ack) {
-            /* Oversized pages (modern sites easily exceed the cap) are
-             * truncated to what fits instead of failing the request -
-             * the browser's tolerant parser renders the first part. */
+            
+
+
             uint32_t room = (rx_size < NET_HTTP_CAP) ? (uint32_t)(NET_HTTP_CAP - rx_size) : 0;
             uint32_t take = pkt.payload_len < room ? pkt.payload_len : room;
             if (take) {
@@ -1268,8 +1268,8 @@ static int net_https_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const ch
         while (sched_ticks() < deadline) {
             uint32_t got = 0;
             if (tls_read(conn, tls_buf, TLS_CAP, &got) == 0 && got > 0) {
-                /* Truncate oversized pages instead of failing (see the
-                 * plain-HTTP path above). */
+                
+
                 uint64_t room = (rx_size < NET_HTTP_CAP) ? (NET_HTTP_CAP - rx_size) : 0;
                 uint32_t take = (uint64_t)got < room ? got : (uint32_t)room;
                 if (take) {

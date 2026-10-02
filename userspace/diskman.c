@@ -1,15 +1,15 @@
-/*
- * diskman.app - ICDA Disk Utility.
- *
- * The "browser of things" shell from docs/DESIGN.md: a toolbar, a
- * sidebar of storage devices, and a detail pane for the selected
- * device's partition table.
- *
- * Every destructive operation is behind an ic_ui_alert that names the
- * device or partition it will touch and spells out the consequence, and
- * the disk the running system persists to is refused outright.  Nothing
- * here writes to a device until the user has answered the alert.
- */
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W 800
@@ -27,12 +27,12 @@
 #define DISKMAN_LAYOUT_MBR     5
 #define DISKMAN_LAYOUT_GPT     6
 
-/* Role codes for icda_set_partition_role. */
+
 #define DISKMAN_ROLE_EFI     1
 #define DISKMAN_ROLE_SYSTEM  2
 #define DISKMAN_ROLE_SWAP    3
 
-/* Actions that need a confirmation. */
+
 enum { DA_NONE = 0, DA_FORMAT_DEVICE, DA_FORMAT_PART, DA_ROLE, DA_LAYOUT };
 
 typedef struct {
@@ -61,15 +61,15 @@ static struct {
     int        part_count;
     int        selected;
     int        selected_part;
-    int        focus_parts;      /* the partition table has the selection */
-    int        runtime_device;   /* the disk the system is running from, or -1 */
+    int        focus_parts;      
+    int        runtime_device;   
 
-    /* view */
+    
     int rows;
     int first_row;
     int last_row;
 
-    /* pointer */
+    
     int hover_device;
     int hover_refresh;
     int hover_fat32;
@@ -79,15 +79,15 @@ static struct {
     int hover_role_swap;
     int list_focused;
 
-    /* confirmation */
-    int  action;                 /* DA_* */
-    int  action_arg;             /* fs_type or role code */
-    int  alert_hover;            /* 0 cancel, 1 confirm */
+    
+    int  action;                 
+    int  action_arg;             
+    int  alert_hover;            
 
     char status[DISKMAN_STATUS_CAP];
 } dm;
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t toolbar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
@@ -117,7 +117,7 @@ static ic_rect_t refresh_rect(ic_app_t *app) {
     return ic_rect_make(b.x + IC_SP_4, (b.h - IC_H_CONTROL_SM) / 2, 30, IC_H_CONTROL_SM);
 }
 
-/* The five action buttons share the rest of the toolbar. */
+
 static ic_rect_t action_rect(ic_app_t *app, int index) {
     static const char *const labels[5] = { "FAT32", "exFAT", "EFI", "System", "Swap" };
     ic_rect_t b = toolbar_rect(app);
@@ -143,7 +143,7 @@ static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
                         IC_H_CONTROL);
 }
 
-/* The selected device is protected when it holds the running system. */
+
 static int device_is_runtime(int i) {
     return i >= 0 && i < dm.device_count && dm.runtime_device >= 0 &&
            dm.devices[i].index == (uint64_t)dm.runtime_device;
@@ -155,8 +155,8 @@ static int has_partition(void) {
     return dm.focus_parts && dm.part_count > 0;
 }
 
-/* Height of the pane title face, so the detail header and the table
- * below it share one measured origin. */
+
+
 static int title_h(void) {
     return ic_font(IC_FONT_TITLE3)->line_h;
 }
@@ -192,7 +192,7 @@ static ic_rect_t part_rect(ic_app_t *app, int i) {
                         d.w - 2 * IC_SP_4, IC_H_ROW);
 }
 
-/* ------------------------------------------------------------ helpers */
+
 
 static uint64_t dm_strlen(const char *s) {
     uint64_t n = 0;
@@ -221,7 +221,7 @@ static void dm_status(const char *text) {
     dm_copy(dm.status, text, DISKMAN_STATUS_CAP);
 }
 
-/* "931.5 GB" from a sector count. */
+
 static void size_text(uint64_t sectors, uint64_t sector_size, char *out, uint64_t cap) {
     static const char *const units[4] = { "B", "KB", "MB", "GB" };
     uint64_t bytes = sectors * sector_size;
@@ -245,7 +245,7 @@ static void size_text(uint64_t sectors, uint64_t sector_size, char *out, uint64_
     ic_strlcat(out, units[unit], cap);
 }
 
-/* Read a `key=value` token out of a kernel storage line. */
+
 static int field_is(const char *p, const char *key) {
     while (*key) {
         if (*p != *key) return 0;
@@ -277,8 +277,8 @@ static void read_token(const char **p, char *out, uint64_t cap) {
     *p = s;
 }
 
-/* The kernel prints one line per device and one per partition, each
- * starting with two spaces and "index: ". */
+
+
 static void parse_storage(void) {
     const char *p = dm.info;
     dm.device_count = 0;
@@ -362,7 +362,7 @@ static void refresh(void) {
     runtime = icda_runtime_device();
     dm.runtime_device = (runtime == (uint64_t)-1) ? -1 : (int64_t)runtime;
 
-    /* Prefer a real disk over the live image, the way a human would. */
+    
     if (dm.device_count > 1 && dm.selected == 0) dm.selected = 1;
     if (dm.selected >= dm.device_count) dm.selected = dm.device_count ? dm.device_count - 1 : 0;
 
@@ -394,7 +394,7 @@ static const char *action_verb(uint64_t fs_type) {
     }
 }
 
-/* ------------------------------------------------------------- actions */
+
 
 static void do_format_device(uint64_t fs_type) {
     long rc;
@@ -500,7 +500,7 @@ static void resolve_alert(void) {
     else if (action == DA_ROLE) do_set_role(arg);
 }
 
-/* The alert's title, message and target, from the pending action. */
+
 static const char *alert_target(char *buf, uint64_t cap) {
     buf[0] = 0;
     if (dm.action == DA_FORMAT_DEVICE && has_device()) {
@@ -546,7 +546,7 @@ static void alert_text(char *title, uint64_t title_cap, char *msg, uint64_t msg_
     }
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -557,14 +557,14 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_toolbar(c, b);
     ic_ui_icon_button(c, refresh_rect(app), IC_SYM_RELOAD,
                       dm.hover_refresh ? IC_STATE_HOVER : IC_STATE_NORMAL);
-    /* The two formats act on the focused list: device or partition. */
+    
     ic_ui_button(c, action_rect(app, 0), "FAT32", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !enabled ? IC_STATE_DISABLED
                           : (dm.hover_fat32 ? IC_STATE_HOVER : IC_STATE_NORMAL));
     ic_ui_button(c, action_rect(app, 1), "exFAT", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !enabled ? IC_STATE_DISABLED
                           : (dm.hover_exfat ? IC_STATE_HOVER : IC_STATE_NORMAL));
-    /* Roles only make sense on a partition. */
+    
     ic_ui_button(c, action_rect(app, 2), "EFI", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !part_enabled ? IC_STATE_DISABLED
                                : (dm.hover_role_efi ? IC_STATE_HOVER : IC_STATE_NORMAL));
@@ -699,7 +699,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static int device_at(ic_app_t *app, int x, int y) {
     for (int i = 0; i < dm.device_count; i++) {
@@ -732,7 +732,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         dm.hover_device = part_at(app, ev->x, ev->y);
         if (dm.hover_device < 0) {
             int d = device_at(app, ev->x, ev->y);
-            if (d >= 0) dm.hover_device = -100 - d;    /* negative: a device */
+            if (d >= 0) dm.hover_device = -100 - d;    
         }
         break;
     case IC_EV_MOUSE_DOWN: {
@@ -747,7 +747,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if (dm.hover_refresh) { refresh(); break; }
-        /* The formats follow whichever list has the selection. */
+        
         if (dm.hover_fat32) {
             if (dm.focus_parts) confirm(DA_FORMAT_PART, DISKMAN_FS_FAT32);
             else confirm(DA_FORMAT_DEVICE, DISKMAN_FS_FAT32);

@@ -15,15 +15,15 @@
 #include "../proc/sched.h"
 #include "../syscall/syscall.h"
 
-/* Verbose serial tracing (fb-claim identity log). Default off;
- * enable with SERIAL_VERBOSE=1. Error paths always log. */
+
+
 #ifndef SERIAL_VERBOSE
 #define SERIAL_VERBOSE 0
 #endif
 
-/* ---- local helpers ---- */
 
-/* Minimal serial u64 printer (no printf in kernel). */
+
+
 #if SERIAL_VERBOSE
 static void dev_serial_u64(uint64_t v) {
     char buf[21];
@@ -58,7 +58,7 @@ static uint64_t dev_kstrlen(const char *text) {
     return len;
 }
 
-/* ---- /dev/console surface (wraps drivers/console) ---- */
+
 
 static uint64_t dev_con_write(const char *text) {
     if (!text) {
@@ -117,7 +117,7 @@ static const dev_calls_t dev_console_calls = {
     0, 0, 0, 0, 0, 0,
 };
 
-/* ---- /dev/input surface (keyboard only; mouse stays direct) ---- */
+
 
 static const dev_calls_t dev_input_calls = {
     0, 0, 0, 0, 0, 0, 0,
@@ -125,7 +125,7 @@ static const dev_calls_t dev_input_calls = {
     0, 0, 0, 0, 0,
 };
 
-/* ---- /dev/fb0 surface (claim state moved here from syscall.c) ---- */
+
 
 static int fb_claimed = 0;
 static uint64_t fb_claim_pid = 0;
@@ -141,8 +141,8 @@ static void fb_release_if_owner_gone(void) {
         owner->state == PROCESS_REAPED) {
         fb_claimed = 0;
         fb_claim_pid = 0;
-        /* WM is gone: unmute fb text so the text VT / recovery
-         * console is visible again. GUI VT re-mutes on next claim. */
+        
+
         console_mute_fb(0);
     }
 }
@@ -158,8 +158,8 @@ static uint64_t dev_fb_claim_map(void *info) {
     uint64_t pages;
     uint64_t pi;
 
-    /* If the previous claimant is gone (killed, crashed, or exited
-     * via a VT switch), let the new process take over the screen. */
+    
+
     fb_release_if_owner_gone();
     if (fb_claimed) {
         return (uint64_t)-1;
@@ -170,8 +170,8 @@ static uint64_t dev_fb_claim_map(void *info) {
     if (!fproc || !fproc->addr_space) {
         return (uint64_t)-1;
     }
-    /* Identity gate, log-only (P0 step 2): record who claims; no denial.
-     * Verbose-only: enable with SERIAL_VERBOSE=1. */
+    
+
 #if SERIAL_VERBOSE
     serial_write("[ident] op=fb-claim pid=");
     dev_serial_u64(fproc->pid);
@@ -191,10 +191,10 @@ static uint64_t dev_fb_claim_map(void *info) {
     pages = (fb_size + page_offset + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
 
     for (pi = 0; pi < pages; pi++) {
-        /* Device framebuffer: WC (PAT-based) when available for fast
-         * pixel blits, UC (PCD+PWT) safe fallback otherwise.
-         * No VMM_NX: EFER.NXE is not set in boot.asm, so PTE bit 63
-         * is a reserved-bit #PF (ERR=RSVD) on any userspace touch. */
+        
+
+
+
         uint64_t page_flags = pat_wc_available()
             ? (VMM_FLAGS_USER_RW | VMM_WC)
             : (VMM_FLAGS_USER_RW | PTE_NO_CACHE | PTE_WRITE_THRU);
@@ -202,7 +202,7 @@ static uint64_t dev_fb_claim_map(void *info) {
                          fb_virt + pi * PAGE_SIZE_4K,
                          fb_phys_aligned + pi * PAGE_SIZE_4K,
                          page_flags) != 0) {
-            /* Unwind already-mapped pages on mid-loop failure. */
+            
             vmm_unmap_range(fproc->addr_space, fb_virt,
                             pi * PAGE_SIZE_4K, 0);
             return (uint64_t)-1;
@@ -213,17 +213,17 @@ static uint64_t dev_fb_claim_map(void *info) {
         fb->width     = fb_width;
         fb->height    = fb_height;
         fb->pitch     = fb_pitch_value();
-        /* Report the real pixel format.  The window manager blits
-         * into this mapping, so it must know whether it is 32bpp
-         * (typical on real GPUs) or 24bpp (QEMU/GRUB fallbacks). */
+        
+
+
         fb->bpp       = (uint32_t)fb_bpp_value();
     }
-    /* Keep the PS/2 cursor position clamped to the real screen size */
+    
     mouse_set_screen(fb_width, fb_height);
     fb_claimed = 1;
     fb_claim_pid = fproc->pid;
-    /* WM owns the screen now: console text goes serial-only so it can
-     * never scribble over the composited desktop. */
+    
+
     console_mute_fb(1);
     return fb_virt + page_offset;
 }
@@ -287,7 +287,7 @@ static const dev_calls_t dev_fb_calls = {
     dev_gpu_set_cursor,
 };
 
-/* ---- /dev/rtc (read-only text node) ---- */
+
 
 static uint64_t dev_rtc_read(char *buf, uint64_t cap) {
     return rtc_format(buf, cap);
@@ -299,13 +299,13 @@ static const dev_calls_t dev_rtc_calls = {
     dev_rtc_read,
 };
 
-/* ---- population ---- */
+
 
 int dev_populate(void) {
     vfs_node_t *dev;
     int rc = 0;
 
-    /* Idempotent: a persistfs replay may already have recreated /dev. */
+    
     dev = vfs_resolve(vfs_root(), "/dev");
     if (!dev) {
         if (vfs_mkdir(vfs_root(), "/dev") != 0) {
@@ -316,7 +316,7 @@ int dev_populate(void) {
             return -1;
         }
     }
-    /* Discoverability nodes (plain files; dispatch uses the registry). */
+    
     if (!vfs_resolve(vfs_root(), "/dev/console")) {
         if (vfs_create(vfs_root(), "/dev/console") != 0) {
             rc = -1;

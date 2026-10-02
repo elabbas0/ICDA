@@ -1,10 +1,10 @@
-/*
- * ic_ui.c - the ICDA control set (see ic_ui.h).
- *
- * Every measurement here comes from ic_theme.h tokens and every colour
- * from the palette; if a control needs a new value, add a token rather
- * than a literal.
- */
+
+
+
+
+
+
+
 #include "ic_ui.h"
 
 static const ic_palette_t *P(void) { return ic_palette(); }
@@ -16,7 +16,7 @@ ic_state_t ic_ui_state(int enabled, int hover, int pressed) {
     return IC_STATE_NORMAL;
 }
 
-/* ------------------------------------------------------------ buttons */
+
 
 #define IC_BTN_PAD_X     14
 #define IC_BTN_SYM_GAP    6
@@ -110,7 +110,7 @@ void ic_ui_focus_ring(ic_canvas_t *c, ic_rect_t r, float radius) {
                         P()->focus_ring);
 }
 
-/* ------------------------------------------------------------ toggle */
+
 
 void ic_ui_toggle(ic_canvas_t *c, int x, int y, float on, ic_state_t state) {
     const ic_palette_t *p = P();
@@ -123,12 +123,12 @@ void ic_ui_toggle(ic_canvas_t *c, int x, int y, float on, ic_state_t state) {
     if (state == IC_STATE_PRESSED) track = ic_color_mix(track, IC_RGB(0x000000), 0.10f);
     ic_gfx_rrect(c, x, y, IC_TOGGLE_W, IC_TOGGLE_H, (float)IC_TOGGLE_H * 0.5f,
                  ic_color_fade(track, fade));
-    /* knob: soft contact shadow, then face */
+    
     ic_gfx_circle(c, kx, ky + 0.75f, kr + 0.5f, IC_RGBA(0x000000, (uint32_t)(0x40 * fade)));
     ic_gfx_circle(c, kx, ky, kr, ic_color_fade(p->knob, fade));
 }
 
-/* ------------------------------------------------------------ segmented */
+
 
 int ic_ui_segmented_hit(ic_rect_t r, int count, int x, int y) {
     if (count <= 0 || !ic_ui_hit(r, x, y)) return -1;
@@ -166,7 +166,7 @@ void ic_ui_segmented(ic_canvas_t *c, ic_rect_t r, const char *const *labels, int
     }
 }
 
-/* ------------------------------------------------------------ slider */
+
 
 float ic_ui_slider_value(ic_rect_t r, int x) {
     float inner = (float)(r.w - IC_TOGGLE_H);
@@ -202,7 +202,7 @@ void ic_ui_progress(ic_canvas_t *c, ic_rect_t r, float value, ic_color_t tint) {
     }
 }
 
-/* ------------------------------------------------------------ text field */
+
 
 #define IC_FIELD_PAD 8
 
@@ -272,7 +272,7 @@ void ic_ui_textfield(ic_canvas_t *c, ic_rect_t r, const ic_textfield_t *tf) {
     ic_canvas_pop_clip(c, &saved);
 }
 
-/* ------------------------------------------------------------ containers */
+
 
 void ic_ui_window_bg(ic_canvas_t *c, ic_rect_t r) {
     ic_gfx_fill(c, r.x, r.y, r.w, r.h, P()->window);
@@ -425,7 +425,7 @@ void ic_ui_empty_state(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char 
     }
 }
 
-/* ------------------------------------------------------------ panels */
+
 
 void ic_ui_panel(ic_canvas_t *c, ic_rect_t r, float radius, ic_elevation_t elevation,
                  uint32_t *scratch, int scratch_len) {
@@ -436,7 +436,7 @@ void ic_ui_panel(ic_canvas_t *c, ic_rect_t r, float radius, ic_elevation_t eleva
     ic_gfx_rrect_stroke(c, r.x + 1, r.y + 1, r.w - 2, r.h - 2, radius - 1.0f, 1.0f, p->highlight);
 }
 
-/* ------------------------------------------------------------ menus */
+
 
 #define IC_MENU_PAD_Y   5
 #define IC_MENU_PAD_X   5
@@ -513,7 +513,7 @@ void ic_ui_menu(ic_canvas_t *c, const ic_menu_model_t *m, int mx, int my,
     }
 }
 
-/* ------------------------------------------------------------ alert */
+
 
 void ic_ui_alert(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char *title,
                  const char *message, const char *const *buttons, int count,

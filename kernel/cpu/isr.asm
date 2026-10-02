@@ -1,28 +1,28 @@
 bits 64
 
-; macro for exceptions WITHOUT error code
+
 %macro ISR_NOERR 1
 global isr%1
 isr%1:
-    push 0              ; dummy error code
-    push %1             ; interrupt number
+    push 0              
+    push %1             
     jmp isr_common
 %endmacro
 
-; macro for exceptions WITH error code
+
 %macro ISR_ERR 1
 global isr%1
 isr%1:
-    push %1             ; interrupt number
+    push %1             
     jmp isr_common
 %endmacro
 
-; macro for hardware irqs
+
 %macro IRQ 2
 global irq%1
 irq%1:
-    push 0              ; dummy error code
-    push %2             ; interrupt number
+    push 0              
+    push %2             
     jmp irq_common
 %endmacro
 
@@ -34,63 +34,63 @@ global %1
     jmp syscall_common
 %endmacro
 
-; cpu exceptions
-ISR_NOERR 0   ; divide by zero
-ISR_NOERR 1   ; debug
-ISR_NOERR 2   ; non-maskable interrupt
-ISR_NOERR 3   ; breakpoint
-ISR_NOERR 4   ; overflow
-ISR_NOERR 5   ; bound range exceeded
-ISR_NOERR 6   ; invalid opcode
-ISR_NOERR 7   ; device not available
-ISR_ERR   8   ; double fault
-ISR_NOERR 9   ; coprocessor segment overrun
-ISR_ERR   10  ; invalid TSS
-ISR_ERR   11  ; segment not present
-ISR_ERR   12  ; stack-segment fault
-ISR_ERR   13  ; general protection fault
-ISR_ERR   14  ; page fault
-ISR_NOERR 15  ; reserved
-ISR_NOERR 16  ; x87 floating point
-ISR_ERR   17  ; alignment check
-ISR_NOERR 18  ; machine check
-ISR_NOERR 19  ; SIMD floating point
-ISR_NOERR 20  ; virtualization
-ISR_NOERR 21  ; reserved
-ISR_NOERR 22  ; reserved
-ISR_NOERR 23  ; reserved
-ISR_NOERR 24  ; reserved
-ISR_NOERR 25  ; reserved
-ISR_NOERR 26  ; reserved
-ISR_NOERR 27  ; reserved
-ISR_NOERR 28  ; reserved
-ISR_NOERR 29  ; reserved
-ISR_ERR   30  ; security exception
-ISR_NOERR 31  ; reserved
 
-; hardware irqs (irq number, interrupt number)
-IRQ 0,  32    ; timer
-IRQ 1,  33    ; keyboard
-IRQ 2,  34    ; cascade
-IRQ 3,  35    ; COM2
-IRQ 4,  36    ; COM1
-IRQ 5,  37    ; LPT2
-IRQ 6,  38    ; floppy
-IRQ 7,  39    ; LPT1
-IRQ 8,  40    ; real time clock
-IRQ 9,  41    ; free
-IRQ 10, 42    ; free
-IRQ 11, 43    ; free
-IRQ 12, 44    ; PS/2 mouse
-IRQ 13, 45    ; FPU
-IRQ 14, 46    ; primary ATA
-IRQ 15, 47    ; secondary ATA
+ISR_NOERR 0   
+ISR_NOERR 1   
+ISR_NOERR 2   
+ISR_NOERR 3   
+ISR_NOERR 4   
+ISR_NOERR 5   
+ISR_NOERR 6   
+ISR_NOERR 7   
+ISR_ERR   8   
+ISR_NOERR 9   
+ISR_ERR   10  
+ISR_ERR   11  
+ISR_ERR   12  
+ISR_ERR   13  
+ISR_ERR   14  
+ISR_NOERR 15  
+ISR_NOERR 16  
+ISR_ERR   17  
+ISR_NOERR 18  
+ISR_NOERR 19  
+ISR_NOERR 20  
+ISR_NOERR 21  
+ISR_NOERR 22  
+ISR_NOERR 23  
+ISR_NOERR 24  
+ISR_NOERR 25  
+ISR_NOERR 26  
+ISR_NOERR 27  
+ISR_NOERR 28  
+ISR_NOERR 29  
+ISR_ERR   30  
+ISR_NOERR 31  
+
+
+IRQ 0,  32    
+IRQ 1,  33    
+IRQ 2,  34    
+IRQ 3,  35    
+IRQ 4,  36    
+IRQ 5,  37    
+IRQ 6,  38    
+IRQ 7,  39    
+IRQ 8,  40    
+IRQ 9,  41    
+IRQ 10, 42    
+IRQ 11, 43    
+IRQ 12, 44    
+IRQ 13, 45    
+IRQ 14, 46    
+IRQ 15, 47    
 SYSCALL syscall128, 128
 
 %define GDT_KERNEL_DATA 0x10
 %define GDT_USER_RPL    0x3
 
-; common exception handler
+
 extern isr_handler
 isr_common:
     push rax
@@ -115,15 +115,15 @@ isr_common:
     mov fs, ax
     mov gs, ax
 
-    mov rdi, rsp        ; first arg = pointer to registers on stack
+    mov rdi, rsp        
     call isr_handler
 
-    ; Reload the data segments for the interrupted context BEFORE the
-    ; register frame is restored.  Doing it after the pops (through CX)
-    ; zeroed RCX of whatever code the interrupt landed in - any user
-    ; instruction could see RCX change under it on a timer tick.  RAX is
-    ; used as scratch here and restored by the pops below.
-    ; Frame: 15 GPRs, int_no, err_code, then RIP, CS (at rsp + 18*8).
+    
+    
+    
+    
+    
+    
     test byte [rsp + 18*8], GDT_USER_RPL
     jz .isr_return_kernel
     xor eax, eax
@@ -152,10 +152,10 @@ isr_common:
     pop rcx
     pop rax
 
-    add rsp, 16         ; skip int_no and err_code
+    add rsp, 16         
     iretq
 
-; common irq handler
+
 extern irq_handler
 irq_common:
     push rax
@@ -180,15 +180,15 @@ irq_common:
     mov fs, ax
     mov gs, ax
 
-    mov rdi, rsp        ; first arg = pointer to registers on stack
+    mov rdi, rsp        
     call irq_handler
 
-    ; Reload the data segments for the interrupted context BEFORE the
-    ; register frame is restored.  Doing it after the pops (through CX)
-    ; zeroed RCX of whatever code the interrupt landed in - any user
-    ; instruction could see RCX change under it on a timer tick.  RAX is
-    ; used as scratch here and restored by the pops below.
-    ; Frame: 15 GPRs, int_no, err_code, then RIP, CS (at rsp + 18*8).
+    
+    
+    
+    
+    
+    
     test byte [rsp + 18*8], GDT_USER_RPL
     jz .irq_return_kernel
     xor eax, eax
@@ -217,7 +217,7 @@ irq_common:
     pop rcx
     pop rax
 
-    add rsp, 16         ; skip int_no and err_code
+    add rsp, 16         
     iretq
 
 extern syscall_handler
@@ -259,14 +259,14 @@ syscall_common:
     mov rdi, rsp
     call syscall_handler
 
-    ; Exit-pending check must happen BEFORE restoring the user register
-    ; frame: the old code loaded current_thread_ptr into RDX after the
-    ; pops, so every int 0x80 returned to user mode with RDX holding a
-    ; kernel direct-map pointer (the thread struct).  User code that kept
-    ; a pointer live in RDX across a syscall and dereferenced it after
-    ; then wrote/read through a kernel address and page-faulted - the
-    ; root cause of the WM's intermittent crashes.  r11 is in the syscall
-    ; ABI's clobber set, so using it here leaks nothing.
+    
+    
+    
+    
+    
+    
+    
+    
     mov rax, [rsp + 14*8]
     mov r11, [rel current_thread_ptr]
     cmp qword [r11 + THREAD_USER_RETURN_PENDING], 0
@@ -307,7 +307,7 @@ syscall_common:
     mov gs, cx
     iretq
 
-; idt flush
+
 global idt_flush
 idt_flush:
     lidt [rdi]

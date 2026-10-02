@@ -1,4 +1,4 @@
-<#
+<
 .SYNOPSIS
   Minimal QMP client: send one human-monitor-command over QMP.
 
@@ -16,7 +16,7 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\qmp-screendump.ps1 -Port 4444 -Out shot.ppm
-#>
+
 param(
     [int]$Port = 4444,
     [string]$Out = "gui-shot.ppm",
@@ -32,8 +32,8 @@ if ($WaitSeconds -gt 0) {
     Start-Sleep -Seconds $WaitSeconds
 }
 
-# Normalise to an absolute Windows path with forward slashes: QEMU's
-# screendump parses it as a POSIX-ish path and chokes on backslashes.
+
+
 $outAbs = if ([System.IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path $RepoRoot $Out }
 $outQemu = ($outAbs -replace '\\', '/') -replace ' ', '\ '
 if (Test-Path -LiteralPath $outAbs) { Remove-Item -LiteralPath $outAbs -Force }
@@ -52,7 +52,7 @@ try {
     function Send-Qmp([hashtable]$obj) {
         $json = $obj | ConvertTo-Json -Compress -Depth 6
         $writer.WriteLine($json)
-        # Read until we get the reply matching our request id.
+        
         while ($true) {
             $line = $reader.ReadLine()
             if ($null -eq $line) { throw "QMP connection closed" }

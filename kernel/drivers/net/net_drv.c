@@ -1,9 +1,9 @@
-/*
- * net_drv.c — Network driver abstraction layer.
- *
- * Probes for virtio-net first (paravirtual, fast on VirtualBox/QEMU),
- * then falls back to e1000 (emulated, works everywhere).
- */
+
+
+
+
+
+
 #include "net_drv.h"
 #include "e1000.h"
 #include "virtio_net.h"
@@ -18,7 +18,7 @@ typedef enum {
 static net_drv_type_t active_driver = NET_DRV_NONE;
 
 int net_drv_init(void) {
-    /* Try e1000 first (works in QEMU and VirtualBox) */
+    
     if (e1000_init() == 0) {
         active_driver = NET_DRV_E1000;
         serial_write("[net-drv] e1000 initialized\n");

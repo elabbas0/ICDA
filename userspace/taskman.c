@@ -1,16 +1,16 @@
-/*
- * taskman.app - ICDA Activity.
- *
- * The Monitor shell from docs/DESIGN.md: a toolbar strip, a process
- * table, and a summary footer.  Every destructive action sits behind an
- * ic_ui_alert, because a mis-click here ends a program.
- *
- * The kernel serves the process table on demand (icda_list_procs plus a
- * per-PID icda_proc_stats), so the whole monitor costs one poll a
- * second: CPU is the busy-tick delta over the wall-tick delta, Memory
- * is mapped user pages.  The row list is virtual, so a long table does
- * not need a tall window.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W 720
@@ -20,10 +20,10 @@
 #define TM_BUF_CAP       8192
 #define TM_STATUS_CAP    160
 #define TM_STORAGE_CAP   512
-#define TM_SAMPLE_TICKS  100      /* ~1 s at the 100 Hz scheduler */
+#define TM_SAMPLE_TICKS  100      
 #define TM_FOOTER_H      26
 
-/* Table columns, in pixels from the table's left edge. */
+
 #define COL_PID    0
 #define COL_NAME   58
 #define COL_STATE  238
@@ -40,7 +40,7 @@ typedef struct {
     uint64_t cpu_ticks;
     uint64_t mem_bytes;
     uint64_t prev_cpu_ticks;
-    int      suspended;           /* we asked for it; the kernel has no flag */
+    int      suspended;           
 } tm_proc_t;
 
 static struct {
@@ -48,29 +48,29 @@ static struct {
     int       count;
     int       selected;
 
-    /* view */
+    
     int rows;
     int scroll;
-    int first_row;                /* index of the first drawn process */
-    int last_row;                 /* one past the last drawn process */
+    int first_row;                
+    int last_row;                 
 
-    /* pointer state */
+    
     int hover_row;
     int hover_refresh;
     int hover_suspend;
     int hover_kill;
     int list_focused;
 
-    /* confirmation */
-    int alert_action;             /* TM_* pending confirmation */
-    int alert_hover;              /* 0 cancel, 1 confirm */
+    
+    int alert_action;             
+    int alert_hover;              
 
     char     storage[TM_STORAGE_CAP];
     char     status[TM_STATUS_CAP];
     uint64_t last_sample;
 } tm;
 
-/* ------------------------------------------------------------- layout */
+
 
 static ic_rect_t toolbar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR);
@@ -96,8 +96,8 @@ static ic_rect_t row_rect(ic_app_t *app, int row) {
     return ic_rect_make(t.x, t.y + row * IC_H_ROW, t.w, IC_H_ROW);
 }
 
-/* Rows, the visible slice and the scroll clamp: one function, called by
- * draw() and by every reflow. */
+
+
 static void layout(ic_app_t *app) {
     ic_rect_t t = table_rect(app);
     int rows = t.h / IC_H_ROW;
@@ -147,7 +147,7 @@ static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
                         IC_H_CONTROL);
 }
 
-/* ------------------------------------------------------------ helpers */
+
 
 static void tm_copy(char *dst, const char *src, uint64_t cap) {
     uint64_t i = 0;
@@ -211,7 +211,7 @@ static int has_selection(void) {
     return tm.selected >= 0 && tm.selected < tm.count;
 }
 
-/* ------------------------------------------------------------ sampling */
+
 
 static void parse_procs(const char *buf, uint64_t len) {
     uint64_t pos = 0;
@@ -252,7 +252,7 @@ static void parse_procs(const char *buf, uint64_t len) {
         out->mem_bytes = 0;
         out->prev_cpu_ticks = 0;
         out->suspended = 0;
-        /* Carry our own suspend flag across samples, matched by pid. */
+        
         for (int k = 0; k < tm.count; k++) {
             if (tm.procs[k].pid == out->pid && tm.procs[k].suspended) out->suspended = 1;
         }
@@ -296,7 +296,7 @@ static void reselect(uint64_t pid) {
     }
 }
 
-/* ------------------------------------------------------------- actions */
+
 
 static void kill_selected(void) {
     uint64_t pid;
@@ -333,7 +333,7 @@ static void confirm(int action) {
     tm.alert_hover = -1;
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
@@ -384,7 +384,7 @@ static void draw_table(ic_app_t *app, ic_canvas_t *c) {
         ic_color_t text = ic_ui_list_row(c, r, i == tm.selected, tm.list_focused,
                                          i == tm.hover_row ? 1.0f : 0.0f);
         uint64_t busy = p->cpu_ticks > p->prev_cpu_ticks ? p->cpu_ticks - p->prev_cpu_ticks : 0;
-        /* One sampling window: 100 ticks of wall clock. */
+        
         uint64_t wall = TM_SAMPLE_TICKS;
 
         tm_u64(p->pid, cell, sizeof(cell));
@@ -401,7 +401,7 @@ static void draw_table(ic_app_t *app, ic_canvas_t *c) {
         tm_u64(p->mem_bytes / 1024, cell, sizeof(cell));
         ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_MEM, r.y, COL_MEM_W, r.h),
                         cell, text, IC_ALIGN_RIGHT);
-        /* Consume the delta so the next frame measures the next window. */
+        
         p->prev_cpu_ticks = p->cpu_ticks;
     }
 
@@ -451,11 +451,11 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_table(app, c);
     draw_footer(app, c);
     if (tm.alert_action != TM_NONE) draw_alert(app, c);
-    /* The table is the only focusable surface; keep the caret alive. */
+    
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static int row_at(ic_app_t *app, int x, int y) {
     ic_rect_t t = table_rect(app);

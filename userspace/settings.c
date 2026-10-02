@@ -1,23 +1,23 @@
-/*
- * settings.app - ICDA Settings.
- *
- * A sidebar of panes (Appearance, Motion & Display, Sound, About) over
- * grouped rows.  Every change is written to /cfg/icda-settings at once
- * (see settings_store.h); the window manager re-reads the file about
- * once a second, and every app picks up appearance changes through
- * ic_palette_reload(), so nothing needs a restart.
- *
- * This app is the reference for how ICDA apps are built: all layout in
- * one place (the *_rect helpers, shared by drawing and hit-testing),
- * all visuals from ic_ui / ic_theme, motion from ic_tween_t.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 #include "settings_store.h"
 
 #define WIN_W 700
 #define WIN_H 480
 
-/* Content column. */
+
 #define PANE_PAD      IC_SP_6
 #define PANE_TITLE_Y  IC_SP_5
 #define GROUP_Y       72
@@ -33,7 +33,7 @@ static const ic_symbol_t pane_symbols[PANE_COUNT] = {
     IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_INFO
 };
 
-/* Toggle rows: which setting, its copy, its badge colour. */
+
 typedef struct {
     int         pane;
     const char *title;
@@ -59,7 +59,7 @@ typedef struct {
     icda_settings_t s;
     int             pane;
     int             hover_pane;
-    int             hover_row;        /* row index within the current pane */
+    int             hover_row;        
     int             hover_swatch;
     int             hover_segment;
     ic_tween_t      toggle_pos[TOG_COUNT];
@@ -83,7 +83,7 @@ static void save(void) {
     st.save_failed = icda_settings_save(&st.s) != 0;
 }
 
-/* ------------------------------------------------------------ layout */
+
 
 static ic_rect_t sidebar_rect(ic_app_t *app) {
     return ic_rect_make(0, 0, IC_W_SIDEBAR, app->height);
@@ -110,7 +110,7 @@ static ic_rect_t row_rect(ic_rect_t group, int i) {
     return ic_rect_make(group.x, group.y + i * ROW_H, group.w, ROW_H);
 }
 
-/* Appearance pane: row 0 = mode (segmented), row 1 = accent swatches. */
+
 static ic_rect_t appearance_group(ic_app_t *app) {
     return group_rect(app, GROUP_Y, 2);
 }
@@ -133,7 +133,7 @@ static ic_rect_t swatch_rect(ic_app_t *app, int i) {
                         SWATCH_D);
 }
 
-/* Toggle panes: rows are the toggles belonging to the pane. */
+
 static int pane_toggles(int pane, int *out) {
     int n = 0;
     for (int t = 0; t < TOG_COUNT; t++) {
@@ -146,7 +146,7 @@ static ic_rect_t toggle_switch_rect(ic_rect_t row) {
     return ic_ui_toggle_rect(row.x + row.w - IC_SP_3 - IC_TOGGLE_W, row.y + (row.h - IC_TOGGLE_H) / 2);
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_sidebar_bg(c, sidebar_rect(app));
@@ -195,7 +195,7 @@ static void draw_appearance(ic_app_t *app, ic_canvas_t *c) {
         if (i == st.s.accent) ic_symbol_draw(c, IC_SYM_CHECK, cx, cy, 11.0f, IC_RGB(0xFFFFFF));
     }
 
-    /* Live preview of the controls in the chosen look. */
+    
     {
         ic_rect_t pv = ic_rect_make(g.x, g.y + g.h + GROUP_GAP, g.w, 76);
         ic_rect_t b1, b2;
@@ -282,7 +282,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
                         "Settings could not be saved on this device.", p->danger, IC_ALIGN_LEFT);
     }
 
-    /* Keep drawing while any control is mid-transition. */
+    
     for (int t = 0; t < TOG_COUNT; t++) {
         if (ic_tween_running(&st.toggle_pos[t])) ic_app_animate(app);
     }
@@ -292,7 +292,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (ic_tween_running(&st.segment_pos)) ic_app_animate(app);
 }
 
-/* ------------------------------------------------------------ events */
+
 
 static int current_rows(ic_app_t *app, ic_rect_t *rows) {
     if (st.pane == PANE_APPEARANCE) {
@@ -330,8 +330,8 @@ static void update_hover(ic_app_t *app, int x, int y) {
     for (int i = 0; i < n; i++) {
         if (ic_ui_hit(rows[i], x, y)) row = i;
     }
-    /* The appearance rows hold their own controls; only toggles
-     * highlight the whole row. */
+    
+
     set_row_hover(st.pane == PANE_APPEARANCE ? -1 : row);
     st.hover_swatch = -1;
     st.hover_segment = -1;
@@ -426,7 +426,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         break;
     case IC_EV_APPEARANCE:
     case IC_EV_FOCUS:
-        /* Another app (or the desktop menu) may have changed settings. */
+        
         icda_settings_load(&st.s);
         ic_tween_set(&st.segment_pos, (float)st.s.appearance);
         for (int t = 0; t < TOG_COUNT; t++) ic_tween_set(&st.toggle_pos[t], *toggle_value(t) ? 1.0f : 0.0f);

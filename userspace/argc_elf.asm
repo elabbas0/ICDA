@@ -5,9 +5,9 @@ global _start
 
 section .text
 _start:
-    mov rbx, [rsp]           ; argc
+    mov rbx, [rsp]           
 
-    mov eax, 1               ; linux write
+    mov eax, 1               
     mov edi, 1
     lea rsi, [msg_argc]
     mov rdx, msg_argc_len
@@ -25,7 +25,7 @@ _start:
     mov rdx, msg_arg1_len
     int 0x80
 
-    mov rsi, [rsp + 16]      ; argv[1]
+    mov rsi, [rsp + 16]      
     xor rdx, rdx
 .len_loop:
     cmp byte [rsi + rdx], 0
@@ -45,7 +45,7 @@ _start:
 
 .done:
     mov edi, ebx
-    mov eax, 60              ; linux exit
+    mov eax, 60              
     int 0x80
 
 print_uint_nl:

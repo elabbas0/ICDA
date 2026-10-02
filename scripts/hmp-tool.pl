@@ -1,12 +1,12 @@
-#!/usr/bin/perl
-# Generic HMP driver for interactive testing of ICDA.
-# Args: sequence of ops:
-#   k:<keys>        -> sendkey <keys>
-#   m:<dx>,<dy>     -> mouse_move dx dy
-#   r:<n>x<dx>,<dy> -> n mouse_move steps of dx,dy each
-#   b:<mask>        -> mouse_button <mask>
-#   s:<name>        -> screendump /workspace/<name>.ppm
-#   w:<secs>        -> sleep
+
+
+
+
+
+
+
+
+
 use strict;
 use warnings;
 use IO::Socket::INET;

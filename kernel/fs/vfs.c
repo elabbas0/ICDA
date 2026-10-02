@@ -434,7 +434,7 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
         return -1;
     }
     if (new_end <= node->size) {
-        /* In-place overwrite inside the existing buffer. */
+        
         for (i = 0; i < size; i++) {
             node->data[off + i] = data[i];
         }

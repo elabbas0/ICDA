@@ -6,23 +6,23 @@
 
 #define SYSCALL_VECTOR 0x80
 
-/*
- * Errno contract for the validated gate (P0 hardening).
- *
- * Legacy convention is preserved: success is 0 (or a positive value),
- * generic failure is (uint64_t)-1.  The gate below adds precise codes
- * for the failures it newly detects; handlers return them as
- * (uint64_t)-U_Exxx so existing userspace `(long)rc < 0` checks keep
- * working.  Do NOT attach new meanings to -1.  (The page-fault killer
- * in pf.c reports -11 for a dead process, deliberately distinct from
- * U_EFAULT below.)
- */
-#define U_ENOENT  2   /* no such file or directory */
-#define U_EBADF   9   /* bad file descriptor */
-#define U_ENOMEM  12  /* out of memory / unmapped range */
-#define U_EACCES  13  /* permission denied (incl. TLS refusing to connect) */
-#define U_EFAULT  14  /* bad user-space address */
-#define U_EINVAL  22  /* invalid argument */
+
+
+
+
+
+
+
+
+
+
+
+#define U_ENOENT  2   
+#define U_EBADF   9   
+#define U_ENOMEM  12  
+#define U_EACCES  13  
+#define U_EFAULT  14  
+#define U_EINVAL  22  
 
 typedef enum {
     SYS_CONSOLE_WRITE = 0,
@@ -79,7 +79,7 @@ typedef enum {
     SYS_HTTPS_GET_IPV4 = 51,
     SYS_EXEC_ARGS = 52,
     SYS_SPAWN_ARGS = 53,
-    /* IPC / GUI — added for desktop environment */
+    
     SYS_SHM_CREATE        = 54,
     SYS_SHM_MAP           = 55,
     SYS_SHM_UNMAP         = 56,
@@ -91,13 +91,13 @@ typedef enum {
     SYS_MAP_FRAMEBUFFER   = 62,
     SYS_INPUT_READ_MOUSE  = 63,
     SYS_GUI_AVAILABLE     = 64,
-    /* GPU device layer (DRM/KMS-shaped general GPU driver) */
+    
     SYS_GPU_QUERY         = 65,
     SYS_GPU_PRESENT       = 66,
     SYS_GPU_CURSOR        = 67,
-    /* Power management */
+    
     SYS_POWER             = 68,
-    /* Process stats for the task manager */
+    
     SYS_PROC_STATS        = 69
 } syscall_number_t;
 
@@ -125,30 +125,30 @@ typedef struct {
 } syscall_install_plan_t;
 
 typedef struct {
-    uint64_t virt_addr;  /* userspace VA of mapped framebuffer */
+    uint64_t virt_addr;  
     int32_t  width;
     int32_t  height;
-    uint32_t pitch;      /* bytes per row */
+    uint32_t pitch;      
     uint32_t bpp;
 } syscall_fb_info_t;
 
 typedef struct {
-    char     name[32];   /* driver name, e.g. "fbdev" */
-    int32_t  width;      /* current mode */
+    char     name[32];   
+    int32_t  width;      
     int32_t  height;
     uint32_t pitch;
     uint32_t bpp;
     uint32_t mode_count;
-    uint32_t hw_cursor;  /* device has a hardware cursor plane */
+    uint32_t hw_cursor;  
     uint32_t present_supported;
-    uint32_t flip_active; /* 1 when tear-free page flipping is active */
-    uint32_t needs_present; /* append-only ABI: 1 when present() does real DMA work */
+    uint32_t flip_active; 
+    uint32_t needs_present; 
 } syscall_gpu_info_t;
 
 typedef struct {
-    uint64_t cpu_ticks;  /* scheduler ticks consumed by this process */
-    uint64_t mem_bytes;  /* user-space pages mapped, in bytes */
-    char     name[64];   /* executable basename */
+    uint64_t cpu_ticks;  
+    uint64_t mem_bytes;  
+    char     name[64];   
 } syscall_proc_stats_t;
 
 typedef struct {
@@ -156,7 +156,7 @@ typedef struct {
     int32_t  abs_y;
     int32_t  dx;
     int32_t  dy;
-    uint8_t  buttons;    /* bit0=left, bit1=right, bit2=middle */
+    uint8_t  buttons;    
 } syscall_mouse_event_t;
 
 void syscall_init(void);

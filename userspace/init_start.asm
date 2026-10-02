@@ -6,8 +6,8 @@ extern init_main
 
 section .text
 _start:
-    ; Standard argc/argv stack layout (see user_build_initial_stack):
-    ; [rsp] = argc, [rsp+8] = argv[0].
+    
+    
     mov rdi, [rsp]
     lea rsi, [rsp + 8]
     call init_main

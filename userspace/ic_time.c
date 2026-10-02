@@ -1,22 +1,22 @@
-/*
- * ic_time.c - TSC clock calibrated against the 100 Hz scheduler tick.
- *
- * Calibration waits for a tick edge, samples the TSC, waits two more
- * edges and samples again, so the measured window is exactly 20 ms of
- * tick time.  Emulators without an invariant TSC still get a usable
- * (if less exact) rate; if the TSC does not advance at all the clock
- * falls back to tick resolution.
- */
+
+
+
+
+
+
+
+
+
 #include "ic_time.h"
 #include "icda_sys.h"
 
-#define IC_TICK_NS       10000000ULL  /* 100 Hz scheduler tick */
+#define IC_TICK_NS       10000000ULL  
 #define IC_CAL_TICKS     2ULL
 
 static int      ic_time_ready;
 static uint64_t ic_tsc_base;
 static uint64_t ic_tick_base;
-/* Nanoseconds per TSC cycle as 32.32 fixed point. */
+
 static uint64_t ic_ns_per_cycle_q32;
 
 static inline uint64_t ic_rdtsc(void) {
@@ -25,9 +25,9 @@ static inline uint64_t ic_rdtsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-/* Block until the next tick boundary.  Sleeping (not yield-spinning)
- * keeps the CPU free and wakes us right at the tick, so the TSC sample
- * taken after each wake sits at the same phase of the tick. */
+
+
+
 static uint64_t ic_wait_tick_edge(void) {
     icda_sleep(1);
     return icda_ticks();
@@ -62,8 +62,8 @@ uint64_t ic_time_ns(void) {
         return (icda_ticks() - ic_tick_base) * IC_TICK_NS;
     }
     cycles = ic_rdtsc() - ic_tsc_base;
-    /* 64x64->128 multiply: a slow emulated TSC makes the rate large
-     * enough that a 64-bit product would overflow within seconds. */
+    
+
     {
         __extension__ typedef unsigned __int128 u128;
         return (uint64_t)(((u128)cycles * ic_ns_per_cycle_q32) >> 32);
@@ -82,19 +82,19 @@ float ic_time_s(void) {
     return (float)((double)ic_time_ns() * 1e-9);
 }
 
-/* ---- wall clock ---- */
+
 
 static int ic_two(const char *p) {
     if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return -1;
     return (p[0] - '0') * 10 + (p[1] - '0');
 }
 
-/* Monday-based weekday (Sakamoto's method). */
+
 static int ic_weekday(int y, int m, int d) {
     static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
     int dow;
     if (m < 3) y -= 1;
-    dow = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;   /* 0 = Sunday */
+    dow = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;   
     return (dow + 6) % 7;
 }
 

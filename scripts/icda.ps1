@@ -710,8 +710,8 @@ function Invoke-Ready {
             $null = Wait-Docker
         }
     } catch {
-        # The requirement check below will report the missing Docker CLI and
-        # trigger the installer path.
+        
+        
     }
 
     if (-not (Invoke-RequirementCheck -InstallMode $InstallMode)) {

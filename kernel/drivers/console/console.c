@@ -10,8 +10,8 @@ static kernel_device_t *display_device = 0;
 static kernel_device_t *serial_device = 0;
 static int console_display_is_framebuffer = 0;
 static int console_serial_mirror_enabled = 1;
-/* When nonzero, fb text output is suppressed (serial still flows).
- * Set while the GUI VT is waiting for / owned by the WM. */
+
+
 static int console_fb_text_muted = 0;
 
 void console_mute_fb(int muted) {

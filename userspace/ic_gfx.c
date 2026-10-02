@@ -1,17 +1,17 @@
-/*
- * ic_gfx.c - the ICDA 2D rasteriser (see ic_gfx.h).
- *
- * Conventions used throughout:
- *   - geometry is integer; pixel (px, py) is sampled at its centre
- *     (px + 0.5, py + 0.5);
- *   - coverage of an edge at distance d from a shape boundary is
- *     clamp(0.5 - d), which gives a one-pixel antialiasing ramp;
- *   - only corner squares and edge bands pay for coverage math, straight
- *     interior spans are plain fills.
- */
+
+
+
+
+
+
+
+
+
+
+
 #include "ic_gfx.h"
 
-/* ------------------------------------------------------------ colour */
+
 
 static inline uint32_t ic_mix_px(uint32_t d, uint32_t s, uint32_t a) {
     uint32_t ia = 255u - a;
@@ -46,7 +46,7 @@ ic_color_t ic_color_over(ic_color_t base, ic_color_t top) {
     return 0xFF000000u | ic_mix_px(base & 0xFFFFFFu, top & 0xFFFFFFu, IC_ALPHA(top));
 }
 
-/* ------------------------------------------------------------ canvas */
+
 
 ic_canvas_t ic_canvas_make(uint32_t *px, int w, int h) {
     ic_canvas_t c;
@@ -66,7 +66,7 @@ void ic_canvas_set_clip(ic_canvas_t *c, int x, int y, int w, int h) {
     c->clip_y = y;
     c->clip_w = w > 0 ? w : 0;
     c->clip_h = h > 0 ? h : 0;
-    /* An empty clip must stay empty, not fall back to "everything". */
+    
     if (c->clip_w == 0 || c->clip_h == 0) {
         c->clip_x = -1;
         c->clip_y = -1;
@@ -124,7 +124,7 @@ void ic_canvas_pop_clip(ic_canvas_t *c, const ic_rect_t *saved) {
     c->clip_h = saved->h;
 }
 
-/* Clip a rect against the canvas; returns 0 if nothing is left. */
+
 static int ic_clip_rect(const ic_canvas_t *c, int x, int y, int w, int h,
                         int *x0, int *y0, int *x1, int *y1) {
     if (w <= 0 || h <= 0) return 0;
@@ -150,7 +150,7 @@ static inline void ic_plot(uint32_t *row, int x, uint32_t rgb, uint32_t a, float
     else if (k > 0u) row[x] = ic_mix_px(row[x], rgb, k);
 }
 
-/* ------------------------------------------------------------ shapes */
+
 
 void ic_gfx_fill(ic_canvas_t *c, int x, int y, int w, int h, ic_color_t color) {
     int x0, y0, x1, y1;
@@ -169,7 +169,7 @@ void ic_gfx_vline(ic_canvas_t *c, int x, int y, int h, ic_color_t color) {
     ic_gfx_fill(c, x, y, 1, h, color);
 }
 
-/* Rounded-rect geometry with radii already clamped to fit. */
+
 typedef struct {
     int   x, y, w, h;
     float tl, tr, br, bl;
@@ -188,7 +188,7 @@ static void ic_rr_make(ic_rr_t *g, int x, int y, int w, int h,
     g->bl = bl < 0 ? 0 : (bl > lim ? lim : bl);
 }
 
-/* Coverage (0..1) of the pixel whose centre is (fx, fy). */
+
 static float ic_rr_cov(const ic_rr_t *g, float fx, float fy) {
     float l = (float)g->x, t = (float)g->y;
     float r = (float)(g->x + g->w), b = (float)(g->y + g->h);
@@ -216,7 +216,7 @@ static inline int ic_ceil_i(float v) {
     return (float)i < v ? i + 1 : i;
 }
 
-/* Column extent of the left/right corner zones for row py. */
+
 static void ic_rr_row_zones(const ic_rr_t *g, int py, int *lz, int *rz) {
     float fy = (float)py + 0.5f;
     float lr = 0.0f, rr = 0.0f;
@@ -416,7 +416,7 @@ void ic_gfx_gradient_v(ic_canvas_t *c, int x, int y, int w, int h,
     }
 }
 
-/* ------------------------------------------------------------- blits */
+
 
 void ic_gfx_blit(ic_canvas_t *c, int x, int y, const uint32_t *src, int sw, int sh,
                  int pitch, uint32_t opacity) {
@@ -462,7 +462,7 @@ void ic_gfx_blit_rrect4(ic_canvas_t *c, int x, int y, const uint32_t *src, int s
 
 static inline uint32_t ic_bilerp(const uint32_t *src, int sw, int sh, int pitch,
                                  int32_t fx, int32_t fy) {
-    /* fx/fy are 16.16 texel coordinates of the sample. */
+    
     int ix = fx >> 16, iy = fy >> 16;
     uint32_t wx = (uint32_t)(fx & 0xFFFF) >> 8, wy = (uint32_t)(fy & 0xFFFF) >> 8;
     int ix1 = ix + 1, iy1 = iy + 1;
@@ -565,8 +565,8 @@ void ic_gfx_image_rgba(ic_canvas_t *c, int x, int y, int dw, int dh,
             wt[1] = wx * (256u - wy);
             wt[2] = (256u - wx) * wy;
             wt[3] = wx * wy;
-            /* Premultiply while filtering so transparent texels do not
-             * bleed their (meaningless) colour into the edge. */
+            
+
             for (int k = 0; k < 4; k++) {
                 uint32_t al = p[k][3];
                 acc[0] += p[k][0] * al * (wt[k] >> 8);
@@ -603,13 +603,13 @@ void ic_gfx_mask(ic_canvas_t *c, int x, int y, const uint8_t *mask, int mw, int 
     }
 }
 
-/* ------------------------------------------------------------ effects */
 
-/* One box pass over n pixels with stride, radius r, edge-clamped. */
+
+
 static void ic_box_pass(uint32_t *base, int n, int stride, int r, uint32_t *line) {
     uint32_t sr = 0, sg = 0, sb = 0;
     uint32_t div = (uint32_t)(2 * r + 1);
-    /* 16.16 reciprocal avoids a divide per channel per pixel. */
+    
     uint32_t inv = (65536u + div / 2) / div;
     for (int i = 0; i < n; i++) line[i] = base[(int64_t)i * stride];
     for (int i = -r; i <= r; i++) {
@@ -650,16 +650,16 @@ void ic_gfx_blur(ic_canvas_t *c, int x, int y, int w, int h, int radius,
     ic_blur_buf(c->px + (int64_t)y0 * c->w + x0, x1 - x0, y1 - y0, c->w, radius, scratch);
 }
 
-/* --- shadow tiles --- */
+
 
 #define IC_SHADOW_SLOTS    6
 #define IC_SHADOW_TILE_MAX 136
 
 typedef struct {
-    int     radius_q;  /* radius * 4, cache key */
+    int     radius_q;  
     int     blur;
-    int     extent;    /* how far the shadow reaches past the shape edge */
-    int     size;      /* tile edge = extent + radius + extent */
+    int     extent;    
+    int     size;      
     uint8_t alpha[IC_SHADOW_TILE_MAX * IC_SHADOW_TILE_MAX];
 } ic_shadow_tile_t;
 
@@ -689,9 +689,9 @@ static const ic_shadow_tile_t *ic_shadow_tile(float radius, int blur) {
     }
     t = &ic_shadow_cache[ic_shadow_next];
     ic_shadow_next = (ic_shadow_next + 1) % IC_SHADOW_SLOTS;
-    /* The shape's top-left corner sits at (ext, ext) and the shape runs
-     * off the tile to the right and bottom; edge-clamped blurring then
-     * treats it as an infinitely large rounded rect. */
+    
+
+
     ic_rr_make(&g, ext, ext, size * 4, size * 4, radius, radius, radius, radius);
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
@@ -728,8 +728,8 @@ void ic_gfx_shadow(ic_canvas_t *c, int x, int y, int w, int h, float radius,
     sh = h + 2 * ext;
     if (!ic_clip_rect(c, sx, sy, sw, sh, &x0, &y0, &x1, &y1)) return;
     {
-        /* Pixels fully covered by the (opaque) shape itself are skipped;
-         * corner squares still get shadow under the arc cut-outs. */
+        
+
         int rr = ic_ceil_i(rclamp);
         for (int py = y0; py < y1; py++) {
             uint32_t *row = c->px + (int64_t)py * c->w;
@@ -772,8 +772,8 @@ void ic_gfx_backdrop(ic_canvas_t *c, int x, int y, int w, int h, float radius,
     if (w <= 0 || h <= 0) return;
     if (!ic_clip_rect(c, x, y, w, h, &x0, &y0, &x1, &y1)) return;
     ic_rr_make(&g, x, y, w, h, radius, radius, radius, radius);
-    /* Blur the whole shape (not just the clipped part) so the result is
-     * stable no matter which damage rect is being repainted. */
+    
+
     bx0 = x < 0 ? 0 : x;
     by0 = y < 0 ? 0 : y;
     bx1 = x + w > c->w ? c->w : x + w;

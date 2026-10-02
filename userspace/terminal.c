@@ -1,18 +1,18 @@
-/*
- * terminal.app - ICDA Terminal.
- *
- * The Console shell from docs/DESIGN.md: one inset `content` surface,
- * IC_FONT_MONO, no toolbar and no status bar.  Output is kept as
- * logical lines (not a fixed character grid), so a resize re-wraps
- * instead of clipping and the scrollback survives the window changing
- * size.
- *
- * The command line is a live logical line: the prompt plus an editable
- * buffer with a real cursor, history and word-wise keys.  Up/Down walk
- * the history (or scroll once already scrolled back), PageUp/PageDown
- * move a screen at a time, and the overlay scrollbar fades in only
- * while the view is away from the bottom.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #include "libicda.h"
 
 #define WIN_W 640
@@ -24,14 +24,14 @@
 #define TERM_HIST_MAX   64
 #define TERM_CMD_MAX    256
 
-/* One logical line of output.  Roles map to palette colours at draw
- * time, so a scrollback recorded in dark mode stays correct in light. */
+
+
 typedef enum {
-    TERM_ROLE_TEXT = 0,   /* label */
-    TERM_ROLE_MUTED,      /* label_tertiary */
-    TERM_ROLE_ACCENT,     /* accent */
-    TERM_ROLE_ERROR,      /* danger */
-    TERM_ROLE_PROMPT      /* success: the prompt */
+    TERM_ROLE_TEXT = 0,   
+    TERM_ROLE_MUTED,      
+    TERM_ROLE_ACCENT,     
+    TERM_ROLE_ERROR,      
+    TERM_ROLE_PROMPT      
 } term_role_t;
 
 typedef struct {
@@ -41,28 +41,28 @@ typedef struct {
 
 static struct {
     term_line_t lines[TERM_LINES_MAX];
-    int         count;      /* logical lines used */
-    int         head;       /* first valid index (oldest line) */
+    int         count;      
+    int         head;       
 
-    /* command line */
+    
     char  cmd[TERM_CMD_MAX];
     int   cmd_len;
-    int   cmd_cursor;               /* byte offset in cmd */
+    int   cmd_cursor;               
     char  history[TERM_HIST_MAX][TERM_CMD_MAX];
     int   history_count;
-    int   history_pos;              /* index for up/down, -1 = editing */
-    char  draft[TERM_CMD_MAX];      /* in-progress line, restored on Esc */
+    int   history_pos;              
+    char  draft[TERM_CMD_MAX];      
     int   draft_saved;
 
-    /* view, all recomputed by layout() */
-    int rows;         /* visible text rows */
-    int cols;         /* columns that fit the content box */
-    int log_rows;     /* wrapped rows the log occupies */
-    int cmd_rows;     /* wrapped rows the command line occupies */
-    int total_rows;   /* log_rows + cmd_rows */
-    int cursor_row;   /* absolute wrapped row of the command-line cursor */
-    int cursor_col;   /* absolute column of the command-line cursor */
-    int scroll_rows;  /* rows scrolled back from the bottom */
+    
+    int rows;         
+    int cols;         
+    int log_rows;     
+    int cmd_rows;     
+    int total_rows;   
+    int cursor_row;   
+    int cursor_col;   
+    int scroll_rows;  
 
     int  hover_scroll;
     int  dragging_scroll;
@@ -70,19 +70,19 @@ static struct {
     ic_tween_t scrollbar;
 } term;
 
-/* Right-click menu.  The blur in ic_ui_menu needs w*h + max(w,h) px. */
+
 #define TERM_SCRATCH_PX (192 * 120)
 static uint32_t menu_scratch[TERM_SCRATCH_PX];
 
 static const char *const PROMPT = "icda@desktop:~$ ";
 #define PROMPT_LEN 14
 
-/* --------------------------------------------------------------- log */
+
 
 static term_line_t *log_new(void) {
     if (term.count < TERM_LINES_MAX) return &term.lines[term.count++];
-    /* Full: drop the oldest line.  One 1 KB memmove per 2000 appended
-     * lines beats a ring's index maths on every write. */
+    
+
     for (int i = 1; i < term.count; i++) term.lines[i - 1] = term.lines[i];
     term.count--;
     term.head++;
@@ -108,7 +108,7 @@ static void log_clear(void) {
     term.head = 0;
 }
 
-/* --------------------------------------------------------- geometry */
+
 
 static const ic_face_t *mono(void) { return ic_font(IC_FONT_MONO); }
 
@@ -122,13 +122,13 @@ static ic_rect_t content_rect(ic_app_t *app) {
                         app->height - 2 * TERM_PAD);
 }
 
-/* Wrapped rows a string of `len` bytes needs. */
+
 static int rows_for(int len, int cols) {
     return len / cols + 1;
 }
 
-/* The single source of truth for geometry: draw() and every reflow call
- * this, so nothing else computes rows or columns. */
+
+
 static void layout(ic_app_t *app) {
     ic_rect_t r = content_rect(app);
     const ic_face_t *f = mono();
@@ -164,7 +164,7 @@ static int max_scroll(void) {
     return m > 0 ? m : 0;
 }
 
-/* -------------------------------------------------------------- input */
+
 
 static void cmd_set(const char *s) {
     ic_strcpy(term.cmd, s ? s : "", TERM_CMD_MAX);
@@ -177,8 +177,8 @@ static const char *skip_spaces(const char *s) {
     return s;
 }
 
-/* True when `line` is exactly `word` or starts with `word` + a space, so
- * "lsx" does not fire the "ls" builtin. */
+
+
 static int is_cmd(const char *line, const char *word) {
     int n = 0;
     while (word[n]) n++;
@@ -267,7 +267,7 @@ static void run_command(const char *raw) {
         return;
     }
     if (ic_strprefix(cmd, "/")) { run_spawn(cmd); return; }
-    /* A bare name resolves against the installed app folder. */
+    
     ic_strcpy(path, "/apps/", TERM_CMD_MAX);
     ic_strlcat(path, cmd, TERM_CMD_MAX);
     run_spawn(path);
@@ -324,7 +324,7 @@ static void history_step(int dir) {
     cmd_set(term.history[term.history_pos]);
 }
 
-/* Tab completes against the apps the shell knows about. */
+
 static const char *const completions[] = {
     "ls", "cat ", "clear", "help", "ps", "run ",
     "settings.app", "terminal.app", "editor.app", "browser.app",
@@ -351,7 +351,7 @@ static void complete(void) {
     }
 }
 
-/* Byte-offset stepping that respects UTF-8 continuation bytes. */
+
 static int prev_offset(const char *s, int at) {
     int i = at - 1;
     if (i <= 0) return 0;
@@ -414,7 +414,7 @@ static void type_char(uint32_t key) {
     term.history_pos = -1;
 }
 
-/* -------------------------------------------------------------- menu */
+
 
 enum { TR_CLEAR = 1, TR_NEW, TR_QUIT };
 
@@ -458,7 +458,7 @@ static void tr_menu_activate(ic_app_t *app, int which) {
     }
 }
 
-/* ------------------------------------------------------------ drawing */
+
 
 static ic_color_t role_color(uint8_t role) {
     const ic_palette_t *p = ic_palette();
@@ -471,8 +471,8 @@ static ic_color_t role_color(uint8_t role) {
     }
 }
 
-/* The prompt and the buffer are one logical line, so it is composed into
- * a scratch string and wrapped exactly like log output. */
+
+
 static int compose_command(char *out, int cap) {
     int n = 0;
     for (int i = 0; i < PROMPT_LEN && n < cap - 1; i++) out[n++] = PROMPT[i];
@@ -496,7 +496,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
 
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
     ic_gfx_fill(c, r.x, r.y, r.w, r.h, p->content);
-    /* Hairline around the inset console surface. */
+    
     ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, IC_R_CONTROL, 1.0f, p->separator);
 
     baseline0 = r.y + ic_text_center_baseline(f, 0, ch);
@@ -505,18 +505,18 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     last = first + term.rows;
     if (last > term.total_rows) last = term.total_rows;
 
-    /* Log lines. */
+    
     row = 0;
     for (i = 0; i < term.count && row < last; i++) {
         const term_line_t *line = &term.lines[term.head + i];
         int len = (int)ic_strlen(line->text);
         int col = 0;
-        /* A line owns rows_for(len) rows: its wrapped chunks, plus one
-         * trailing empty row when it fills the last column exactly (the
-         * cursor needs somewhere to sit).  Advancing by that same
-         * arithmetic keeps this loop in step with layout()'s log_rows.
-         * Counting the newline as an extra row instead overshoots by one
-         * row per line, so the log overwrites the command line. */
+        
+
+
+
+
+
         int owned = rows_for(len, term.cols);
         int drawn = 0;
         while (col < len) {
@@ -536,7 +536,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
         row += owned - drawn;
     }
 
-    /* The live command line, wrapped like any other line. */
+    
     cmdlen = compose_command(cmdline, (int)sizeof(cmdline));
     {
         int col = 0;
@@ -569,7 +569,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
         }
     }
 
-    /* Caret, on top of the console surface only. */
+    
     if (app->focused && term.cursor_row >= first && term.cursor_row < last &&
         ic_app_caret_visible(app)) {
         int cx = r.x + term.cursor_col * cell_w();
@@ -577,7 +577,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
         if (cx + 3 <= r.x + r.w) ic_gfx_fill(c, cx, cy, 2, ch, p->label);
     }
 
-    /* Overlay scrollbar: only while scrolled back or being dragged. */
+    
     scrolled = term.scroll_rows > 0;
     ic_tween_to(&term.scrollbar,
                 (scrolled || term.hover_scroll || term.dragging_scroll) ? 1.0f : 0.0f,
@@ -588,8 +588,8 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     }
     if (ic_tween_running(&term.scrollbar)) ic_app_animate(app);
 
-    /* Scrolled back: say so, so the frozen view is not mistaken for a
-     * hung terminal. */
+    
+
     if (scrolled) {
         char note[64];
         int w;
@@ -611,11 +611,11 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
                                       app->mouse_x, app->mouse_y);
         ic_ui_menu(c, &tr_menu, tr_menu_x, tr_menu_y, menu_scratch, TERM_SCRATCH_PX);
     }
-    /* Keep the caret blinking while the terminal has focus. */
+    
     if (app->focused) ic_app_animate(app);
 }
 
-/* -------------------------------------------------------------- events */
+
 
 static void scroll_by(int rows) {
     int max = max_scroll();
@@ -624,8 +624,8 @@ static void scroll_by(int rows) {
     if (term.scroll_rows < 0) term.scroll_rows = 0;
 }
 
-/* Dragging the overlay scrollbar: the thumb tracks the pointer, so map
- * y back to a first visible row. */
+
+
 static void scrollbar_drag(ic_app_t *app, int y) {
     ic_rect_t r = content_rect(app);
     int track_h = r.h;
@@ -717,8 +717,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         }
         break;
     case IC_EV_RESIZE:
-        /* Rows and columns come from the new size; the log re-wraps and
-         * the scroll position is re-clamped by layout(). */
+        
+
         layout(app);
         break;
     case IC_EV_APPEARANCE:
