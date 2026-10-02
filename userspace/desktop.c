@@ -842,9 +842,15 @@ static int item_at(ic_app_t *app, int x, int y) {
     }
     {
         ic_rect_t c = content_rect(app);
-        int col = (x - c.x - IC_SP_3) / GRID_CELL_W;
-        int row = (y - c.y - IC_SP_3) / GRID_CELL_H;
-        int idx;
+        int col, row, idx;
+        /* Reject anything outside the content area *before* dividing.
+         * C truncates integer division toward zero, so a click on the
+         * toolbar or the sidebar yields (negative)/size == 0 rather than
+         * -1 and the bounds check below never fires - the click then
+         * selects a grid cell instead. */
+        if (!ic_ui_hit(c, x, y)) return -1;
+        col = (x - c.x - IC_SP_3) / GRID_CELL_W;
+        row = (y - c.y - IC_SP_3) / GRID_CELL_H;
         if (col < 0 || col >= ex.cols || row < 0 || row >= ex.rows) return -1;
         idx = ex.scroll + row * ex.cols + col;
         return (idx >= 0 && idx < ex.count) ? idx : -1;
