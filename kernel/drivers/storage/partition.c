@@ -40,6 +40,8 @@ typedef struct {
 
 static partition_info_t partitions[PARTITION_MAX];
 static uint32_t partitions_found = 0;
+#define PARTITION_MAX_DEVICES 8
+static partition_kind_t device_kinds[PARTITION_MAX_DEVICES];
 
 static const uint8_t gpt_type_efi[16] = {
     0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B
@@ -159,20 +161,20 @@ static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t s
     }
 }
 
-static void scan_gpt(block_device_t *device) {
+static partition_kind_t scan_gpt(block_device_t *device) {
     uint8_t sector[SECTOR_SIZE];
     gpt_header_t *header = (gpt_header_t *)sector;
     uint32_t entry_size;
     uint32_t per_sector;
     uint8_t entry_sector[SECTOR_SIZE];
 
-    if (device->read(device->context, 1, 1, sector) != 0) return;
-    if (!str_eq8(header->signature, "EFI PART")) return;
-    if (header->partition_entry_size < sizeof(gpt_entry_t) || header->partition_entry_count == 0) return;
+    if (device->read(device->context, 1, 1, sector) != 0) return PARTITION_KIND_UNKNOWN;
+    if (!str_eq8(header->signature, "EFI PART")) return PARTITION_KIND_UNKNOWN;
+    if (header->partition_entry_size < sizeof(gpt_entry_t) || header->partition_entry_count == 0) return PARTITION_KIND_GPT;
 
     entry_size = header->partition_entry_size;
     per_sector = SECTOR_SIZE / entry_size;
-    if (per_sector == 0) return;
+    if (per_sector == 0) return PARTITION_KIND_GPT;
 
     for (uint32_t i = 0; i < header->partition_entry_count && partitions_found < PARTITION_MAX; i++) {
         uint64_t lba = header->partition_entries_lba + (i / per_sector);
@@ -181,7 +183,7 @@ static void scan_gpt(block_device_t *device) {
         char name[48];
         uint32_t out = 0;
 
-        if (device->read(device->context, lba, 1, entry_sector) != 0) return;
+        if (device->read(device->context, lba, 1, entry_sector) != 0) return PARTITION_KIND_GPT;
         entry = (gpt_entry_t *)(entry_sector + off);
         if (entry->first_lba == 0 || entry->last_lba < entry->first_lba) continue;
         if (entry->type_guid[0] == 0 && entry->type_guid[1] == 0 && entry->type_guid[2] == 0 && entry->type_guid[3] == 0) continue;
@@ -196,15 +198,17 @@ static void scan_gpt(block_device_t *device) {
                       PARTITION_KIND_GPT, 0, name, header->partition_entries_lba,
                       entry_size, i, entry->type_guid);
     }
+    return PARTITION_KIND_GPT;
 }
 
-static void scan_mbr(block_device_t *device) {
+static partition_kind_t scan_mbr(block_device_t *device) {
     uint8_t sector[SECTOR_SIZE];
     mbr_entry_t *entries = (mbr_entry_t *)(sector + 446);
     int protective_gpt = 0;
+    uint32_t found_before;
 
-    if (device->read(device->context, 0, 1, sector) != 0) return;
-    if (sector[510] != 0x55 || sector[511] != 0xAA) return;
+    if (device->read(device->context, 0, 1, sector) != 0) return PARTITION_KIND_UNKNOWN;
+    if (sector[510] != 0x55 || sector[511] != 0xAA) return PARTITION_KIND_UNKNOWN;
 
     for (uint32_t i = 0; i < 4; i++) {
         if (entries[i].type == 0xEE) {
@@ -212,10 +216,8 @@ static void scan_mbr(block_device_t *device) {
             break;
         }
     }
-    if (protective_gpt) {
-        scan_gpt(device);
-        return;
-    }
+    if (protective_gpt) return scan_gpt(device);
+    found_before = partitions_found;
 
     for (uint32_t i = 0; i < 4 && partitions_found < PARTITION_MAX; i++) {
         char name[16];
@@ -225,14 +227,18 @@ static void scan_mbr(block_device_t *device) {
         add_partition(device, entries[i].lba_start, entries[i].sector_count,
                       PARTITION_KIND_MBR, entries[i].type, name, 0, 0, 0, 0);
     }
+    return partitions_found > found_before ? PARTITION_KIND_MBR : PARTITION_KIND_UNKNOWN;
 }
 
 int partition_scan_all(void) {
     partitions_found = 0;
+    for (uint32_t i = 0; i < PARTITION_MAX_DEVICES; i++) device_kinds[i] = PARTITION_KIND_UNKNOWN;
     for (uint32_t i = 0; i < block_count(); i++) {
         block_device_t *device = block_get(i);
+        partition_kind_t kind;
         if (!device) continue;
-        scan_mbr(device);
+        kind = scan_mbr(device);
+        if (i < PARTITION_MAX_DEVICES) device_kinds[i] = kind;
     }
     return 0;
 }
@@ -258,6 +264,9 @@ const char *partition_fs_name(partition_fs_hint_t hint) {
 partition_kind_t partition_device_kind(uint32_t device_index) {
     block_device_t *device = block_get(device_index);
     if (!device) return PARTITION_KIND_UNKNOWN;
+    if (device_index < PARTITION_MAX_DEVICES && device_kinds[device_index] != PARTITION_KIND_UNKNOWN) {
+        return device_kinds[device_index];
+    }
     for (uint32_t i = 0; i < partitions_found; i++) {
         if (partitions[i].device == device) {
             return partitions[i].kind;

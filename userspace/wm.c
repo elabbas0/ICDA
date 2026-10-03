@@ -1698,6 +1698,10 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, uint32_t *ne
         win->x = (wa.w - win_w) / 2 - 80 + cascade;
         win->y = WM_TITLE_H + (wa.h - WM_TITLE_H - win_h) / 3 + cascade;
         if (win->x < 16) win->x = 16 + cascade;
+        if (win->x + win_w > wa.x + wa.w - 8) win->x = wa.x + wa.w - 8 - win_w;
+        if (win->x < wa.x + 8) win->x = wa.x + 8;
+        if (win->y + win_h > wa.y + wa.h - 8) win->y = wa.y + wa.h - 8 - win_h;
+        if (win->y < WM_TITLE_H) win->y = WM_TITLE_H;
     }
     win->hover = WM_HIT_NONE;
     win->pressed = WM_HIT_NONE;

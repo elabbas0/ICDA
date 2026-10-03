@@ -41,6 +41,7 @@ static struct {
     
     int hover_save;
     int hover_new;
+    int confirm_new;
 
     char status[EDIT_STATUS_CAP];
 } ed;
@@ -101,16 +102,21 @@ static uint64_t line_end(uint64_t pos) {
     return pos;
 }
 
-static uint64_t column_of(uint64_t pos) {
-    return pos - line_start(pos);
-}
-
 static uint64_t row_of(uint64_t pos) {
     uint64_t row = 0;
     for (uint64_t i = 0; i < pos && i < ed.len; i++) {
         if (ed.buf[i] == '\n') row++;
     }
     return row;
+}
+
+static int visual_col(uint64_t pos) {
+    int c = 0;
+    for (uint64_t i = line_start(pos); i < pos; i++) {
+        if (ed.buf[i] == '\t') c += EDIT_TAB - (c % EDIT_TAB);
+        else c++;
+    }
+    return c;
 }
 
 static uint64_t offset_of_row(uint64_t row) {
@@ -129,7 +135,7 @@ static void ed_status(const char *text) {
 
 static void scroll_to_cursor(void) {
     uint64_t row = row_of(ed.cursor);
-    int col = (int)column_of(ed.cursor);
+    int col = visual_col(ed.cursor);
     if ((int)row < ed.scroll_row) ed.scroll_row = (int)row;
     if ((int)row >= ed.scroll_row + ed.rows) ed.scroll_row = (int)row - ed.rows + 1;
     if (col < ed.scroll_col) ed.scroll_col = col;
@@ -249,7 +255,8 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
     const ic_face_t *num = ic_font(IC_FONT_MONO_SMALL);
     ic_rect_t saved;
     uint64_t cursor_row = row_of(ed.cursor);
-    char digits[16];
+    uint64_t last_row = row_of(ed.len);
+    char digits[24];
 
     ic_gfx_fill(c, t.x, t.y, t.w, t.h, p->content);
 
@@ -259,13 +266,11 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
     ic_gfx_fill(c, t.x, t.y, EDIT_GUTTER_W, t.h, p->sidebar);
     for (int r = 0; r < ed.rows; r++) {
         uint64_t row = (uint64_t)(ed.scroll_row + r);
-        uint64_t start = offset_of_row(row);
         ic_rect_t rr = ic_rect_make(t.x, ed.text_y + r * ed.ch, EDIT_GUTTER_W, ed.ch);
-        int n = 0;
-        uint64_t v = row + 1;
-        if (start > ed.len) break;
+        int n;
+        if (row > last_row) break;
         if (row == cursor_row) ic_gfx_fill(c, rr.x, rr.y, rr.w, rr.h, p->accent_soft);
-        do { digits[n++] = (char)('0' + (v % 10)); v /= 10; } while (v && n < 15);
+        n = (int)ic_snprintf_u64(digits, sizeof(digits), row + 1);
         ic_text_draw_n(c, num,
                        t.x + EDIT_GUTTER_W - IC_SP_2 -
                            ic_text_measure_n(num, digits, n),
@@ -284,37 +289,41 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
         int y = ed.text_y + r * ed.ch + ic_text_center_baseline(f, 0, ed.ch);
         int col = 0;
         uint64_t pos = start;
-        if (start > ed.len) break;
+        if (row > last_row) break;
         end = line_end(start);
-        while (pos < end) {
+        while (pos < end && col < ed.scroll_col + ed.cols) {
             uint64_t run_end = pos;
             int run_start_col = col;
-            if (ed.buf[pos] == '\t') {
+            unsigned char first = (unsigned char)ed.buf[pos];
+            if (first == '\t') {
                 col += EDIT_TAB - (col % EDIT_TAB);
                 pos++;
                 continue;
             }
-            
+            if (first < 32 || first > 126) {
+                if (col >= ed.scroll_col) {
+                    ic_text_draw_n(c, f, ed.text_x + (col - ed.scroll_col) * ed.cw, y, "?", 1,
+                                   p->label_tertiary);
+                }
+                col++;
+                pos++;
+                continue;
+            }
             while (run_end < end) {
-                int vis = run_start_col + (int)(run_end - pos);
                 unsigned char ch = (unsigned char)ed.buf[run_end];
                 if (ch == '\t' || ch < 32 || ch > 126) break;
-                if (vis >= ed.scroll_col + ed.cols) break;
                 run_end++;
             }
-            if (run_end > pos) {
-                
+            {
                 int end_col = run_start_col + (int)(run_end - pos);
-                int from = ed.scroll_col > run_start_col ? ed.scroll_col - run_start_col : 0;
-                int to = end_col - ed.scroll_col;
-                if (from < to) {
-                    if (to > ed.cols) to = ed.cols;
-                    if (from < to) {
-                        int x = ed.text_x + (run_start_col + from - ed.scroll_col) * ed.cw;
-                        ic_text_draw_n(c, f, x, y, ed.buf + pos + from, to - from, p->label);
-                    }
+                int vis_from = run_start_col > ed.scroll_col ? run_start_col : ed.scroll_col;
+                int vis_to = end_col < ed.scroll_col + ed.cols ? end_col : ed.scroll_col + ed.cols;
+                if (vis_from < vis_to) {
+                    ic_text_draw_n(c, f, ed.text_x + (vis_from - ed.scroll_col) * ed.cw, y,
+                                   ed.buf + pos + (vis_from - run_start_col), vis_to - vis_from,
+                                   p->label);
                 }
-                col = run_start_col + (int)(run_end - pos);
+                col = end_col;
                 pos = run_end;
             }
         }
@@ -324,7 +333,7 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
 
 static void draw_caret(ic_app_t *app, ic_canvas_t *c) {
     uint64_t row = row_of(ed.cursor);
-    int col = (int)column_of(ed.cursor);
+    int col = visual_col(ed.cursor);
     int r = (int)row - ed.scroll_row;
     int cc = col - ed.scroll_col;
     if (r < 0 || r >= ed.rows || cc < 0 || cc >= ed.cols) return;
@@ -333,44 +342,30 @@ static void draw_caret(ic_app_t *app, ic_canvas_t *c) {
                 ic_palette()->label);
 }
 
-static void draw_status(ic_canvas_t *c, int app_w) {
-    ic_rect_t s = ic_rect_make(0, app_w - 24, app_w, 24);
+static void draw_status(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t s = ic_rect_make(0, app->height - 24, app->width, 24);
     const ic_palette_t *p = ic_palette();
-    char left[64];
-    char mid[64];
+    char pos[48];
     char right[64];
-    uint64_t row = row_of(ed.cursor) + 1;
-    uint64_t col = column_of(ed.cursor) + 1;
+    char n[24];
 
-    left[0] = 0;
-    ic_strlcat(left, "Ln ", sizeof(left));
-    {
-        char n[24];
-        ic_snprintf_u64(n, sizeof(n), row);
-        ic_strlcat(left, n, sizeof(left));
-    }
-    mid[0] = 0;
-    ic_strlcat(mid, "Col ", sizeof(mid));
-    {
-        char n[24];
-        ic_snprintf_u64(n, sizeof(n), col);
-        ic_strlcat(mid, n, sizeof(mid));
-    }
+    pos[0] = 0;
+    ic_strlcat(pos, "Ln ", sizeof(pos));
+    ic_snprintf_u64(n, sizeof(n), row_of(ed.cursor) + 1);
+    ic_strlcat(pos, n, sizeof(pos));
+    ic_strlcat(pos, ", Col ", sizeof(pos));
+    ic_snprintf_u64(n, sizeof(n), (uint64_t)visual_col(ed.cursor) + 1);
+    ic_strlcat(pos, n, sizeof(pos));
+
     right[0] = 0;
-    {
-        char n[24];
-        ic_snprintf_u64(n, sizeof(n), ed.len);
-        ic_strlcat(right, n, sizeof(right));
-        ic_strlcat(right, " bytes", sizeof(right));
-    }
+    ic_snprintf_u64(n, sizeof(n), ed.len);
+    ic_strlcat(right, n, sizeof(right));
+    ic_strlcat(right, " bytes", sizeof(right));
 
     ic_ui_statusbar(c, s, ed.status);
     ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
-                    ic_rect_make(s.x + IC_SP_3, s.y, 90, s.h), left, p->label_secondary,
-                    IC_ALIGN_LEFT);
-    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
-                    ic_rect_make(s.x + 100, s.y, 90, s.h), mid, p->label_secondary,
-                    IC_ALIGN_LEFT);
+                    ic_rect_make(s.x + s.w - 260, s.y, 110, s.h), pos, p->label_secondary,
+                    IC_ALIGN_RIGHT);
     ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL),
                     ic_rect_make(s.x + s.w - 140, s.y, 140 - IC_SP_3, s.h), right,
                     p->label_secondary, IC_ALIGN_RIGHT);
@@ -383,7 +378,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_toolbar(app, c);
     draw_text(app, c);
     draw_caret(app, c);
-    draw_status(c, app->width);
+    draw_status(app, c);
     if (app->focused) ic_app_animate(app);
 }
 
@@ -419,7 +414,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     case IC_EV_MOUSE_DOWN:
         if (ev->button != GUI_BTN_LEFT) break;
         if (ed.hover_new) {
-            ic_strcpy(ed.path, "untitled.txt", EDIT_PATH_CAP);
+            if (ed.modified && !ed.confirm_new) {
+                ed.confirm_new = 1;
+                ed_status("Unsaved changes. Click New again to discard them.");
+                break;
+            }
+            ed.confirm_new = 0;
+            ic_strcpy(ed.path, "/home/untitled.txt", EDIT_PATH_CAP);
             ed.buf[0] = 0;
             ed.len = 0;
             ed.cursor = 0;
@@ -429,6 +430,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             ed_status("New document");
             break;
         }
+        ed.confirm_new = 0;
         if (ed.hover_save) { save(); break; }
         click_to_cursor(ev->x, ev->y);
         break;
@@ -436,6 +438,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         ed.hover_new = ed.hover_save = 0;
         break;
     case IC_EV_KEY:
+        ed.confirm_new = 0;
         switch (ev->key) {
         case IC_KEY_LEFT:      move_to(ed.cursor > 0 ? ed.cursor - 1 : 0); break;
         case IC_KEY_RIGHT:     move_to(ed.cursor + 1); break;

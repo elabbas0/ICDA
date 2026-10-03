@@ -293,10 +293,10 @@ static int ahci_setup_device(const pci_device_t *pci_dev, hba_mem_t *abar, uint8
     if (port->sig != SATA_SIG_ATA) return -1;
 
     dev = &ahci_devices[ahci_count];
-    region_phys = pmm_alloc_contiguous(2 + AHCI_DMA_PAGES);
+    region_phys = pmm_alloc_contiguous(3 + AHCI_DMA_PAGES);
     if (!region_phys) return -1;
     region = (uint8_t *)PHYS_TO_VIRT(region_phys);
-    mem_zero(region, (2 + AHCI_DMA_PAGES) * PAGE_SIZE);
+    mem_zero(region, (3 + AHCI_DMA_PAGES) * PAGE_SIZE);
 
     dev->present = 1;
     dev->port_no = port_no;

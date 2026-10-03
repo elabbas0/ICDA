@@ -31,7 +31,8 @@ typedef enum {
     TERM_ROLE_MUTED,      
     TERM_ROLE_ACCENT,     
     TERM_ROLE_ERROR,      
-    TERM_ROLE_PROMPT      
+    TERM_ROLE_PROMPT,
+    TERM_ROLE_COMMAND
 } term_role_t;
 
 typedef struct {
@@ -75,7 +76,7 @@ static struct {
 static uint32_t menu_scratch[TERM_SCRATCH_PX];
 
 static const char *const PROMPT = "icda@desktop:~$ ";
-#define PROMPT_LEN 14
+#define PROMPT_LEN 16
 
 
 
@@ -223,6 +224,49 @@ static void run_spawn(const char *path) {
     }
 }
 
+static void run_ps(void) {
+    static char buf[4096];
+    uint64_t rc = icda_list_procs(buf, sizeof(buf) - 1);
+    char *s = buf;
+    if (rc == (uint64_t)-1) {
+        log_print(TERM_ROLE_ERROR, "ps: cannot read the process table");
+        return;
+    }
+    buf[rc < sizeof(buf) ? rc : sizeof(buf) - 1] = '\0';
+    log_print(TERM_ROLE_MUTED, "  PID  STATE     PROGRAM");
+    while (*s) {
+        char *tok[7];
+        char out[TERM_LINE_MAX];
+        int fi = 0;
+        char *line = s;
+        icda_proc_stats_t st;
+        uint64_t pid;
+        while (*s && *s != '\n') s++;
+        if (*s) *s++ = '\0';
+        if (line[0] < '0' || line[0] > '9') continue;
+        tok[fi++] = line;
+        for (char *q = line; *q && fi < 7; q++) {
+            if (*q == ' ') { *q = '\0'; tok[fi++] = q + 1; }
+        }
+        if (fi < 6) continue;
+        out[0] = '\0';
+        ic_strlcat(out, "  ", sizeof(out));
+        for (int pad = (int)ic_strlen(tok[0]); pad < 3; pad++) ic_strlcat(out, " ", sizeof(out));
+        ic_strlcat(out, tok[0], sizeof(out));
+        ic_strlcat(out, "  ", sizeof(out));
+        ic_strlcat(out, tok[5], sizeof(out));
+        for (int pad = (int)ic_strlen(tok[5]); pad < 10; pad++) ic_strlcat(out, " ", sizeof(out));
+        pid = 0;
+        for (const char *d = tok[0]; *d >= '0' && *d <= '9'; d++) pid = pid * 10 + (uint64_t)(*d - '0');
+        if (icda_proc_stats(pid, &st) == 0 && st.name[0]) {
+            ic_strlcat(out, st.name, sizeof(out));
+        } else {
+            ic_strlcat(out, ic_streq(tok[4], "kernel") ? "kernel_task" : "?", sizeof(out));
+        }
+        log_print(TERM_ROLE_TEXT, out);
+    }
+}
+
 static void run_help(void) {
     log_print(TERM_ROLE_ACCENT, "Commands");
     log_print(TERM_ROLE_TEXT, "  help              Show this list");
@@ -231,6 +275,7 @@ static void run_help(void) {
     log_print(TERM_ROLE_TEXT, "  clear             Clear the scrollback");
     log_print(TERM_ROLE_TEXT, "  run <app>         Launch an app by path");
     log_print(TERM_ROLE_TEXT, "  ps                List running programs");
+    log_print(TERM_ROLE_TEXT, "  storage           List disks, partitions and mounts");
     log_print(TERM_ROLE_MUTED, "Anything else is launched as a program.");
     log_print(TERM_ROLE_MUTED, "Up and Down walk the history, Page Up and Page Down scroll.");
 }
@@ -245,10 +290,16 @@ static void run_command(const char *raw) {
     if (is_cmd(cmd, "help")) { run_help(); return; }
     if (is_cmd(cmd, "clear")) { log_clear(); return; }
     if (is_cmd(cmd, "ls"))    { run_ls(); return; }
-    if (is_cmd(cmd, "ps")) {
-        log_print(TERM_ROLE_TEXT, "  PID  PROGRAM");
-        log_print(TERM_ROLE_TEXT, "    1  init");
-        log_print(TERM_ROLE_MUTED, "Open the Activity window for the full list.");
+    if (is_cmd(cmd, "ps"))    { run_ps(); return; }
+    if (is_cmd(cmd, "storage")) {
+        char buf[2048];
+        uint64_t rc = icda_storage_info(buf, sizeof(buf) - 1);
+        if (rc == (uint64_t)-1) {
+            log_print(TERM_ROLE_ERROR, "storage: the query failed");
+            return;
+        }
+        buf[rc < sizeof(buf) ? rc : sizeof(buf) - 1] = '\0';
+        log_print(TERM_ROLE_TEXT, buf);
         return;
     }
     if (is_cmd(cmd, "cat")) {
@@ -290,8 +341,12 @@ static void history_push(const char *line) {
 }
 
 static void submit(void) {
-    log_print(TERM_ROLE_PROMPT, PROMPT);
-    log_print(TERM_ROLE_TEXT, term.cmd);
+    {
+        char echo[PROMPT_LEN + TERM_CMD_MAX + 1];
+        ic_strcpy(echo, PROMPT, sizeof(echo));
+        ic_strlcat(echo, term.cmd, sizeof(echo));
+        log_print(TERM_ROLE_COMMAND, echo);
+    }
     history_push(term.cmd);
     run_command(term.cmd);
     cmd_set("");
@@ -326,7 +381,7 @@ static void history_step(int dir) {
 
 
 static const char *const completions[] = {
-    "ls", "cat ", "clear", "help", "ps", "run ",
+    "ls", "cat ", "clear", "help", "ps", "run ", "storage",
     "settings.app", "terminal.app", "editor.app", "browser.app",
     "desktop.app", "taskman.app", "diskman.app", "audioplay.app"
 };
@@ -525,8 +580,17 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             if (row >= first && row < last) {
                 ic_rect_t saved;
                 ic_canvas_push_clip(c, r.x, r.y + row * ch, r.w, ch, &saved);
-                ic_text_draw_n(c, f, r.x, baseline0 + row * ch, line->text + col, n,
-                               role_color(line->role));
+                if (line->role == TERM_ROLE_COMMAND && col < PROMPT_LEN) {
+                    int pn = PROMPT_LEN - col < n ? PROMPT_LEN - col : n;
+                    ic_text_draw_n(c, f, r.x, baseline0 + row * ch, line->text + col, pn,
+                                   p->success);
+                    ic_text_draw_n(c, f, r.x + ic_text_measure_n(f, line->text + col, pn),
+                                   baseline0 + row * ch, line->text + col + pn, n - pn,
+                                   p->label);
+                } else {
+                    ic_text_draw_n(c, f, r.x, baseline0 + row * ch, line->text + col, n,
+                                   role_color(line->role));
+                }
                 ic_canvas_pop_clip(c, &saved);
             }
             col += n;
@@ -584,7 +648,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
                 IC_DUR_FAST, scrolled ? IC_EASE_ENTER : IC_EASE_EXIT);
     {
         float a = ic_tween_value(&term.scrollbar);
-        if (a > 0.01f) ic_ui_scrollbar(c, r, first, term.total_rows, a);
+        if (a > 0.01f) ic_ui_scrollbar(c, r, first * ch, term.total_rows * ch, a);
     }
     if (ic_tween_running(&term.scrollbar)) ic_app_animate(app);
 
@@ -629,7 +693,7 @@ static void scroll_by(int rows) {
 static void scrollbar_drag(ic_app_t *app, int y) {
     ic_rect_t r = content_rect(app);
     int track_h = r.h;
-    int thumb = ic_ui_scrollbar_thumb(r, 0, term.total_rows).h;
+    int thumb = ic_ui_scrollbar_thumb(r, 0, term.total_rows * mono()->line_h).h;
     int usable = track_h - thumb;
     int over;
     if (usable <= 0) return;

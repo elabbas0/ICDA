@@ -227,6 +227,8 @@ void ic_ui_panel(ic_canvas_t *c, ic_rect_t r, float radius, ic_elevation_t eleva
 
 
 
+int ic_ui_alert_height(ic_symbol_t sym, const char *message);
+ic_rect_t ic_ui_alert_button_rect(ic_rect_t r, int index, int count);
 void ic_ui_alert(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char *title,
                  const char *message, const char *const *buttons, int count,
                  int hover_button, ic_rect_t *button_rects);

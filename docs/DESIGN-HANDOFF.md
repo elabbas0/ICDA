@@ -36,13 +36,13 @@ powershell -File scripts/qmp-screendump.ps1 -Port 4444 -Out .verify/app.png
 | Terminal | `terminal.c` | Console | **yes** |
 | Explorer | `desktop.c` | Toolbar + sidebar + grid/list | **yes** |
 | Music | `audioplay.c` | List + now-playing | **yes** |
-| Activity | `taskman.c` | Monitor | no |
-| Editor | `editor.c` | Toolbar + text + status | no |
-| Disk Utility | `diskman.c` | Toolbar + sidebar + detail | no |
-| Browser | `browser.c` | Toolbar + address + page | no |
+| Activity | `taskman.c` | Monitor | **yes** |
+| Editor | `editor.c` | Toolbar + text + status | **yes** |
+| Disk Utility | `diskman.c` | Toolbar + sidebar + detail | **yes** |
+| Browser | `browser.c` | Toolbar + address + page | **yes** |
 | ICDA Demo | `gui_demo.c` | Control gallery (CI image) | no |
 
-What the three verified apps cover:
+What the verified apps cover:
 
 - Terminal: window opens, heading/hint/prompt render in the right roles,
   caret visible, scrollback reachable.
@@ -52,8 +52,31 @@ What the three verified apps cover:
 - Music: `.wav` discovery, track list, selection pill, disabled Stop
   while idle, now-playing bar, and correct reflow when the window is
   maximized (so `IC_EV_RESIZE` is handled).
+- Activity: process table with named kernel tasks and readable states,
+  row selection enables Suspend/Quit, Suspend confirm, Suspended state and
+  Resume label, storage summary in the footer.
+- Editor: typing, Enter, Tab, arrow keys, gutter numbers, status bar
+  (Ln/Col, bytes), Save, and the unsaved-changes guard on New.
+- Disk Utility (with a 2 GB scratch disk): device list, FAT32 erase,
+  ICDA layout (EFI/Swap/System on GPT), partition selection, role change,
+  Cancel/Continue in the confirm dialog.
+- Browser (QEMU `-nic user,model=e1000`): Loading state, page fetch and
+  render of `http://example.com`, error state when the network is down.
 
-Bugs this found and fixed, none of which the compiler or the smoke test
+Bugs the second pass found and fixed: the AHCI driver allocated one page
+too few for its DMA window, so any transfer of 24+ sectors overwrote the
+next physical page (it erased the device name on a GPT write); setting a
+partition role wrote GPT entry `index % 4`; Disk Utility never parsed the
+`partitions:` section and only recognised devices whose name starts with
+`a`; arrow keys reached apps as ESC + `[A` because a lone ESC was flushed
+after one idle loop pass; the Editor drew past the end of a line after a
+tab and spun forever on lines wider than the view; the Editor status bar
+was placed at `y = width - 24`; `ic_ui_alert` was shorter than its own
+content and apps hit-tested different button rects than it drew;
+scrollbars were passed row counts where pixels were expected, so they
+never appeared; the WM placed cascaded windows past the right edge.
+
+Bugs the first pass found and fixed, none of which the compiler or the smoke test
 could see: the Terminal prompt overwrote the hint line (row accounting
 disagreed with `layout()`), the Explorer sidebar caption sat under the
 first item, the Explorer toolbar buttons were drawn outside the client

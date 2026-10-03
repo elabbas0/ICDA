@@ -515,6 +515,18 @@ void ic_ui_menu(ic_canvas_t *c, const ic_menu_model_t *m, int mx, int my,
 
 
 
+int ic_ui_alert_height(ic_symbol_t sym, const char *message) {
+    return IC_SP_5 + (sym != IC_SYM_NONE ? 48 : 0) + 24 + (message ? 2 * 17 : 0) + IC_SP_4 +
+           IC_H_CONTROL + IC_SP_4;
+}
+
+ic_rect_t ic_ui_alert_button_rect(ic_rect_t r, int index, int count) {
+    int gap = IC_SP_2;
+    int bw = (r.w - 2 * IC_SP_4 - gap * (count - 1)) / count;
+    int by = r.y + r.h - IC_SP_4 - IC_H_CONTROL;
+    return ic_rect_make(r.x + IC_SP_4 + index * (bw + gap), by, bw, IC_H_CONTROL);
+}
+
 void ic_ui_alert(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char *title,
                  const char *message, const char *const *buttons, int count,
                  int hover_button, ic_rect_t *button_rects) {
@@ -532,20 +544,39 @@ void ic_ui_alert(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char *title
                     title, p->label, IC_ALIGN_CENTER);
     y += 24;
     if (message) {
-        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
-                        ic_rect_make(r.x + IC_SP_4, y, r.w - 2 * IC_SP_4, 18), message,
-                        p->label_secondary, IC_ALIGN_CENTER);
-    }
-    if (count > 0) {
-        int gap = IC_SP_2;
-        int bw = (r.w - 2 * IC_SP_4 - gap * (count - 1)) / count;
-        int by = r.y + r.h - IC_SP_4 - IC_H_CONTROL;
-        for (int i = 0; i < count; i++) {
-            ic_rect_t b = ic_rect_make(r.x + IC_SP_4 + i * (bw + gap), by, bw, IC_H_CONTROL);
-            ic_ui_button(c, b, buttons[i], IC_SYM_NONE,
-                         i == count - 1 ? IC_BUTTON_PRIMARY : IC_BUTTON_DEFAULT,
-                         i == hover_button ? IC_STATE_HOVER : IC_STATE_NORMAL);
-            if (button_rects) button_rects[i] = b;
+        const ic_face_t *mf = ic_font(IC_FONT_FOOTNOTE);
+        int w = r.w - 2 * IC_SP_4;
+        int i = 0;
+        for (int line = 0; line < 2 && message[i]; line++) {
+            char buf[160];
+            int brk = 0, n;
+            if (line == 0) {
+                int fit = ic_text_fit(mf, message, w);
+                brk = fit;
+                if (message[fit] && message[fit] != ' ') {
+                    int k = fit;
+                    while (k > 0 && message[k - 1] != ' ') k--;
+                    if (k > 0) brk = k;
+                }
+            } else {
+                while (message[i + brk]) brk++;
+            }
+            n = brk;
+            while (n > 0 && message[i + n - 1] == ' ') n--;
+            if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+            for (int k = 0; k < n; k++) buf[k] = message[i + k];
+            buf[n] = 0;
+            ic_text_draw_in(c, mf, ic_rect_make(r.x + IC_SP_4, y + line * 17, w, 17), buf,
+                            p->label_secondary, IC_ALIGN_CENTER);
+            i += brk;
+            while (message[i] == ' ') i++;
         }
+    }
+    for (int i = 0; i < count; i++) {
+        ic_rect_t b = ic_ui_alert_button_rect(r, i, count);
+        ic_ui_button(c, b, buttons[i], IC_SYM_NONE,
+                     i == count - 1 ? IC_BUTTON_PRIMARY : IC_BUTTON_DEFAULT,
+                     i == hover_button ? IC_STATE_HOVER : IC_STATE_NORMAL);
+        if (button_rects) button_rects[i] = b;
     }
 }

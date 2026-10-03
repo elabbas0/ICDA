@@ -27,8 +27,8 @@
 #define COL_PID    0
 #define COL_NAME   58
 #define COL_STATE  238
-#define COL_CPU    312
-#define COL_MEM    384
+#define COL_CPU    330
+#define COL_MEM    400
 #define COL_MEM_W  92
 
 enum { TM_NONE = 0, TM_KILL, TM_SUSPEND };
@@ -134,17 +134,12 @@ static ic_rect_t kill_rect(ic_app_t *app) {
 }
 
 static ic_rect_t alert_rect(ic_app_t *app) {
-    int w = 380, h = 140;
+    int w = 380, h = ic_ui_alert_height(IC_SYM_INFO, "");
     return ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
 }
 
 static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
-    ic_rect_t r = alert_rect(app);
-    const char *label = index == 0 ? "Cancel" : "Quit Process";
-    int w = ic_ui_button_width(label, IC_SYM_NONE);
-    int y = r.y + r.h - IC_H_CONTROL - IC_SP_3;
-    return ic_rect_make(r.x + r.w - w - (index == 0 ? w + IC_SP_2 + IC_SP_3 : IC_SP_3), y, w,
-                        IC_H_CONTROL);
+    return ic_ui_alert_button_rect(alert_rect(app), index, 2);
 }
 
 
@@ -196,15 +191,17 @@ static int cpu_percent(uint64_t busy, uint64_t wall) {
 static const char *state_label(int i) {
     const tm_proc_t *p = &tm.procs[i];
     if (p->suspended) return "Suspended";
-    if (ic_streq(p->state, "R")) return "Running";
-    if (ic_streq(p->state, "S")) return "Sleeping";
-    if (ic_streq(p->state, "Z")) return "Stopped";
+    if (ic_streq(p->state, "running")) return "Running";
+    if (ic_streq(p->state, "ready")) return "Ready";
+    if (ic_streq(p->state, "blocked")) return "Waiting";
+    if (ic_streq(p->state, "new")) return "Starting";
+    if (ic_streq(p->state, "exited") || ic_streq(p->state, "reaped")) return "Exited";
     return p->state;
 }
 
 static int state_is_idle(int i) {
     const char *s = state_label(i);
-    return s[0] == 'S' || s[0] == 'Z';
+    return s[0] == 'S' || s[0] == 'W' || s[0] == 'E';
 }
 
 static int has_selection(void) {
@@ -251,11 +248,7 @@ static void parse_procs(const char *buf, uint64_t len) {
         out->cpu_ticks = 0;
         out->mem_bytes = 0;
         out->prev_cpu_ticks = 0;
-        out->suspended = 0;
-        
-        for (int k = 0; k < tm.count; k++) {
-            if (tm.procs[k].pid == out->pid && tm.procs[k].suspended) out->suspended = 1;
-        }
+        out->suspended = ic_streq(tok[5], "stopped");
         {
             icda_proc_stats_t st;
             if (icda_proc_stats((uint64_t)pid, &st) == 0) {
@@ -264,9 +257,42 @@ static void parse_procs(const char *buf, uint64_t len) {
                 out->mem_bytes = st.mem_bytes;
             }
         }
+        if (!out->name[0] || ic_streq(out->name, "?")) {
+            tm_copy(out->name, ic_streq(tok[4], "kernel") ? "kernel_task" : "?", sizeof(out->name));
+        }
         tm.count++;
     }
     if (tm.selected >= tm.count) tm.selected = -1;
+}
+
+static void summarize_storage(void) {
+    int section = 0, counts[3] = { 0, 0, 0 };
+    char *s = tm.storage;
+    char digits[24];
+
+    while (*s) {
+        char *line = s;
+        while (*s && *s != '\n') s++;
+        if (*s) *s++ = 0;
+        if (line[0] != ' ') {
+            if (ic_streq(line, "devices:")) section = 0;
+            else if (ic_streq(line, "partitions:")) section = 1;
+            else if (ic_streq(line, "mounts:")) section = 2;
+        } else if (!ic_streq(line, "  (none)")) {
+            counts[section]++;
+        }
+    }
+    tm.storage[0] = 0;
+    if (counts[0] == 0) {
+        ic_strlcat(tm.storage, "No disks", TM_STORAGE_CAP);
+        return;
+    }
+    tm_u64((uint64_t)counts[0], digits, sizeof(digits));
+    ic_strlcat(tm.storage, digits, TM_STORAGE_CAP);
+    ic_strlcat(tm.storage, counts[0] == 1 ? " disk, " : " disks, ", TM_STORAGE_CAP);
+    tm_u64((uint64_t)counts[2], digits, sizeof(digits));
+    ic_strlcat(tm.storage, digits, TM_STORAGE_CAP);
+    ic_strlcat(tm.storage, " mounted", TM_STORAGE_CAP);
 }
 
 static void sample(void) {
@@ -283,6 +309,7 @@ static void sample(void) {
     sn = (long)icda_storage_info(tm.storage, sizeof(tm.storage) - 1);
     if (sn < 0 || (uint64_t)sn >= sizeof(tm.storage)) tm.storage[0] = 0;
     else tm.storage[sn] = 0;
+    summarize_storage();
 }
 
 static uint64_t selected_pid(void) {
@@ -386,20 +413,21 @@ static void draw_table(ic_app_t *app, ic_canvas_t *c) {
         uint64_t busy = p->cpu_ticks > p->prev_cpu_ticks ? p->cpu_ticks - p->prev_cpu_ticks : 0;
         
         uint64_t wall = TM_SAMPLE_TICKS;
+        int x0 = r.x + IC_SP_3;
 
         tm_u64(p->pid, cell, sizeof(cell));
-        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_PID, r.y, COL_NAME - COL_PID - IC_SP_2, r.h),
+        ic_text_draw_in(c, mono, ic_rect_make(x0 + COL_PID, r.y, COL_NAME - COL_PID - IC_SP_2, r.h),
                         cell, text, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, body, ic_rect_make(r.x + COL_NAME, r.y, COL_STATE - COL_NAME - IC_SP_2, r.h),
+        ic_text_draw_in(c, body, ic_rect_make(x0 + COL_NAME, r.y, COL_STATE - COL_NAME - IC_SP_2, r.h),
                         p->name, text, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, body, ic_rect_make(r.x + COL_STATE, r.y, COL_CPU - COL_STATE - IC_SP_2, r.h),
-                        state_label(i), state_is_idle(i) ? ic_palette()->label_secondary : text,
+        ic_text_draw_in(c, body, ic_rect_make(x0 + COL_STATE, r.y, COL_CPU - COL_STATE - IC_SP_2, r.h),
+                        state_label(i), (state_is_idle(i) && i != tm.selected) ? ic_palette()->label_secondary : text,
                         IC_ALIGN_LEFT);
         tm_u64((uint64_t)cpu_percent(busy, wall), cell, sizeof(cell));
-        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_CPU, r.y, COL_MEM - COL_CPU - IC_SP_2, r.h),
+        ic_text_draw_in(c, mono, ic_rect_make(x0 + COL_CPU, r.y, COL_MEM - COL_CPU - IC_SP_2, r.h),
                         cell, text, IC_ALIGN_RIGHT);
         tm_u64(p->mem_bytes / 1024, cell, sizeof(cell));
-        ic_text_draw_in(c, mono, ic_rect_make(r.x + COL_MEM, r.y, COL_MEM_W, r.h),
+        ic_text_draw_in(c, mono, ic_rect_make(x0 + COL_MEM, r.y, COL_MEM_W, r.h),
                         cell, text, IC_ALIGN_RIGHT);
         
         p->prev_cpu_ticks = p->cpu_ticks;
@@ -409,7 +437,7 @@ static void draw_table(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_empty_state(c, t, IC_SYM_ACTIVITY, "No processes",
                           "The kernel did not report any running programs.");
     } else if (tm.count > tm.rows) {
-        ic_ui_scrollbar(c, t, tm.scroll, tm.count, 1.0f);
+        ic_ui_scrollbar(c, t, tm.scroll * IC_H_ROW, tm.count * IC_H_ROW, 1.0f);
     }
 }
 
@@ -425,7 +453,7 @@ static void draw_footer(ic_app_t *app, ic_canvas_t *c) {
 }
 
 static void draw_alert(ic_app_t *app, ic_canvas_t *c) {
-    static const char *const labels[2] = { "Cancel", "Quit Process" };
+    const char *labels[2] = { "Cancel", tm.alert_action == TM_KILL ? "Quit Process" : "Suspend" };
     ic_rect_t rects[2];
     char msg[160];
     const char *title = tm.alert_action == TM_KILL ? "Quit this process?" : "Suspend this process?";
@@ -497,7 +525,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if (tm.hover_refresh) { sample(); break; }
-        if (tm.hover_suspend && has_selection()) { confirm(TM_SUSPEND); break; }
+        if (tm.hover_suspend && has_selection()) {
+            if (suspend_label_is_resume()) toggle_suspend();
+            else confirm(TM_SUSPEND);
+            break;
+        }
         if (tm.hover_kill && has_selection()) { confirm(TM_KILL); break; }
         {
             int i = row_at(app, ev->x, ev->y);
@@ -533,8 +565,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         case IC_KEY_HOME:  tm.scroll = 0; break;
         case IC_KEY_END:   tm.scroll = tm.count; break;
         case IC_KEY_DELETE: if (has_selection()) confirm(TM_KILL); break;
-        case IC_KEY_ESCAPE: if (has_selection()) confirm(TM_KILL); break;
-        case 's': case 'S': if (has_selection()) confirm(TM_SUSPEND); break;
+        case IC_KEY_ESCAPE: tm.selected = -1; break;
+        case 's': case 'S': if (!has_selection()) break;
+            if (suspend_label_is_resume()) toggle_suspend();
+            else confirm(TM_SUSPEND);
+            break;
         case 'r': case 'R': sample(); break;
         default: break;
         }

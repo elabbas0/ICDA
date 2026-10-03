@@ -56,6 +56,9 @@ static struct {
     int  wrap_cols;            
 
     int  loading;
+    int  nav_pending;
+    int  load_failed;
+    char nav_url[BR_URL_CAP];
     int  addr_focused;
 
     
@@ -519,7 +522,7 @@ static void set_address(const char *url) {
     ic_strcpy(br.address, url, BR_URL_CAP);
 }
 
-static void navigate_to(const char *url) {
+static void fetch_now(const char *url) {
     char host[128];
     char path[256];
     char out_path[64];
@@ -554,6 +557,7 @@ static void navigate_to(const char *url) {
     if (ic_url_split(br.current_url, host, sizeof(host),
                      &port, path, sizeof(path), &use_tls) < 0) {
         br_status("That address is not a valid URL");
+        br.load_failed = 1;
         br.loading = 0;
         return;
     }
@@ -573,12 +577,14 @@ static void navigate_to(const char *url) {
         else if (err == 11)                br_status("The secure connection failed");
         else if (err == 12)                br_status("The secure connection dropped");
         else                               br_status("The network is unavailable");
+        br.load_failed = 1;
         br.loading = 0;
         return;
     }
 
     if (!br.html || !br.text) {
         br_status("Not enough memory to hold the page");
+        br.load_failed = 1;
         br.loading = 0;
         return;
     }
@@ -593,6 +599,7 @@ static void navigate_to(const char *url) {
     build_render_text();
     br.scroll = 0;
     br.loading = 0;
+    br.load_failed = 0;
     {
         char msg[80];
         char n[24];
@@ -601,6 +608,24 @@ static void navigate_to(const char *url) {
         ic_strcat(msg, n, sizeof(msg));
         ic_strcat(msg, " bytes", sizeof(msg));
         br_status(msg);
+    }
+}
+
+static void navigate_to(const char *url) {
+    if (!url || !*url) return;
+    ic_strcpy(br.nav_url, url, BR_URL_CAP);
+    br.nav_pending = 1;
+    br.loading = 1;
+    br_status("Loading...");
+}
+
+static void tick(ic_app_t *app) {
+    if (br.nav_pending == 1) {
+        br.nav_pending = 2;
+    } else if (br.nav_pending == 2) {
+        br.nav_pending = 0;
+        fetch_now(br.nav_url);
+        ic_app_invalidate(app);
     }
 }
 
@@ -756,6 +781,11 @@ static void draw_page(ic_app_t *app, ic_canvas_t *c) {
 
     if (br.loading) {
         ic_ui_empty_state(c, p, IC_SYM_RELOAD, "Loading", br.status);
+        ic_canvas_pop_clip(c, &saved);
+        return;
+    }
+    if (br.load_failed && (!br.text || br.text_len == 0)) {
+        ic_ui_empty_state(c, p, IC_SYM_WARNING, "Could not open the page", br.status);
         ic_canvas_pop_clip(c, &saved);
         return;
     }
@@ -1025,7 +1055,7 @@ static void init(ic_app_t *app) {
 }
 
 int main(int argc, char **argv) {
-    static const ic_app_desc_t desc = { "Browser", WIN_W, WIN_H, init, draw, event, 0 };
+    static const ic_app_desc_t desc = { "Browser", WIN_W, WIN_H, init, draw, event, tick };
     const char *arg = (argc > 1 && argv) ? argv[1] : 0;
 
     

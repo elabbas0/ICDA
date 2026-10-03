@@ -74,6 +74,7 @@ static struct {
     int hover_refresh;
     int hover_fat32;
     int hover_exfat;
+    int hover_gpt;
     int hover_role_efi;
     int hover_role_system;
     int hover_role_swap;
@@ -100,7 +101,7 @@ static ic_rect_t sidebar_rect(ic_app_t *app) {
 
 static ic_rect_t device_rect(ic_app_t *app, int i) {
     ic_rect_t s = sidebar_rect(app);
-    return ic_rect_make(s.x, s.y + IC_SP_3 + i * (IC_H_ROW + 2), s.w, IC_H_ROW);
+    return ic_rect_make(s.x, s.y + IC_SP_3 + 14 + IC_SP_2 + i * (IC_H_ROW + 2), s.w, IC_H_ROW);
 }
 
 static ic_rect_t detail_rect(ic_app_t *app) {
@@ -119,7 +120,7 @@ static ic_rect_t refresh_rect(ic_app_t *app) {
 
 
 static ic_rect_t action_rect(ic_app_t *app, int index) {
-    static const char *const labels[5] = { "FAT32", "exFAT", "EFI", "System", "Swap" };
+    static const char *const labels[6] = { "FAT32", "exFAT", "ICDA", "EFI", "System", "Swap" };
     ic_rect_t b = toolbar_rect(app);
     int x = refresh_rect(app).x + refresh_rect(app).w + IC_SP_3;
     for (int i = 0; i < index; i++) {
@@ -130,17 +131,12 @@ static ic_rect_t action_rect(ic_app_t *app, int index) {
 }
 
 static ic_rect_t alert_rect(ic_app_t *app) {
-    int w = 440, h = 168;
+    int w = 440, h = ic_ui_alert_height(IC_SYM_WARNING, "");
     return ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
 }
 
 static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
-    ic_rect_t r = alert_rect(app);
-    const char *label = index == 0 ? "Cancel" : "Continue";
-    int w = ic_ui_button_width(label, IC_SYM_NONE);
-    int y = r.y + r.h - IC_H_CONTROL - IC_SP_3;
-    return ic_rect_make(r.x + r.w - w - (index == 0 ? w + IC_SP_2 + IC_SP_3 : IC_SP_3), y, w,
-                        IC_H_CONTROL);
+    return ic_ui_alert_button_rect(alert_rect(app), index, 2);
 }
 
 
@@ -153,6 +149,10 @@ static int has_device(void) { return dm.device_count > 0; }
 
 static int has_partition(void) {
     return dm.focus_parts && dm.part_count > 0;
+}
+
+static int can_set_role(void) {
+    return has_partition() && has_device() && ic_streq(dm.devices[dm.selected].table, "gpt");
 }
 
 
@@ -232,108 +232,123 @@ static void size_text(uint64_t sectors, uint64_t sector_size, char *out, uint64_
     while (whole >= 1000 && unit < 3) { frac = whole % 1000; whole /= 1000; unit++; }
     out[0] = 0;
     dm_u64(whole, out, cap);
-    if (unit > 0 && frac > 0) {
-        char d[8];
-        dm_u64(frac, d, sizeof(d));
+    if (unit > 0 && whole < 100 && frac / 100 > 0) {
+        char d[4];
+        dm_u64(frac / 100, d, sizeof(d));
         ic_strlcat(out, ".", cap);
-        ic_strlcat(out, d[0] ? d : "0", cap);
-        if (ic_strlen(out) > 1 && out[ic_strlen(out) - 1] == '0') {
-            out[ic_strlen(out) - 1] = 0;
-        }
+        ic_strlcat(out, d, cap);
     }
     ic_strlcat(out, " ", cap);
     ic_strlcat(out, units[unit], cap);
 }
 
 
-static int field_is(const char *p, const char *key) {
-    while (*key) {
-        if (*p != *key) return 0;
-        p++;
-        key++;
-    }
-    return *p == '=' || *p == ' ' || *p == 0;
-}
-
-static const char *field_value(const char *p) {
-    while (*p && *p != '=') p++;
-    return *p ? p + 1 : p;
-}
-
-static void read_value(const char *p, uint64_t *out) {
-    *out = 0;
-    while (*p >= '0' && *p <= '9') {
-        *out = *out * 10 + (uint64_t)(*p - '0');
-        p++;
-    }
-}
-
-static void read_token(const char **p, char *out, uint64_t cap) {
-    const char *s = *p;
+static void copy_span(char *out, uint64_t cap, const char *s, uint64_t n) {
     uint64_t i = 0;
-    while (*s == ' ') s++;
-    while (*s && *s != ' ' && *s != '\n' && i + 1 < cap) out[i++] = *s++;
+    if (cap == 0) return;
+    while (i < n && i + 1 < cap) { out[i] = s[i]; i++; }
     out[i] = 0;
-    *p = s;
 }
 
+static uint64_t span_u64(const char *s, uint64_t n) {
+    uint64_t v = 0;
+    for (uint64_t i = 0; i < n && s[i] >= '0' && s[i] <= '9'; i++) {
+        v = v * 10 + (uint64_t)(s[i] - '0');
+    }
+    return v;
+}
 
+static int key_is(const char *s, uint64_t n, const char *key) {
+    if (n != dm_strlen(key)) return 0;
+    for (uint64_t i = 0; i < n; i++) {
+        if (s[i] != key[i]) return 0;
+    }
+    return 1;
+}
+
+static void parse_line(int section, const char *line, uint64_t len) {
+    dm_device_t *d = 0;
+    dm_part_t *pt = 0;
+    uint64_t pos = 0;
+    int field = 0;
+
+    if (section == 0 && dm.device_count < DISKMAN_MAX_DEV) {
+        d = &dm.devices[dm.device_count++];
+        d->name[0] = 0;
+        dm_copy(d->table, "unknown", sizeof(d->table));
+        d->sectors = 0;
+        d->sector_size = 512;
+    } else if (section == 1 && dm.part_count < DISKMAN_MAX_PART) {
+        pt = &dm.parts[dm.part_count++];
+        pt->name[0] = pt->dev[0] = pt->fs[0] = pt->role[0] = 0;
+        pt->start = 0;
+        pt->sectors = 0;
+    } else {
+        return;
+    }
+
+    while (pos < len) {
+        const char *t, *v;
+        uint64_t start, n, eq, vn;
+        while (pos < len && line[pos] == ' ') pos++;
+        start = pos;
+        while (pos < len && line[pos] != ' ') pos++;
+        n = pos - start;
+        if (n == 0) break;
+        t = line + start;
+        if (field == 0) {
+            if (d) d->index = span_u64(t, n);
+            else pt->index = span_u64(t, n);
+            field++;
+            continue;
+        }
+        for (eq = 0; eq < n && t[eq] != '='; eq++) {}
+        if (field == 1 && eq == n) {
+            char *name = d ? d->name : pt->name;
+            uint64_t cap = d ? sizeof(d->name) : sizeof(pt->name);
+            uint64_t at = dm_strlen(name);
+            if (at > 0 && at + 1 < cap) name[at++] = ' ';
+            copy_span(name + at, cap - at, t, n);
+            continue;
+        }
+        field = 2;
+        if (eq == n) continue;
+        v = t + eq + 1;
+        vn = n - eq - 1;
+        if (d) {
+            if (key_is(t, eq, "table")) copy_span(d->table, sizeof(d->table), v, vn);
+            else if (key_is(t, eq, "sectors")) d->sectors = span_u64(v, vn);
+            else if (key_is(t, eq, "sector_size")) d->sector_size = span_u64(v, vn);
+        } else {
+            if (key_is(t, eq, "dev")) copy_span(pt->dev, sizeof(pt->dev), v, vn);
+            else if (key_is(t, eq, "fs")) copy_span(pt->fs, sizeof(pt->fs), v, vn);
+            else if (key_is(t, eq, "role")) copy_span(pt->role, sizeof(pt->role), v, vn);
+            else if (key_is(t, eq, "start")) pt->start = span_u64(v, vn);
+            else if (key_is(t, eq, "sectors")) pt->sectors = span_u64(v, vn);
+        }
+    }
+    if (d && d->sector_size == 0) d->sector_size = 512;
+}
 
 static void parse_storage(void) {
     const char *p = dm.info;
+    int section = -1;
     dm.device_count = 0;
     dm.part_count = 0;
     while (*p) {
-        if (p[0] == ' ' && p[1] == ' ' && p[2] >= '0' && p[2] <= '9') {
-            const char *line = p + 2;
-            uint64_t idx = 0;
-            const char *q = line;
-            read_value(q, &idx);
-            while (*q && *q != ':') q++;
-            if (*q == ':') {
-                q++;
-                while (*q == ' ') q++;
-                if (*q == 'a' && dm.device_count < DISKMAN_MAX_DEV) {
-                    dm_device_t *d = &dm.devices[dm.device_count];
-                    d->index = idx;
-                    read_token(&q, d->name, sizeof(d->name));
-                    dm_copy(d->table, "unknown", sizeof(d->table));
-                    d->sectors = 0;
-                    d->sector_size = 512;
-                    while (*q && *q != '\n') {
-                        if (field_is(q, "sectors")) read_value(field_value(q), &d->sectors);
-                        else if (field_is(q, "sector_size")) {
-                            read_value(field_value(q), &d->sector_size);
-                        } else if (field_is(q, "table")) {
-                            read_token(&q, d->table, sizeof(d->table));
-                            continue;
-                        }
-                        q++;
-                    }
-                    dm.device_count++;
-                } else if (*q != '(' && dm.part_count < DISKMAN_MAX_PART) {
-                    dm_part_t *pt = &dm.parts[dm.part_count];
-                    pt->index = idx;
-                    read_token(&q, pt->name, sizeof(pt->name));
-                    pt->dev[0] = pt->fs[0] = pt->role[0] = 0;
-                    pt->start = 0;
-                    pt->sectors = 0;
-                    while (*q && *q != '\n') {
-                        if (field_is(q, "dev")) read_token(&q, pt->dev, sizeof(pt->dev));
-                        else if (field_is(q, "fs")) read_token(&q, pt->fs, sizeof(pt->fs));
-                        else if (field_is(q, "role")) read_token(&q, pt->role, sizeof(pt->role));
-                        else if (field_is(q, "start")) read_value(field_value(q), &pt->start);
-                        else if (field_is(q, "sectors")) read_value(field_value(q), &pt->sectors);
-                        else q++;
-                        if (*q != '\n') q++;
-                    }
-                    dm.part_count++;
-                }
-            }
-        }
-        while (*p && *p != '\n') p++;
+        const char *line = p;
+        uint64_t len = 0;
+        while (p[len] && p[len] != '\n') len++;
+        p += len;
         if (*p == '\n') p++;
-        if (p[0] == 'p' && p[1] == 'a') break;
+        if (len == 0) continue;
+        if (line[0] != ' ') {
+            if (key_is(line, len, "devices:")) section = 0;
+            else if (key_is(line, len, "partitions:")) section = 1;
+            else section = 2;
+            continue;
+        }
+        if (len > 2 && line[2] >= '0' && line[2] <= '9') parse_line(section, line + 2, len - 2);
     }
 }
 
@@ -346,6 +361,18 @@ static int part_belongs_to_selected(int i) {
         if (dm.parts[i].dev[j] != want[j]) return 0;
     }
     return 1;
+}
+
+static void select_device(int i) {
+    int n = 0;
+    dm.selected = i;
+    parse_storage();
+    for (int k = 0; k < dm.part_count; k++) {
+        if (part_belongs_to_selected(k)) dm.parts[n++] = dm.parts[k];
+    }
+    dm.part_count = n;
+    dm.selected_part = 0;
+    dm.first_row = 0;
 }
 
 static void refresh(void) {
@@ -366,10 +393,7 @@ static void refresh(void) {
     if (dm.device_count > 1 && dm.selected == 0) dm.selected = 1;
     if (dm.selected >= dm.device_count) dm.selected = dm.device_count ? dm.device_count - 1 : 0;
 
-    dm.selected_part = 0;
-    for (int i = 0; i < dm.part_count; i++) {
-        if (part_belongs_to_selected(i)) { dm.selected_part = i; break; }
-    }
+    select_device(dm.selected);
     if (dm.device_count == 0) dm_status("No storage devices were reported");
 }
 
@@ -405,9 +429,14 @@ static void do_format_device(uint64_t fs_type) {
     }
     rc = (long)icda_format_device(dm.devices[dm.selected].index, fs_type);
     if (rc < 0) {
+        if (rc == -21 || rc == -31) {
+            dm_status(fs_type == DISKMAN_LAYOUT_ICDA ? "The ICDA layout needs a disk of at least 1 GB"
+                                                     : "This disk is too small for that layout");
+            return;
+        }
         char msg[DISKMAN_STATUS_CAP];
         char n[24];
-        dm_status("");
+        msg[0] = 0;
         ic_strlcat(msg, action_verb(fs_type), sizeof(msg));
         ic_strlcat(msg, " failed (error ", sizeof(msg));
         dm_u64((uint64_t)(-rc), n, sizeof(n));
@@ -418,23 +447,31 @@ static void do_format_device(uint64_t fs_type) {
     }
     {
         char msg[DISKMAN_STATUS_CAP];
-        dm_status("");
-        ic_strlcat(msg, action_verb(fs_type), sizeof(msg));
-        ic_strlcat(msg, " finished on ", sizeof(msg));
+        msg[0] = 0;
         ic_strlcat(msg, dm.devices[dm.selected].name, sizeof(msg));
+        ic_strlcat(msg, " was erased and now holds ", sizeof(msg));
+        ic_strlcat(msg, fs_label(fs_type), sizeof(msg));
         dm_status(msg);
     }
     refresh();
 }
 
+static void reselect_part(uint64_t index) {
+    for (int i = 0; i < dm.part_count; i++) {
+        if (dm.parts[i].index == index) { dm.selected_part = i; dm.focus_parts = 1; return; }
+    }
+}
+
 static void do_format_partition(uint64_t fs_type) {
     long rc;
+    uint64_t keep;
     if (!has_partition()) { dm_status("No partition is selected"); return; }
+    keep = dm.parts[dm.selected_part].index;
     rc = (long)icda_format_partition(dm.parts[dm.selected_part].index, fs_type);
     if (rc < 0) {
         char msg[DISKMAN_STATUS_CAP];
         char n[24];
-        dm_status("");
+        msg[0] = 0;
         ic_strlcat(msg, "Format failed on ", sizeof(msg));
         ic_strlcat(msg, dm.parts[dm.selected_part].name, sizeof(msg));
         ic_strlcat(msg, " (error ", sizeof(msg));
@@ -446,7 +483,7 @@ static void do_format_partition(uint64_t fs_type) {
     }
     {
         char msg[DISKMAN_STATUS_CAP];
-        dm_status("");
+        msg[0] = 0;
         ic_strlcat(msg, "Formatted ", sizeof(msg));
         ic_strlcat(msg, dm.parts[dm.selected_part].name, sizeof(msg));
         ic_strlcat(msg, " as ", sizeof(msg));
@@ -454,17 +491,20 @@ static void do_format_partition(uint64_t fs_type) {
         dm_status(msg);
     }
     refresh();
+    reselect_part(keep);
 }
 
 static void do_set_role(int role) {
     long rc;
+    uint64_t keep;
     static const char *const names[4] = { "", "EFI", "System", "Swap" };
     if (!has_partition()) { dm_status("No partition is selected"); return; }
+    keep = dm.parts[dm.selected_part].index;
     rc = (long)icda_set_partition_role(dm.parts[dm.selected_part].index, (uint64_t)role);
     if (rc < 0) {
         char msg[DISKMAN_STATUS_CAP];
         char n[24];
-        dm_status("");
+        msg[0] = 0;
         ic_strlcat(msg, "Could not set the role (error ", sizeof(msg));
         dm_u64((uint64_t)(-rc), n, sizeof(n));
         ic_strlcat(msg, n, sizeof(msg));
@@ -474,7 +514,7 @@ static void do_set_role(int role) {
     }
     {
         char msg[DISKMAN_STATUS_CAP];
-        dm_status("");
+        msg[0] = 0;
         ic_strlcat(msg, dm.parts[dm.selected_part].name, sizeof(msg));
         ic_strlcat(msg, " is now the ", sizeof(msg));
         ic_strlcat(msg, names[role], sizeof(msg));
@@ -482,6 +522,7 @@ static void do_set_role(int role) {
         dm_status(msg);
     }
     refresh();
+    reselect_part(keep);
 }
 
 static void confirm(int action, int arg) {
@@ -552,7 +593,8 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t b = toolbar_rect(app);
     const ic_palette_t *p = ic_palette();
     int enabled = has_device() && !device_is_runtime(dm.selected);
-    int part_enabled = has_partition();
+    int part_enabled = can_set_role();
+    const char *hint;
 
     ic_ui_toolbar(c, b);
     ic_ui_icon_button(c, refresh_rect(app), IC_SYM_RELOAD,
@@ -564,23 +606,29 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_button(c, action_rect(app, 1), "exFAT", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !enabled ? IC_STATE_DISABLED
                           : (dm.hover_exfat ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    ic_ui_button(c, action_rect(app, 2), "ICDA", IC_SYM_NONE, IC_BUTTON_DEFAULT,
+                 !enabled ? IC_STATE_DISABLED
+                          : (dm.hover_gpt ? IC_STATE_HOVER : IC_STATE_NORMAL));
     
-    ic_ui_button(c, action_rect(app, 2), "EFI", IC_SYM_NONE, IC_BUTTON_DEFAULT,
+    ic_ui_button(c, action_rect(app, 3), "EFI", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !part_enabled ? IC_STATE_DISABLED
                                : (dm.hover_role_efi ? IC_STATE_HOVER : IC_STATE_NORMAL));
-    ic_ui_button(c, action_rect(app, 3), "System", IC_SYM_NONE, IC_BUTTON_DEFAULT,
+    ic_ui_button(c, action_rect(app, 4), "System", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !part_enabled ? IC_STATE_DISABLED
                                : (dm.hover_role_system ? IC_STATE_HOVER : IC_STATE_NORMAL));
-    ic_ui_button(c, action_rect(app, 4), "Swap", IC_SYM_NONE, IC_BUTTON_DEFAULT,
+    ic_ui_button(c, action_rect(app, 5), "Swap", IC_SYM_NONE, IC_BUTTON_DEFAULT,
                  !part_enabled ? IC_STATE_DISABLED
                                : (dm.hover_role_swap ? IC_STATE_HOVER : IC_STATE_NORMAL));
+    if (!has_device()) hint = "Attach a disk to begin";
+    else if (device_is_runtime(dm.selected)) hint = "System disk - protected";
+    else if (has_partition() && !part_enabled) hint = "Roles need a GPT disk. ICDA writes one.";
+    else if (has_partition()) hint = "Format the partition or set its role";
+    else hint = "Erase the disk, or select a partition";
     {
-        int right = action_rect(app, 4).x + action_rect(app, 4).w + IC_SP_3;
+        int right = action_rect(app, 5).x + action_rect(app, 5).w + IC_SP_3;
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
                         ic_rect_make(right, 0, b.w - right - IC_SP_3, b.h),
-                        device_is_runtime(dm.selected) ? "System disk - protected"
-                                                       : "Select a disk, then choose an action",
-                        p->label_tertiary, IC_ALIGN_LEFT);
+                        hint, p->label_tertiary, IC_ALIGN_LEFT);
     }
 }
 
@@ -593,7 +641,7 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
                     "DEVICES", p->label_tertiary, IC_ALIGN_LEFT);
     for (int i = 0; i < dm.device_count; i++) {
         ic_rect_t r = device_rect(app, i);
-        float hover = i == dm.hover_device ? 1.0f : 0.0f;
+        float hover = (-100 - i) == dm.hover_device ? 1.0f : 0.0f;
         char size[24];
         char line[40];
         size_text(dm.devices[i].sectors, dm.devices[i].sector_size, size, sizeof(size));
@@ -602,8 +650,8 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
         line[0] = 0;
         ic_strlcat(line, size, sizeof(line));
         ic_text_draw_in(c, ic_font(IC_FONT_CAPTION),
-                        ic_rect_make(r.x + IC_SP_3 + 22, r.y, r.w - IC_SP_4 - 22, r.h),
-                        line, p->label_tertiary, IC_ALIGN_LEFT);
+                        ic_rect_make(r.x + IC_SP_3, r.y, r.w - IC_SP_3 - IC_SP_4, r.h),
+                        line, p->label_tertiary, IC_ALIGN_RIGHT);
     }
     if (dm.device_count == 0) {
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
@@ -612,23 +660,43 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
     }
 }
 
+static const char *pretty_token(const char *s) {
+    if (ic_streq(s, "fat32")) return "FAT32";
+    if (ic_streq(s, "exfat")) return "exFAT";
+    if (ic_streq(s, "ntfs")) return "NTFS";
+    if (ic_streq(s, "efi")) return "EFI";
+    if (ic_streq(s, "system")) return "System";
+    if (ic_streq(s, "swap")) return "Swap";
+    if (ic_streq(s, "data")) return "Data";
+    return "-";
+}
+
+static const char *table_label(const char *kind) {
+    if (ic_streq(kind, "gpt")) return "GUID partition table";
+    if (ic_streq(kind, "mbr")) return "Master boot record";
+    return "No partition table";
+}
+
 static void draw_detail(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t d = detail_rect(app);
     const ic_palette_t *p = ic_palette();
     const ic_face_t *body = ic_font(IC_FONT_BODY);
     const ic_face_t *mono = ic_font(IC_FONT_MONO_SMALL);
-    static const char *const titles[4] = { "PARTITION", "FILE SYSTEM", "ROLE", "SIZE" };
-    static const int widths[4] = { 260, 130, 100, 120 };
+    static const char *const titles[4] = { "Partition", "File System", "Role", "Size" };
+    int widths[4] = { 0, 120, 90, 100 };
     char cell[32];
 
     layout(app);
+    widths[0] = d.w - 2 * IC_SP_4 - widths[1] - widths[2] - widths[3];
+    if (widths[0] < 80) widths[0] = 80;
     ic_ui_section_header(c, d.x + IC_SP_4, d.y + IC_SP_4,
                          has_device() ? dm.devices[dm.selected].name : "No device");
     if (has_device()) {
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
                         ic_rect_make(d.x + IC_SP_4, d.y + IC_SP_4 + title_h(), d.w - IC_SP_6,
                                      16),
-                        dm.devices[dm.selected].table, p->label_tertiary, IC_ALIGN_LEFT);
+                        table_label(dm.devices[dm.selected].table), p->label_tertiary,
+                        IC_ALIGN_LEFT);
     }
     ic_ui_table_header(c, ic_rect_make(d.x + IC_SP_4, d.y + IC_SP_4 + title_h() + IC_SP_4,
                                        d.w - 2 * IC_SP_4, IC_H_ROW),
@@ -640,26 +708,30 @@ static void draw_detail(ic_app_t *app, ic_canvas_t *c) {
         int sel = i == dm.selected_part && dm.focus_parts;
         ic_color_t text = ic_ui_list_row(c, r, sel, dm.list_focused,
                                          i == dm.hover_device ? 1.0f : 0.0f);
-        int y = ic_text_center_baseline(body, r.y, r.h);
+        int x = r.x + IC_SP_3;
         size_text(pt->sectors, 512, cell, sizeof(cell));
-        ic_text_draw_in(c, body, ic_rect_make(r.x, r.y, widths[0] - IC_SP_2, r.h), pt->name,
+        ic_text_draw_in(c, body, ic_rect_make(x, r.y, widths[0] - IC_SP_2, r.h), pt->name,
                         text, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, body, ic_rect_make(r.x + widths[0], r.y, widths[1] - IC_SP_2, r.h),
-                        pt->fs[0] ? pt->fs : "-", text, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, body, ic_rect_make(r.x + widths[0] + widths[1], r.y,
+        ic_text_draw_in(c, body, ic_rect_make(x + widths[0], r.y, widths[1] - IC_SP_2, r.h),
+                        pretty_token(pt->fs), text, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, body, ic_rect_make(x + widths[0] + widths[1], r.y,
                                               widths[2] - IC_SP_2, r.h),
-                        pt->role[0] ? pt->role : "-", text, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, mono, ic_rect_make(r.x + widths[0] + widths[1] + widths[2], r.y,
-                                              widths[3] - IC_SP_2, r.h),
+                        pretty_token(pt->role), text, IC_ALIGN_LEFT);
+        ic_text_draw_in(c, mono, ic_rect_make(x + widths[0] + widths[1] + widths[2], r.y,
+                                              widths[3] - IC_SP_3 - IC_SP_2, r.h),
                         cell, text, IC_ALIGN_RIGHT);
-        (void)y;
     }
 
     if (dm.part_count == 0) {
-        ic_ui_empty_state(c, d, IC_SYM_DISK, "No partitions",
-                          "This disk has no partition table. Choose an action above to write one.");
+        if (!has_device()) {
+            ic_ui_empty_state(c, d, IC_SYM_DISK, "No storage devices",
+                              "Attach a disk, then press Refresh.");
+        } else {
+            ic_ui_empty_state(c, d, IC_SYM_DISK, "No partitions",
+                              "This disk has no partition table. Choose an action above to write one.");
+        }
     } else if (dm.part_count > dm.rows) {
-        ic_ui_scrollbar(c, d, dm.first_row, dm.part_count, 1.0f);
+        ic_ui_scrollbar(c, d, dm.first_row * IC_H_ROW, (dm.part_count - dm.rows) * IC_H_ROW + d.h, 1.0f);
     }
 }
 
@@ -726,9 +798,10 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         dm.hover_refresh = ic_ui_hit(refresh_rect(app), ev->x, ev->y);
         dm.hover_fat32 = ic_ui_hit(action_rect(app, 0), ev->x, ev->y);
         dm.hover_exfat = ic_ui_hit(action_rect(app, 1), ev->x, ev->y);
-        dm.hover_role_efi = ic_ui_hit(action_rect(app, 2), ev->x, ev->y);
-        dm.hover_role_system = ic_ui_hit(action_rect(app, 3), ev->x, ev->y);
-        dm.hover_role_swap = ic_ui_hit(action_rect(app, 4), ev->x, ev->y);
+        dm.hover_gpt = ic_ui_hit(action_rect(app, 2), ev->x, ev->y);
+        dm.hover_role_efi = ic_ui_hit(action_rect(app, 3), ev->x, ev->y);
+        dm.hover_role_system = ic_ui_hit(action_rect(app, 4), ev->x, ev->y);
+        dm.hover_role_swap = ic_ui_hit(action_rect(app, 5), ev->x, ev->y);
         dm.hover_device = part_at(app, ev->x, ev->y);
         if (dm.hover_device < 0) {
             int d = device_at(app, ev->x, ev->y);
@@ -758,9 +831,10 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             else confirm(DA_FORMAT_DEVICE, DISKMAN_FS_EXFAT);
             break;
         }
-        if (dm.hover_role_efi && has_partition()) { confirm(DA_ROLE, DISKMAN_ROLE_EFI); break; }
-        if (dm.hover_role_system && has_partition()) { confirm(DA_ROLE, DISKMAN_ROLE_SYSTEM); break; }
-        if (dm.hover_role_swap && has_partition()) { confirm(DA_ROLE, DISKMAN_ROLE_SWAP); break; }
+        if (dm.hover_gpt) { confirm(DA_FORMAT_DEVICE, DISKMAN_LAYOUT_ICDA); break; }
+        if (dm.hover_role_efi && can_set_role()) { confirm(DA_ROLE, DISKMAN_ROLE_EFI); break; }
+        if (dm.hover_role_system && can_set_role()) { confirm(DA_ROLE, DISKMAN_ROLE_SYSTEM); break; }
+        if (dm.hover_role_swap && can_set_role()) { confirm(DA_ROLE, DISKMAN_ROLE_SWAP); break; }
         i = part_at(app, ev->x, ev->y);
         if (i >= 0) {
             dm.selected_part = i;
@@ -770,19 +844,15 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         }
         i = device_at(app, ev->x, ev->y);
         if (i >= 0) {
-            dm.selected = i;
+            select_device(i);
             dm.focus_parts = 0;
             dm.list_focused = 1;
-            dm.selected_part = 0;
-            for (int k = 0; k < dm.part_count; k++) {
-                if (part_belongs_to_selected(k)) { dm.selected_part = k; break; }
-            }
         }
         break;
     }
     case IC_EV_MOUSE_LEAVE:
         dm.hover_device = -1;
-        dm.hover_refresh = dm.hover_fat32 = dm.hover_exfat = 0;
+        dm.hover_refresh = dm.hover_fat32 = dm.hover_exfat = dm.hover_gpt = 0;
         dm.hover_role_efi = dm.hover_role_system = dm.hover_role_swap = 0;
         break;
     case IC_EV_KEY:
@@ -805,14 +875,14 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             if (dm.focus_parts) {
                 if (dm.selected_part > 0) dm.selected_part--;
             } else if (dm.selected > 0) {
-                dm.selected--;
+                select_device(dm.selected - 1);
             }
             break;
         case IC_KEY_DOWN:
             if (dm.focus_parts) {
                 if (dm.selected_part + 1 < dm.part_count) dm.selected_part++;
             } else if (dm.selected + 1 < dm.device_count) {
-                dm.selected++;
+                select_device(dm.selected + 1);
             }
             break;
         case IC_KEY_HOME: dm.selected_part = 0; break;
@@ -855,7 +925,7 @@ static void init(ic_app_t *app) {
     dm.focus_parts = 0;
     dm.runtime_device = -1;
     dm.hover_device = -1;
-    dm.hover_refresh = dm.hover_fat32 = dm.hover_exfat = 0;
+    dm.hover_refresh = dm.hover_fat32 = dm.hover_exfat = dm.hover_gpt = 0;
     dm.hover_role_efi = dm.hover_role_system = dm.hover_role_swap = 0;
     dm.list_focused = 1;
     dm.action = DA_NONE;

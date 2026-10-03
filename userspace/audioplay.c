@@ -279,7 +279,7 @@ static void draw_list(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_empty_state(c, l, IC_SYM_MUSIC, "No music found",
                           "Add .wav files to the media folder, then press Refresh.");
     } else if (ap.count > ap.rows) {
-        ic_ui_scrollbar(c, l, ap.scroll, ap.count, 1.0f);
+        ic_ui_scrollbar(c, l, ap.scroll * IC_H_ROW, ap.count * IC_H_ROW, 1.0f);
     }
 }
 

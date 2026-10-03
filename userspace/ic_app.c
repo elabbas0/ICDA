@@ -15,7 +15,10 @@
 typedef struct {
     int     state;     
     uint32_t param;
+    uint32_t esc_ms;
 } ic_keydec_t;
+
+#define IC_ESC_TIMEOUT_MS 50
 
 static void ic_app_emit_key(ic_app_t *app, uint32_t key) {
     ic_event_t ev;
@@ -32,6 +35,7 @@ static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
     if (d->state == 0) {
         if (c == 27) {
             d->state = 1;
+            d->esc_ms = ic_time_ms();
             return;
         }
         ic_app_emit_key(app, c == 127 ? IC_KEY_BACKSPACE : c);
@@ -137,6 +141,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
     for (uint64_t i = 0; i < sizeof(app); i++) ((uint8_t *)&app)[i] = 0;
     keys.state = 0;
     keys.param = 0;
+    keys.esc_ms = 0;
     app.desc = desc;
     app.user = user;
     app.mouse_x = app.mouse_y = -1;
@@ -187,7 +192,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
         }
         if (app.quit) break;
         
-        if (keys.state == 1 && events == 0) {
+        if (keys.state == 1 && events == 0 && ic_time_ms() - keys.esc_ms >= IC_ESC_TIMEOUT_MS) {
             keys.state = 0;
             ic_app_emit_key(&app, IC_KEY_ESCAPE);
         }

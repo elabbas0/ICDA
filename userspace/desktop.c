@@ -653,7 +653,8 @@ static void draw_grid(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_empty_state(c, area, IC_SYM_FOLDER, "This folder is empty",
                           "Use New Folder or New File to add something here.");
     } else if (ex.count > ex.cols * ex.rows) {
-        ic_ui_scrollbar(c, area, ex.scroll, ex.count, 1.0f);
+        ic_ui_scrollbar(c, area, ex.scroll / ex.cols * GRID_CELL_H,
+                        (ex.count + ex.cols - 1) / ex.cols * GRID_CELL_H + 2 * IC_SP_3, 1.0f);
     }
 }
 
@@ -696,7 +697,7 @@ static void draw_list(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_empty_state(c, area, IC_SYM_FOLDER, "This folder is empty",
                           "Use New Folder or New File to add something here.");
     } else if (ex.count > ex.rows) {
-        ic_ui_scrollbar(c, area, ex.first_item, ex.count, 1.0f);
+        ic_ui_scrollbar(c, area, ex.first_item * ROW_H, ex.count * ROW_H + 2 * IC_SP_2, 1.0f);
     }
 }
 
