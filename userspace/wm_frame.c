@@ -85,8 +85,8 @@ static void wm_frame_caption_button(ic_canvas_t *c, const wm_frame_t *f, wm_hit_
     ic_color_t fg = f->focused ? p->label_secondary : p->label_tertiary;
     if (which == WM_HIT_CLOSE && (hover || pressed)) {
         ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL,
-                     pressed ? ic_color_mix(p->close_hover, IC_RGB(0x000000), 0.15f) : p->close_hover);
-        fg = IC_RGB(0xFFFFFF);
+                     pressed ? ic_color_mix(p->close_hover, IC_BLACK, 0.15f) : p->close_hover);
+        fg = IC_WHITE;
     } else if (pressed) {
         ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL, p->fill_pressed);
         fg = p->label;

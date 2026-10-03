@@ -69,9 +69,9 @@ void ic_ui_button(ic_canvas_t *c, ic_rect_t r, const char *label, ic_symbol_t sy
                           state == IC_STATE_HOVER ? p->accent_hover : p->accent;
         if (!p->dark) ic_theme_shadow(c, r.x, r.y, r.w, r.h, rad, IC_ELEV_CONTROL);
         ic_gfx_rrect_gradient_v(c, r.x, r.y, r.w, r.h, rad,
-                                ic_color_mix(base, IC_RGB(0xFFFFFF), 0.08f), base);
-        ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, rad, 1.0f, IC_RGBA(0x000000, 0x1C));
-        ic_gfx_hline(c, r.x + (int)rad, r.y + 1, r.w - 2 * (int)rad, IC_RGBA(0xFFFFFF, 0x2C));
+                                ic_color_mix(base, IC_WHITE, 0.08f), base);
+        ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, rad, 1.0f, IC_BLACK_A(0x1C));
+        ic_gfx_hline(c, r.x + (int)rad, r.y + 1, r.w - 2 * (int)rad, IC_WHITE_A(0x2C));
         fg = p->label_on_accent;
     } else {
         ic_color_t face = state == IC_STATE_PRESSED ? p->control_pressed :
@@ -120,11 +120,11 @@ void ic_ui_toggle(ic_canvas_t *c, int x, int y, float on, ic_state_t state) {
     float kx = (float)x + (float)IC_TOGGLE_H * 0.5f + t * (float)(IC_TOGGLE_W - IC_TOGGLE_H);
     float ky = (float)y + (float)IC_TOGGLE_H * 0.5f;
     ic_color_t track = ic_color_mix(p->toggle_off, p->accent, t);
-    if (state == IC_STATE_PRESSED) track = ic_color_mix(track, IC_RGB(0x000000), 0.10f);
+    if (state == IC_STATE_PRESSED) track = ic_color_mix(track, IC_BLACK, 0.10f);
     ic_gfx_rrect(c, x, y, IC_TOGGLE_W, IC_TOGGLE_H, (float)IC_TOGGLE_H * 0.5f,
                  ic_color_fade(track, fade));
     
-    ic_gfx_circle(c, kx, ky + 0.75f, kr + 0.5f, IC_RGBA(0x000000, (uint32_t)(0x40 * fade)));
+    ic_gfx_circle(c, kx, ky + 0.75f, kr + 0.5f, IC_BLACK_A((uint32_t)(0x40 * fade)));
     ic_gfx_circle(c, kx, ky, kr, ic_color_fade(p->knob, fade));
 }
 
@@ -184,9 +184,9 @@ void ic_ui_slider(ic_canvas_t *c, ic_rect_t r, float value, ic_state_t state) {
     ic_color_t fill = state == IC_STATE_DISABLED ? p->label_disabled : p->accent;
     ic_gfx_rrect(c, r.x, ty, r.w, 4, 2.0f, p->toggle_off);
     ic_gfx_rrect(c, r.x, ty, (int)(kx - (float)r.x), 4, 2.0f, fill);
-    ic_gfx_circle(c, kx, ky + 0.75f, kr + 0.5f, IC_RGBA(0x000000, 0x40));
+    ic_gfx_circle(c, kx, ky + 0.75f, kr + 0.5f, IC_BLACK_A(0x40));
     ic_gfx_circle(c, kx, ky, kr, state == IC_STATE_PRESSED ?
-                  ic_color_mix(p->knob, IC_RGB(0x000000), 0.08f) : p->knob);
+                  ic_color_mix(p->knob, IC_BLACK, 0.08f) : p->knob);
 }
 
 void ic_ui_progress(ic_canvas_t *c, ic_rect_t r, float value, ic_color_t tint) {
@@ -307,7 +307,7 @@ void ic_ui_row_text(ic_canvas_t *c, ic_rect_t row, ic_symbol_t sym, ic_color_t s
         int by = row.y + (row.h - b) / 2;
         ic_gfx_rrect(c, x, by, b, b, 6.0f, IC_ALPHA(sym_tint) ? sym_tint : p->accent);
         ic_symbol_draw(c, sym, (float)x + (float)b * 0.5f, (float)by + (float)b * 0.5f, 15.0f,
-                       IC_RGB(0xFFFFFF));
+                       IC_WHITE);
         x += b + IC_SP_3 - 2;
     }
     if (subtitle && subtitle[0]) {

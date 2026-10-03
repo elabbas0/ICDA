@@ -46,13 +46,13 @@ enum { TOG_ANIMATIONS = 0, TOG_BOOT_ANIM, TOG_VSYNC, TOG_AUDIO, TOG_COUNT };
 
 static const toggle_row_t toggles[TOG_COUNT] = {
     { PANE_MOTION, "Window animations", "Open, close, minimize and zoom with motion",
-      IC_SYM_MAXIMIZE, 0x5E5CE6 },
+      IC_SYM_MAXIMIZE, IC_TINT_INDIGO },
     { PANE_MOTION, "Startup and shutdown", "Fade the screen when powering off or restarting",
-      IC_SYM_POWER, 0xFF9F0A },
+      IC_SYM_POWER, IC_TINT_ORANGE },
     { PANE_MOTION, "Sync to display refresh", "Present once per frame to avoid tearing",
-      IC_SYM_RELOAD, 0x30B0C7 },
+      IC_SYM_RELOAD, IC_TINT_TEAL },
     { PANE_SOUND, "Sound", "Allow apps to play audio",
-      IC_SYM_SPEAKER, 0xFF375F },
+      IC_SYM_SPEAKER, IC_TINT_PINK },
 };
 
 typedef struct {
@@ -175,7 +175,7 @@ static void draw_appearance(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_group(c, g);
     draw_row_hover(c, r0, 0, 2);
     draw_row_hover(c, r1, 1, 2);
-    ic_ui_row_text(c, r0, st.s.appearance ? IC_SYM_SUN : IC_SYM_MOON, IC_RGB(0x5E5CE6),
+    ic_ui_row_text(c, r0, st.s.appearance ? IC_SYM_SUN : IC_SYM_MOON, IC_RGB(IC_TINT_INDIGO),
                    "Appearance", "Use a dark or light look everywhere");
     ic_ui_segmented(c, segmented_rect(app), modes, 2, ic_tween_value(&st.segment_pos),
                     st.hover_segment);
@@ -192,7 +192,7 @@ static void draw_appearance(ic_app_t *app, ic_canvas_t *c) {
             ic_gfx_ring(c, cx, cy, SWATCH_D * 0.5f + 3.5f, 2.0f, p->separator);
         }
         ic_gfx_circle(c, cx, cy, SWATCH_D * 0.5f, col);
-        if (i == st.s.accent) ic_symbol_draw(c, IC_SYM_CHECK, cx, cy, 11.0f, IC_RGB(0xFFFFFF));
+        if (i == st.s.accent) ic_symbol_draw(c, IC_SYM_CHECK, cx, cy, 11.0f, IC_WHITE);
     }
 
     

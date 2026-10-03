@@ -1774,7 +1774,7 @@ static void composite_window_zoom(wm_window_t *win, int idx, ic_rect_t outer, fl
     nh = f.h + WM_TITLE_H + 2;
     if (nw > scr_w || nh > scr_h || outer.w <= 0 || outer.h <= 0) return;
     ic_canvas_set_clip(&lc, 0, 0, nw, nh);
-    ic_gfx_fill(&lc, 0, 0, nw, nh, IC_RGB(0x000000));
+    ic_gfx_fill(&lc, 0, 0, nw, nh, IC_BLACK);
     wm_frame_draw(&lc, &f, win->pixels, win->pix_w, win->pix_h);
 
     sx = (float)outer.w / (float)(nw - 2);

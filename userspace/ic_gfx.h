@@ -40,6 +40,10 @@ typedef uint32_t ic_color_t;
 #define IC_RGB(hex)       ((ic_color_t)(0xFF000000u | ((uint32_t)(hex) & 0xFFFFFFu)))
 #define IC_RGBA(hex, a8)  ((ic_color_t)(((uint32_t)(a8) << 24) | ((uint32_t)(hex) & 0xFFFFFFu)))
 #define IC_ALPHA(c)       ((uint32_t)(c) >> 24)
+#define IC_WHITE          IC_RGB(0xFFFFFF)
+#define IC_BLACK          IC_RGB(0x000000)
+#define IC_BLACK_A(a8)    IC_RGBA(0x000000, a8)
+#define IC_WHITE_A(a8)    IC_RGBA(0xFFFFFF, a8)
 
 ic_color_t ic_color_with_alpha(ic_color_t c, uint32_t a8);
 

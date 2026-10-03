@@ -90,8 +90,10 @@ copy-then-truncate, which the status line also states.
 ### P1: remove the legacy UI API
 
 Done. The legacy `libicda` UI API has been removed; code comments were moved to
-`docs/code-comments.md`. Then grep `userspace/*.c` for hex literals; the only exceptions allowed
-are `ic_theme.c`, `wm_shell.c` (wallpaper glows) and the generators.
+`docs/code-comments.md`. Color hex literals in `userspace/*.c` now live only
+in `ic_theme.c` and `wm_shell.c` (wallpaper glows). Everything else uses
+`IC_WHITE`/`IC_BLACK`/`IC_*_A()` (`ic_gfx.h`) or `IC_TINT_*` (`ic_theme.h`).
+The hex values left in `libicda.c` and `nptestlx.c` are not colors.
 
 ### P2: verification still owed
 - The five unverified apps above (Activity, Editor, Disk Utility, Browser,

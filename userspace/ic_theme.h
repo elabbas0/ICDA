@@ -101,6 +101,11 @@ typedef enum {
     IC_ACCENT_COUNT
 } ic_accent_t;
 
+#define IC_TINT_INDIGO  0x5E5CE6
+#define IC_TINT_ORANGE  0xFF9F0A
+#define IC_TINT_TEAL    0x30B0C7
+#define IC_TINT_PINK    0xFF375F
+
 typedef struct {
     int        dark;
 
