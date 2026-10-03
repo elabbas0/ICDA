@@ -1,26 +1,3 @@
-<
-.SYNOPSIS
-  Minimal QMP input driver: move the mouse, click, press keys, screendump.
-
-.DESCRIPTION
-  scripts/gui-check.py covers this but needs Python, which is not on this
-  host.  Same QMP protocol and the same PS/2 workarounds:
-
-    - the emulated mouse is PS/2, so it takes *relative* motion only
-      (there is no "abs" input handler);
-    - each packet carries a signed 8-bit delta, so a long move is walked
-      in <=127 px steps;
-    - x and y must be sent in *separate* input-send-event calls, or the
-      y event is silently dropped;
-    - QEMU can lose the first rel event after boot, so one warm-up
-      jiggle is issued before the real move.
-
-  The guest cursor position is tracked in gui-cursor.txt so successive
-  calls accumulate deltas correctly (the same file gui-check.py uses).
-
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts\qmp-input.ps1 -Port 4444 -Click 63,150 -Double -Shot term.png
-
 param(
     [int]$Port = 4444,
     [string]$Move = "",            
@@ -55,15 +32,6 @@ function Get-Cursor {
     }
     return @(512, 384)   
 }
-
-<
-  Locate the pointer by differencing two consecutive screendumps.  On an
-  idle desktop the pointer is the only thing that changes, so the pixels
-  that differ are the old and new cursor positions - which is immune to
-  the near-white *text* all over this UI, and does not depend on knowing
-  where the guest thinks the cursor is.
-
-  Returns a list of @{X;Y;N} clusters, largest first.
 
 function Find-CursorByDiff([string]$a, [string]$b) {
     $ba = [System.IO.File]::ReadAllBytes($a)
@@ -147,11 +115,6 @@ function Find-CursorByDiff([string]$a, [string]$b) {
     }
     return @($clusters | Sort-Object -Property N -Descending)
 }
-
-<
-  Locate the pointer in a P6 screendump by looking for a near-white
-  cluster.  This UI is full of light text, so this is only a fallback -
-  prefer Find-CursorByDiff, which cannot be confused by text.
 
 function Find-CursorInPpm([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -348,8 +311,9 @@ try {
         $outAbs = if ([System.IO.Path]::IsPathRooted($Shot)) { $Shot } else { Join-Path $RepoRoot $Shot }
         $qemuPath = ($outAbs -replace '\\', '/') -replace ' ', '\ '
         $ppm = [System.IO.Path]::ChangeExtension($outAbs, ".ppm")
+        $ppmQemu = ($ppm -replace '\\', '/') -replace ' ', '\ '
         if (Test-Path -LiteralPath $ppm) { Remove-Item -LiteralPath $ppm -Force }
-        [void](Send-Qmp "human-monitor-command" @{ "command-line" = "screendump $qemuPath" })
+        [void](Send-Qmp "human-monitor-command" @{ "command-line" = "screendump $ppmQemu" })
         Start-Sleep -Milliseconds 900
         if (-not (Test-Path -LiteralPath $ppm)) { throw "screendump produced no file" }
         & (Join-Path $RepoRoot "scripts\ppm2png.ps1") -In $ppm -Out $outAbs

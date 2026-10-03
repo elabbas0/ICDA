@@ -1,22 +1,3 @@
-<
-.SYNOPSIS
-  Minimal QMP client: send one human-monitor-command over QMP.
-
-.DESCRIPTION
-  scripts/gui-check.py needs Python, which is not installed on this host.
-  This does the one thing we need to verify the GUI: ask a running QEMU
-  (started with -qmp tcp:...,server,nowait -display none) to write a
-  screendump of the guest framebuffer, then optionally convert it to PNG
-  with scripts/ppm2png.ps1.
-
-  A screendump is the only way to see the ICDA desktop: the kernel turns
-  the serial mirror off once the framebuffer is up (kernel/kernel.c), so
-  headless serial output stops at "[S22 shell]" whether or not the GUI
-  came up.
-
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts\qmp-screendump.ps1 -Port 4444 -Out shot.ppm
-
 param(
     [int]$Port = 4444,
     [string]$Out = "gui-shot.ppm",

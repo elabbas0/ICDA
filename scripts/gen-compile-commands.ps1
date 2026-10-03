@@ -1,31 +1,3 @@
-<
-.SYNOPSIS
-  Regenerate compile_commands.json (clangd LSP database) from the Makefile.
-
-.DESCRIPTION
-  Uses the Docker toolchain image as ground truth: `make -nB` prints the
-  exact gcc command for every translation unit (kernel CFLAGS vs userspace
-  USR_CFLAGS, generated asset sources, per-file -D overrides), and this
-  script converts those into compile_commands.json with host paths so any
-  clangd client (VS Code, Vim, Emacs, Sublime) gets accurate browse,
-  diagnostics, and rename for the tree.
-
-  Three dry-runs are merged so every C source is covered, even ones the
-  default product build skips:
-    - default build (product image)
-    - CI_SELFTEST=1 CI_IMAGE=1 (gui_demo, nptest, nptestlx test apps)
-    - the orphan sb16.o rule (compiled but not linked into kernel.bin)
-  Sources with no Makefile rule at all (currently audiod.c, mkfiles.c)
-  reuse the userspace compile flags of an already-parsed entry.
-
-  Run from the repo root after the Docker image exists:
-
-    powershell -ExecutionPolicy Bypass -File scripts\gen-compile-commands.ps1
-
-  Requires: Docker engine running, image icda-toolchain (scripts\icda.cmd
-  image builds it). No Python / bear / compiledb needed on the host.
-
-
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $ImageName = "icda-toolchain"
