@@ -287,8 +287,11 @@ a dark full-screen overlay.
 
 Everything in P1-P3 is done or partly done as described above. What is
 left, smallest first:
-- Clipboard: Shift-select exists in the Editor, but there is nowhere to
-  copy to.
+- Clipboard: done. `ic_clipboard_set/get` (ic_app) keep it in
+  `/home/.clipboard`, so no new syscall was needed. The Editor has
+  Ctrl+C/X/V (also Ctrl+V in its path prompt), and the Terminal pastes
+  on right-click. The WM now forwards a whole escape sequence per frame,
+  so End/Home/arrows no longer leak `[F`-style bytes into apps.
 - True 2x rendering: `scale=2` pixel-doubles; crisp HiDPI needs a scale
   in `ic_canvas_t` and 2x font/icon atlases.
 - Explorer delete: still blocked on the ABI decision above.

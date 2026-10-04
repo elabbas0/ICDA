@@ -3112,7 +3112,14 @@ int main(int argc, char **argv) {
 
         {
             long key = icda_read_char_timeout(1);
-            if (key >= 0) handle_key(key);
+            int in_seq = 0;
+            for (int n = 0; key >= 0 && n < 16; n++) {
+                handle_key(key);
+                if (key == 27) in_seq = 1;
+                else if (!in_seq || !(key == '[' || key == ';' || (key >= '0' && key <= '9'))) in_seq = 0;
+                if (!in_seq) break;
+                key = icda_read_char_timeout(1);
+            }
         }
 
         if (animations_tick()) need_frame = 1;

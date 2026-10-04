@@ -121,4 +121,10 @@ void ic_app_quit(ic_app_t *app);
 
 void ic_app_set_cursor(ic_app_t *app, int shape);
 
+#define IC_CLIPBOARD_PATH "/home/.clipboard"
+
+int  ic_clipboard_set(const char *text, uint64_t len);
+
+long ic_clipboard_get(char *buf, uint64_t cap);
+
 #endif 

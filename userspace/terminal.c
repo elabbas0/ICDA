@@ -597,6 +597,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         if (ev->button == GUI_BTN_LEFT && term.hover_scroll) {
             term.dragging_scroll = 1;
             scrollbar_drag(app, ev->y);
+        } else if (ev->button == GUI_BTN_RIGHT) {
+            char clip[2048];
+            long n = ic_clipboard_get(clip, sizeof(clip));
+            for (long k = 0; k < n; k++) {
+                if (clip[k] == '\n') clip[k] = '\r';
+            }
+            if (n > 0) pty_send(clip, (int)n);
         }
         break;
     case IC_EV_MOUSE_UP:

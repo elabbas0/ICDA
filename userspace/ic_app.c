@@ -328,3 +328,17 @@ void ic_app_caret_reset(ic_app_t *app) {
 void ic_app_quit(ic_app_t *app) {
     if (app) app->quit = 1;
 }
+
+int ic_clipboard_set(const char *text, uint64_t len) {
+    return icda_write_file(IC_CLIPBOARD_PATH, text, len) == (uint64_t)-1 ? -1 : 0;
+}
+
+long ic_clipboard_get(char *buf, uint64_t cap) {
+    long n;
+    if (cap == 0) return 0;
+    n = (long)icda_read_file(IC_CLIPBOARD_PATH, buf, cap - 1);
+    if (n < 0) n = 0;
+    if ((uint64_t)n >= cap) n = (long)cap - 1;
+    buf[n] = 0;
+    return n;
+}

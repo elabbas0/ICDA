@@ -177,6 +177,26 @@ static void insert_char(char ch) {
     ed.modified = 1;
 }
 
+static void paste(void) {
+    static char clip[EDIT_BUF_CAP];
+    uint64_t n = 0;
+    long got = ic_clipboard_get(clip, sizeof(clip));
+    for (long k = 0; k < got; k++) {
+        if (clip[k] != '\r') clip[n++] = clip[k];
+    }
+    if (n == 0) return;
+    if (ed.len + n >= EDIT_BUF_CAP) {
+        ed_status("Document is full (64 KB)");
+        return;
+    }
+    for (uint64_t i = ed.len; i > ed.cursor; i--) ed.buf[i - 1 + n] = ed.buf[i - 1];
+    for (uint64_t i = 0; i < n; i++) ed.buf[ed.cursor + i] = clip[i];
+    ed.len += n;
+    ed.cursor += n;
+    ed.buf[ed.len] = 0;
+    ed.modified = 1;
+}
+
 static void backspace(void) {
     if (ed.cursor == 0) return;
     for (uint64_t i = ed.cursor - 1; i < ed.len; i++) ed.buf[i] = ed.buf[i + 1];
@@ -973,6 +993,13 @@ static void prompt_key(const ic_event_t *ev) {
         if (len) ed.prompt_buf[len - 1] = 0;
     } else if ((ev->mods & IC_MOD_CTRL) && ev->key == 'u') {
         ed.prompt_buf[0] = 0;
+    } else if ((ev->mods & IC_MOD_CTRL) && ev->key == 'v') {
+        char clip[EDIT_PATH_CAP];
+        long n = ic_clipboard_get(clip, sizeof(clip));
+        for (long k = 0; k < n && len + 1 < EDIT_PATH_CAP; k++) {
+            if (clip[k] >= 32 && clip[k] < 127) ed.prompt_buf[len++] = clip[k];
+        }
+        ed.prompt_buf[len] = 0;
     } else if (ev->key >= 32 && ev->key < 127 && !(ev->mods & (IC_MOD_CTRL | IC_MOD_ALT)) &&
                len + 1 < EDIT_PATH_CAP) {
         ed.prompt_buf[len] = (char)ev->key;
@@ -1054,6 +1081,19 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             case 'o': open_prompt((ev->mods & IC_MOD_SHIFT) ? PROMPT_FOLDER : PROMPT_FILE); break;
             case 'b': ed.sidebar = !ed.sidebar; break;
             case 'n': if (guard_unsaved("")) new_file(); break;
+            case 'c':
+            case 'x':
+                if (ed.has_sel) {
+                    uint64_t a, b;
+                    sel_range(&a, &b);
+                    if (ic_clipboard_set(ed.buf + a, b - a) < 0) {
+                        ed_status("Could not copy");
+                    } else if (ev->key == 'x') {
+                        delete_selection();
+                    }
+                }
+                break;
+            case 'v': paste(); break;
             case 'a':
                 ed.anchor = 0;
                 ed.cursor = ed.len;
