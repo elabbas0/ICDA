@@ -86,6 +86,8 @@ static struct {
     int hover_new_file;
     int hover_sidebar;
     int list_focused;
+    int last_click_item;
+    uint32_t last_click_ms;
 
     
     int  dialog;
@@ -1097,9 +1099,15 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         if (i >= 0) { navigate_to(PLACES[i], 1); break; }
         i = item_at(app, ev->x, ev->y);
         if (i >= 0) {
+            uint32_t now = (uint32_t)ic_time_ms();
+            int dbl = i == ex.last_click_item && now - ex.last_click_ms < 400;
             ex.selected = i;
             ex.list_focused = 1;
+            ex.last_click_item = dbl ? -1 : i;
+            ex.last_click_ms = now;
+            if (dbl) open_item(i);
         } else {
+            ex.last_click_item = -1;
             ex.selected = -1;
             ex.list_focused = 0;
         }
