@@ -180,6 +180,7 @@ static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t s
     part->gpt_entry_index = gpt_entry_index;
     for (uint32_t i = 0; i < 16; i++) {
         part->gpt_type_guid[i] = type_guid ? type_guid[i] : 0;
+        part->gpt_unique_guid[i] = 0;
     }
     if (name && *name) {
         copy_text(part->name, name, sizeof(part->name));
@@ -225,9 +226,15 @@ static partition_kind_t scan_gpt(block_device_t *device) {
             name[out++] = (ch >= 32 && ch <= 126) ? (char)ch : '_';
         }
         name[out] = 0;
+        {
+            uint32_t before = partitions_found;
         add_partition(device, entry->first_lba, entry->last_lba - entry->first_lba + 1,
                       PARTITION_KIND_GPT, 0, name, header->partition_entries_lba,
                       entry_size, i, entry->type_guid);
+            if (partitions_found > before) {
+                for (uint32_t k = 0; k < 16; k++) partitions[before].gpt_unique_guid[k] = entry->unique_guid[k];
+            }
+        }
     }
     return PARTITION_KIND_GPT;
 }

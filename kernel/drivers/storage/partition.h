@@ -40,6 +40,7 @@ typedef struct {
     uint32_t gpt_entry_size;
     uint32_t gpt_entry_index;
     uint8_t gpt_type_guid[16];
+    uint8_t gpt_unique_guid[16];
     char name[48];
 } partition_info_t;
 

@@ -51,6 +51,7 @@
 #include "proc/sched.h"
 #include "proc/user.h"
 #include "net/net.h"
+#include "firmware/efi.h"
 
 #ifndef SERIAL_SHELL_MIRROR
 #define SERIAL_SHELL_MIRROR 0
@@ -170,6 +171,7 @@ static int boot_cmdline_has_flag(void *multiboot_info, const char *flag) {
 void kernel_main(void *multiboot_info) {
     int live_installer = boot_cmdline_has_flag(multiboot_info, "icda.live=1");
     serial_init();
+    efi_init(multiboot_info);
     bootstage_set(1, "serial");
 
     int has_fb = fb_init(multiboot_info);

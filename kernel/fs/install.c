@@ -13,6 +13,7 @@
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
 #include "../memory/heap.h"
+#include "../firmware/efi.h"
 
 #define ICDA_ROOT_BUNDLE_NAME "ICDAROOT.BIN"
 #define ICDA_ROOT_CFG_NAME    "ICDACFG.TXT"
@@ -488,6 +489,12 @@ int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partit
     install_progress("Preparing boot disk", "Writing EFI boot files", 0, 1);
     if (fat32_install_boot_partition(boot_part) != 0) {
         return -17;
+    }
+    if (efi_available()) {
+        install_progress("Registering boot entry", "UEFI boot manager", 0, 1);
+        if (efi_register_boot_entry(boot_part, "/EFI/ICDA/GRUBX64.EFI", "ICDA") != 0) {
+            install_progress("Registering boot entry", "Could not add a UEFI boot entry", 1, 1);
+        }
     }
     total_files_written += 4;
     total_bytes_written += (uint64_t)boot_asset_efi_size();
