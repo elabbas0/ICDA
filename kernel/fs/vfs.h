@@ -23,8 +23,11 @@ typedef struct {
 #define VFS_EXT_MKDIR  1
 #define VFS_EXT_WRITE  2
 #define VFS_EXT_REMOVE 3
+#define VFS_EXT_WRITE_AT 4
+#define VFS_EXT_TRUNCATE 5
 
-typedef int (*vfs_external_fn)(int op, uint8_t mount_id, const char *path, const char *data, uint64_t size);
+typedef int (*vfs_external_fn)(int op, uint8_t mount_id, const char *path, const char *data, uint64_t size,
+                               uint64_t off);
 typedef int64_t (*vfs_loader_fn)(uint8_t mount_id, const char *path, uint64_t ref, uint64_t off, char *buf,
                                  uint64_t len);
 typedef int (*vfs_dir_loader_fn)(uint8_t mount_id, const char *path, uint64_t ref);
@@ -46,6 +49,8 @@ vfs_node_t *vfs_root(void);
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size);
 void vfs_set_sync_hook(int (*hook)(void));
 int vfs_sync(void);
+int vfs_flush(int force);
+int vfs_node_truncate(vfs_node_t *node, uint64_t len);
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path);
 int vfs_getcwd(vfs_node_t *node, char *buf, size_t size);
 int vfs_mkdir(vfs_node_t *cwd, const char *path);

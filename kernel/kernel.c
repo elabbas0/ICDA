@@ -216,6 +216,7 @@ void kernel_main(void *multiboot_info) {
     boot_line("cpu", "gdt loaded");
 
     idt_init();
+    cpu_syscall_init();
     bootstage_set(4, "idt");
     boot_line("cpu", "idt loaded");
 

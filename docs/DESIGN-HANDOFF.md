@@ -596,6 +596,33 @@ left, smallest first:
 - Explorer delete: done (see "Explorer delete" above). Folder rename is
   still missing.
 
+### Partial writes (native ABI v6)
+Saving no longer rewrites whole files. `vfs_sync()` only marks the tree
+dirty, and `vfs_flush()` exports the persistfs bundle in three cases:
+- once writes have been quiet for 1 s, and at most 5 s after the first
+  change;
+- on `SYS_SYNC`;
+- before power-off.
+
+On FAT32 and exFAT volumes, `vfs_node_write_at` and `vfs_node_truncate`
+call `fatfs_write_at`/`fatfs_truncate` and
+`exfat_write_at`/`exfat_truncate`. These grow cluster chains, zero-fill
+gaps and rewrite only the clusters they touch. An exFAT NoFatChain file
+stays contiguous when it can; otherwise it is converted to a FAT chain.
+
+ABI v6 adds two calls:
+- `SYS_VFS_WRITE_AT` = 77 (path, off, buf, len);
+- `SYS_VFS_TRUNCATE` = 78 (path, len).
+
+libc `FILE` tracks the dirty byte range, so `fopen` with `"a"` or `"r+"`
+writes only the changed bytes. `"w"` still writes the whole file.
+`libctest` covers this on /home, exFAT and FAT32.
+
+The Linux personality also gets the `syscall` instruction
+(`linux_syscall_entry`, which shares `syscall_common` with `int 0x80`) and
+a per-thread FS base for TLS (`arch_prctl` SET_FS/GET_FS). The interrupt
+paths no longer reload FS or GS, because on Intel that clears the base.
+
 ## Regenerating assets
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install pillow fonttools

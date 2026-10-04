@@ -169,6 +169,41 @@ static void test_volume_writes(const char *root) {
     check(count == 100, "volume listing after deletes");
 }
 
+static void test_partial_writes(const char *root) {
+    static char buf[24000];
+    char path[160];
+    FILE *f;
+    long got;
+    int ok;
+    icda_stat_t st;
+    if ((long)icda_stat(root, &st) < 0) return;
+    snprintf(path, sizeof(path), "%s/partial.bin", root);
+    printf("  partial write test on %s\n", path);
+    f = fopen(path, "w");
+    for (int i = 0; f && i < 10000; i++) fputc('A' + i % 26, f);
+    check(f && fclose(f) == 0, "create 10000-byte file");
+    f = fopen(path, "r+");
+    if (f) {
+        fseek(f, 5000, SEEK_SET);
+        fputs("XYZ", f);
+    }
+    check(f && fclose(f) == 0, "overwrite in place");
+    f = fopen(path, "a");
+    for (int i = 0; f && i < 9000; i++) fputc('b', f);
+    check(f && fclose(f) == 0, "append across clusters");
+    got = (long)icda_read_file(path, buf, sizeof(buf));
+    ok = got == 19000;
+    for (int i = 0; ok && i < 19000; i++) {
+        char want = i >= 10000 ? 'b' : (i >= 5000 && i < 5003) ? "XYZ"[i - 5000] : (char)('A' + i % 26);
+        ok = buf[i] == want;
+    }
+    check(ok, "partial writes read back");
+    check(icda_truncate(path, 7000) == 0 && (long)icda_stat(path, &st) >= 0 && st.size == 7000, "truncate shrink");
+    check(icda_truncate(path, 12000) == 0 && (long)icda_read_file(path, buf, sizeof(buf)) == 12000 &&
+              buf[6999] == (char)('A' + 6999 % 26) && buf[7000] == 0 && buf[11999] == 0,
+          "truncate grow zero-fills");
+}
+
 static void test_volume_ranges(void) {
     static const char *paths[3] = { "/volumes/fat32-1/rangetest.bin", "/volumes/exfat-0/rangetest.bin",
                                     "/volumes/ntfs-0/rangetest.bin" };
@@ -200,6 +235,9 @@ int main(int argc, char **argv) {
     test_files();
     test_volume_ranges();
     test_volume_writes("/volumes/exfat-0");
+    test_partial_writes("/home");
+    test_partial_writes("/volumes/exfat-0");
+    test_partial_writes("/volumes/fat32-1");
     printf("libctest: %d/%d passed\n", passed, passed + failed);
     return failed ? 1 : 0;
 }

@@ -58,7 +58,7 @@ int fd_open_path(process_t *proc, struct vfs_node *cwd, const char *kpath,
     }
     if ((flags & FD_O_TRUNC) && vfs_node_type(node) == VFS_NODE_FILE &&
         !vfs_node_readonly(node)) {
-        if (vfs_node_write_at(node, 0, "", 0) != 0) {
+        if (vfs_node_truncate(node, 0) != 0) {
             return -1;
         }
     }

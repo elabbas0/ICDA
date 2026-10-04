@@ -24,11 +24,15 @@ struct ic_file {
     size_t len;
     size_t cap;
     size_t pos;
+    size_t disk_len;
+    size_t lo;
+    size_t hi;
+    int    whole;
 };
 
-static struct ic_file libc_stdin = { F_STDIN, 1, 0, 0, 0, 0, -1, "", 0, 0, 0, 0 };
-static struct ic_file libc_stdout = { F_STDOUT, 0, 1, 0, 0, 0, -1, "", 0, 0, 0, 0 };
-static struct ic_file libc_stderr = { F_STDERR, 0, 1, 0, 0, 0, -1, "", 0, 0, 0, 0 };
+static struct ic_file libc_stdin = { F_STDIN, 1, 0, 0, 0, 0, -1, "", 0, 0, 0, 0, 0, 0, 0, 0 };
+static struct ic_file libc_stdout = { F_STDOUT, 0, 1, 0, 0, 0, -1, "", 0, 0, 0, 0, 0, 0, 0, 0 };
+static struct ic_file libc_stderr = { F_STDERR, 0, 1, 0, 0, 0, -1, "", 0, 0, 0, 0, 0, 0, 0, 0 };
 FILE *stdin = &libc_stdin;
 FILE *stdout = &libc_stdout;
 FILE *stderr = &libc_stderr;
@@ -510,6 +514,12 @@ static void console_flush(void) {
     out_len = 0;
 }
 
+static void file_touch(FILE *f, size_t from, size_t to) {
+    if (from < f->lo) f->lo = from;
+    if (to > f->hi) f->hi = to;
+    f->dirty = 1;
+}
+
 static int file_reserve(FILE *f, size_t need) {
     size_t cap = f->cap ? f->cap : 256;
     char *grown;
@@ -534,9 +544,9 @@ int fputc(int c, FILE *f) {
         f->err = 1;
         return EOF;
     }
+    file_touch(f, f->pos, f->pos + 1);
     f->buf[f->pos++] = (char)c;
     if (f->pos > f->len) f->len = f->pos;
-    f->dirty = 1;
     return (unsigned char)c;
 }
 
@@ -634,7 +644,10 @@ FILE *fopen(const char *path, const char *mode) {
         n = (long)icda_read_file(path, f->buf, st.size + 1);
         f->len = n > 0 ? (size_t)n : 0;
     }
-    if (mode[0] == 'w') f->dirty = 1;
+    f->disk_len = f->len;
+    f->lo = (size_t)-1;
+    f->whole = mode[0] == 'w' || !exists;
+    if (f->whole) f->dirty = 1;
     if (mode[0] == 'a') f->pos = f->len;
     return f;
 }
@@ -649,11 +662,22 @@ int fflush(FILE *f) {
         return 0;
     }
     if (f->writable && f->dirty) {
-        if (icda_write_file(f->path, f->buf ? f->buf : "", f->len) == (uint64_t)-1) {
+        int failed;
+        if (f->whole) {
+            failed = icda_write_file(f->path, f->buf ? f->buf : "", f->len) == (uint64_t)-1;
+        } else {
+            failed = f->lo < f->hi && icda_write_file_at(f->path, f->lo, f->buf + f->lo, f->hi - f->lo) < 0;
+            if (!failed && f->len < f->disk_len) failed = icda_truncate(f->path, f->len) < 0;
+        }
+        if (failed) {
             f->err = 1;
             return EOF;
         }
         f->dirty = 0;
+        f->whole = 0;
+        f->disk_len = f->len;
+        f->lo = (size_t)-1;
+        f->hi = 0;
     }
     return 0;
 }
@@ -696,8 +720,8 @@ int fseek(FILE *f, long offset, int whence) {
     if (f->pos > f->len) {
         if (file_reserve(f, f->pos) != 0) return -1;
         memset(f->buf + f->len, 0, f->pos - f->len);
+        file_touch(f, f->len, f->pos);
         f->len = f->pos;
-        f->dirty = 1;
     }
     f->eof = 0;
     f->unget = -1;

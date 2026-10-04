@@ -89,7 +89,7 @@ static int rel_path(uint8_t id, const char *path, volume_t **out, const char **r
     return 0;
 }
 
-static int volume_external(int op, uint8_t id, const char *path, const char *data, uint64_t size) {
+static int volume_external(int op, uint8_t id, const char *path, const char *data, uint64_t size, uint64_t off) {
     volume_t *m;
     const char *rel;
     int rc = -1;
@@ -104,6 +104,8 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
             if (op == VFS_EXT_MKDIR) rc = fatfs_mkdir(v, rel);
             else if (op == VFS_EXT_WRITE) rc = fatfs_write(v, rel, data, size);
             else if (op == VFS_EXT_REMOVE) rc = fatfs_remove(v, rel);
+            else if (op == VFS_EXT_WRITE_AT) rc = fatfs_write_at(v, rel, off, data, size);
+            else if (op == VFS_EXT_TRUNCATE) rc = fatfs_truncate(v, rel, size);
         }
         kfree(v);
     } else {
@@ -114,6 +116,8 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
             if (op == VFS_EXT_MKDIR) rc = exfat_mkdir(v, rel);
             else if (op == VFS_EXT_WRITE) rc = exfat_write(v, rel, data, size);
             else if (op == VFS_EXT_REMOVE) rc = exfat_remove(v, rel);
+            else if (op == VFS_EXT_WRITE_AT) rc = exfat_write_at(v, rel, off, data, size);
+            else if (op == VFS_EXT_TRUNCATE) rc = exfat_truncate(v, rel, size);
         }
         kfree(v);
     }

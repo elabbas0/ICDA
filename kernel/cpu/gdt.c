@@ -77,5 +77,36 @@ void gdt_init() {
 }
 
 void tss_set_rsp0(uint64_t rsp0) {
+    extern uint64_t syscall_kstack_top;
     tss.rsp0 = rsp0;
+    syscall_kstack_top = rsp0;
+}
+
+uint64_t syscall_kstack_top = 0;
+uint64_t syscall_user_rsp = 0;
+extern void linux_syscall_entry(void);
+
+static void wrmsr64(uint32_t msr, uint64_t v) {
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
+static uint64_t rdmsr64(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void cpu_syscall_init(void) {
+    wrmsr64(0xC0000080U, rdmsr64(0xC0000080U) | 1ULL);
+    wrmsr64(0xC0000081U, ((uint64_t)GDT_KERNEL_CODE << 32) | ((uint64_t)(GDT_KERNEL_DATA | 3) << 48));
+    wrmsr64(0xC0000082U, (uint64_t)(uintptr_t)linux_syscall_entry);
+    wrmsr64(0xC0000084U, 0x200U | 0x400U | 0x100U | 0x40000U);
+}
+
+uint64_t cpu_fs_base(void) {
+    return rdmsr64(0xC0000100U);
+}
+
+void cpu_set_fs_base(uint64_t base) {
+    wrmsr64(0xC0000100U, base);
 }

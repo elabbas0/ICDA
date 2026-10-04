@@ -61,5 +61,8 @@ void gdt_init();
 
 
 void tss_set_rsp0(uint64_t rsp0);
+void cpu_syscall_init(void);
+uint64_t cpu_fs_base(void);
+void cpu_set_fs_base(uint64_t base);
 
 #endif

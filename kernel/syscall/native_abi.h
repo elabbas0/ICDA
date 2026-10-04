@@ -17,6 +17,6 @@
 #define ICDA_NATIVE_ABI_VERSION 5
 
 
-#define ICDA_NATIVE_SYS_MAX 77
+#define ICDA_NATIVE_SYS_MAX 79
 
 #endif

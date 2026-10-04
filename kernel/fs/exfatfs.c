@@ -976,3 +976,146 @@ int exfat_mount(exfat_t *v, block_device_t *dev, uint64_t start_lba, uint64_t se
     v->next_free = 2;
     return 0;
 }
+
+static int link_run(exfat_t *v, uint32_t start, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        if (fat_set(v, start + i, i + 1 < count ? start + i + 1 : EOC) != 0) return -1;
+    }
+    return 0;
+}
+
+static uint32_t clusters_for(const exfat_t *v, uint64_t size) {
+    return (uint32_t)((size + v->cluster_bytes - 1) / v->cluster_bytes);
+}
+
+static int grow_entry(exfat_t *v, exfat_entry_t *e, uint64_t new_size) {
+    uint32_t have = e->cluster ? clusters_for(v, e->size) : 0;
+    uint32_t need = clusters_for(v, new_size), extra, fresh = 0, last;
+    int fresh_nofat = 1, contiguous = 1;
+    if (e->cluster && have == 0) have = 1;
+    if (need <= have) return 0;
+    extra = need - have;
+    if (!e->cluster) {
+        if (alloc_clusters(v, extra, &fresh, &fresh_nofat) != 0) return -1;
+        e->cluster = fresh;
+        e->nofat = fresh_nofat;
+        return exfat_flush(v);
+    }
+    if (e->nofat) {
+        for (uint32_t i = 0; i < extra && contiguous; i++) {
+            uint32_t c = e->cluster + have + i;
+            if (!valid_cluster(v, c) || bmp_get(v, c)) contiguous = 0;
+        }
+        if (contiguous) {
+            for (uint32_t i = 0; i < extra; i++) {
+                if (bmp_set(v, e->cluster + have + i, 1) != 0) return -1;
+            }
+            return exfat_flush(v);
+        }
+    }
+    if (alloc_clusters(v, extra, &fresh, &fresh_nofat) != 0) return -1;
+    if (fresh_nofat && link_run(v, fresh, extra) != 0) return -1;
+    if (e->nofat) {
+        if (link_run(v, e->cluster, have) != 0) return -1;
+        e->nofat = 0;
+    }
+    last = chain_cluster(v, e->cluster, 0, have - 1);
+    if (!valid_cluster(v, last) || fat_set(v, last, fresh) != 0) return -1;
+    return exfat_flush(v);
+}
+
+static int write_span(exfat_t *v, const exfat_entry_t *e, uint64_t pos, const uint8_t *src, uint64_t len) {
+    uint8_t *tmp;
+    uint32_t idx = (uint32_t)(pos / v->cluster_bytes);
+    uint32_t c = chain_cluster(v, e->cluster, e->nofat, idx);
+    int rc = 0;
+    if (!len) return 0;
+    tmp = (uint8_t *)kmalloc(v->cluster_bytes);
+    if (!tmp) return -1;
+    while (len && rc == 0) {
+        uint64_t in = pos % v->cluster_bytes;
+        uint64_t take = v->cluster_bytes - in;
+        if (take > len) take = len;
+        if (!valid_cluster(v, c)) {
+            rc = -1;
+            break;
+        }
+        if ((in != 0 || take != v->cluster_bytes) &&
+            dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) {
+            rc = -1;
+            break;
+        }
+        if (src) mem_copy(tmp + in, src, take);
+        else mem_zero(tmp + in, take);
+        if (dev_write(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) rc = -1;
+        pos += take;
+        len -= take;
+        if (src) src += take;
+        idx++;
+        c = e->nofat ? e->cluster + idx : fat_get(v, c);
+    }
+    kfree(tmp);
+    return rc;
+}
+
+static int zero_between(exfat_t *v, const exfat_entry_t *e, uint64_t from, uint64_t to) {
+    return to > from ? write_span(v, e, from, 0, to - from) : 0;
+}
+
+int exfat_write_at(exfat_t *v, const char *path, uint64_t off, const void *data, uint64_t len) {
+    exfat_entry_t *e;
+    uint64_t new_size, valid, end = off + len;
+    int rc = -1;
+    if (!v->writable || end < off) return -1;
+    e = (exfat_entry_t *)kmalloc(sizeof(exfat_entry_t));
+    if (!e) return -1;
+    if (exfat_lookup(v, path, e) != 0 || (e->attr & (EXFATFS_ATTR_DIR | EXFATFS_ATTR_RO))) goto out;
+    valid = e->valid_size < e->size ? e->valid_size : e->size;
+    new_size = end > e->size ? end : e->size;
+    if (grow_entry(v, e, new_size) != 0) goto out;
+    rc = zero_between(v, e, valid, off);
+    if (rc == 0) rc = write_span(v, e, off, (const uint8_t *)data, len);
+    if (rc == 0) rc = zero_between(v, e, end > valid ? end : valid, e->size);
+    if (rc == 0) rc = update_set(v, &e->dir, e->set_slot, e->cluster, e->nofat, new_size);
+out:
+    kfree(e);
+    if (exfat_flush(v) != 0) rc = -1;
+    return rc;
+}
+
+int exfat_truncate(exfat_t *v, const char *path, uint64_t len) {
+    exfat_entry_t *e;
+    uint64_t valid;
+    int rc = -1;
+    if (!v->writable) return -1;
+    e = (exfat_entry_t *)kmalloc(sizeof(exfat_entry_t));
+    if (!e) return -1;
+    if (exfat_lookup(v, path, e) != 0 || (e->attr & (EXFATFS_ATTR_DIR | EXFATFS_ATTR_RO))) goto out;
+    valid = e->valid_size < e->size ? e->valid_size : e->size;
+    if (len > e->size) {
+        if (grow_entry(v, e, len) != 0) goto out;
+        rc = zero_between(v, e, valid, len);
+    } else {
+        uint32_t have = e->cluster ? clusters_for(v, e->size) : 0;
+        uint32_t keep = clusters_for(v, len);
+        rc = 0;
+        if (keep == 0) {
+            if (e->cluster) free_clusters(v, e->cluster, e->nofat, e->size);
+            e->cluster = 0;
+            e->nofat = 1;
+        } else if (keep < have && e->nofat) {
+            free_clusters(v, e->cluster + keep, 1, (uint64_t)(have - keep) * v->cluster_bytes);
+        } else if (keep < have) {
+            uint32_t last = chain_cluster(v, e->cluster, 0, keep - 1);
+            uint32_t next = valid_cluster(v, last) ? fat_get(v, last) : EOC;
+            if (valid_cluster(v, last)) fat_set(v, last, EOC);
+            if (valid_cluster(v, next)) free_clusters(v, next, 0, (uint64_t)(have - keep) * v->cluster_bytes);
+        }
+        if (keep && valid < len) rc = zero_between(v, e, valid, len);
+    }
+    if (rc == 0) rc = update_set(v, &e->dir, e->set_slot, e->cluster, e->nofat, len);
+out:
+    kfree(e);
+    if (exfat_flush(v) != 0) rc = -1;
+    return rc;
+}

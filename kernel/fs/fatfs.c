@@ -898,3 +898,132 @@ int64_t fatfs_read_range(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void 
     kfree(tmp);
     return (int64_t)done;
 }
+
+static struct {
+    uint32_t first;
+    uint32_t idx;
+    uint32_t cluster;
+} seek_hint;
+
+static uint32_t chain_seek(fatfs_t *v, uint32_t first, uint32_t idx) {
+    uint32_t c = first, i = 0;
+    if (seek_hint.first == first && seek_hint.cluster && seek_hint.idx <= idx) {
+        c = seek_hint.cluster;
+        i = seek_hint.idx;
+    }
+    while (i < idx && valid_cluster(v, c)) {
+        c = fat_get(v, c);
+        i++;
+    }
+    if (valid_cluster(v, c)) {
+        seek_hint.first = first;
+        seek_hint.idx = idx;
+        seek_hint.cluster = c;
+    }
+    return c;
+}
+
+static int write_range(fatfs_t *v, uint32_t first, uint64_t pos, const uint8_t *src, uint64_t len) {
+    uint8_t *tmp = (uint8_t *)kmalloc(v->cluster_bytes);
+    int rc = 0;
+    if (!tmp) return -1;
+    while (len && rc == 0) {
+        uint32_t c = chain_seek(v, first, (uint32_t)(pos / v->cluster_bytes));
+        uint64_t in = pos % v->cluster_bytes;
+        uint64_t take = v->cluster_bytes - in;
+        if (take > len) take = len;
+        if (!valid_cluster(v, c)) {
+            rc = -1;
+            break;
+        }
+        if (in != 0 || take != v->cluster_bytes) {
+            if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+        if (src) mem_copy(tmp + in, src, take);
+        else mem_zero(tmp + in, take);
+        if (dev_write(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) rc = -1;
+        pos += take;
+        len -= take;
+        if (src) src += take;
+    }
+    kfree(tmp);
+    return rc;
+}
+
+static int update_dirent(fatfs_t *v, const fatfs_entry_t *e, uint32_t first, uint32_t size) {
+    uint8_t d[32];
+    if (slot_read(v, e->dir_cluster, e->short_slot, d) != 0) return -1;
+    wr16(d + 20, first >> 16);
+    wr16(d + 26, first & 0xFFFFU);
+    wr32(d + 28, size);
+    stamp(d);
+    return slot_write(v, e->dir_cluster, e->short_slot, d);
+}
+
+static int grow_to(fatfs_t *v, fatfs_entry_t *e, uint64_t new_size) {
+    uint32_t have = e->cluster ? (uint32_t)((e->size + v->cluster_bytes - 1) / v->cluster_bytes) : 0;
+    uint32_t need = (uint32_t)((new_size + v->cluster_bytes - 1) / v->cluster_bytes);
+    uint32_t fresh;
+    if (e->cluster && have == 0) have = 1;
+    if (need <= have) return 0;
+    if (alloc_chain(v, need - have, &fresh) != 0) return -1;
+    if (!e->cluster) {
+        e->cluster = fresh;
+    } else {
+        uint32_t last = chain_seek(v, e->cluster, have - 1);
+        if (!valid_cluster(v, last) || fat_set(v, last, fresh) != 0) return -1;
+    }
+    return fat_cache_flush(v);
+}
+
+int fatfs_write_at(fatfs_t *v, const char *path, uint64_t off, const void *data, uint64_t len) {
+    fatfs_entry_t e;
+    uint64_t new_size;
+    int rc;
+    seek_hint.cluster = 0;
+    if (fatfs_lookup(v, path, &e) != 0 || (e.attr & (FATFS_ATTR_DIR | FATFS_ATTR_RO))) return -1;
+    new_size = off + len > e.size ? off + len : e.size;
+    if (new_size > 0xFFFFFFFFULL) return -1;
+    if (grow_to(v, &e, new_size) != 0) {
+        fatfs_flush(v);
+        return -1;
+    }
+    rc = 0;
+    if (off > e.size) rc = write_range(v, e.cluster, e.size, 0, off - e.size);
+    if (rc == 0 && len) rc = write_range(v, e.cluster, off, (const uint8_t *)data, len);
+    if (rc == 0) rc = update_dirent(v, &e, e.cluster, (uint32_t)new_size);
+    if (fatfs_flush(v) != 0) rc = -1;
+    return rc;
+}
+
+int fatfs_truncate(fatfs_t *v, const char *path, uint64_t len) {
+    fatfs_entry_t e;
+    int rc = 0;
+    if (fatfs_lookup(v, path, &e) != 0 || (e.attr & (FATFS_ATTR_DIR | FATFS_ATTR_RO))) return -1;
+    if (len > 0xFFFFFFFFULL) return -1;
+    if (len == e.size) return 0;
+    seek_hint.cluster = 0;
+    if (len > e.size) {
+        uint64_t old = e.size;
+        if (grow_to(v, &e, len) != 0) rc = -1;
+        if (rc == 0) rc = write_range(v, e.cluster, old, 0, len - old);
+    } else {
+        uint32_t keep = (uint32_t)((len + v->cluster_bytes - 1) / v->cluster_bytes);
+        if (keep == 0) {
+            if (e.cluster) free_chain(v, e.cluster);
+            e.cluster = 0;
+        } else if (e.cluster) {
+            uint32_t last = chain_seek(v, e.cluster, keep - 1);
+            uint32_t next = valid_cluster(v, last) ? fat_get(v, last) : EOC;
+            if (valid_cluster(v, last)) fat_set(v, last, EOC);
+            if (valid_cluster(v, next)) free_chain(v, next);
+        }
+        seek_hint.cluster = 0;
+    }
+    if (rc == 0) rc = update_dirent(v, &e, e.cluster, (uint32_t)len);
+    if (fatfs_flush(v) != 0) rc = -1;
+    return rc;
+}

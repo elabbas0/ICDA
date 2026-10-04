@@ -1,5 +1,9 @@
 #include "vfs.h"
 #include "../memory/heap.h"
+#include "../proc/sched.h"
+
+#define VFS_FLUSH_QUIET_TICKS 100ULL
+#define VFS_FLUSH_MAX_TICKS   500ULL
 
 struct vfs_node {
     char *name;
@@ -11,6 +15,7 @@ struct vfs_node {
     uint8_t readonly;
     uint8_t mount_id;
     uint8_t lazy;
+    uint64_t cap;
     uint8_t lazy_dir;
     uint64_t ext_ref;
     char *data;
@@ -260,10 +265,32 @@ void vfs_set_sync_hook(int (*hook)(void)) {
     vfs_sync_hook = hook;
 }
 
+static int vfs_dirty;
+static uint64_t vfs_dirty_first;
+static uint64_t vfs_dirty_last;
+
 int vfs_sync(void) {
+    uint64_t now = sched_ticks();
     if (!vfs_sync_hook) {
         return 0;
     }
+    if (!vfs_dirty) {
+        vfs_dirty = 1;
+        vfs_dirty_first = now;
+    }
+    vfs_dirty_last = now;
+    return 0;
+}
+
+int vfs_flush(int force) {
+    uint64_t now = sched_ticks();
+    if (!vfs_dirty || !vfs_sync_hook) {
+        return 0;
+    }
+    if (!force && now - vfs_dirty_last < VFS_FLUSH_QUIET_TICKS && now - vfs_dirty_first < VFS_FLUSH_MAX_TICKS) {
+        return 0;
+    }
+    vfs_dirty = 0;
     return vfs_sync_hook();
 }
 
@@ -414,6 +441,7 @@ static int ensure_loaded(vfs_node_t *node) {
     }
     buf[node->size] = 0;
     node->data = buf;
+    node->cap = node->size;
     node->lazy = 0;
     return 0;
 }
@@ -430,7 +458,7 @@ static int external_op(int op, vfs_node_t *dir, const char *leaf, const char *da
     }
     if (n + str_len(leaf) + 1 > sizeof(path)) return -1;
     copy_bytes(path + n, leaf, str_len(leaf) + 1);
-    return vfs_external_hook(op, dir->mount_id, path, data, size);
+    return vfs_external_hook(op, dir->mount_id, path, data, size, 0);
 }
 
 int vfs_mkdir(vfs_node_t *cwd, const char *path) {
@@ -557,17 +585,38 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
         kfree(node->data);
     }
     node->data = next;
+    node->cap = size;
     node->size = size;
     node->lazy = 0;
     node->modified = vfs_tick++;
     return vfs_sync();
 }
 
+static int node_reserve(vfs_node_t *node, uint64_t need) {
+    uint64_t cap = node->cap ? node->cap : 64;
+    char *next;
+    if (node->data && need <= node->cap) return 0;
+    while (cap < need) cap *= 2;
+    next = (char *)kmalloc((size_t)(cap + 1));
+    if (!next) return -1;
+    for (uint64_t i = 0; i < node->size && node->data; i++) next[i] = node->data[i];
+    for (uint64_t i = node->size; i <= cap; i++) next[i] = 0;
+    if (node->data) kfree(node->data);
+    node->data = next;
+    node->cap = cap;
+    return 0;
+}
+
+static int external_range(int op, vfs_node_t *node, const char *data, uint64_t size, uint64_t off) {
+    char path[512];
+    if (!node->mount_id || !vfs_external_hook) return 0;
+    if (build_path(node->parent, node->name, path, sizeof(path)) != 0) return -1;
+    return vfs_external_hook(op, node->mount_id, path, data, size, off);
+}
+
 int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
                       uint64_t size) {
     uint64_t new_end;
-    char *next;
-    uint64_t i;
 
     if (!node || node->type != VFS_NODE_FILE || node->readonly) {
         return -1;
@@ -575,48 +624,62 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
     if (!data && size != 0) {
         return -1;
     }
-    if (ensure_loaded(node) != 0) {
-        return -1;
-    }
     new_end = off + size;
     if (new_end < off) {
         return -1;
     }
-    if (new_end <= node->size) {
-        
-        for (i = 0; i < size; i++) {
-            node->data[off + i] = data[i];
-        }
+    if (size == 0) {
+        return 0;
+    }
+    if (external_range(VFS_EXT_WRITE_AT, node, data, size, off) != 0) {
+        return -1;
+    }
+    if (node->lazy) {
+        if (new_end > node->size) node->size = new_end;
         node->modified = vfs_tick++;
-        if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, node->data, node->size) != 0) {
-            return -1;
-        }
-        return vfs_sync();
+        return 0;
     }
-    next = (char *)kmalloc((size_t)(new_end + 1));
-    if (!next) {
+    if (node_reserve(node, new_end > node->size ? new_end : node->size) != 0) {
         return -1;
     }
-    for (i = 0; i < node->size; i++) {
-        next[i] = node->data ? node->data[i] : 0;
+    for (uint64_t i = node->size; i < off; i++) {
+        node->data[i] = 0;
     }
-    for (; i < off; i++) {
-        next[i] = 0;
+    for (uint64_t i = 0; i < size; i++) {
+        node->data[off + i] = data[i];
     }
-    for (i = 0; i < size; i++) {
-        next[off + i] = data[i];
+    if (new_end > node->size) {
+        node->size = new_end;
+        node->data[new_end] = 0;
     }
-    next[new_end] = '\0';
-    if (node->data) {
-        kfree(node->data);
-    }
-    node->data = next;
-    node->size = new_end;
     node->modified = vfs_tick++;
-    if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, node->data, node->size) != 0) {
+    return node->mount_id ? 0 : vfs_sync();
+}
+
+int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
+    if (!node || node->type != VFS_NODE_FILE || node->readonly) {
         return -1;
     }
-    return vfs_sync();
+    if (len == node->size) {
+        return 0;
+    }
+    if (external_range(VFS_EXT_TRUNCATE, node, 0, len, 0) != 0) {
+        return -1;
+    }
+    if (node->lazy) {
+        node->size = len;
+        if (len == 0) node->lazy = 0;
+        node->modified = vfs_tick++;
+        return 0;
+    }
+    if (len > node->size) {
+        if (node_reserve(node, len) != 0) return -1;
+        for (uint64_t i = node->size; i < len; i++) node->data[i] = 0;
+    }
+    node->size = len;
+    if (node->data) node->data[len] = 0;
+    node->modified = vfs_tick++;
+    return node->mount_id ? 0 : vfs_sync();
 }
 
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
@@ -656,6 +719,7 @@ int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
     if (!node->data) {
         return -1;
     }
+    node->cap = size;
     if (size) {
         copy_bytes(node->data, data, size);
     }
@@ -707,6 +771,7 @@ int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char
         node->data = next;
         node->size = size;
         node->lazy = 0;
+        node->cap = size;
     }
 
     node->readonly = readonly;
@@ -822,6 +887,7 @@ int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {
     node->data = 0;
     node->size = size;
     node->lazy = 1;
+    node->cap = 0;
     return 0;
 }
 

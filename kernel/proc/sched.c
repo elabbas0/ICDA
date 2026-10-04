@@ -398,6 +398,8 @@ static void schedule_inner(int force) {
         pf_set_current_as(next->owner->addr_space);
     }
 
+    prev->fs_base = cpu_fs_base();
+    if (next->fs_base != prev->fs_base) cpu_set_fs_base(next->fs_base);
     fpu_switch(prev->fpu_state, next->fpu_state);
     switch_context(prev, next);
 }

@@ -444,7 +444,7 @@ static int system_install_core(uint64_t *files_installed, uint64_t *bytes_instal
     }
     kfree(manifest);
 
-    if (vfs_sync() != 0) {
+    if (vfs_flush(1) != 0) {
         return -28;
     }
 

@@ -108,6 +108,7 @@ typedef struct thread {
 
 
     uint8_t          fpu_state[512] __attribute__((aligned(16)));
+    uint64_t         fs_base;
 } thread_t;
 
 #endif

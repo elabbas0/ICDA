@@ -27,6 +27,7 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../fs/fd.h"
+#include "../cpu/gdt.h"
 #include "../dev/devops.h"
 #include "uaccess.h"
 #include "native_abi.h"
@@ -41,10 +42,11 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v5: first number moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v5: v4 numbers moved");
-_Static_assert(SYS_DISK_EDIT == 76, "native ABI v5: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 77, "native ABI v5: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v6: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v6: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v6: v5 numbers moved");
+_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v6: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 79, "native ABI v6: count changed");
 
 
 
@@ -253,6 +255,40 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
     }
 
     return size;
+}
+
+static uint64_t sys_vfs_write_at(const char *path, uint64_t off, const char *buf, uint64_t size) {
+    process_t *proc = sched_current_process();
+    vfs_node_t *node;
+
+    if (!proc || !path || (!buf && size != 0)) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (size != 0 && !user_range_prepare_cur(buf, size)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), path);
+    if (!node || vfs_node_write_at(node, off, buf, size) != 0) {
+        return (uint64_t)-1;
+    }
+    return size;
+}
+
+static uint64_t sys_vfs_truncate(const char *path, uint64_t len) {
+    process_t *proc = sched_current_process();
+    vfs_node_t *node;
+
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), path);
+    return node && vfs_node_truncate(node, len) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_exit(uint64_t code) {
@@ -941,6 +977,7 @@ static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h
 }
 
 static uint64_t sys_power(uint64_t action) {
+    (void)vfs_flush(1);
     
     if (action == 1) {
         power_reboot();
@@ -959,7 +996,7 @@ static uint64_t sys_resume(uint64_t pid) {
 }
 
 static uint64_t sys_sync(void) {
-    return vfs_sync() == 0 ? 0 : (uint64_t)-1;
+    return vfs_flush(1) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_pty_open(void) {
@@ -1948,8 +1985,20 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 return written;
             }
         }
-        case 158: 
-            return 0;
+        case 158: {
+            thread_t *self = sched_current_thread();
+            if (a0 == 0x1002) {
+                if (self) self->fs_base = a1;
+                cpu_set_fs_base(a1);
+                return 0;
+            }
+            if (a0 == 0x1003) {
+                uint64_t base = cpu_fs_base();
+                if (copy_to_user((void *)(uintptr_t)a1, &base, sizeof(base)) != 0) return (uint64_t)-U_EFAULT;
+                return 0;
+            }
+            return (uint64_t)-U_EINVAL;
+        }
         default:
             return (uint64_t)-1;
     }
@@ -1963,6 +2012,7 @@ static uint64_t syscall_dispatch_native(struct registers *regs);
 
 uint64_t syscall_dispatch(struct registers *regs) {
     process_t *proc = sched_current_process();
+    (void)vfs_flush(0);
     if (proc && proc->linux_personality) {
         return linux_syscall_dispatch(regs);
     }
@@ -2219,6 +2269,11 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return sys_vm_free(regs->rdi, regs->rsi);
         case SYS_DISK_EDIT:
             return sys_disk_edit((void *)(uintptr_t)regs->rdi);
+        case SYS_VFS_WRITE_AT:
+            return sys_vfs_write_at((const char *)(uintptr_t)regs->rdi, regs->rsi,
+                                    (const char *)(uintptr_t)regs->rdx, regs->r10);
+        case SYS_VFS_TRUNCATE:
+            return sys_vfs_truncate((const char *)(uintptr_t)regs->rdi, regs->rsi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

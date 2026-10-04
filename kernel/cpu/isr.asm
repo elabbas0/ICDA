@@ -112,8 +112,6 @@ isr_common:
     mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     mov rdi, rsp        
     call isr_handler
@@ -133,8 +131,6 @@ isr_common:
 .isr_return_segs:
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     pop r15
     pop r14
@@ -177,8 +173,6 @@ irq_common:
     mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     mov rdi, rsp        
     call irq_handler
@@ -198,8 +192,6 @@ irq_common:
 .irq_return_segs:
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     pop r15
     pop r14
@@ -253,8 +245,6 @@ syscall_common:
     mov ax, GDT_KERNEL_DATA
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     mov rdi, rsp
     call syscall_handler
@@ -279,8 +269,6 @@ syscall_common:
     mov ss, ax
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
     jmp user_thread_finish
 .sysret_user:
     pop r15
@@ -303,10 +291,24 @@ syscall_common:
     xor ecx, ecx
     mov ds, cx
     mov es, cx
-    mov fs, cx
-    mov gs, cx
     iretq
 
+
+global linux_syscall_entry
+extern syscall_kstack_top
+extern syscall_user_rsp
+
+linux_syscall_entry:
+    mov [rel syscall_user_rsp], rsp
+    mov rsp, [rel syscall_kstack_top]
+    push qword 0x23
+    push qword [rel syscall_user_rsp]
+    push r11
+    push qword 0x1B
+    push rcx
+    push 0
+    push 128
+    jmp syscall_common
 
 global idt_flush
 idt_flush:
