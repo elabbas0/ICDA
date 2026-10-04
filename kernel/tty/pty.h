@@ -15,6 +15,7 @@ void     pty_set_size(int id, uint32_t cols, uint32_t rows);
 void     pty_get_size(int id, uint32_t *cols, uint32_t *rows);
 void     pty_slave_write(int id, const char *buf, uint64_t len);
 int      pty_slave_read_char(int id);
+int      pty_slave_peek(int id);
 int      pty_alive(int id);
 void     pty_proc_exit(struct process *proc);
 

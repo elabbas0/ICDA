@@ -13,8 +13,9 @@ Rules for changing anything in `kernel/syscall/syscall.c` dispatch:
   `ICDA_NATIVE_ABI_VERSION` in `kernel/syscall/native_abi.h` and
   document the addition here.
 - The Linux personality (`linux_syscall_dispatch`, Linux numbers) is a
-  separate namespace and is NOT covered by this freeze; it grows toward
-  musl compat instead.
+  separate namespace and is NOT covered by this freeze. It lives in
+  `kernel/linux/lx.c` and targets unmodified static glibc/musl binaries
+  (BusyBox runs on it).
 
 Call table (number — name — rough area):
 
@@ -97,6 +98,15 @@ legacy no-op path (backward-compatible with `sys_call0` callers whose
 | 67 | SYS_GPU_CURSOR | display (/dev/fb0) |
 | 68 | SYS_POWER | power |
 | 69 | SYS_PROC_STATS | proc |
+| 70 | SYS_PTY_OPEN | tty |
+| 71 | SYS_PTY_SPAWN | tty |
+| 72 | SYS_PTY_IO | tty |
+| 73 | SYS_VFS_REMOVE | vfs |
+| 74 | SYS_VM_ALLOC | memory |
+| 75 | SYS_VM_FREE | memory |
+| 76 | SYS_DISK_EDIT | storage (v5) |
+| 77 | SYS_VFS_WRITE_AT | vfs (v6) |
+| 78 | SYS_VFS_TRUNCATE | vfs (v6) |
 
 **Post-freeze append-only:** `syscall_gpu_info_t` (kernel) and
 `icda_gpu_info_t` (userspace) gained a `needs_present` uint32_t field

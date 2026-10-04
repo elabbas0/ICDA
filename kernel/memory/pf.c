@@ -8,6 +8,7 @@
 #include "../proc/sched.h"
 #include "../proc/process.h"
 #include "../fs/fd.h"
+#include "../linux/lx.h"
 #include "../ipc/shm.h"
 #include "../tty/pty.h"
 
@@ -175,8 +176,7 @@ static void pf_panic(struct registers *regs, uint64_t cr2) {
 static int is_stack_growth(struct registers *regs, uint64_t cr2) {
     uint64_t e = regs->err_code;
 
-    if (e & PF_PRESENT)  return 0;  
-    if (!(e & PF_WRITE)) return 0;  
+    if (e & PF_PRESENT)  return 0;
 
     
     if (cr2 < USER_STACK_LIMIT || cr2 >= USER_STACK_TOP) return 0;
@@ -197,8 +197,9 @@ static int is_stack_growth(struct registers *regs, uint64_t cr2) {
     uint64_t fault_page = cr2       & ~0xFFFULL;
     uint64_t slack      = STACK_SLACK_PAGES * PAGE_SIZE_4K;
 
-    if (fault_page > rsp_page) return 0;               
-    if (rsp_page - fault_page > slack) return 0;        
+    /* Anything above rsp is live stack (frames are touched out of order);
+     * below rsp only within the slack. */
+    if (fault_page < rsp_page && rsp_page - fault_page > slack) return 0;
 
     return 1;
 }
@@ -207,6 +208,11 @@ static int is_stack_growth(struct registers *regs, uint64_t cr2) {
 
 static void page_fault_handler(struct registers *regs) {
     uint64_t cr2 = read_cr2();
+
+    if ((regs->err_code & PF_PRESENT) && (regs->err_code & PF_WRITE) && cr2 < 0x0000800000000000ULL &&
+        vmm_cow_break(active_as(), cr2) == 0) {
+        return;
+    }
 
     if (is_stack_growth(regs, cr2)) {
         
@@ -249,6 +255,7 @@ static void page_fault_handler(struct registers *regs) {
             pty_proc_exit(proc);
             pf_serial_dump(regs, cr2);
             serial_write("  user process killed\n");
+            lx_mark_signaled(proc, 11);
             proc->state = PROCESS_EXITED;
             
 

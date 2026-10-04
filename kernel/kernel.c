@@ -37,6 +37,7 @@
 #include "cpu/multiboot2.h"
 
 #include "cpu/gdt.h"
+#include "linux/lx.h"
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
@@ -244,6 +245,7 @@ void kernel_main(void *multiboot_info) {
         boot_halt("memory", "virtual memory manager failed to map kernel space");
     }
     bootstage_set(6, "vmm");
+    pmm_refs_init();
     boot_line("memory", "higher-half mappings active");
 
     if (heap_init() != 0) {
@@ -396,6 +398,7 @@ void kernel_main(void *multiboot_info) {
     }
     bootstage_set(17, "initramfs");
     (void)vfs_mkdir(vfs_root(), "/home");
+    lx_init();
     boot_prefix("storage");
     console_write("ramfs online, seeded files=", CONSOLE_STYLE_INFO);
     console_write_dec64(initramfs_file_count(), CONSOLE_STYLE_INFO);

@@ -72,6 +72,8 @@ typedef struct {
 
 
 #define VMM_WC       (1ULL << 59)
+#define VMM_NOFREE   (1ULL << 9)
+#define VMM_COW      (1ULL << 10)
 
 
 #define VMM_FLAGS_KERNEL_RW  (VMM_PRESENT | VMM_WRITE | VMM_GLOBAL)
@@ -105,6 +107,8 @@ addr_space_t *vmm_create_address_space(void);
 
 
 void vmm_destroy_address_space(addr_space_t *as);
+addr_space_t *vmm_clone_user(addr_space_t *src);
+int vmm_cow_break(addr_space_t *as, uint64_t virt);
 
 
 void vmm_switch_address_space(addr_space_t *as);

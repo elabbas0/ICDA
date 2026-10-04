@@ -55,7 +55,7 @@ static inline int user_page_ready(addr_space_t *as, uint64_t page_va,
         if (!for_write) {
             return 1;
         }
-        return vmm_page_writable(as, page_va);
+        return vmm_page_writable(as, page_va) || vmm_cow_break(as, page_va) == 0;
     }
     if (page_va < USER_STACK_LIMIT || page_va >= USER_STACK_TOP) {
         return 0;

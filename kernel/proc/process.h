@@ -5,6 +5,7 @@
 #include "../memory/vmm.h"
 
 struct vfs_node;
+struct lx_state;
 
 #define KERNEL_STACK_PAGES  2
 #define KERNEL_STACK_SIZE   (KERNEL_STACK_PAGES * PAGE_SIZE_4K)
@@ -54,6 +55,10 @@ typedef struct process {
     struct vfs_node *cwd;
     struct process  *next_all;
     int linux_personality;
+    struct lx_state *lx;
+    uint64_t lx_phdr;
+    uint64_t lx_phnum;
+    uint64_t lx_entry;
     int pty;
     uint64_t linux_brk_pos;
     uint64_t linux_mmap_next;
@@ -109,6 +114,7 @@ typedef struct thread {
 
     uint8_t          fpu_state[512] __attribute__((aligned(16)));
     uint64_t         fs_base;
+    void            *lx_frame;
 } thread_t;
 
 #endif

@@ -20,6 +20,8 @@ global userprog_argc_elf_start
 global userprog_argc_elf_end
 global userprog_libctest_elf_start
 global userprog_libctest_elf_end
+global userprog_busybox_start
+global userprog_busybox_end
 global userprog_ticker_start
 global userprog_ticker_end
 global userprog_audioplay_start
@@ -78,6 +80,10 @@ userprog_argc_elf_end:
 userprog_libctest_elf_start:
     incbin "userspace/libctest.elf"
 userprog_libctest_elf_end:
+
+userprog_busybox_start:
+    incbin "resources/linux/busybox"
+userprog_busybox_end:
 
 userprog_ticker_start:
     incbin "userspace/ticker.icx"

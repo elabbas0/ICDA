@@ -193,8 +193,8 @@ static uint64_t dev_fb_claim_map(void *info) {
 
 
         uint64_t page_flags = pat_wc_available()
-            ? (VMM_FLAGS_USER_RW | VMM_WC)
-            : (VMM_FLAGS_USER_RW | PTE_NO_CACHE | PTE_WRITE_THRU);
+            ? (VMM_FLAGS_USER_RW | VMM_WC | VMM_NOFREE)
+            : (VMM_FLAGS_USER_RW | PTE_NO_CACHE | PTE_WRITE_THRU | VMM_NOFREE);
         if (vmm_map_page(fproc->addr_space,
                          fb_virt + pi * PAGE_SIZE_4K,
                          fb_phys_aligned + pi * PAGE_SIZE_4K,

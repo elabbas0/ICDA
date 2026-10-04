@@ -6,6 +6,7 @@
 extern uint8_t kernel_end[];
 
 static uint64_t *bitmap       = 0;
+static uint16_t *frame_refs;
 static uint64_t  total_frames = 0;
 static uint64_t  used_frames  = 0;
 static uint64_t  next_free    = 0;
@@ -312,6 +313,10 @@ void pmm_free(uint64_t addr) {
     uint64_t frame = ADDR_TO_FRAME(addr);
     if (frame == 0 || frame >= total_frames) return;
     if (!frame_used(frame)) return;
+    if (frame_refs && frame_refs[frame]) {
+        frame_refs[frame]--;
+        return;
+    }
 
     frame_clear(frame);
     used_frames--;
@@ -346,4 +351,28 @@ void pmm_print_stats() {
     console_write(" next_free=", CONSOLE_STYLE_WARN);
     print_hex64(FRAME_TO_ADDR(next_free));
     console_write("\n", CONSOLE_STYLE_WARN);
+}
+
+/* Extra references per frame (0 = one owner), for frames shared between
+ * address spaces by copy-on-write fork.  pmm_free drops one reference and
+ * only releases the frame when none are left. */
+static uint16_t *frame_refs = 0;
+
+void pmm_refs_init(void) {
+    uint64_t pages = (total_frames * sizeof(uint16_t) + 4095) / 4096;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) return;
+    frame_refs = (uint16_t *)(phys + 0xFFFF800000000000ULL);
+    for (uint64_t i = 0; i < total_frames; i++) frame_refs[i] = 0;
+}
+
+void pmm_ref(uint64_t addr) {
+    uint64_t frame = ADDR_TO_FRAME(addr);
+    if (frame_refs && frame < total_frames && frame_refs[frame] < 0xFFFF) frame_refs[frame]++;
+}
+
+uint64_t pmm_refcount(uint64_t addr) {
+    uint64_t frame = ADDR_TO_FRAME(addr);
+    if (!frame_refs || frame >= total_frames) return 1;
+    return (uint64_t)frame_refs[frame] + 1;
 }

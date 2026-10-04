@@ -623,6 +623,52 @@ The Linux personality also gets the `syscall` instruction
 a per-thread FS base for TLS (`arch_prctl` SET_FS/GET_FS). The interrupt
 paths no longer reload FS or GS, because on Intel that clears the base.
 
+### Linux binaries (BusyBox)
+`kernel/linux/lx.c` implements the Linux x86-64 syscall ABI for ELF files in
+`/bin` that are not native (the OSABI byte is not 0xFF). It runs Debian's
+static glibc BusyBox 1.35 unmodified (`resources/linux/busybox`, seeded as
+`/bin/busybox`). `lx_init` adds a `#!/bin/busybox` stub for each common
+applet (`/bin/sh`, `ls`, `vi`, …) plus `/etc/passwd` and `/etc/group`.
+
+**Process start.** The loader passes a full auxv (AT_PHDR, AT_ENTRY,
+AT_RANDOM, AT_PLATFORM, AT_EXECFN, …) and a default environment.
+`user_enter` zeroes every register, because glibc treats `rdx` as an
+atexit hook.
+
+**Files.** Each process has its own fd table of reference-counted open
+files: VFS files, the tty, pipes, `/dev/null`, `/dev/zero` and
+`/dev/urandom`. `/proc` is synthetic (meminfo, uptime, loadavg, mounts,
+cpuinfo, stat, plus `<pid>/stat`, `cmdline`, `status` and `comm`), so
+`free`, `ps` and `uptime` work.
+
+**tty.** A termios line discipline sits on top of the raw pty: canonical
+mode with echo and erase, raw mode for `vi`, and TCGETS/TCSETS,
+TIOCGWINSZ and TIOCGPGRP/TIOCSPGRP.
+
+**Processes.**
+- `fork`, `vfork` and `clone` (non-thread) use copy-on-write.
+  `vmm_clone_user` shares frames and marks writable pages `VMM_COW`. The
+  pmm keeps per-frame reference counts, and `vmm_cow_break` resolves
+  write faults and kernel writes.
+- `execve` (with `#!` scripts), `wait4`, `kill`, process groups and
+  sessions are supported.
+- Signals use real `rt_sigframe`/`rt_sigreturn` (with SA_RESTART and
+  fxsave state) and are delivered when a syscall returns. Ctrl+C sends
+  SIGINT to the newest Linux process on the pty.
+
+**Memory.** User address spaces now have private low page tables, and the
+identity map is no longer global, so static binaries can load at
+0x400000. Exiting Linux processes free their address space. Pages above
+`rsp` inside the stack region are mapped on demand.
+
+**Not done yet:**
+- threads (CLONE_VM without VFORK returns ENOSYS);
+- `mmap` of shared files;
+- symlinks;
+- renaming on FAT/exFAT volumes;
+- freeing process and thread structs after reaping (about 28 KB each);
+- asynchronous signal delivery to a process spinning in user mode.
+
 ## Regenerating assets
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install pillow fonttools

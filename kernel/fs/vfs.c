@@ -934,3 +934,54 @@ const char *vfs_node_data(vfs_node_t *node) {
     if (node && ensure_loaded(node) != 0) return 0;
     return (node && node->data) ? node->data : "";
 }
+
+/* Moves or renames a node.  An existing target file (or empty directory)
+ * is replaced, as with POSIX rename().  Volume-backed nodes go through the
+ * external hook so the filesystem driver renames on disk. */
+int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
+    char leaf[64];
+    vfs_node_t *node = vfs_resolve(cwd, from);
+    vfs_node_t *dest = resolve_parent(cwd, to, leaf, sizeof(leaf), 0);
+    vfs_node_t *existing;
+    vfs_node_t **link;
+    char *name;
+
+    if (!node || !dest || node == vfs_root_node || !node->parent || !valid_name(leaf) ||
+        dest->type != VFS_NODE_DIR || subtree_has_readonly(node) || dest->readonly) {
+        return -1;
+    }
+    for (vfs_node_t *p = dest; p; p = p->parent) {
+        if (p == node) return -1;
+    }
+    if (node->mount_id != dest->mount_id) return -1;
+    existing = find_child(dest, leaf);
+    if (existing == node) return 0;
+    if (existing) {
+        if (existing->type != node->type || existing->first_child || existing->readonly) return -1;
+    }
+    if (node->mount_id) {
+        char src[512], dst[512];
+        if (!vfs_external_hook || build_path(node->parent, node->name, src, sizeof(src)) != 0 ||
+            build_path(dest, leaf, dst, sizeof(dst)) != 0 ||
+            vfs_external_hook(VFS_EXT_RENAME, node->mount_id, src, dst, 0, 0) != 0) {
+            return -1;
+        }
+    }
+    if (existing) {
+        link = &dest->first_child;
+        while (*link && *link != existing) link = &(*link)->next_sibling;
+        if (*link) *link = existing->next_sibling;
+    }
+    name = dup_cstr(leaf);
+    if (!name) return -1;
+    link = &node->parent->first_child;
+    while (*link && *link != node) link = &(*link)->next_sibling;
+    if (!*link) return -1;
+    *link = node->next_sibling;
+    node->parent->modified = vfs_tick++;
+    node->next_sibling = 0;
+    node->name = name;
+    append_child(dest, node);
+    dest->modified = vfs_tick++;
+    return node->mount_id ? 0 : vfs_sync();
+}

@@ -62,7 +62,7 @@ uint64_t shm_map(uint64_t handle) {
         if (vmm_map_page(proc->addr_space,
                          virt_base + i * SHM_PAGE_SZ,
                          r->phys_pages[i],
-                         VMM_FLAGS_USER_RW) != 0) {
+                         VMM_FLAGS_USER_RW | VMM_NOFREE) != 0) {
             
             for (uint64_t j = 0; j < i; j++)
                 vmm_unmap_page(proc->addr_space, virt_base + j * SHM_PAGE_SZ, 0);

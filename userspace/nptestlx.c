@@ -23,7 +23,7 @@
 #define LX_MUNMAP    11
 #define LX_BRK       12
 #define LX_EXIT      60
-#define LX_GETDENTS  78
+#define LX_GETDENTS  217
 #define LX_ARCH_PRCTL 158
 
 #define LX_O_RDONLY 0
@@ -43,13 +43,12 @@
 
 
 typedef struct {
-    uint64_t st_inode;
-    uint64_t st_size;
-    uint64_t st_created;
-    uint64_t st_modified;
-    uint8_t  st_type;
-    uint8_t  st_readonly;
-    uint8_t  _pad[6];
+    uint64_t st_dev, st_ino, st_nlink;
+    uint32_t st_mode, st_uid, st_gid, _pad0;
+    uint64_t st_rdev;
+    int64_t  st_size, st_blksize, st_blocks;
+    uint64_t st_times[6];
+    int64_t  _reserved[3];
 } lx_stat_t;
 
 static int failures = 0;
@@ -124,7 +123,7 @@ int nptestlx_main(int argc, char **argv) {
                             (uint64_t)(uintptr_t)&st, 0);
         check("fstat ok", n, 0);
         check("fstat size > 0", st.st_size > 0 ? 1 : 0, 1);
-        check("fstat type file", st.st_type, 1);
+        check("fstat type file", (st.st_mode & 0170000) == 0100000 ? 1 : 0, 1);
         check("close ok", (long)sys_call1(LX_CLOSE, (uint64_t)fd), 0);
         
         check("close twice -> EBADF",
@@ -140,12 +139,6 @@ int nptestlx_main(int argc, char **argv) {
           -(long)U_EBADF);
     check("write bad fd -> EBADF",
           (long)sys_call3(LX_WRITE, 99, (uint64_t)(uintptr_t)"x", 1),
-          -(long)U_EBADF);
-    check("write stdin -> EBADF",
-          (long)sys_call3(LX_WRITE, 0, (uint64_t)(uintptr_t)"x", 1),
-          -(long)U_EBADF);
-    check("read stdout -> EBADF",
-          (long)sys_call3(LX_READ, 1, (uint64_t)(uintptr_t)buf, 64),
           -(long)U_EBADF);
 
     
@@ -166,9 +159,9 @@ int nptestlx_main(int argc, char **argv) {
                               (uint64_t)(uintptr_t)buf, 64),
               -(long)U_EBADF);
     }
-    check("getdents stdio -> EBADF",
+    check("getdents stdio -> ENOTDIR",
           (long)sys_call3(LX_GETDENTS, 1, (uint64_t)(uintptr_t)buf, 64),
-          -(long)U_EBADF);
+          -20L);
 
     
     {

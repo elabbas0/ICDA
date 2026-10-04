@@ -310,6 +310,30 @@ linux_syscall_entry:
     push 128
     jmp syscall_common
 
+global lx_resume_user
+lx_resume_user:
+    mov rsp, rdi
+    xor eax, eax
+    mov ds, ax
+    mov es, ax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16
+    iretq
+
 global idt_flush
 idt_flush:
     lidt [rdi]

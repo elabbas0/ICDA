@@ -18,5 +18,9 @@ uint64_t user_last_exit_code(void);
 void user_thread_start(void);
 __attribute__((noreturn)) void user_thread_finish(void);
 void user_enter(uint64_t rip, uint64_t rsp);
+int user_build_stack(process_t *proc, uint64_t *rsp_out, uint64_t argc, char *const argv[],
+                     uint64_t envc, char *const envp[], const char *execfn);
+int user_exec_image(process_t *proc, const char *image, uint64_t size, uint64_t argc, char *const argv[],
+                    uint64_t envc, char *const envp[], const char *execfn, uint64_t *rip, uint64_t *rsp);
 
 #endif

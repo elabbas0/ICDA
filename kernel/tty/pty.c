@@ -1,6 +1,7 @@
 #include "pty.h"
 #include "../proc/process.h"
 #include "../proc/sched.h"
+#include "../linux/lx.h"
 
 #define PTY_IN_CAP  4096u
 #define PTY_OUT_CAP 32768u
@@ -67,7 +68,8 @@ static void pty_interrupt(pty_t *p) {
         if (!proc->parent || proc->parent->pty != proc->pty) continue;
         if (!victim || proc->pid > victim->pid) victim = proc;
     }
-    if (victim) sched_kill_process(victim->pid, 130);
+    if (victim && victim->linux_personality) lx_signal(victim, 2);
+    else if (victim) sched_kill_process(victim->pid, 130);
 }
 
 uint64_t pty_master_write(int id, const char *buf, uint64_t len) {
@@ -141,4 +143,9 @@ void pty_proc_exit(struct process *proc) {
             }
         }
     }
+}
+
+int pty_slave_peek(int id) {
+    pty_t *p = pty_get(id);
+    return p && p->in_tail != p->in_head;
 }

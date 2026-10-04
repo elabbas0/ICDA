@@ -25,6 +25,7 @@ typedef struct {
 #define VFS_EXT_REMOVE 3
 #define VFS_EXT_WRITE_AT 4
 #define VFS_EXT_TRUNCATE 5
+#define VFS_EXT_RENAME   6
 
 typedef int (*vfs_external_fn)(int op, uint8_t mount_id, const char *path, const char *data, uint64_t size,
                                uint64_t off);
@@ -56,6 +57,7 @@ int vfs_getcwd(vfs_node_t *node, char *buf, size_t size);
 int vfs_mkdir(vfs_node_t *cwd, const char *path);
 int vfs_create(vfs_node_t *cwd, const char *path);
 int vfs_remove(vfs_node_t *cwd, const char *path);
+int vfs_rename(vfs_node_t *cwd, const char *from, const char *to);
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size);
 
 

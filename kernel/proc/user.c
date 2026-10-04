@@ -18,6 +18,10 @@ static uint64_t user_exit_code = 0;
 #define USER_ARG_MAX         32
 #define USER_ARG_BYTES_MAX   2048
 #define USER_SHEBANG_MAX     256
+#define USER_ENV_MAX         64
+#define USER_EXEC_ARGS_MAX   1024
+#define USER_EXEC_ENV_MAX    256
+#define USER_ARGS_SPAN       (256ULL * 1024)
 
 #define ICX_MAGIC    0x31584349U
 #define ICX_VERSION  1U
@@ -136,59 +140,140 @@ static int split_words(const char *text, char *storage, uint64_t storage_cap,
     return 0;
 }
 
-static int write_stack_u64(char *stack_page, uint64_t base, uint64_t *sp_io, uint64_t value) {
-    if (!stack_page || !sp_io || *sp_io < base + sizeof(uint64_t)) return -1;
-    *sp_io -= sizeof(uint64_t);
-    *(uint64_t *)(stack_page + (*sp_io - base)) = value;
+static int stack_poke(process_t *proc, uint64_t va, const void *src, uint64_t len) {
+    const char *s = (const char *)src;
+    while (len) {
+        uint64_t phys = vmm_virt_to_phys(proc->addr_space, va);
+        uint64_t take = PAGE_SIZE_4K - (va & 0xFFFULL);
+        if (!phys && va >= USER_STACK_LIMIT && va < USER_STACK_TOP) {
+            uint64_t page = pmm_alloc();
+            if (!page) return -1;
+            zero_bytes((char *)PHYS_TO_VIRT(page), PAGE_SIZE_4K);
+            if (vmm_map_page(proc->addr_space, va & ~0xFFFULL, page, VMM_FLAGS_USER_RW) != 0) {
+                pmm_free(page);
+                return -1;
+            }
+            phys = vmm_virt_to_phys(proc->addr_space, va);
+        }
+        if (!phys) return -1;
+        if (take > len) take = len;
+        copy_bytes((char *)PHYS_TO_VIRT(phys), s, take);
+        va += take;
+        s += take;
+        len -= take;
+    }
     return 0;
 }
 
+static int stack_push(process_t *proc, uint64_t *sp, uint64_t floor, const void *src, uint64_t len) {
+    if (*sp < floor + len) return -1;
+    *sp -= len;
+    return stack_poke(proc, *sp, src, len);
+}
+
+/* Lays out argc, argv, envp and (for Linux binaries) the auxiliary vector
+ * the way the SysV x86-64 ABI expects.  Native programs see the same layout
+ * with an empty environment and a lone AT_NULL. */
+static int build_stack(process_t *proc, uint64_t *rsp_out, uint64_t argc, char *const argv[],
+                       uint64_t envc, char *const envp[], const char *execfn, uint64_t *argp, uint64_t *envp_va) {
+    uint64_t floor = USER_STACK_TOP - USER_ARGS_SPAN;
+    uint64_t sp = USER_STACK_TOP;
+    uint64_t auxv[2 * 20];
+    uint64_t words, aux_n = 0, execfn_va = 0, platform_va = 0, random_va = 0;
+    uint64_t seed = sched_ticks() * 0x9E3779B97F4A7C15ULL;
+    uint8_t rnd[16];
+
+    if (!proc || !proc->addr_space || !rsp_out) return -1;
+    for (uint64_t i = argc; i > 0; i--) {
+        if (stack_push(proc, &sp, floor, argv[i - 1], cstr_len(argv[i - 1]) + 1) != 0) return -1;
+        argp[i - 1] = sp;
+    }
+    for (uint64_t i = envc; i > 0; i--) {
+        if (stack_push(proc, &sp, floor, envp[i - 1], cstr_len(envp[i - 1]) + 1) != 0) return -1;
+        envp_va[i - 1] = sp;
+    }
+    if (proc->linux_personality) {
+        uint64_t tsc_lo, tsc_hi;
+        __asm__ volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
+        seed ^= (tsc_hi << 32) | tsc_lo;
+        for (int i = 0; i < 16; i++) {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            rnd[i] = (uint8_t)seed;
+        }
+        if (execfn && stack_push(proc, &sp, floor, execfn, cstr_len(execfn) + 1) != 0) return -1;
+        execfn_va = execfn ? sp : 0;
+        if (stack_push(proc, &sp, floor, "x86_64", 7) != 0) return -1;
+        platform_va = sp;
+        sp &= ~0xFULL;
+        if (stack_push(proc, &sp, floor, rnd, sizeof(rnd)) != 0) return -1;
+        random_va = sp;
+#define AUX(k, v) do { auxv[aux_n++] = (k); auxv[aux_n++] = (v); } while (0)
+        AUX(3, proc->lx_phdr);
+        AUX(4, 56);
+        AUX(5, proc->lx_phnum);
+        AUX(6, PAGE_SIZE_4K);
+        AUX(7, 0);
+        AUX(8, 0);
+        AUX(9, proc->lx_entry);
+        AUX(11, 0);
+        AUX(12, 0);
+        AUX(13, 0);
+        AUX(14, 0);
+        AUX(15, platform_va);
+        AUX(16, 0x178BFBFFULL);
+        AUX(17, 100);
+        AUX(23, 0);
+        AUX(25, random_va);
+        if (execfn_va) AUX(31, execfn_va);
+#undef AUX
+    }
+    auxv[aux_n++] = 0;
+    auxv[aux_n++] = 0;
+    sp &= ~0xFULL;
+    words = 1 + argc + 1 + envc + 1 + aux_n;
+    if (words & 1) sp -= 8;
+    if (stack_push(proc, &sp, floor, auxv, aux_n * 8) != 0) return -1;
+    envp_va[envc] = 0;
+    if (stack_push(proc, &sp, floor, envp_va, (envc + 1) * 8) != 0) return -1;
+    argp[argc] = 0;
+    if (stack_push(proc, &sp, floor, argp, (argc + 1) * 8) != 0) return -1;
+    if (stack_push(proc, &sp, floor, &argc, 8) != 0) return -1;
+    *rsp_out = sp;
+    return 0;
+}
+
+int user_build_stack(process_t *proc, uint64_t *rsp_out, uint64_t argc, char *const argv[],
+                     uint64_t envc, char *const envp[], const char *execfn) {
+    uint64_t *argp, *envp_va;
+    int rc;
+    if (argc > USER_EXEC_ARGS_MAX || envc > USER_EXEC_ENV_MAX) return -1;
+    argp = (uint64_t *)kmalloc((argc + 1) * 8);
+    envp_va = (uint64_t *)kmalloc((envc + 1) * 8);
+    rc = (argp && envp_va) ? build_stack(proc, rsp_out, argc, argv, envc, envp, execfn, argp, envp_va) : -1;
+    if (argp) kfree(argp);
+    if (envp_va) kfree(envp_va);
+    return rc;
+}
+
+static const char *const default_linux_env[] = {
+    "PATH=/bin:/usr/bin:/sbin", "HOME=/home", "TERM=linux", "SHELL=/bin/sh", "USER=root", "LANG=C.UTF-8"
+};
+
 static int user_build_initial_stack(process_t *proc, uint64_t *user_rsp_out,
                                     const char *argv0, uint64_t extra_argc, char *const extra_argv[]) {
-    uint64_t total_argc;
-    uint64_t stack_base = USER_STACK_TOP - PAGE_SIZE_4K;
-    uint64_t sp = USER_STACK_TOP;
-    uint64_t phys;
-    char *stack_page;
-    uint64_t arg_ptrs[USER_ARG_MAX + 1];
-
-    if (!proc || !proc->addr_space || !user_rsp_out || !argv0) return -1;
-    total_argc = 1 + extra_argc;
-    if (total_argc > USER_ARG_MAX) return -1;
-
-    phys = vmm_virt_to_phys(proc->addr_space, stack_base);
-    if (!phys) return -1;
-    stack_page = (char *)PHYS_TO_VIRT(phys);
-
-    for (uint64_t i = total_argc; i > 0; i--) {
-        const char *src = (i == 1) ? argv0 : extra_argv[i - 2];
-        uint64_t len = cstr_len(src) + 1;
-        if (sp < stack_base + len) return -1;
-        sp -= len;
-        copy_bytes(stack_page + (sp - stack_base), src, len);
-        arg_ptrs[i - 1] = sp;
-    }
-
-    sp &= ~0xFULL;
-
+    char *argv[USER_ARG_MAX];
+    uint64_t argc = 1 + extra_argc;
+    if (!argv0 || argc > USER_ARG_MAX) return -1;
+    argv[0] = (char *)argv0;
+    for (uint64_t i = 0; i < extra_argc; i++) argv[i + 1] = extra_argv[i];
     if (proc->linux_personality) {
-        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* AT_NULL value */
-        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* AT_NULL key */
-        if (write_stack_u64(stack_page, stack_base, &sp, PAGE_SIZE_4K) != 0) return -1; /* AT_PAGESZ value */
-        if (write_stack_u64(stack_page, stack_base, &sp, 6) != 0) return -1; /* AT_PAGESZ key */
-    } else {
-        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1;
-        if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1;
+        return user_build_stack(proc, user_rsp_out, argc, argv,
+                                sizeof(default_linux_env) / sizeof(default_linux_env[0]),
+                                (char *const *)default_linux_env, argv0);
     }
-    if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* envp NULL */
-    if (write_stack_u64(stack_page, stack_base, &sp, 0) != 0) return -1; /* argv NULL */
-    for (uint64_t i = total_argc; i > 0; i--) {
-        if (write_stack_u64(stack_page, stack_base, &sp, arg_ptrs[i - 1]) != 0) return -1;
-    }
-    if (write_stack_u64(stack_page, stack_base, &sp, total_argc) != 0) return -1;
-
-    *user_rsp_out = sp;
-    return 0;
+    return user_build_stack(proc, user_rsp_out, argc, argv, 0, 0, 0);
 }
 
 int user_prepare_address_space(process_t *proc) {
@@ -471,6 +556,19 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
         }
     }
 
+    user_proc->lx_entry = eh->e_entry + load_bias;
+    user_proc->lx_phnum = eh->e_phnum;
+    user_proc->lx_phdr = 0;
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type == 6) {
+            user_proc->lx_phdr = ph[i].p_vaddr + load_bias;
+            break;
+        }
+        if (ph[i].p_type == PT_LOAD && eh->e_phoff >= ph[i].p_offset &&
+            eh->e_phoff < ph[i].p_offset + ph[i].p_filesz && !user_proc->lx_phdr) {
+            user_proc->lx_phdr = ph[i].p_vaddr + (eh->e_phoff - ph[i].p_offset) + load_bias;
+        }
+    }
     *entry_rip_out = eh->e_entry + load_bias;
     return 0;
 }
@@ -718,6 +816,10 @@ __attribute__((noreturn)) void user_thread_finish(void) {
 
     vmm_switch_address_space(vmm_kernel_address_space());
     pf_set_current_as(vmm_kernel_address_space());
+    if (proc && proc->linux_personality && proc->addr_space) {
+        vmm_destroy_address_space(proc->addr_space);
+        proc->addr_space = 0;
+    }
 
     user_exit_code = proc ? proc->exit_code : (uint64_t)-1;
     sched_yield();
@@ -813,4 +915,15 @@ int user_wait_pid(uint64_t pid, uint64_t *exit_code_out) {
     }
     child->state = PROCESS_REAPED;
     return 0;
+}
+
+/* Loads an image into a fresh address space for execve.  On success the
+ * new space is in proc->addr_space and the old one is left to the caller;
+ * on failure proc->addr_space is NULL or a partial space to destroy. */
+int user_exec_image(process_t *proc, const char *image, uint64_t size, uint64_t argc, char *const argv[],
+                    uint64_t envc, char *const envp[], const char *execfn, uint64_t *rip, uint64_t *rsp) {
+    if (!proc || !image || !rip || !rsp) return -1;
+    proc->addr_space = 0;
+    if (user_load_image(proc, image, size, rip) != 0) return -1;
+    return user_build_stack(proc, rsp, argc, argv, envc, envp, execfn);
 }

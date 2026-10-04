@@ -2,6 +2,7 @@
 #include "irq_controller.h"
 #include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
+#include "../linux/lx.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
@@ -150,4 +151,5 @@ void irq_handler(struct registers* regs) {
 
 void syscall_handler(struct registers* regs) {
     regs->rax = syscall_dispatch(regs);
+    lx_after_syscall(regs);
 }
