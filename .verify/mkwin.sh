@@ -20,6 +20,11 @@ mcopy -i /tmp/esp.img /tmp/bootx64.efi "::/EFI/Microsoft/Boot/A long file name.t
 dd if=/tmp/esp.img of="$img" bs=1M seek=$((start1 / 2048)) conv=notrunc,sparse status=none
 truncate -s 400M /tmp/data.img
 mkfs.fat -F 32 -n ICDAROOT /tmp/data.img >/dev/null
+gcc -O2 -o /tmp/genrange .verify/genrange.c && /tmp/genrange > /tmp/rangetest.bin
+mcopy -i /tmp/data.img /tmp/rangetest.bin ::/rangetest.bin
+mmd -i /tmp/data.img "::/Photos 2026"
+printf 'small file\n' > /tmp/small.txt
+mcopy -i /tmp/data.img /tmp/small.txt "::/Photos 2026/Read me first.txt"
 dd if=/tmp/data.img of="$img" bs=1M seek=$((start3 / 2048)) conv=notrunc,sparse status=none
 sgdisk -p "$img" | tail -4
 cp --sparse=always "$img" "$out"

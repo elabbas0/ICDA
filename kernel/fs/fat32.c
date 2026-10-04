@@ -6,7 +6,6 @@
 
 #define FAT32_PATH_CAP       512U
 #define FAT32_MOUNT_MAX      16U
-#define FAT32_IMPORT_MAX     (32ULL * 1024ULL * 1024ULL)
 #define FAT32_DEPTH_MAX      16U
 #define FAT32_VFS_NAME_MAX   63U
 
@@ -21,6 +20,9 @@ typedef struct {
 
 static fat32_mount_t mounts[FAT32_MOUNT_MAX];
 static uint32_t mounted_fat32 = 0;
+static fatfs_hint_t read_hint;
+static char read_hint_path[FAT32_PATH_CAP];
+static uint8_t read_hint_mount;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -67,6 +69,7 @@ static int fat32_external(int op, uint8_t mount_id, const char *path, const char
     m = &mounts[mount_id - 1];
     if (!m->used) return 0;
     if (!m->writable) return -1;
+    read_hint.cluster = 0;
     prefix = str_len(m->path);
     for (uint64_t i = 0; i < prefix; i++) {
         if (path[i] != m->path[i]) return -1;
@@ -82,6 +85,53 @@ static int fat32_external(int op, uint8_t mount_id, const char *path, const char
     }
     kfree(vol);
     return rc == 0 ? 0 : -1;
+}
+
+static int fat32_rel_path(uint8_t mount_id, const char *path, fat32_mount_t **out, const char **rel) {
+    uint64_t prefix;
+    fat32_mount_t *m;
+    if (mount_id == 0 || mount_id > FAT32_MOUNT_MAX) return -1;
+    m = &mounts[mount_id - 1];
+    if (!m->used) return -1;
+    prefix = str_len(m->path);
+    for (uint64_t i = 0; i < prefix; i++) {
+        if (path[i] != m->path[i]) return -1;
+    }
+    if (path[prefix] != '/') return -1;
+    *out = m;
+    *rel = path + prefix;
+    return 0;
+}
+
+static int same_text(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static int64_t fat32_loader(uint8_t mount_id, const char *path, uint64_t off, char *buf, uint64_t len) {
+    fat32_mount_t *m;
+    const char *rel;
+    fatfs_t *vol;
+    fatfs_entry_t *e;
+    int64_t got = -1;
+    if (fat32_rel_path(mount_id, path, &m, &rel) != 0) return -1;
+    vol = (fatfs_t *)kmalloc(sizeof(fatfs_t));
+    e = (fatfs_entry_t *)kmalloc(sizeof(fatfs_entry_t));
+    if (vol && e && fatfs_mount(vol, m->dev, m->start, m->sectors) == 0 && fatfs_lookup(vol, rel, e) == 0 &&
+        !(e->attr & FATFS_ATTR_DIR)) {
+        if (read_hint_mount != mount_id || !same_text(read_hint_path, path)) {
+            read_hint.cluster = 0;
+            read_hint_mount = mount_id;
+            copy_text(read_hint_path, path, sizeof(read_hint_path));
+        }
+        got = fatfs_read_range(vol, e, off, buf, len, &read_hint);
+    }
+    if (vol) kfree(vol);
+    if (e) kfree(e);
+    return got;
 }
 
 typedef struct {
@@ -104,15 +154,8 @@ static int import_cb(const fatfs_entry_t *e, void *p) {
     if (e->attr & FATFS_ATTR_DIR) {
         if (vfs_import_node(path, VFS_NODE_DIR, ctx->readonly, 0, 0, 0, 0, 0) != 0) return 0;
         if (e->cluster >= 2) (void)import_dir(ctx->vol, e->cluster, path, ctx->depth + 1, ctx->readonly);
-    } else if (e->size <= FAT32_IMPORT_MAX) {
-        char *data = 0;
-        if (fatfs_read_entry(ctx->vol, e, &data) == 0) {
-            (void)vfs_import_node(path, VFS_NODE_FILE, ctx->readonly || (e->attr & FATFS_ATTR_RO), data, e->size,
-                                  0, 0, 0);
-            kfree(data);
-        }
     } else {
-        (void)vfs_import_node(path, VFS_NODE_FILE, 1, "", 0, 0, 0, 0);
+        (void)vfs_import_lazy(path, e->size, (uint8_t)(ctx->readonly || (e->attr & FATFS_ATTR_RO)));
     }
     return 0;
 }
@@ -171,6 +214,8 @@ static int fat32_mount_partition_info(const partition_info_t *part, const char *
 
 int fat32_mount_detected(void) {
     vfs_set_external_hook(fat32_external);
+    vfs_set_loader(fat32_loader);
+    read_hint.cluster = 0;
     for (uint32_t i = 0; i < FAT32_MOUNT_MAX; i++) {
         if (mounts[i].used) (void)vfs_detach_tree(mounts[i].path);
         mounts[i].used = 0;
@@ -195,5 +240,6 @@ uint32_t fat32_mount_count(void) {
 int fat32_mount_partition(uint32_t partition_index, const char *mount_path) {
     const partition_info_t *part = partition_get(partition_index);
     vfs_set_external_hook(fat32_external);
+    vfs_set_loader(fat32_loader);
     return fat32_mount_partition_info(part, mount_path);
 }

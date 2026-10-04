@@ -235,16 +235,30 @@ straight to disk:
   each operation. Nothing is cached between operations, so the installer and
   persistence can safely write the same disks.
 - **Read-only volumes:** EFI partitions and ICDA's own system partition are
-  read-only, as are files over 32 MB (they are imported empty so a partial RAM
-  copy can never be written back). Mount roots are read-only, so a volume
-  cannot be deleted.
+  read-only. Mount roots are read-only, so a volume cannot be deleted.
 - **Persistence:** `persistfs` skips anything with a `mount_id`, so volume
   contents never end up in ICDA's root bundle.
 
-Limits: files are loaded into RAM when the volume is mounted, and a partial
-write (`write_at`) rewrites the whole file on disk. The shell gained `rm`.
-Explorer, the Editor, libc `fopen` and the shell all work on volumes through
-the normal VFS calls.
+Lazy loading:
+- **Mounting** imports only the directory tree. File nodes are `lazy`: they
+  carry the size, but no data.
+- **Ranged reads** (`vfs_node_read_at`, used by `SYS_VFS_READ_AT` and `fd`
+  reads through a 64 KB bounce buffer) go straight to disk through the loader
+  set with `vfs_set_loader`. `fat32.c` looks up the path for every read, so it
+  stays coherent with other writers. It keeps a cluster hint (first cluster,
+  offset, cluster), so sequential chunked reads don't re-walk the chain.
+- **Whole-file access** (`vfs_read`, `vfs_node_data`, and partial writes,
+  which need the old contents) loads the file once on first use and caches it.
+  That is capped at `VFS_LAZY_LOAD_MAX` (256 MB); larger files are readable in
+  ranges only.
+- **Full rewrites** (`vfs_write`) replace the data without loading it first.
+
+Limits: a partial write (`write_at`) still rewrites the whole file on disk, and
+loaded files stay cached until the volume is remounted. The shell gained `rm`,
+and `write "path with spaces" text`. Explorer, the Editor, libc `fopen` and the
+shell all work on volumes through the normal VFS calls. `libctest` checks
+ranged reads against `.verify/mkwin.sh`'s 40 MB pattern file when it is
+present.
 
 ### Installing next to other systems
 - **Boot files:** everything goes in `\EFI\ICDA\` (`GRUBX64.EFI`,

@@ -668,11 +668,21 @@ static void shell_write_file(const char *arg) {
         return;
     }
 
-    text = (char *)arg;
-    while (*text && *text != ' ' && *text != '\t') text++;
-    if (!*text) {
-        icda_write("usage: write <path> <text>\n");
-        return;
+    if (*arg == '"') {
+        arg++;
+        text = (char *)arg;
+        while (*text && *text != '"') text++;
+        if (!*text) {
+            icda_write("usage: write \"<path>\" <text>\n");
+            return;
+        }
+    } else {
+        text = (char *)arg;
+        while (*text && *text != ' ' && *text != '\t') text++;
+        if (!*text) {
+            icda_write("usage: write <path> <text>\n");
+            return;
+        }
     }
 
     *text++ = 0;

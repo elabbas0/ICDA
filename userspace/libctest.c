@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "icda_sys.h"
 
 static int passed, failed;
 
@@ -125,6 +126,23 @@ static void test_files(void) {
     check(remove(path) == 0 && fopen(path, "r") == 0, "remove");
 }
 
+static void test_volume_ranges(void) {
+    static const char *path = "/volumes/fat32-1/rangetest.bin";
+    static const unsigned long offsets[4] = { 0UL, 4095UL, 5000003UL, 41934000UL };
+    static char buf[8192];
+    icda_stat_t st;
+    if ((long)icda_stat(path, &st) < 0) return;
+    printf("  range test on %s (%lu bytes)\n", path, (unsigned long)st.size);
+    for (int k = 0; k < 4; k++) {
+        long got = (long)icda_read_file_at(path, offsets[k], buf, sizeof(buf));
+        int ok = got == (long)sizeof(buf);
+        for (long i = 0; ok && i < got; i++) {
+            ok = (unsigned char)buf[i] == (unsigned char)(((offsets[k] + (unsigned long)i) * 7UL + 3UL) & 0xFFUL);
+        }
+        check(ok, "ranged read from a volume");
+    }
+}
+
 int main(int argc, char **argv) {
     printf("libctest: %s (argc=%d)\n", argc > 0 ? argv[0] : "?", argc);
     test_strings();
@@ -132,6 +150,7 @@ int main(int argc, char **argv) {
     test_format();
     test_memory();
     test_files();
+    test_volume_ranges();
     printf("libctest: %d/%d passed\n", passed, passed + failed);
     return failed ? 1 : 0;
 }

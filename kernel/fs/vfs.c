@@ -10,6 +10,7 @@ struct vfs_node {
     uint8_t type;
     uint8_t readonly;
     uint8_t mount_id;
+    uint8_t lazy;
     char *data;
     struct vfs_node *parent;
     struct vfs_node *first_child;
@@ -22,6 +23,7 @@ static uint64_t vfs_tick = 1;
 static const uint64_t VFS_NAME_CAP = 63;
 static int (*vfs_sync_hook)(void) = 0;
 static vfs_external_fn vfs_external_hook = 0;
+static vfs_loader_fn vfs_loader_hook = 0;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -347,6 +349,58 @@ void vfs_set_external_hook(vfs_external_fn fn) {
     vfs_external_hook = fn;
 }
 
+static int build_path(vfs_node_t *dir, const char *leaf, char *path, uint64_t cap) {
+    uint64_t n;
+    if (vfs_getcwd(dir, path, cap) != 0) return -1;
+    n = str_len(path);
+    if (n == 0 || path[n - 1] != '/') {
+        if (n + 1 >= cap) return -1;
+        path[n++] = '/';
+    }
+    if (n + str_len(leaf) + 1 > cap) return -1;
+    copy_bytes(path + n, leaf, str_len(leaf) + 1);
+    return 0;
+}
+
+void vfs_set_loader(vfs_loader_fn fn) {
+    vfs_loader_hook = fn;
+}
+
+int64_t vfs_node_read_at(vfs_node_t *node, uint64_t off, char *buf, uint64_t len) {
+    char path[512];
+    if (!node || node->type != VFS_NODE_FILE) return -1;
+    if (off >= node->size) return 0;
+    if (len > node->size - off) len = node->size - off;
+    if (!node->lazy) {
+        copy_bytes(buf, node->data + off, len);
+        return (int64_t)len;
+    }
+    if (!vfs_loader_hook || build_path(node->parent, node->name, path, sizeof(path)) != 0) return -1;
+    return vfs_loader_hook(node->mount_id, path, off, buf, len);
+}
+
+uint8_t vfs_node_is_lazy(vfs_node_t *node) {
+    return node ? node->lazy : 0;
+}
+
+static int ensure_loaded(vfs_node_t *node) {
+    char *buf;
+    int64_t got;
+    if (!node || !node->lazy) return 0;
+    if (node->size > VFS_LAZY_LOAD_MAX) return -1;
+    buf = (char *)kmalloc((size_t)(node->size + 1));
+    if (!buf) return -1;
+    got = node->size ? vfs_node_read_at(node, 0, buf, node->size) : 0;
+    if (got < 0 || (uint64_t)got != node->size) {
+        kfree(buf);
+        return -1;
+    }
+    buf[node->size] = 0;
+    node->data = buf;
+    node->lazy = 0;
+    return 0;
+}
+
 static int external_op(int op, vfs_node_t *dir, const char *leaf, const char *data, uint64_t size) {
     char path[512];
     uint64_t n;
@@ -487,6 +541,7 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     }
     node->data = next;
     node->size = size;
+    node->lazy = 0;
     node->modified = vfs_tick++;
     return vfs_sync();
 }
@@ -501,6 +556,9 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
         return -1;
     }
     if (!data && size != 0) {
+        return -1;
+    }
+    if (ensure_loaded(node) != 0) {
         return -1;
     }
     new_end = off + size;
@@ -631,6 +689,7 @@ int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char
         }
         node->data = next;
         node->size = size;
+        node->lazy = 0;
     }
 
     node->readonly = readonly;
@@ -651,7 +710,7 @@ int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char
 
 const char *vfs_read(vfs_node_t *cwd, const char *path, uint64_t *size_out) {
     vfs_node_t *node = vfs_resolve(cwd, path);
-    if (!node || node->type != VFS_NODE_FILE) {
+    if (!node || node->type != VFS_NODE_FILE || ensure_loaded(node) != 0) {
         return 0;
     }
     if (size_out) {
@@ -718,6 +777,18 @@ uint8_t vfs_node_mount_id(vfs_node_t *node) {
     return node ? node->mount_id : 0;
 }
 
+int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {
+    vfs_node_t *node;
+    if (vfs_import_node(path, VFS_NODE_FILE, readonly, "", 0, 0, 0, 0) != 0) return -1;
+    node = vfs_resolve(vfs_root_node, path);
+    if (!node) return -1;
+    if (node->data) kfree(node->data);
+    node->data = 0;
+    node->size = size;
+    node->lazy = 1;
+    return 0;
+}
+
 int vfs_set_mount(const char *path, uint8_t mount_id) {
     vfs_node_t *node = vfs_resolve(vfs_root_node, path);
     if (!node || node->type != VFS_NODE_DIR) return -1;
@@ -758,5 +829,6 @@ uint64_t vfs_node_modified(vfs_node_t *node) {
 }
 
 const char *vfs_node_data(vfs_node_t *node) {
+    if (node && ensure_loaded(node) != 0) return 0;
     return (node && node->data) ? node->data : "";
 }

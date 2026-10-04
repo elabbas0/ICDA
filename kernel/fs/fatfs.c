@@ -854,3 +854,47 @@ int fatfs_usage(fatfs_t *v, uint32_t *free_clusters, uint32_t *highest_used) {
     if (highest_used) *highest_used = high;
     return 0;
 }
+
+int64_t fatfs_read_range(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void *buf, uint64_t len,
+                         fatfs_hint_t *hint) {
+    uint8_t *tmp;
+    uint8_t *out = (uint8_t *)buf;
+    uint64_t done = 0, pos = 0;
+    uint32_t c = e->cluster;
+    if (off >= e->size) return 0;
+    if (len > e->size - off) len = e->size - off;
+    if (hint && hint->cluster && hint->first == e->cluster && hint->off <= off) {
+        pos = hint->off;
+        c = hint->cluster;
+    }
+    while (valid_cluster(v, c) && pos + v->cluster_bytes <= off) {
+        c = fat_get(v, c);
+        pos += v->cluster_bytes;
+    }
+    tmp = (uint8_t *)kmalloc(v->cluster_bytes);
+    if (!tmp) return -1;
+    while (done < len && valid_cluster(v, c)) {
+        uint64_t in = off + done - pos;
+        uint64_t take = v->cluster_bytes - in;
+        if (take > len - done) take = len - done;
+        if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) break;
+        mem_copy(out + done, tmp + in, take);
+        done += take;
+        if (in + take == v->cluster_bytes) {
+            if (hint) {
+                hint->first = e->cluster;
+                hint->cluster = c;
+                hint->off = pos;
+            }
+            c = fat_get(v, c);
+            pos += v->cluster_bytes;
+        }
+    }
+    if (hint && done && valid_cluster(v, c)) {
+        hint->first = e->cluster;
+        hint->cluster = c;
+        hint->off = pos;
+    }
+    kfree(tmp);
+    return (int64_t)done;
+}

@@ -261,8 +261,6 @@ static uint64_t sys_exit(uint64_t code) {
 
 static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, uint64_t cap) {
     process_t *proc = sched_current_process();
-    uint64_t size = 0;
-    const char *data;
     uint64_t chunk;
 
     if (!proc || !path || !buf || cap == 0) {
@@ -275,17 +273,15 @@ static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, ui
         return (uint64_t)-U_EFAULT;
     }
 
-    data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), path, &size);
-    if (!data || offset >= size) {
-        return 0;
+    {
+        vfs_node_t *node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), path);
+        int64_t got;
+        if (!node) {
+            return 0;
+        }
+        got = vfs_node_read_at(node, offset, buf, cap);
+        chunk = got < 0 ? 0 : (uint64_t)got;
     }
-
-    chunk = size - offset;
-    if (chunk > cap) {
-        chunk = cap;
-    }
-
-    copy_bytes(buf, data + offset, chunk);
     return chunk;
 }
 
@@ -1602,10 +1598,25 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             size = vfs_node_size(node);
             if (off >= size) return 0;
-            data = vfs_node_data(node);
-            if (!data) return 0;
             avail = size - off;
             copy = count < avail ? count : avail;
+            if (vfs_node_is_lazy(node)) {
+                char *bounce;
+                int64_t got;
+                if (copy > 65536) copy = 65536;
+                bounce = (char *)kmalloc(copy);
+                if (!bounce) return (uint64_t)-U_ENOMEM;
+                got = vfs_node_read_at(node, off, bounce, copy);
+                if (got <= 0 || copy_to_user(buf, bounce, (uint64_t)got) != 0) {
+                    kfree(bounce);
+                    return got < 0 ? (uint64_t)-U_EFAULT : 0;
+                }
+                kfree(bounce);
+                fd_set_off(proc, fd, off + (uint64_t)got);
+                return (uint64_t)got;
+            }
+            data = vfs_node_data(node);
+            if (!data) return 0;
             if (copy_to_user(buf, data + off, copy) != 0) {
                 return (uint64_t)-U_EFAULT;
             }

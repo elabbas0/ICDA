@@ -53,6 +53,15 @@ int fatfs_read(fatfs_t *vol, const char *path, char **data_out, uint64_t *size_o
 int fatfs_read_entry(fatfs_t *vol, const fatfs_entry_t *entry, char **data_out);
 int fatfs_remove(fatfs_t *vol, const char *path);
 int fatfs_usage(fatfs_t *vol, uint32_t *free_clusters, uint32_t *highest_used);
+
+typedef struct {
+    uint32_t first;
+    uint32_t cluster;
+    uint64_t off;
+} fatfs_hint_t;
+
+int64_t fatfs_read_range(fatfs_t *vol, const fatfs_entry_t *entry, uint64_t off, void *buf, uint64_t len,
+                         fatfs_hint_t *hint);
 int fatfs_flush(fatfs_t *vol);
 
 #endif
