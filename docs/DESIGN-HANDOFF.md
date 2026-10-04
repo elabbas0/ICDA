@@ -167,12 +167,22 @@ a dark full-screen overlay.
   resize shapes chosen from the frame hit under the pointer. A text
   cursor needs apps to tell the WM where text is (a new message type);
   not done.
-- Blur cost: `ic_gfx_backdrop` re-blurs the whole taskbar and panel on
-  every damaged frame. Cache the blurred wallpaper strip.
-- Composite cost: zoom animations re-render the frame per damage region;
-  render once per frame.
-- HiDPI: no scale factor. Add a logical-to-physical scale in
-  `ic_canvas_t` and 2x font/icon atlases.
+- Blur cost: done differently. `ic_gfx_backdrop` now blurs only the clip
+  rectangle plus the blur's reach (3 box passes of radius blur/2), which
+  is pixel-identical inside the clip (checked against a full blur on the
+  host), and the WM grows a dirty rect into the taskbar or a panel only by
+  that reach instead of to the whole material. Updates near the taskbar
+  no longer re-blur all of it.
+- Composite cost: done. Dirty rects are coalesced until none overlap, so
+  no region is composited twice, and when they cover more than 60% of
+  the screen the frame is composited once as a whole.
+- HiDPI: partly done. `scale=` in the settings file (0 auto, 1, 2; auto
+  picks 2 at 2560 px wide and up). The WM composes at logical resolution
+  and pixel-doubles in `blit_region`, and divides pointer coordinates, so
+  everything is correctly sized on 2560x1440 and 4K (which previously
+  overflowed the 2560x1600 back buffer). Text and icons are doubled, not
+  re-rasterised: true 2x needs a scale in `ic_canvas_t` and 2x font and
+  icon atlases from `gen_fonts.py`/`gen_icons.py`. Verified at 2560x1440.
 - Mouse wheel: done. The PS/2 driver does the IntelliMouse handshake
   (rates 200/100/80, then ID 3 means 4-byte packets) and reports `dz`.
   `dz` is appended to `mouse_event_t`, `syscall_mouse_event_t` and

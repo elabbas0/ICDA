@@ -41,6 +41,7 @@ typedef struct {
     int appearance;
     int accent;
     int tz_minutes;
+    int scale;
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -54,6 +55,7 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->appearance = ICDA_APPEARANCE_DARK;
     s->accent = 0;
     s->tz_minutes = 0;
+    s->scale = 0;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -112,6 +114,10 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         value = vc - '0';
     }
     line += i;
+    if (icda_settings_key_is(line, key_len, "scale")) {
+        if (value <= 2) s->scale = value;
+        return;
+    }
     if (icda_settings_key_is(line, key_len, "accent")) {
         if (value <= ICDA_ACCENT_MAX) {
             s->accent = value;
@@ -218,6 +224,14 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
         tz_line[k] = '\0';
         icda_settings_put(buf, sizeof(buf), &pos, "tz=");
         icda_settings_put(buf, sizeof(buf), &pos, tz_line);
+    }
+    {
+        char scale_line[3];
+        scale_line[0] = (char)('0' + (s->scale >= 0 && s->scale <= 2 ? s->scale : 0));
+        scale_line[1] = '\n';
+        scale_line[2] = 0;
+        icda_settings_put(buf, sizeof(buf), &pos, "scale=");
+        icda_settings_put(buf, sizeof(buf), &pos, scale_line);
     }
     if (pos == 0 || pos >= sizeof(buf)) {
         return -1;

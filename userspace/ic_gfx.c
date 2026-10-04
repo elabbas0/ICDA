@@ -774,10 +774,17 @@ void ic_gfx_backdrop(ic_canvas_t *c, int x, int y, int w, int h, float radius,
     ic_rr_make(&g, x, y, w, h, radius, radius, radius, radius);
     
 
-    bx0 = x < 0 ? 0 : x;
-    by0 = y < 0 ? 0 : y;
-    bx1 = x + w > c->w ? c->w : x + w;
-    by1 = y + h > c->h ? c->h : y + h;
+    {
+        int m = 3 * (blur / 2 < 1 ? 1 : blur / 2) + 2;
+        bx0 = x0 - m > x ? x0 - m : x;
+        by0 = y0 - m > y ? y0 - m : y;
+        bx1 = x1 + m < x + w ? x1 + m : x + w;
+        by1 = y1 + m < y + h ? y1 + m : y + h;
+        if (bx0 < 0) bx0 = 0;
+        if (by0 < 0) by0 = 0;
+        if (bx1 > c->w) bx1 = c->w;
+        if (by1 > c->h) by1 = c->h;
+    }
     if (blur > 0 && scratch && bx1 > bx0 && by1 > by0) {
         int bw = bx1 - bx0, bh = by1 - by0;
         int need = bw * bh + (bw > bh ? bw : bh);

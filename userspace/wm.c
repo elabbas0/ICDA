@@ -99,6 +99,7 @@ static uint32_t *real_fb = NULL;
 
 static int scr_w = 0;
 static int scr_h = 0;
+static int wm_scale = 1;
 
 static ic_canvas_t scene;
 
@@ -1297,7 +1298,20 @@ static void extend_one(dirty_rect_t *r, ic_rect_t m) {
     if (d.y < 0) { d.h += d.y; d.y = 0; }
     if (d.x + d.w > scr_w) d.w = scr_w - d.x;
     if (d.y + d.h > scr_h) d.h = scr_h - d.y;
-    if (dirty_rects_intersect(r, &d)) dirty_rect_union(r, &d);
+    {
+        const int reach = 48;
+        int x0 = r->x - reach > d.x ? r->x - reach : d.x;
+        int y0 = r->y - reach > d.y ? r->y - reach : d.y;
+        int x1 = r->x + r->w + reach < d.x + d.w ? r->x + r->w + reach : d.x + d.w;
+        int y1 = r->y + r->h + reach < d.y + d.h ? r->y + r->h + reach : d.y + d.h;
+        dirty_rect_t e;
+        if (x1 <= x0 || y1 <= y0) return;
+        e.x = x0;
+        e.y = y0;
+        e.w = x1 - x0;
+        e.h = y1 - y0;
+        dirty_rect_union(r, &e);
+    }
 }
 
 static void extend_to_materials(dirty_rect_t *r) {
@@ -2102,6 +2116,33 @@ static uint32_t fb_pitch_pixels(void) {
 }
 
 
+static void blit_region_scaled(int x, int y, int rw, int rh) {
+    int s = wm_scale;
+    int bpp = fb_info.bpp == 32 ? 4 : 3;
+    for (int yy = y; yy < y + rh; yy++) {
+        const uint32_t *src = back_buffer + (uint64_t)yy * scr_w + x;
+        for (int k = 0; k < s; k++) {
+            uint8_t *row = (uint8_t *)real_fb + (uint64_t)(yy * s + k) * fb_info.pitch + (uint64_t)x * s * bpp;
+            if (bpp == 4) {
+                uint32_t *d = (uint32_t *)row;
+                for (int i = 0; i < rw; i++) {
+                    for (int j = 0; j < s; j++) d[i * s + j] = src[i];
+                }
+            } else {
+                for (int i = 0; i < rw; i++) {
+                    uint32_t c = src[i];
+                    for (int j = 0; j < s; j++) {
+                        uint8_t *p = row + (uint64_t)(i * s + j) * 3;
+                        p[0] = (uint8_t)c;
+                        p[1] = (uint8_t)(c >> 8);
+                        p[2] = (uint8_t)(c >> 16);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void blit_region(int x, int y, int rw, int rh) {
     uint32_t pitch = fb_pitch_pixels();
     if (x < 0) { rw += x; x = 0; }
@@ -2109,6 +2150,10 @@ static void blit_region(int x, int y, int rw, int rh) {
     if (x + rw > scr_w) rw = scr_w - x;
     if (y + rh > scr_h) rh = scr_h - y;
     if (rw <= 0 || rh <= 0) return;
+    if (wm_scale > 1) {
+        blit_region_scaled(x, y, rw, rh);
+        return;
+    }
     if (fb_info.bpp != 32) {
         for (int yy = y; yy < y + rh; yy++) {
             blit_row_24((uint8_t *)real_fb + (uint64_t)yy * fb_info.pitch + (uint64_t)x * 3,
@@ -2170,7 +2215,31 @@ static void cursor_bbox(int mx, int my, int pmx, int pmy, int *ox, int *oy, int 
 
 
 
+static void coalesce_dirty(void) {
+    int merged = 1;
+    int64_t area = 0;
+    while (merged) {
+        merged = 0;
+        for (int i = 0; i < dirty_count && !merged; i++) {
+            for (int j = i + 1; j < dirty_count; j++) {
+                if (dirty_rects_intersect(&dirty_rects[i], &dirty_rects[j])) {
+                    dirty_rect_union(&dirty_rects[i], &dirty_rects[j]);
+                    dirty_rects[j] = dirty_rects[--dirty_count];
+                    merged = 1;
+                    break;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < dirty_count; i++) area += (int64_t)dirty_rects[i].w * dirty_rects[i].h;
+    if (area * 10 > (int64_t)scr_w * scr_h * 6) {
+        dirty_full = 1;
+        dirty_count = 0;
+    }
+}
+
 static void composite_dirty(int mx, int my, int pmx, int pmy) {
+    coalesce_dirty();
     if (dirty_full) {
         composite_region(0, 0, scr_w, scr_h);
         draw_cursor_into_bb(scr_w, scr_h, mx, my);
@@ -2930,8 +2999,11 @@ int main(int argc, char **argv) {
     
     do_present = gpu_info.flip_active || gpu_info.needs_present;
 
-    scr_w = fb_info.width;
-    scr_h = fb_info.height;
+    icda_settings_load(&wm_settings);
+    wm_scale = wm_settings.scale == 1 || wm_settings.scale == 2 ? wm_settings.scale
+             : (fb_info.width >= 2560 ? 2 : 1);
+    scr_w = fb_info.width / wm_scale;
+    scr_h = fb_info.height / wm_scale;
     if (scr_w > BACK_BUFFER_WIDTH) scr_w = BACK_BUFFER_WIDTH;
     if (scr_h > BACK_BUFFER_HEIGHT) scr_h = BACK_BUFFER_HEIGHT;
     if (scr_w < 320 || scr_h < 240) return -1;
@@ -2998,8 +3070,8 @@ int main(int argc, char **argv) {
                 uint8_t prev_btn = mouse_buttons;
                 mouse_moved = 1;
                 wm_diag_mouse_events++;
-                mouse_x = mev.abs_x;
-                mouse_y = mev.abs_y;
+                mouse_x = mev.abs_x / wm_scale;
+                mouse_y = mev.abs_y / wm_scale;
                 mouse_buttons = mev.buttons;
                 if (mouse_x < 0) mouse_x = 0;
                 if (mouse_y < 0) mouse_y = 0;
