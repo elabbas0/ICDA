@@ -104,7 +104,8 @@ typedef enum {
     SYS_PTY_IO            = 72,
     SYS_VFS_REMOVE        = 73,
     SYS_VM_ALLOC          = 74,
-    SYS_VM_FREE           = 75
+    SYS_VM_FREE           = 75,
+    SYS_DISK_EDIT         = 76
 } syscall_number_t;
 
 typedef struct {

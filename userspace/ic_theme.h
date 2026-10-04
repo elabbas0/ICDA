@@ -184,4 +184,24 @@ typedef enum {
 
 ic_color_t ic_syntax_color(ic_syntax_t kind);
 
+typedef enum {
+    IC_VOL_UNKNOWN = 0,
+    IC_VOL_EFI,
+    IC_VOL_ICDA,
+    IC_VOL_WINDOWS,
+    IC_VOL_DATA,
+    IC_VOL_SWAP,
+    IC_VOL_LINUX,
+    IC_VOL_RESERVED,
+    IC_VOL_FREE,
+    IC_VOL_METAL,
+    IC_VOL_METAL_DARK,
+    IC_VOL_PCB,
+    IC_VOL_CHIP,
+    IC_VOL_GOLD,
+    IC_VOL_COUNT
+} ic_volume_t;
+
+ic_color_t ic_volume_color(ic_volume_t kind);
+
 #endif 

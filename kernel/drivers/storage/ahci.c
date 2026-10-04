@@ -3,6 +3,7 @@
 #include "../pci/pci.h"
 #include "../../memory/pmm.h"
 #include "../../memory/vmm.h"
+#include "../../proc/sched.h"
 
 #include <stdint.h>
 
@@ -164,8 +165,18 @@ static int ahci_port_ready(hba_port_t *port) {
     return det == 3 && ipm == 1;
 }
 
+#define AHCI_TIMEOUT_TICKS 3000ULL
+#define AHCI_SPIN_FALLBACK 400000000U
+
+static int ahci_timed_out(uint64_t start, uint32_t spins) {
+    uint64_t now = sched_ticks();
+    if (now != start) return now - start > AHCI_TIMEOUT_TICKS;
+    return spins > AHCI_SPIN_FALLBACK;
+}
+
 static int ahci_wait_idle(hba_port_t *port) {
-    for (uint32_t i = 0; i < 1000000; i++) {
+    uint64_t start = sched_ticks();
+    for (uint32_t i = 0; !ahci_timed_out(start, i); i++) {
         uint32_t tfd = port->tfd;
         if ((tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) == 0) return 0;
     }
@@ -213,8 +224,11 @@ static int ahci_issue(ahci_device_t *dev, uint8_t command, uint64_t lba, uint16_
     dev->port->is = 0xFFFFFFFFU;
     dev->port->ci = 1U;
 
-    for (uint32_t i = 0; i < 5000000; i++) {
-        if ((dev->port->ci & 1U) == 0) break;
+    {
+        uint64_t start = sched_ticks();
+        for (uint32_t i = 0; !ahci_timed_out(start, i); i++) {
+            if ((dev->port->ci & 1U) == 0) break;
+        }
     }
     if (dev->port->ci & 1U) return -1;
     if (dev->port->is & HBA_PXIS_TFES) return -1;

@@ -83,6 +83,35 @@ static void install_write_line(int col, int row, int width, const char *text, co
     console_write(line, style);
 }
 
+static install_status_t install_status;
+
+static void install_status_copy(char *dst, const char *src, uint64_t cap) {
+    uint64_t i = 0;
+    while (src && src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static void install_status_note(const char *stage, const char *detail, uint64_t current, uint64_t total) {
+    install_status.active = 1;
+    if (stage) install_status_copy(install_status.stage, stage, sizeof(install_status.stage));
+    if (detail) install_status_copy(install_status.detail, detail, sizeof(install_status.detail));
+    install_status.current = current;
+    install_status.total = total;
+}
+
+void install_status_get(install_status_t *out) {
+    *out = install_status;
+}
+
+void install_status_finish(int rc) {
+    install_status.active = 0;
+    install_status.finished++;
+    install_status.rc = rc;
+}
+
 static void install_progress(const char *stage, const char *detail, uint64_t current, uint64_t total) {
     char line[160];
     int cols = install_console_cols();
@@ -93,6 +122,8 @@ static void install_progress(const char *stage, const char *detail, uint64_t cur
     int bar_width;
     uint64_t filled;
 
+    install_status_note(stage, detail, current, total);
+    if (console_fb_muted()) return;
     if (width < 32 || rows < 10) {
         return;
     }

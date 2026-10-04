@@ -6,6 +6,7 @@
 #include "exfat.h"
 #include "ntfs.h"
 #include "persistfs.h"
+#include "fatfs.h"
 #include "../memory/heap.h"
 
 #define DISK_SECTOR_SIZE 512U
@@ -299,6 +300,8 @@ static uint32_t fat32_calc_fat_sectors(uint32_t total_sectors, uint8_t spc, uint
     return fat_sectors;
 }
 
+static uint64_t guid_seed(void);
+
 static int diskfmt_format_fat32_partition(block_device_t *dev, uint32_t part_start, uint32_t part_sectors) {
     uint8_t spc;
     uint16_t reserved = 32;
@@ -347,9 +350,12 @@ static int diskfmt_format_fat32_partition(block_device_t *dev, uint32_t part_sta
     sector[50] = 0x06;
     sector[64] = 0x80;
     sector[66] = 0x29;
-    sector[67] = 0x34; sector[68] = 0x12; sector[69] = 0xCD; sector[70] = 0xAB;
-    sector[71] = 0x49; sector[72] = 0x43; sector[73] = 0x44; sector[74] = 0x41;
-    sector[75] = 0x20; sector[76] = 0x44; sector[77] = 0x49; sector[78] = 0x53; sector[79] = 0x4B; sector[80] = 0x20; sector[81] = 0x20;
+    {
+        uint64_t serial = guid_seed();
+        static const char no_name[11] = { 'N', 'O', ' ', 'N', 'A', 'M', 'E', ' ', ' ', ' ', ' ' };
+        for (int i = 0; i < 4; i++) sector[67 + i] = (uint8_t)(serial >> (8 * i));
+        for (int i = 0; i < 11; i++) sector[71 + i] = (uint8_t)no_name[i];
+    }
     sector[82] = 'F'; sector[83] = 'A'; sector[84] = 'T'; sector[85] = '3'; sector[86] = '2'; sector[87] = ' '; sector[88] = ' '; sector[89] = ' ';
     sector[510] = 0x55; sector[511] = 0xAA;
     if (dev->write(dev->context, part_start, 1, sector) != 0) return -1;
@@ -645,4 +651,307 @@ int diskfmt_set_partition_role(uint32_t partition_index, partition_role_t role) 
     if (rc != 0) return -18;
     (void)partition_scan_all();
     return 0;
+}
+
+static int gpt_load(block_device_t *dev, gpt_header_t *hdr, uint8_t **entries_out) {
+    uint8_t sector[DISK_SECTOR_SIZE];
+    uint8_t *entries;
+    uint32_t crc;
+    *entries_out = 0;
+    if (dev->read(dev->context, 1, 1, sector) != 0) return -1;
+    copy_bytes((char *)hdr, (const char *)sector, sizeof(*hdr));
+    if (hdr->signature[0] != 'E' || hdr->signature[1] != 'F' || hdr->signature[2] != 'I' ||
+        hdr->header_size < 92 || hdr->header_size > DISK_SECTOR_SIZE) {
+        return -1;
+    }
+    crc = hdr->header_crc32;
+    ((gpt_header_t *)sector)->header_crc32 = 0;
+    if (crc32_bytes(sector, hdr->header_size) != crc) return -2;
+    if (hdr->partition_entry_count != GPT_ENTRY_COUNT || hdr->partition_entry_size != GPT_ENTRY_SIZE) return -3;
+    entries = (uint8_t *)kmalloc(GPT_ENTRY_COUNT * GPT_ENTRY_SIZE);
+    if (!entries) return -4;
+    if (dev->read(dev->context, hdr->partition_entries_lba, GPT_ENTRIES_SECTORS, entries) != 0 ||
+        crc32_bytes(entries, GPT_ENTRY_COUNT * GPT_ENTRY_SIZE) != hdr->partition_entries_crc32) {
+        kfree(entries);
+        return -5;
+    }
+    *entries_out = entries;
+    return 0;
+}
+
+static int device_index_of(block_device_t *dev) {
+    for (uint32_t i = 0; i < block_count(); i++) {
+        if (block_get(i) == dev) return (int)i;
+    }
+    return -1;
+}
+
+static int editable_device(block_device_t *dev) {
+    int runtime = persistfs_active_device();
+    if (!dev || !dev->write || dev->sector_size != DISK_SECTOR_SIZE) return 0;
+    return runtime < 0 || device_index_of(dev) != runtime;
+}
+
+uint32_t diskfmt_free_regions(uint32_t device_index, diskfmt_region_t *out, uint32_t max) {
+    block_device_t *dev = block_get(device_index);
+    partition_kind_t kind = partition_device_kind(device_index);
+    uint64_t first, last, cursor;
+    uint32_t n = 0;
+    if (!dev || !out || max == 0) return 0;
+    if (kind == PARTITION_KIND_GPT) {
+        gpt_header_t hdr;
+        uint8_t *entries;
+        if (gpt_load(dev, &hdr, &entries) != 0) return 0;
+        kfree(entries);
+        first = hdr.first_usable_lba;
+        last = hdr.last_usable_lba;
+    } else if (kind == PARTITION_KIND_MBR) {
+        first = 1;
+        last = dev->sector_count > 0xFFFFFFFFULL ? 0xFFFFFFFEULL : dev->sector_count - 1;
+    } else {
+        return 0;
+    }
+    cursor = first;
+    while (cursor <= last) {
+        uint64_t next_start = last + 1, next_end = last;
+        uint64_t gap_start, gap_end;
+        for (uint32_t i = 0; i < partition_count(); i++) {
+            const partition_info_t *p = partition_get(i);
+            uint64_t p_end;
+            if (!p || p->device != dev) continue;
+            p_end = p->start_lba + p->sector_count - 1;
+            if (p_end < cursor) continue;
+            if (p->start_lba < next_start) {
+                next_start = p->start_lba;
+                next_end = p_end;
+            }
+        }
+        if (next_start > cursor) {
+            gap_start = (cursor + DISK_ALIGN_LBA - 1) / DISK_ALIGN_LBA * DISK_ALIGN_LBA;
+            gap_end = next_start - 1;
+            if (gap_end > last) gap_end = last;
+            if (gap_end >= gap_start && gap_end - gap_start + 1 >= DISK_ALIGN_LBA && n < max) {
+                out[n].start_lba = gap_start;
+                out[n].sectors = (gap_end - gap_start + 1) / DISK_ALIGN_LBA * DISK_ALIGN_LBA;
+                n++;
+            }
+        }
+        if (next_start > last) break;
+        cursor = next_end + 1;
+    }
+    return n;
+}
+
+static uint64_t guid_seed(void) {
+    uint32_t lo, hi;
+    static uint64_t counter;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (((uint64_t)hi << 32) | lo) ^ (++counter * 0x9E3779B97F4A7C15ULL);
+}
+
+static void random_guid(uint8_t out[16]) {
+    uint64_t a = guid_seed(), b = guid_seed() * 0xD6E8FEB86659FD93ULL;
+    for (int i = 0; i < 8; i++) {
+        out[i] = (uint8_t)(a >> (8 * i));
+        out[8 + i] = (uint8_t)(b >> (8 * i));
+    }
+    out[7] = (uint8_t)((out[7] & 0x0F) | 0x40);
+    out[8] = (uint8_t)((out[8] & 0x3F) | 0x80);
+}
+
+static int inside_free_region(uint32_t device_index, uint64_t start, uint64_t sectors) {
+    diskfmt_region_t regions[32];
+    uint32_t n = diskfmt_free_regions(device_index, regions, 32);
+    for (uint32_t i = 0; i < n; i++) {
+        if (start >= regions[i].start_lba && start + sectors <= regions[i].start_lba + regions[i].sectors) return 1;
+    }
+    return 0;
+}
+
+static uint8_t mbr_type_for(partition_role_t role, diskfmt_fs_t fs) {
+    if (role == PARTITION_ROLE_EFI) return 0xEF;
+    if (role == PARTITION_ROLE_SWAP) return 0x82;
+    if (fs == DISKFMT_FS_EXFAT) return 0x07;
+    return 0x0C;
+}
+
+int diskfmt_create_partition(uint32_t device_index, uint64_t start_lba, uint64_t sectors, partition_role_t role,
+                             diskfmt_fs_t fs, const char *name) {
+    block_device_t *dev = block_get(device_index);
+    partition_kind_t kind = partition_device_kind(device_index);
+    int rc = 0;
+    if (!editable_device(dev)) return -10;
+    if (sectors < DISK_ALIGN_LBA || (start_lba % DISK_ALIGN_LBA) != 0) return -11;
+    if (!inside_free_region(device_index, start_lba, sectors)) return -12;
+    if (kind == PARTITION_KIND_GPT) {
+        gpt_header_t hdr;
+        uint8_t *entries;
+        gpt_entry_t *slot = 0;
+        uint8_t guid[16];
+        const char *role_name = 0;
+        if (gpt_load(dev, &hdr, &entries) != 0) return -13;
+        for (uint32_t i = 0; i < GPT_ENTRY_COUNT && !slot; i++) {
+            gpt_entry_t *e = (gpt_entry_t *)(entries + i * GPT_ENTRY_SIZE);
+            int empty = 1;
+            for (int k = 0; k < 16; k++) empty &= e->type_guid[k] == 0;
+            if (empty) slot = e;
+        }
+        if (!slot) {
+            kfree(entries);
+            return -14;
+        }
+        zero_bytes((uint8_t *)slot, GPT_ENTRY_SIZE);
+        partition_role_guid(role, guid, &role_name);
+        copy_bytes((char *)slot->type_guid, (const char *)guid, 16);
+        random_guid(slot->unique_guid);
+        slot->first_lba = start_lba;
+        slot->last_lba = start_lba + sectors - 1;
+        utf16_name_bytes((uint8_t *)slot + __builtin_offsetof(gpt_entry_t, name),
+                         name && *name ? name : role_name);
+        rc = rewrite_gpt_entries(dev, &hdr, entries) == 0 ? 0 : -15;
+        kfree(entries);
+    } else if (kind == PARTITION_KIND_MBR) {
+        uint8_t mbr[DISK_SECTOR_SIZE];
+        int slot = -1;
+        if (start_lba + sectors > 0xFFFFFFFFULL) return -16;
+        if (dev->read(dev->context, 0, 1, mbr) != 0) return -13;
+        for (int i = 0; i < 4 && slot < 0; i++) {
+            if (mbr[446 + i * 16 + 4] == 0) slot = i;
+        }
+        if (slot < 0) return -14;
+        write_mbr_partition_slot(mbr, (uint32_t)slot, mbr_type_for(role, fs), (uint32_t)start_lba, (uint32_t)sectors);
+        rc = dev->write(dev->context, 0, 1, mbr) == 0 ? 0 : -15;
+    } else {
+        return -17;
+    }
+    if (rc == 0 && fs == DISKFMT_FS_FAT32) {
+        rc = diskfmt_format_fat32_partition(dev, (uint32_t)start_lba, (uint32_t)sectors) == 0 ? 0 : -18;
+    } else if (rc == 0 && fs == DISKFMT_FS_EXFAT) {
+        rc = diskfmt_format_exfat_partition(dev, (uint32_t)start_lba, (uint32_t)sectors) == 0 ? 0 : -18;
+    }
+    (void)partition_scan_all();
+    (void)fat32_mount_detected();
+    return rc;
+}
+
+int diskfmt_delete_partition(uint32_t partition_index) {
+    const partition_info_t *part = partition_get(partition_index);
+    block_device_t *dev;
+    int rc;
+    if (!part) return -10;
+    dev = part->device;
+    if (!editable_device(dev)) return -11;
+    if (part->kind == PARTITION_KIND_GPT) {
+        gpt_header_t hdr;
+        uint8_t *entries;
+        if (gpt_load(dev, &hdr, &entries) != 0) return -13;
+        if (part->gpt_entry_index >= GPT_ENTRY_COUNT) {
+            kfree(entries);
+            return -14;
+        }
+        zero_bytes(entries + part->gpt_entry_index * GPT_ENTRY_SIZE, GPT_ENTRY_SIZE);
+        rc = rewrite_gpt_entries(dev, &hdr, entries) == 0 ? 0 : -15;
+        kfree(entries);
+    } else if (part->kind == PARTITION_KIND_MBR) {
+        uint8_t mbr[DISK_SECTOR_SIZE];
+        int found = 0;
+        if (dev->read(dev->context, 0, 1, mbr) != 0) return -13;
+        for (int i = 0; i < 4; i++) {
+            uint8_t *e = mbr + 446 + i * 16;
+            uint32_t s = (uint32_t)e[8] | ((uint32_t)e[9] << 8) | ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+            if (e[4] && s == part->start_lba) {
+                zero_bytes(e, 16);
+                found = 1;
+            }
+        }
+        if (!found) return -14;
+        rc = dev->write(dev->context, 0, 1, mbr) == 0 ? 0 : -15;
+    } else {
+        return -17;
+    }
+    (void)partition_scan_all();
+    return rc;
+}
+
+static int fat32_resize_bpb(block_device_t *dev, uint64_t start, uint64_t new_sectors) {
+    fatfs_t vol;
+    uint8_t s[DISK_SECTOR_SIZE];
+    uint32_t free_n, highest, new_clusters, fat_capacity, backup;
+    if (fatfs_mount(&vol, dev, start, ~0ULL) != 0) return -20;
+    if (new_sectors <= vol.data_lba) return -21;
+    new_clusters = (uint32_t)((new_sectors - vol.data_lba) / vol.sectors_per_cluster);
+    fat_capacity = vol.fat_sectors * (DISK_SECTOR_SIZE / 4U) - 2U;
+    if (new_clusters < 65525U) return -22;
+    if (new_clusters > fat_capacity) return -23;
+    fatfs_usage(&vol, &free_n, &highest);
+    if (highest >= new_clusters + 2U) return -24;
+    if (dev->read(dev->context, start, 1, s) != 0) return -25;
+    backup = (uint32_t)s[50] | ((uint32_t)s[51] << 8);
+    s[32] = (uint8_t)new_sectors;
+    s[33] = (uint8_t)(new_sectors >> 8);
+    s[34] = (uint8_t)(new_sectors >> 16);
+    s[35] = (uint8_t)(new_sectors >> 24);
+    if (dev->write(dev->context, start, 1, s) != 0) return -26;
+    if (backup && backup < vol.reserved) {
+        if (dev->write(dev->context, start + backup, 1, s) != 0) return -27;
+    }
+    vol.touched = 1;
+    return fatfs_flush(&vol) == 0 ? 0 : -28;
+}
+
+int diskfmt_resize_partition(uint32_t partition_index, uint64_t new_sectors) {
+    const partition_info_t *part = partition_get(partition_index);
+    block_device_t *dev;
+    uint64_t start, old;
+    int rc, dev_index;
+    if (!part) return -10;
+    dev = part->device;
+    start = part->start_lba;
+    old = part->sector_count;
+    dev_index = device_index_of(dev);
+    if (!editable_device(dev) || dev_index < 0) return -11;
+    new_sectors = new_sectors / DISK_ALIGN_LBA * DISK_ALIGN_LBA;
+    if (new_sectors == old) return 0;
+    if (new_sectors < DISK_ALIGN_LBA) return -12;
+    if (new_sectors > old && !inside_free_region((uint32_t)dev_index, start + old, new_sectors - old)) return -13;
+    if (part->fs_hint == PARTITION_FS_FAT32) {
+        rc = fat32_resize_bpb(dev, start, new_sectors);
+        if (rc != 0) return rc;
+    } else if (part->fs_hint != PARTITION_FS_UNKNOWN || part->role == PARTITION_ROLE_DATA ||
+               part->role == PARTITION_ROLE_RECOVERY || part->role == PARTITION_ROLE_MSR) {
+        return -14;
+    }
+    if (part->kind == PARTITION_KIND_GPT) {
+        gpt_header_t hdr;
+        uint8_t *entries;
+        gpt_entry_t *e;
+        if (gpt_load(dev, &hdr, &entries) != 0) return -15;
+        e = (gpt_entry_t *)(entries + part->gpt_entry_index * GPT_ENTRY_SIZE);
+        if (e->first_lba != start) {
+            kfree(entries);
+            return -16;
+        }
+        e->last_lba = start + new_sectors - 1;
+        rc = rewrite_gpt_entries(dev, &hdr, entries) == 0 ? 0 : -17;
+        kfree(entries);
+    } else if (part->kind == PARTITION_KIND_MBR) {
+        uint8_t mbr[DISK_SECTOR_SIZE];
+        rc = -16;
+        if (dev->read(dev->context, 0, 1, mbr) != 0) return -15;
+        for (int i = 0; i < 4; i++) {
+            uint8_t *e = mbr + 446 + i * 16;
+            uint32_t s = (uint32_t)e[8] | ((uint32_t)e[9] << 8) | ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+            if (e[4] && s == start) {
+                e[12] = (uint8_t)new_sectors;
+                e[13] = (uint8_t)(new_sectors >> 8);
+                e[14] = (uint8_t)(new_sectors >> 16);
+                e[15] = (uint8_t)(new_sectors >> 24);
+                rc = dev->write(dev->context, 0, 1, mbr) == 0 ? 0 : -17;
+            }
+        }
+    } else {
+        return -18;
+    }
+    (void)partition_scan_all();
+    return rc;
 }

@@ -192,3 +192,17 @@ ic_color_t ic_syntax_color(ic_syntax_t kind) {
     if ((int)kind <= 0 || kind >= IC_SYN_COUNT) return p->label;
     return IC_RGB(p->dark ? dark[kind] : light[kind]);
 }
+
+ic_color_t ic_volume_color(ic_volume_t kind) {
+    static const uint32_t dark[IC_VOL_COUNT] = {
+        0x6E6E73, 0xE8A33D, 0x3B82F6, 0x2F7DD1, 0x22A699, 0x9B6BDF, 0xE95E3A, 0x5A5A60,
+        0x2C2C30, 0xC9CDD3, 0x7C828C, 0x1F6F4A, 0x26282C, 0xD4AF37
+    };
+    static const uint32_t light[IC_VOL_COUNT] = {
+        0x9A9AA0, 0xE09A2F, 0x2F6FED, 0x1F6FC5, 0x1A9A8D, 0x8A5BD2, 0xDD5534, 0xA8A8AE,
+        0xE8E8EC, 0xD7DBE0, 0x8C929C, 0x2A8A5C, 0x30333A, 0xC9A227
+    };
+    const ic_palette_t *p = ic_palette();
+    if ((int)kind < 0 || kind >= IC_VOL_COUNT) kind = IC_VOL_UNKNOWN;
+    return IC_RGB(p->dark ? dark[kind] : light[kind]);
+}

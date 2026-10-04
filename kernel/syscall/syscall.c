@@ -10,6 +10,8 @@
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
 #include "../fs/diskfmt.h"
+#include "../fs/fatfs.h"
+#include "../firmware/efi.h"
 #include "../fs/fat32.h"
 #include "../fs/exfat.h"
 #include "../fs/install.h"
@@ -38,10 +40,10 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v4: first number moved");
-_Static_assert(SYS_VFS_REMOVE == 73, "native ABI v4: v3 numbers moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v4: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 76, "native ABI v4: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v5: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v5: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v5: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 77, "native ABI v5: count changed");
 
 
 
@@ -652,6 +654,74 @@ static uint64_t sys_vm_free(uint64_t addr, uint64_t length) {
     return 0;
 }
 
+
+typedef struct {
+    uint32_t op;
+    uint32_t device;
+    uint32_t partition;
+    uint32_t role;
+    uint32_t fs;
+    uint32_t reserved;
+    uint64_t start_lba;
+    uint64_t sectors;
+    char     name[36];
+} disk_edit_req_t;
+
+static uint64_t sys_disk_edit(void *user_req) {
+    disk_edit_req_t req;
+    int rc = -1;
+    if (!user_req || !user_range_prepare_cur_w(user_req, sizeof(req))) return (uint64_t)-U_EFAULT;
+    copy_bytes((char *)&req, (const char *)user_req, sizeof(req));
+    req.name[sizeof(req.name) - 1] = 0;
+    switch (req.op) {
+    case 1:
+        rc = diskfmt_create_partition(req.device, req.start_lba, req.sectors, (partition_role_t)req.role,
+                                      (diskfmt_fs_t)req.fs, req.name);
+        break;
+    case 2:
+        rc = diskfmt_delete_partition(req.partition);
+        break;
+    case 3:
+        rc = diskfmt_resize_partition(req.partition, req.sectors);
+        break;
+    case 4: {
+        const partition_info_t *part = partition_get(req.partition);
+        fatfs_t vol;
+        uint32_t free_n = 0, highest = 0;
+        if (!part || part->fs_hint != PARTITION_FS_FAT32 || fatfs_mount_part(&vol, part) != 0) {
+            rc = -2;
+            break;
+        }
+        fatfs_usage(&vol, &free_n, &highest);
+        req.start_lba = (uint64_t)(vol.cluster_count - free_n) * vol.cluster_bytes;
+        req.sectors = (uint64_t)vol.cluster_count * vol.cluster_bytes;
+        rc = 0;
+        break;
+    }
+    case 5:
+        rc = efi_available() ? 1 : 0;
+        break;
+    case 6: {
+        install_status_t st;
+        uint64_t n = 0;
+        install_status_get(&st);
+        req.role = (uint32_t)st.active;
+        req.partition = (uint32_t)st.finished;
+        req.fs = (uint32_t)st.rc;
+        req.start_lba = st.current;
+        req.sectors = st.total;
+        for (uint64_t i = 0; st.stage[i] && n + 1 < sizeof(req.name); i++) req.name[n++] = st.stage[i];
+        req.name[n] = 0;
+        rc = 0;
+        break;
+    }
+    default:
+        return (uint64_t)-U_EINVAL;
+    }
+    copy_bytes((char *)user_req, (const char *)&req, sizeof(req));
+    return (uint64_t)(int64_t)rc;
+}
+
 static uint64_t sys_vfs_remove(const char *path) {
     process_t *proc = sched_current_process();
 
@@ -1022,6 +1092,15 @@ static uint64_t sys_mount(uint64_t partition_index, const char *path) {
 
 static uint64_t sys_format_device(uint64_t device_index, uint64_t fs_type) {
     int rc = diskfmt_format_device((uint32_t)device_index, (diskfmt_fs_t)fs_type);
+    if (rc != 0) {
+        char msg[40] = "format_device rc=-";
+        int v = -rc, n = 18;
+        if (v >= 10) msg[n++] = (char)('0' + v / 10);
+        msg[n++] = (char)('0' + v % 10);
+        msg[n++] = '\n';
+        msg[n] = 0;
+        serial_write(msg);
+    }
     return rc == 0 ? 0 : (uint64_t)(int64_t)rc;
 }
 
@@ -1069,6 +1148,7 @@ static uint64_t sys_install_device(uint64_t device_index, uint64_t *files_out, u
         return (uint64_t)-U_EFAULT;
     }
     rc = system_install_device((uint32_t)device_index, &files, &bytes);
+    install_status_finish(rc);
     if (rc != 0) {
         return (uint64_t)(int64_t)rc;
     }
@@ -1099,6 +1179,7 @@ static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint6
         return (uint64_t)-U_EFAULT;
     }
     rc = system_install_partitions((uint32_t)plan->efi_partition, (uint32_t)plan->root_partition, (int32_t)plan->swap_partition, &files, &bytes);
+    install_status_finish(rc);
     if (rc != 0) {
         return (uint64_t)(int64_t)rc;
     }
@@ -1237,6 +1318,24 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
         out = append_uint(buf, out, cap, part->sector_count);
         out = append_text(buf, out, cap, "\n");
     }
+
+    out = append_text(buf, out, cap, "free:\n");
+    for (uint32_t i = 0; i < block_count(); i++) {
+        diskfmt_region_t regions[16];
+        uint32_t n = diskfmt_free_regions(i, regions, 16);
+        for (uint32_t r = 0; r < n; r++) {
+            out = append_text(buf, out, cap, "  dev=");
+            out = append_uint(buf, out, cap, i);
+            out = append_text(buf, out, cap, " start=");
+            out = append_uint(buf, out, cap, regions[r].start_lba);
+            out = append_text(buf, out, cap, " sectors=");
+            out = append_uint(buf, out, cap, regions[r].sectors);
+            out = append_text(buf, out, cap, "\n");
+        }
+    }
+    out = append_text(buf, out, cap, "firmware=");
+    out = append_text(buf, out, cap, efi_available() ? "uefi" : "bios");
+    out = append_text(buf, out, cap, "\n");
 
     out = append_text(buf, out, cap, "mounts:\n");
     if (fat32_mount_count() == 0 && exfat_mount_count() == 0 && ntfs_mount_count() == 0) {
@@ -2106,6 +2205,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return sys_vm_alloc(regs->rdi);
         case SYS_VM_FREE:
             return sys_vm_free(regs->rdi, regs->rsi);
+        case SYS_DISK_EDIT:
+            return sys_disk_edit((void *)(uintptr_t)regs->rdi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

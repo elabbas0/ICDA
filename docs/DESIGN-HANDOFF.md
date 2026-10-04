@@ -202,6 +202,101 @@ length drops the last byte. Pass `size + 1`.
 with the host gcc/ld. Copy the result onto a volume ICDA mounts, or fetch it
 with curl, and run it by path.
 
+## Disks, partitioning and dual boot (native ABI v5)
+
+### FAT32 driver
+`kernel/fs/fatfs.c` is the FAT32 read/write driver. It supports:
+- **Paths:** lookup, read, write (create or replace), mkdir-p and recursive
+  remove.
+- **Names:** long file names with checksums, unique `~N` short aliases, and
+  case-insensitive lookup.
+- **Directories:** they grow when full.
+- **FAT updates:** a write-back FAT sector cache mirrored to every FAT copy.
+  FSInfo's free count is set to "unknown"; the spec allows that and Windows
+  recounts.
+- **Safe replace:** a new file is written and linked before the old clusters
+  are freed.
+
+The installer uses it. It used to create a second `EFI` directory next to an
+existing one (which corrupted a shared ESP) and leaked the clusters of
+replaced files.
+
+### Installing next to other systems
+- **Boot files:** everything goes in `\EFI\ICDA\` (`GRUBX64.EFI`,
+  `KERNEL.BIN`). `\EFI\BOOT\BOOTX64.EFI` and `STARTUP.NSH` are written only
+  when absent, so another OS's loader is never replaced. An ESP that is
+  already typed EFI is not renamed.
+- **Firmware boot entry:** `kernel/firmware/efi.c` registers a UEFI boot
+  entry after install, as `efibootmgr` does.
+  - It reads the EFI system table and memory map from multiboot2 tags 12 and
+    17.
+  - It identity-maps only `EFI_MEMORY_RUNTIME` regions, and only pages not
+    already mapped, uncached for MMIO.
+  - It calls `GetVariable`/`SetVariable` with the MS ABI and interrupts off.
+  - It writes `Boot####` "ICDA", reusing an existing entry with the same
+    label, as a hard-drive device path from the ESP's GPT unique GUID plus
+    `\EFI\ICDA\GRUBX64.EFI`, and puts it first in `BootOrder`.
+- **GRUB menu:** the installed config (`grub-install.cfg`) finds Windows
+  (`/EFI/Microsoft/Boot/bootmgfw.efi`) and Ubuntu (`/EFI/ubuntu/shimx64.efi`)
+  on any ESP. When it finds one it shows a 5-second menu with chainload
+  entries and UEFI Firmware Settings.
+
+### Partition types and roles
+ICDA's own partition has its own GPT type
+(`5E2A3F8C-1D4B-4E6A-9C7D-1CDA00000001`). It used to share Microsoft Basic
+Data, which made Windows partitions look like ICDA ones. Old installs are still
+recognised by the name "ICDA System". Roles now include data, msr, recovery and
+linux, so tools never mistake Windows data for ICDA.
+
+### Partition editing (`SYS_DISK_EDIT` = 76)
+- **Free space:** `diskfmt_free_regions` lists 1 MiB-aligned gaps (GPT usable
+  range or MBR). Storage info prints them under `free:` together with
+  `firmware=uefi|bios`.
+- **Operations:** create (only inside a free gap, with a random unique GUID
+  and optional FAT32/exFAT format), delete, resize, FAT32 usage, firmware
+  type, and install status.
+- **Resize** is FAT32 only. It keeps at least 65525 clusters, keeps every
+  used cluster, stays within the existing FAT, and updates both boot sectors.
+  NTFS is never resized; the UI points to Windows Disk Management instead.
+- **Safety:** every edit verifies the GPT header and entry CRCs first,
+  rewrites primary and backup tables, and refuses the disk the system runs
+  from. `sgdisk -v` reports no problems after create, resize and delete.
+
+### Disk Utility
+`userspace/diskman.c` is laid out like GNOME Disks:
+- **Drive list** with drawn drive icons (`ic_volume_color` holds the colours).
+- **Volumes map** with colours per partition type, hatched free space and
+  usage bars.
+- **Actions:** + (create), - (delete) and a gear menu (format, resize,
+  change type).
+- **Details:** size, contents, type, disk and location.
+
+**Install ICDA...** first asks **Automatic** or **Manual**:
+- **Automatic:** install alongside other systems in the largest free gap
+  (adding a 260 MB ESP only if none exists), or erase the disk and use the
+  ICDA layout.
+- **Manual:** pick the EFI and ICDA partitions from this disk's FAT32 volumes,
+  optionally formatting the ICDA partition.
+
+The install runs in a child `diskman.app --install E R` /
+`--install-device D`. The window polls `SYS_DISK_EDIT` op 6 for a progress
+bar. While the GUI owns the screen the kernel no longer draws its text-mode
+progress over the desktop, and `console_clear` respects the framebuffer mute.
+
+### Other fixes
+- **AHCI timeouts** are time-based (30 s, using `sched_ticks`, with an
+  iteration fallback before the timer starts). Fixed spin counts failed on
+  slow writes.
+- **New FAT32 volumes** get a random serial and the "NO NAME" label.
+
+### Testing
+- `.verify/mkwin.sh` builds a Windows-like GPT disk: an ESP with fake Windows
+  loaders, a basic-data partition, a FAT32 partition and free space.
+- `.verify/checkwin.sh` runs fsck and compares the files.
+- `.verify/boot-uefi.ps1` boots under OVMF with a writable variable store.
+- `.verify/dualboot-test.ps1` runs install, reboot and the GRUB menu end to
+  end.
+
 ## Explorer delete (native ABI v3)
 
 The VFS now has `vfs_remove`, exposed as `SYS_VFS_REMOVE` (73), which

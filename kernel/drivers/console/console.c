@@ -228,6 +228,7 @@ void console_set_serial_mirror(int enabled) {
 }
 
 void console_clear(void) {
+    if (console_fb_text_muted && console_has_framebuffer && console_display_is_framebuffer) return;
     if (console_has_framebuffer && console_display_is_framebuffer && fb_available()) {
         fb_clear(FB_BLACK);
         console_refresh_overlay();

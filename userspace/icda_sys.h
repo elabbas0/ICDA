@@ -79,7 +79,8 @@ enum {
     SYS_PTY_IO            = 72,
     SYS_VFS_REMOVE        = 73,
     SYS_VM_ALLOC          = 74,
-    SYS_VM_FREE           = 75
+    SYS_VM_FREE           = 75,
+    SYS_DISK_EDIT         = 76
 };
 
 typedef struct {
@@ -293,5 +294,35 @@ static inline long icda_pty_io(long pty, uint64_t op, void *buf, uint64_t len) {
 static inline long icda_remove(const char *path) { return (long)sys_call1(SYS_VFS_REMOVE, (uint64_t)(uintptr_t)path); }
 static inline void *icda_vm_alloc(uint64_t size) { uint64_t a = sys_call1(SYS_VM_ALLOC, size); return (int64_t)a < 0 ? (void *)0 : (void *)(uintptr_t)a; }
 static inline long icda_vm_free(void *addr, uint64_t size) { return (long)sys_call2(SYS_VM_FREE, (uint64_t)(uintptr_t)addr, size); }
+
+enum {
+    ICDA_DISK_CREATE = 1,
+    ICDA_DISK_DELETE = 2,
+    ICDA_DISK_RESIZE = 3,
+    ICDA_DISK_USAGE = 4,
+    ICDA_DISK_FIRMWARE = 5,
+    ICDA_DISK_INSTALL_STATUS = 6
+};
+
+enum {
+    ICDA_ROLE_EFI = 1,
+    ICDA_ROLE_SYSTEM = 2,
+    ICDA_ROLE_SWAP = 3,
+    ICDA_ROLE_DATA = 4
+};
+
+typedef struct {
+    uint32_t op;
+    uint32_t device;
+    uint32_t partition;
+    uint32_t role;
+    uint32_t fs;
+    uint32_t reserved;
+    uint64_t start_lba;
+    uint64_t sectors;
+    char     name[36];
+} icda_disk_edit_t;
+
+static inline long icda_disk_edit(icda_disk_edit_t *req) { return (long)sys_call1(SYS_DISK_EDIT, (uint64_t)(uintptr_t)req); }
 
 #endif

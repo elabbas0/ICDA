@@ -9,6 +9,19 @@ int system_install_device(uint32_t device_index, uint64_t *files_installed, uint
 int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partition_index, int32_t swap_partition_index,
                               uint64_t *files_installed, uint64_t *bytes_installed);
 int system_install_present(void);
+
+typedef struct {
+    int      active;
+    int      finished;
+    int      rc;
+    char     stage[48];
+    char     detail[48];
+    uint64_t current;
+    uint64_t total;
+} install_status_t;
+
+void install_status_get(install_status_t *out);
+void install_status_finish(int rc);
 int system_install_write_root_bundle(const partition_info_t *part, const char *bundle, uint64_t size, int32_t swap_partition_index);
 int system_install_read_root_bundle(const partition_info_t *part, char **bundle_out, uint64_t *size_out, int32_t *swap_partition_index_out);
 
