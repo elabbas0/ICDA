@@ -11,6 +11,8 @@ struct vfs_node {
     uint8_t readonly;
     uint8_t mount_id;
     uint8_t lazy;
+    uint8_t lazy_dir;
+    uint64_t ext_ref;
     char *data;
     struct vfs_node *parent;
     struct vfs_node *first_child;
@@ -24,6 +26,8 @@ static const uint64_t VFS_NAME_CAP = 63;
 static int (*vfs_sync_hook)(void) = 0;
 static vfs_external_fn vfs_external_hook = 0;
 static vfs_loader_fn vfs_loader_hook = 0;
+static vfs_dir_loader_fn vfs_dir_loader_hook = 0;
+static void ensure_children(vfs_node_t *dir);
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -112,6 +116,7 @@ static vfs_node_t *find_child(vfs_node_t *dir, const char *name) {
     if (!dir || dir->type != VFS_NODE_DIR) {
         return 0;
     }
+    ensure_children(dir);
 
     child = dir->first_child;
     while (child) {
@@ -366,6 +371,18 @@ void vfs_set_loader(vfs_loader_fn fn) {
     vfs_loader_hook = fn;
 }
 
+void vfs_set_dir_loader(vfs_dir_loader_fn fn) {
+    vfs_dir_loader_hook = fn;
+}
+
+static void ensure_children(vfs_node_t *dir) {
+    char path[512];
+    if (!dir || !dir->lazy_dir || !vfs_dir_loader_hook) return;
+    dir->lazy_dir = 0;
+    if (vfs_getcwd(dir, path, sizeof(path)) != 0) return;
+    (void)vfs_dir_loader_hook(dir->mount_id, path, dir->ext_ref);
+}
+
 int64_t vfs_node_read_at(vfs_node_t *node, uint64_t off, char *buf, uint64_t len) {
     char path[512];
     if (!node || node->type != VFS_NODE_FILE) return -1;
@@ -376,7 +393,7 @@ int64_t vfs_node_read_at(vfs_node_t *node, uint64_t off, char *buf, uint64_t len
         return (int64_t)len;
     }
     if (!vfs_loader_hook || build_path(node->parent, node->name, path, sizeof(path)) != 0) return -1;
-    return vfs_loader_hook(node->mount_id, path, off, buf, len);
+    return vfs_loader_hook(node->mount_id, path, node->ext_ref, off, buf, len);
 }
 
 uint8_t vfs_node_is_lazy(vfs_node_t *node) {
@@ -740,6 +757,7 @@ vfs_node_t *vfs_child_at(vfs_node_t *dir, uint64_t index) {
     if (!dir || dir->type != VFS_NODE_DIR) {
         return 0;
     }
+    ensure_children(dir);
 
     child = dir->first_child;
     while (child && index) {
@@ -756,6 +774,7 @@ uint64_t vfs_child_count(vfs_node_t *dir) {
     if (!dir || dir->type != VFS_NODE_DIR) {
         return 0;
     }
+    ensure_children(dir);
 
     child = dir->first_child;
     while (child) {
@@ -775,6 +794,23 @@ uint8_t vfs_node_type(vfs_node_t *node) {
 
 uint8_t vfs_node_mount_id(vfs_node_t *node) {
     return node ? node->mount_id : 0;
+}
+
+int vfs_import_ref(const char *path, uint8_t type, uint64_t size, uint8_t readonly, uint64_t ref) {
+    vfs_node_t *node;
+    if (type == VFS_NODE_DIR) {
+        if (vfs_import_node(path, VFS_NODE_DIR, readonly, 0, 0, 0, 0, 0) != 0) return -1;
+        node = vfs_resolve(vfs_root_node, path);
+        if (!node) return -1;
+        node->lazy_dir = 1;
+        node->ext_ref = ref;
+        return 0;
+    }
+    if (vfs_import_lazy(path, size, readonly) != 0) return -1;
+    node = vfs_resolve(vfs_root_node, path);
+    if (!node) return -1;
+    node->ext_ref = ref;
+    return 0;
 }
 
 int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {

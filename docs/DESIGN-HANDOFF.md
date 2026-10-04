@@ -305,6 +305,38 @@ loop-mounts images with the Linux exFAT driver:
 `libctest` adds a 200-file create/read/delete test on `/volumes/exfat-0` when
 present, which also forces directory growth.
 
+### Read-only NTFS
+`kernel/fs/ntfsfs.c` reads NTFS:
+- **MFT records** are read through the `$MFT` data runs, with update-sequence
+  fixups.
+- **Data runs** support sparse runs. Data beyond the initialized size reads
+  as zeros. `$ATTRIBUTE_LIST` is followed, so fragmented files and large
+  directories work.
+- **Directories** are listed from `$INDEX_ROOT` plus every `INDX` block of
+  `$INDEX_ALLOCATION`. DOS short-name duplicates and `$` system files are
+  skipped.
+- **Small files** stored inside their MFT record (resident `$DATA`) are
+  copied directly.
+- **Compressed and encrypted files** report a read error instead of returning
+  garbage.
+
+NTFS volumes mount read-only at `/volumes/ntfs-N` through `volumes.c`. A
+Windows system drive has far too many files to import up front, so the VFS
+gained lazy directories:
+- A node marked `lazy_dir` is populated through `vfs_set_dir_loader` the
+  first time a child is looked up or the directory is listed. The flag is
+  cleared before the hook runs, so the imports don't recurse.
+- Every lazy node carries an `ext_ref` (the MFT record number), so loads go
+  straight to the record without path lookups. The loader hook now receives
+  that `ref`.
+
+Limits: names longer than 63 characters (the VFS name limit) are skipped, and
+sizes come from the directory index's `$FILE_NAME` copy.
+
+`.verify/mkntfs.sh` builds a test disk with `ntfs-3g` (in `icda-verify`): the
+40 MB pattern file, a tiny resident file, nested folders with spaces, and a
+3,000-file folder. `libctest`'s range test also covers `/volumes/ntfs-0`.
+
 ### Installing next to other systems
 - **Boot files:** everything goes in `\EFI\ICDA\` (`GRUBX64.EFI`,
   `KERNEL.BIN`). `\EFI\BOOT\BOOTX64.EFI` and `STARTUP.NSH` are written only

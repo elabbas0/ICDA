@@ -25,7 +25,9 @@ typedef struct {
 #define VFS_EXT_REMOVE 3
 
 typedef int (*vfs_external_fn)(int op, uint8_t mount_id, const char *path, const char *data, uint64_t size);
-typedef int64_t (*vfs_loader_fn)(uint8_t mount_id, const char *path, uint64_t off, char *buf, uint64_t len);
+typedef int64_t (*vfs_loader_fn)(uint8_t mount_id, const char *path, uint64_t ref, uint64_t off, char *buf,
+                                 uint64_t len);
+typedef int (*vfs_dir_loader_fn)(uint8_t mount_id, const char *path, uint64_t ref);
 
 #define VFS_LAZY_LOAD_MAX (256ULL * 1024ULL * 1024ULL)
 
@@ -34,6 +36,8 @@ void vfs_set_external_hook(vfs_external_fn fn);
 int vfs_set_mount(const char *path, uint8_t mount_id);
 int vfs_detach_tree(const char *path);
 void vfs_set_loader(vfs_loader_fn fn);
+void vfs_set_dir_loader(vfs_dir_loader_fn fn);
+int vfs_import_ref(const char *path, uint8_t type, uint64_t size, uint8_t readonly, uint64_t ref);
 int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly);
 int64_t vfs_node_read_at(vfs_node_t *node, uint64_t off, char *buf, uint64_t len);
 uint8_t vfs_node_is_lazy(vfs_node_t *node);

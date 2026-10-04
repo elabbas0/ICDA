@@ -2,6 +2,7 @@
 #include "vfs.h"
 #include "fatfs.h"
 #include "exfatfs.h"
+#include "ntfsfs.h"
 #include "../drivers/storage/partition.h"
 #include "../memory/heap.h"
 
@@ -19,10 +20,11 @@ typedef struct {
     uint64_t        start;
     uint64_t        sectors;
     uint16_t       *upcase;
+    ntfs_t         *ntfs;
 } volume_t;
 
 static volume_t volumes[VOL_MAX];
-static uint32_t volume_counts[3];
+static uint32_t volume_counts[4];
 static fatfs_hint_t fat_hint;
 static exfat_hint_t ex_hint;
 static char hint_path[VOL_PATH_CAP];
@@ -118,11 +120,12 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
     return rc == 0 ? 0 : -1;
 }
 
-static int64_t volume_loader(uint8_t id, const char *path, uint64_t off, char *buf, uint64_t len) {
+static int64_t volume_loader(uint8_t id, const char *path, uint64_t ref, uint64_t off, char *buf, uint64_t len) {
     volume_t *m;
     const char *rel;
     int64_t got = -1;
     if (rel_path(id, path, &m, &rel) != 0) return -1;
+    if (m->fs == VOLUME_NTFS) return m->ntfs ? ntfs_read_file(m->ntfs, ref, off, buf, len) : -1;
     if (hint_mount != id || !same_text(hint_path, path)) {
         fat_hint.cluster = 0;
         ex_hint.cluster = 0;
@@ -229,6 +232,41 @@ static int import_ex_dir(exfat_t *v, const exfat_dir_t *dir, const char *path, u
     return rc < 0 ? -1 : 0;
 }
 
+typedef struct {
+    char path[VOL_PATH_CAP];
+} ntfs_ctx_t;
+
+static int ntfs_child_cb(const char *name, uint64_t record, int is_dir, uint64_t size, void *p) {
+    ntfs_ctx_t *ctx = (ntfs_ctx_t *)p;
+    char path[VOL_PATH_CAP];
+    if (str_len(name) > VOL_NAME_MAX) return 0;
+    copy_text(path, ctx->path, sizeof(path));
+    append_text(path, "/", sizeof(path));
+    append_text(path, name, sizeof(path));
+    if (str_len(path) + 1 >= sizeof(path)) return 0;
+    (void)vfs_import_ref(path, is_dir ? VFS_NODE_DIR : VFS_NODE_FILE, size, 1, record);
+    return 0;
+}
+
+static int volume_dir_loader(uint8_t id, const char *path, uint64_t ref) {
+    volume_t *m;
+    const char *rel;
+    ntfs_ctx_t *ctx;
+    int rc;
+    if (rel_path(id, path, &m, &rel) != 0 && !(id && id <= VOL_MAX && volumes[id - 1].used &&
+                                                same_text(volumes[id - 1].path, path))) {
+        return -1;
+    }
+    m = &volumes[id - 1];
+    if (m->fs != VOLUME_NTFS || !m->ntfs) return -1;
+    ctx = (ntfs_ctx_t *)kmalloc(sizeof(ntfs_ctx_t));
+    if (!ctx) return -1;
+    copy_text(ctx->path, path, sizeof(ctx->path));
+    rc = ntfs_list_dir(m->ntfs, ref, ntfs_child_cb, ctx);
+    kfree(ctx);
+    return rc;
+}
+
 static volume_t *claim_slot(uint8_t *id) {
     for (uint32_t i = 0; i < VOL_MAX; i++) {
         if (!volumes[i].used) {
@@ -245,9 +283,36 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
     int rc = -1, fs_writable = 0;
     void *vol = 0;
     if (!part || !mount_path || !*mount_path) return -1;
-    if (part->fs_hint != PARTITION_FS_FAT32 && part->fs_hint != PARTITION_FS_EXFAT) return -1;
+    if (part->fs_hint != PARTITION_FS_FAT32 && part->fs_hint != PARTITION_FS_EXFAT &&
+        part->fs_hint != PARTITION_FS_NTFS) {
+        return -1;
+    }
     m = claim_slot(&id);
     if (!m) return -1;
+    if (part->fs_hint == PARTITION_FS_NTFS) {
+        ntfs_t *n = (ntfs_t *)kmalloc(sizeof(ntfs_t));
+        if (!n || ntfs_mount(n, part->device, part->start_lba, part->sector_count) != 0) {
+            if (n) kfree(n);
+            return -1;
+        }
+        m->used = 1;
+        m->fs = VOLUME_NTFS;
+        m->ntfs = n;
+        m->writable = 0;
+        m->dev = part->device;
+        m->start = part->start_lba;
+        m->sectors = part->sector_count;
+        copy_text(m->path, mount_path, sizeof(m->path));
+        (void)vfs_detach_tree(mount_path);
+        if (vfs_import_node(mount_path, VFS_NODE_DIR, 1, 0, 0, 0, 0, 0) != 0 || vfs_set_mount(mount_path, id) != 0 ||
+            vfs_import_ref(mount_path, VFS_NODE_DIR, 0, 1, NTFS_ROOT_RECORD) != 0) {
+            kfree(n);
+            m->ntfs = 0;
+            m->used = 0;
+            return -1;
+        }
+        return 0;
+    }
     if (part->fs_hint == PARTITION_FS_FAT32) {
         fatfs_t *v = (fatfs_t *)kmalloc(sizeof(fatfs_t));
         if (!v || fatfs_mount_part(v, part) != 0) {
@@ -296,6 +361,7 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
 static void install_hooks(void) {
     vfs_set_external_hook(volume_external);
     vfs_set_loader(volume_loader);
+    vfs_set_dir_loader(volume_dir_loader);
 }
 
 int volumes_mount_all(void) {
@@ -303,7 +369,9 @@ int volumes_mount_all(void) {
     for (uint32_t i = 0; i < VOL_MAX; i++) {
         if (volumes[i].used) (void)vfs_detach_tree(volumes[i].path);
         if (volumes[i].upcase) kfree(volumes[i].upcase);
+        if (volumes[i].ntfs) kfree(volumes[i].ntfs);
         volumes[i].upcase = 0;
+        volumes[i].ntfs = 0;
         volumes[i].used = 0;
     }
     fat_hint.cluster = 0;
@@ -311,6 +379,7 @@ int volumes_mount_all(void) {
     hint_mount = 0;
     volume_counts[VOLUME_FAT32] = 0;
     volume_counts[VOLUME_EXFAT] = 0;
+    volume_counts[VOLUME_NTFS] = 0;
     (void)vfs_mkdir(vfs_root(), "/volumes");
     for (uint32_t i = 0; i < partition_count(); i++) {
         const partition_info_t *part = partition_get(i);
@@ -319,8 +388,10 @@ int volumes_mount_all(void) {
         if (!part) continue;
         if (part->fs_hint == PARTITION_FS_FAT32) fs = VOLUME_FAT32;
         else if (part->fs_hint == PARTITION_FS_EXFAT) fs = VOLUME_EXFAT;
+        else if (part->fs_hint == PARTITION_FS_NTFS) fs = VOLUME_NTFS;
         else continue;
-        copy_text(mount_path, fs == VOLUME_FAT32 ? "/volumes/fat32-" : "/volumes/exfat-", sizeof(mount_path));
+        copy_text(mount_path, fs == VOLUME_FAT32 ? "/volumes/fat32-" : fs == VOLUME_EXFAT ? "/volumes/exfat-" : "/volumes/ntfs-",
+                  sizeof(mount_path));
         append_u32(mount_path, sizeof(mount_path), volume_counts[fs]);
         if (mount_part(part, mount_path) == 0) volume_counts[fs]++;
     }
@@ -328,7 +399,7 @@ int volumes_mount_all(void) {
 }
 
 uint32_t volumes_count(int fs) {
-    return fs == VOLUME_FAT32 || fs == VOLUME_EXFAT ? volume_counts[fs] : 0;
+    return fs >= VOLUME_FAT32 && fs <= VOLUME_NTFS ? volume_counts[fs] : 0;
 }
 
 int volumes_mount_partition(uint32_t partition_index, const char *mount_path) {

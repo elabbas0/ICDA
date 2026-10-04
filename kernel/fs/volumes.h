@@ -5,6 +5,7 @@
 
 #define VOLUME_FAT32 1
 #define VOLUME_EXFAT 2
+#define VOLUME_NTFS  3
 
 int      volumes_mount_all(void);
 uint32_t volumes_count(int fs);

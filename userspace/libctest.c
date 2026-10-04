@@ -170,12 +170,13 @@ static void test_volume_writes(const char *root) {
 }
 
 static void test_volume_ranges(void) {
-    static const char *paths[2] = { "/volumes/fat32-1/rangetest.bin", "/volumes/exfat-0/rangetest.bin" };
+    static const char *paths[3] = { "/volumes/fat32-1/rangetest.bin", "/volumes/exfat-0/rangetest.bin",
+                                    "/volumes/ntfs-0/rangetest.bin" };
     static const unsigned long offsets[4] = { 0UL, 4095UL, 5000003UL, 41934000UL };
     static char buf[8192];
     icda_stat_t st;
     const char *path = 0;
-    for (int p = 0; p < 2 && !path; p++) {
+    for (int p = 0; p < 3 && !path; p++) {
         if ((long)icda_stat(paths[p], &st) >= 0) path = paths[p];
     }
     if (!path) return;
