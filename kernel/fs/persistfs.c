@@ -133,6 +133,9 @@ static uint64_t persistfs_measure_node(vfs_node_t *node, char *path, uint64_t ca
     if (!node) {
         return 0;
     }
+    if (vfs_node_mount_id(node)) {
+        return 0;
+    }
     if (path_push(path, cap, vfs_node_name(node)) != 0) {
         return 0;
     }
@@ -161,6 +164,9 @@ static uint8_t *persistfs_write_node(uint8_t *cursor, vfs_node_t *node, char *pa
     uint64_t old_len = str_len(path);
 
     if (!node) {
+        return cursor;
+    }
+    if (vfs_node_mount_id(node)) {
         return cursor;
     }
     if (path_push(path, cap, vfs_node_name(node)) != 0) {

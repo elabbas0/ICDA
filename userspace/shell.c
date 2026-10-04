@@ -334,7 +334,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
 
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
-            "help","clear","pwd","cd","ls","cat","mkdir","touch","write","stat","install","sync","storage","mount","play","stop",
+            "help","clear","pwd","cd","ls","cat","mkdir","rm","touch","write","stat","install","sync","storage","mount","play","stop",
             "edit","diskman","curl","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
@@ -629,6 +629,14 @@ static int shell_spawn_and_wait(const char *path, const char *args) {
     write_uint(code);
     icda_write("\n");
     return 0;
+}
+
+static void shell_rm(const char *path) {
+    if (!path || !*path) {
+        icda_write("usage: rm <path>\n");
+        return;
+    }
+    if (icda_remove(path) < 0) icda_write("rm failed\n");
 }
 
 static void shell_mkdir(const char *path) {
@@ -950,6 +958,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "cat")) { shell_cat(arg); return; }
     if (str_eq(line, "echo")) { shell_echo(arg); return; }
     if (str_eq(line, "mkdir")) { shell_mkdir(arg); return; }
+    if (str_eq(line, "rm")) { shell_rm(arg); return; }
     if (str_eq(line, "touch")) { shell_touch(arg); return; }
     if (str_eq(line, "write")) { shell_write_file(arg); return; }
     if (str_eq(line, "stat")) { shell_stat(arg); return; }

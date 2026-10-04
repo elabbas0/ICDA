@@ -404,6 +404,7 @@ void kernel_main(void *multiboot_info) {
 
     (void)partition_scan_all();
     bootstage_set(18, "partitions");
+    (void)fat32_mount_detected();
     boot_prefix("storage");
     console_write("block devices=", CONSOLE_STYLE_INFO);
     console_write_dec64(block_count(), CONSOLE_STYLE_INFO);

@@ -20,7 +20,17 @@ typedef struct {
     uint8_t readonly;
 } vfs_stat_t;
 
+#define VFS_EXT_MKDIR  1
+#define VFS_EXT_WRITE  2
+#define VFS_EXT_REMOVE 3
+
+typedef int (*vfs_external_fn)(int op, uint8_t mount_id, const char *path, const char *data, uint64_t size);
+
 int vfs_init(void);
+void vfs_set_external_hook(vfs_external_fn fn);
+int vfs_set_mount(const char *path, uint8_t mount_id);
+int vfs_detach_tree(const char *path);
+uint8_t vfs_node_mount_id(vfs_node_t *node);
 vfs_node_t *vfs_root(void);
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size);
 void vfs_set_sync_hook(int (*hook)(void));

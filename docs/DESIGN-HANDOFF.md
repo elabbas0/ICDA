@@ -221,6 +221,31 @@ The installer uses it. It used to create a second `EFI` directory next to an
 existing one (which corrupted a shared ESP) and leaked the clusters of
 replaced files.
 
+### Writable FAT32 volumes
+FAT32 partitions are mounted at boot (and again after any partition edit) at
+`/volumes/fat32-N`, with long file names. Changes made through the VFS go
+straight to disk:
+- **VFS hook:** every node has a `mount_id`, inherited from its mount root.
+  `vfs_mkdir`, `vfs_create`, `vfs_write`, `vfs_node_write_at` and `vfs_remove`
+  on a mounted node call the external hook registered with
+  `vfs_set_external_hook`. If the disk operation fails, the VFS operation
+  fails.
+- **Disk side:** `fat32.c` maps the path to the volume and runs
+  `fatfs_mkdir`/`fatfs_write`/`fatfs_remove` on a fresh `fatfs` mount for
+  each operation. Nothing is cached between operations, so the installer and
+  persistence can safely write the same disks.
+- **Read-only volumes:** EFI partitions and ICDA's own system partition are
+  read-only, as are files over 32 MB (they are imported empty so a partial RAM
+  copy can never be written back). Mount roots are read-only, so a volume
+  cannot be deleted.
+- **Persistence:** `persistfs` skips anything with a `mount_id`, so volume
+  contents never end up in ICDA's root bundle.
+
+Limits: files are loaded into RAM when the volume is mounted, and a partial
+write (`write_at`) rewrites the whole file on disk. The shell gained `rm`.
+Explorer, the Editor, libc `fopen` and the shell all work on volumes through
+the normal VFS calls.
+
 ### Installing next to other systems
 - **Boot files:** everything goes in `\EFI\ICDA\` (`GRUBX64.EFI`,
   `KERNEL.BIN`). `\EFI\BOOT\BOOTX64.EFI` and `STARTUP.NSH` are written only

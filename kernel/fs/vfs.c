@@ -9,6 +9,7 @@ struct vfs_node {
     uint64_t size;
     uint8_t type;
     uint8_t readonly;
+    uint8_t mount_id;
     char *data;
     struct vfs_node *parent;
     struct vfs_node *first_child;
@@ -20,6 +21,7 @@ static uint64_t vfs_next_inode = 1;
 static uint64_t vfs_tick = 1;
 static const uint64_t VFS_NAME_CAP = 63;
 static int (*vfs_sync_hook)(void) = 0;
+static vfs_external_fn vfs_external_hook = 0;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -124,6 +126,7 @@ static void append_child(vfs_node_t *dir, vfs_node_t *child) {
     vfs_node_t *tail;
 
     child->parent = dir;
+    if (!child->mount_id) child->mount_id = dir->mount_id;
     if (!dir->first_child) {
         dir->first_child = child;
         return;
@@ -340,12 +343,34 @@ int vfs_getcwd(vfs_node_t *node, char *buf, size_t size) {
     return 0;
 }
 
+void vfs_set_external_hook(vfs_external_fn fn) {
+    vfs_external_hook = fn;
+}
+
+static int external_op(int op, vfs_node_t *dir, const char *leaf, const char *data, uint64_t size) {
+    char path[512];
+    uint64_t n;
+    if (!dir || !dir->mount_id || !vfs_external_hook) return 0;
+    if (vfs_getcwd(dir, path, sizeof(path)) != 0) return -1;
+    n = str_len(path);
+    if (n == 0 || path[n - 1] != '/') {
+        if (n + 1 >= sizeof(path)) return -1;
+        path[n++] = '/';
+    }
+    if (n + str_len(leaf) + 1 > sizeof(path)) return -1;
+    copy_bytes(path + n, leaf, str_len(leaf) + 1);
+    return vfs_external_hook(op, dir->mount_id, path, data, size);
+}
+
 int vfs_mkdir(vfs_node_t *cwd, const char *path) {
     char leaf[64];
     vfs_node_t *parent = resolve_parent(cwd, path, leaf, sizeof(leaf), 0);
     vfs_node_t *node;
 
     if (!parent || !valid_name(leaf) || find_child(parent, leaf)) {
+        return -1;
+    }
+    if (external_op(VFS_EXT_MKDIR, parent, leaf, 0, 0) != 0) {
         return -1;
     }
 
@@ -373,6 +398,9 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
         return node->type == VFS_NODE_FILE ? 0 : -1;
     }
 
+    if (external_op(VFS_EXT_WRITE, parent, leaf, "", 0) != 0) {
+        return -1;
+    }
     node = new_node(leaf, VFS_NODE_FILE, 0);
     if (!node) {
         return -1;
@@ -409,6 +437,9 @@ int vfs_remove(vfs_node_t *cwd, const char *path) {
     }
 
     parent = node->parent;
+    if (node->mount_id && external_op(VFS_EXT_REMOVE, parent, node->name, 0, 0) != 0) {
+        return -1;
+    }
     link = &parent->first_child;
     while (*link && *link != node) {
         link = &(*link)->next_sibling;
@@ -436,6 +467,9 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     }
 
     if (!node || node->type != VFS_NODE_FILE || node->readonly) {
+        return -1;
+    }
+    if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, data, size) != 0) {
         return -1;
     }
 
@@ -479,6 +513,9 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
             node->data[off + i] = data[i];
         }
         node->modified = vfs_tick++;
+        if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, node->data, node->size) != 0) {
+            return -1;
+        }
         return vfs_sync();
     }
     next = (char *)kmalloc((size_t)(new_end + 1));
@@ -501,6 +538,9 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
     node->data = next;
     node->size = new_end;
     node->modified = vfs_tick++;
+    if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, node->data, node->size) != 0) {
+        return -1;
+    }
     return vfs_sync();
 }
 
@@ -672,6 +712,29 @@ const char *vfs_node_name(vfs_node_t *node) {
 
 uint8_t vfs_node_type(vfs_node_t *node) {
     return node ? node->type : 0;
+}
+
+uint8_t vfs_node_mount_id(vfs_node_t *node) {
+    return node ? node->mount_id : 0;
+}
+
+int vfs_set_mount(const char *path, uint8_t mount_id) {
+    vfs_node_t *node = vfs_resolve(vfs_root_node, path);
+    if (!node || node->type != VFS_NODE_DIR) return -1;
+    node->mount_id = mount_id;
+    return 0;
+}
+
+int vfs_detach_tree(const char *path) {
+    vfs_node_t *node = vfs_resolve(vfs_root_node, path);
+    vfs_node_t **link;
+    if (!node || node == vfs_root_node || !node->parent) return -1;
+    link = &node->parent->first_child;
+    while (*link && *link != node) link = &(*link)->next_sibling;
+    if (!*link) return -1;
+    *link = node->next_sibling;
+    node->next_sibling = 0;
+    return 0;
 }
 
 uint8_t vfs_node_readonly(vfs_node_t *node) {

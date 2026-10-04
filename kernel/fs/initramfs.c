@@ -88,6 +88,7 @@ static const char commands_txt[] =
     "  cat <path>     print a file\n"
     "  echo <text>    print a line of text\n"
     "  mkdir <path>   create a directory\n"
+    "  rm <path>      delete a file or folder\n"
     "  touch <path>   create an empty file\n"
     "  write <path> <text>  replace file contents\n"
     "  stat <path>    show file metadata\n"
