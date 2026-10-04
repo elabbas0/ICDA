@@ -132,3 +132,7 @@ compile_commands.json
 *.log
 gui-cursor.txt
 /sdk/
+
+# local transfer archives and scratch scripts
+*.tar.gz
+scripts/locate-cursor*.ps1
