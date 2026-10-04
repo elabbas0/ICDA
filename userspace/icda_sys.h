@@ -73,7 +73,10 @@ enum {
     SYS_GPU_PRESENT       = 66,
     SYS_GPU_CURSOR        = 67,
     SYS_POWER             = 68,
-    SYS_PROC_STATS        = 69
+    SYS_PROC_STATS        = 69,
+    SYS_PTY_OPEN          = 70,
+    SYS_PTY_SPAWN         = 71,
+    SYS_PTY_IO            = 72
 };
 
 typedef struct {
@@ -276,5 +279,13 @@ static inline uint64_t icda_power(uint64_t action) { return sys_call1(SYS_POWER,
 
 
 static inline uint64_t icda_proc_stats(uint64_t pid, icda_proc_stats_t *out) { return sys_call2(SYS_PROC_STATS, pid, (uint64_t)(uintptr_t)out); }
+
+#define ICDA_PTY_READ   0
+#define ICDA_PTY_WRITE  1
+#define ICDA_PTY_RESIZE 2
+#define ICDA_PTY_ALIVE  3
+static inline long icda_pty_open(void) { return (long)sys_call0(SYS_PTY_OPEN); }
+static inline long icda_pty_spawn(long pty, const char *path, const char *args) { return (long)sys_call3(SYS_PTY_SPAWN, (uint64_t)pty, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)args); }
+static inline long icda_pty_io(long pty, uint64_t op, void *buf, uint64_t len) { return (long)sys_call4(SYS_PTY_IO, (uint64_t)pty, op, (uint64_t)(uintptr_t)buf, len); }
 
 #endif

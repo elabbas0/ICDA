@@ -247,11 +247,25 @@ static void shell_history_add(const char *line) {
     shell_history_count++;
 }
 
+static int shell_relative = 0;
+
 static void shell_render_line(const char *line, uint64_t len, uint64_t cursor, uint64_t prompt_x, uint64_t prompt_y, uint64_t *shown_len) {
     uint64_t i;
     uint64_t old_len = shown_len ? *shown_len : 0;
     uint64_t pad = old_len > len ? old_len - len : 0;
 
+    if (shell_relative) {
+        icda_write("\x1b" "8");
+        if (len) icda_write(line);
+        icda_write("\x1b[K\x1b" "8");
+        if (cursor) {
+            icda_write("\x1b[");
+            write_uint(cursor);
+            icda_write("C");
+        }
+        if (shown_len) *shown_len = len;
+        return;
+    }
     icda_set_cursor(prompt_x, prompt_y);
     if (len) {
         icda_write(line);
@@ -378,7 +392,8 @@ static int shell_read_line(char *line, uint64_t cap) {
 
     if (!line || cap == 0) return -1;
     line[0] = 0;
-    (void)icda_console_cursor(&prompt_x, &prompt_y);
+    shell_relative = (long)icda_console_cursor(&prompt_x, &prompt_y) < 0;
+    if (shell_relative) icda_write("\x1b" "7");
     shell_cursor_show(&cursor_visible);
 
     for (;;) {
@@ -435,7 +450,7 @@ static int shell_read_line(char *line, uint64_t cap) {
             continue;
         }
 
-        if (c == '\b') {
+        if (c == '\b' || c == 127) {
             if (cursor > 0) {
                 for (uint64_t i = cursor - 1; i < len; i++) {
                     line[i] = line[i + 1];
@@ -535,6 +550,15 @@ static void print_prompt(void) {
     if ((long)icda_getcwd(cwd, sizeof(cwd)) < 0) {
         icda_write("icda:/ ");
         return;
+    }
+    {
+        uint64_t x, y;
+        if ((long)icda_console_cursor(&x, &y) < 0) {
+            icda_write("\x1b[1;32micda\x1b[0m:\x1b[1;34m");
+            icda_write(cwd);
+            icda_write("\x1b[0m$ ");
+            return;
+        }
     }
     icda_write("icda:");
     icda_write(cwd);

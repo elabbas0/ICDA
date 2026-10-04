@@ -54,6 +54,7 @@ typedef struct process {
     struct vfs_node *cwd;
     struct process  *next_all;
     int linux_personality;
+    int pty;
     uint64_t linux_brk_pos;
     uint64_t linux_mmap_next;
     

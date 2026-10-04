@@ -9,6 +9,7 @@
 #include "../proc/process.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
+#include "../tty/pty.h"
 
 
 
@@ -245,6 +246,7 @@ static void page_fault_handler(struct registers *regs) {
         if (proc && proc->kind == PROCESS_USER && thread) {
             fd_proc_exit(proc);
             shm_proc_exit(proc);
+            pty_proc_exit(proc);
             pf_serial_dump(regs, cr2);
             serial_write("  user process killed\n");
             proc->state = PROCESS_EXITED;

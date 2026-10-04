@@ -98,7 +98,10 @@ typedef enum {
     
     SYS_POWER             = 68,
     
-    SYS_PROC_STATS        = 69
+    SYS_PROC_STATS        = 69,
+    SYS_PTY_OPEN          = 70,
+    SYS_PTY_SPAWN         = 71,
+    SYS_PTY_IO            = 72
 } syscall_number_t;
 
 typedef struct {

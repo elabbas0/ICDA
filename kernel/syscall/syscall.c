@@ -27,6 +27,7 @@
 #include "../dev/devops.h"
 #include "uaccess.h"
 #include "native_abi.h"
+#include "../tty/pty.h"
 
 
 
@@ -37,9 +38,10 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v1: first number moved");
-_Static_assert(SYS_PROC_STATS == 69, "native ABI v1: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 70, "native ABI v1: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v2: first number moved");
+_Static_assert(SYS_PROC_STATS == 69, "native ABI v2: v1 numbers moved");
+_Static_assert(SYS_PTY_IO == 72, "native ABI v2: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 73, "native ABI v2: count changed");
 
 
 
@@ -108,6 +110,17 @@ static uint64_t append_uint(char *buf, uint64_t out, uint64_t cap, uint64_t valu
     return out;
 }
 
+static int cur_pty(void) {
+    process_t *p = sched_current_process();
+    return (p && p->pty && pty_alive(p->pty)) ? p->pty : 0;
+}
+
+static void pty_puts(int pty, const char *s) {
+    uint64_t n = 0;
+    while (s[n]) n++;
+    pty_slave_write(pty, s, n);
+}
+
 static uint64_t sys_console_write(const char *text) {
     const dev_calls_t *dcon;
     uint64_t len;
@@ -120,6 +133,10 @@ static uint64_t sys_console_write(const char *text) {
     len = strnlen_user(text, UACCESS_MAX_STR);
     if (len == (uint64_t)-1) {
         return (uint64_t)-U_EFAULT;
+    }
+    if (cur_pty()) {
+        pty_slave_write(cur_pty(), text, len);
+        return len;
     }
     dcon = dev_console();
     if (!dcon) {
@@ -273,6 +290,10 @@ static uint64_t sys_vfs_read_at(const char *path, uint64_t offset, char *buf, ui
 static uint64_t sys_input_read(void) {
     const dev_calls_t *din = dev_input();
     int c;
+    if (cur_pty()) {
+        c = pty_slave_read_char(cur_pty());
+        return c < 0 ? (uint64_t)-1 : (uint64_t)c;
+    }
     if (!din) {
         return (uint64_t)-1;
     }
@@ -286,6 +307,15 @@ static uint64_t sys_input_read(void) {
 static uint64_t sys_input_read_timeout(uint64_t ticks) {
     const dev_calls_t *din = dev_input();
     int c;
+    if (cur_pty()) {
+        int pty = cur_pty();
+        c = pty_slave_read_char(pty);
+        for (uint64_t t = 0; c < 0 && t < ticks && pty_alive(pty); t++) {
+            sched_sleep(1);
+            c = pty_slave_read_char(pty);
+        }
+        return c < 0 ? (uint64_t)-1 : (uint64_t)c;
+    }
     if (!din) {
         return (uint64_t)-1;
     }
@@ -312,6 +342,36 @@ static uint64_t sys_input_readline(char *buf, uint64_t cap) {
     }
     if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
+    }
+    if (cur_pty()) {
+        int pty = cur_pty();
+        buf[0] = 0;
+        for (;;) {
+            int c = pty_slave_read_char(pty);
+            char ch;
+            if (c < 0) {
+                if (!pty_alive(pty)) return (uint64_t)-1;
+                sched_sleep(1);
+                continue;
+            }
+            if (c == '\r' || c == '\n') {
+                pty_puts(pty, "\r\n");
+                buf[len] = 0;
+                return len;
+            }
+            if (c == 8 || c == 127) {
+                if (len > 0) {
+                    buf[--len] = 0;
+                    pty_puts(pty, "\b \b");
+                }
+                continue;
+            }
+            if (c < 32 || len + 1 >= cap) continue;
+            ch = (char)c;
+            buf[len++] = ch;
+            buf[len] = 0;
+            pty_slave_write(pty, &ch, 1);
+        }
     }
     if (!din || !dcon || !dcon->con_write || !dcon->con_backspace) {
         return (uint64_t)-1;
@@ -470,6 +530,10 @@ static uint64_t sys_exec(const char *path) {
 
 static uint64_t sys_console_clear(void) {
     const dev_calls_t *dcon = dev_console();
+    if (cur_pty()) {
+        pty_puts(cur_pty(), "\x1b[2J\x1b[H");
+        return 0;
+    }
     if (!dcon || !dcon->con_clear) {
         return (uint64_t)-1;
     }
@@ -479,6 +543,10 @@ static uint64_t sys_console_clear(void) {
 
 static uint64_t sys_console_backspace(void) {
     const dev_calls_t *dcon = dev_console();
+    if (cur_pty()) {
+        pty_puts(cur_pty(), "\b \b");
+        return 0;
+    }
     if (!dcon || !dcon->con_backspace) {
         return (uint64_t)-1;
     }
@@ -765,6 +833,60 @@ static uint64_t sys_sync(void) {
     return vfs_sync() == 0 ? 0 : (uint64_t)-1;
 }
 
+static uint64_t sys_pty_open(void) {
+    int id = pty_open(sched_current_process());
+    return id < 0 ? (uint64_t)-1 : (uint64_t)id;
+}
+
+static uint64_t sys_pty_spawn(uint64_t id, const char *path, const char *args) {
+    process_t *proc = sched_current_process();
+    uint64_t pid = 0;
+    int saved;
+    int rc;
+    if (!proc || !pty_owned_by((int)id, proc) || !path) return (uint64_t)-1;
+    if (!gate_path_ok(path) || !*path) return (uint64_t)-U_EFAULT;
+    if (args && strnlen_user(args, 2048) == (uint64_t)-1) return (uint64_t)-U_EFAULT;
+    saved = proc->pty;
+    proc->pty = (int)id;
+    rc = args ? user_spawn_path_args(path, args, &pid) : user_spawn_path(path, &pid);
+    proc->pty = saved;
+    return rc != 0 ? (uint64_t)-1 : pid;
+}
+
+static uint64_t sys_pty_io(uint64_t id, uint64_t op, char *buf, uint64_t len) {
+    process_t *proc = sched_current_process();
+    char kbuf[1024];
+    uint64_t done = 0;
+    if (!proc || !pty_owned_by((int)id, proc)) return op == 3 ? 0 : (uint64_t)-1;
+    if (op == 2) {
+        pty_set_size((int)id, (uint32_t)(len & 0xFFFF), (uint32_t)((len >> 16) & 0xFFFF));
+        return 0;
+    }
+    if (op == 3) return 1;
+    if (op > 3 || (!buf && len)) return (uint64_t)-1;
+    if (op == 0) {
+        if (!user_range_prepare_cur_w(buf, len)) return (uint64_t)-U_EFAULT;
+        while (done < len) {
+            uint64_t want = len - done < sizeof(kbuf) ? len - done : sizeof(kbuf);
+            uint64_t got = pty_master_read((int)id, kbuf, want);
+            if (!got) break;
+            if (copy_to_user(buf + done, kbuf, got) != 0) return (uint64_t)-U_EFAULT;
+            done += got;
+        }
+        return done;
+    }
+    if (!user_range_prepare_cur(buf, len)) return (uint64_t)-U_EFAULT;
+    while (done < len) {
+        uint64_t chunk = len - done < sizeof(kbuf) ? len - done : sizeof(kbuf);
+        uint64_t put;
+        if (copy_from_user(kbuf, buf + done, chunk) != 0) return (uint64_t)-U_EFAULT;
+        put = pty_master_write((int)id, kbuf, chunk);
+        done += put;
+        if (put < chunk) break;
+    }
+    return done;
+}
+
 static uint64_t sys_spawn_args(const char *path, const char *args) {
     uint64_t pid = 0;
 
@@ -929,6 +1051,22 @@ static uint64_t sys_install_partitions(const syscall_install_plan_t *plan, uint6
 
 static uint64_t sys_console_set_cursor(uint64_t x, uint64_t y) {
     const dev_calls_t *dcon = dev_console();
+    if (cur_pty()) {
+        char seq[32];
+        uint64_t n = 0;
+        char d[24];
+        int k;
+        seq[n++] = 0x1b;
+        seq[n++] = '[';
+        k = 0; y++; do { d[k++] = (char)('0' + y % 10); y /= 10; } while (y && k < 20);
+        while (k) seq[n++] = d[--k];
+        seq[n++] = ';';
+        k = 0; x++; do { d[k++] = (char)('0' + x % 10); x /= 10; } while (x && k < 20);
+        while (k) seq[n++] = d[--k];
+        seq[n++] = 'H';
+        pty_slave_write(cur_pty(), seq, n);
+        return 0;
+    }
     if (!dcon || !dcon->con_set_cursor) {
         return (uint64_t)-1;
     }
@@ -945,6 +1083,13 @@ static uint64_t sys_console_size(uint64_t *cols_out, uint64_t *rows_out) {
     if (!user_range_prepare_cur_w(cols_out, sizeof(*cols_out)) ||
         !user_range_prepare_cur_w(rows_out, sizeof(*rows_out))) {
         return (uint64_t)-U_EFAULT;
+    }
+    if (cur_pty()) {
+        uint32_t c, r;
+        pty_get_size(cur_pty(), &c, &r);
+        *cols_out = c;
+        *rows_out = r;
+        return 0;
     }
     if (!dcon || !dcon->con_columns || !dcon->con_rows) {
         return (uint64_t)-1;
@@ -964,6 +1109,9 @@ static uint64_t sys_console_get_cursor(uint64_t *x_out, uint64_t *y_out) {
     if (!user_range_prepare_cur_w(x_out, sizeof(*x_out)) ||
         !user_range_prepare_cur_w(y_out, sizeof(*y_out))) {
         return (uint64_t)-U_EFAULT;
+    }
+    if (cur_pty()) {
+        return (uint64_t)-1;
     }
     if (!dcon || !dcon->con_get_cursor) {
         return (uint64_t)-1;
@@ -1262,6 +1410,22 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             }
             if (is_stdio) {
                 if (fd != 0) return (uint64_t)-U_EBADF;
+                if (cur_pty()) {
+                    int pty = cur_pty();
+                    uint64_t got = 0;
+                    int c;
+                    while ((c = pty_slave_read_char(pty)) < 0) {
+                        if (!pty_alive(pty)) return 0;
+                        sched_sleep(1);
+                    }
+                    do {
+                        char ch = (char)(c == '\r' ? '\n' : c);
+                        if (copy_to_user(buf + got, &ch, 1) != 0) return (uint64_t)-U_EFAULT;
+                        got++;
+                        if (ch == '\n') break;
+                    } while (got < count && (c = pty_slave_read_char(pty)) >= 0);
+                    return got;
+                }
                 if (proc->linux_brk_pos == 0) proc->linux_brk_pos = 0x60000000;
                 data = vfs_read(proc->cwd ? proc->cwd : vfs_root(), "/dev/stdin", &size);
                 if (!data) return 0;
@@ -1307,6 +1471,16 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
                 uint64_t done = 0;
                 char kbuf[4096];
                 if (fd == 0) return (uint64_t)-U_EBADF;
+                if (cur_pty()) {
+                    while (done < count) {
+                        uint64_t chunk = count - done;
+                        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+                        if (copy_from_user(kbuf, buf + done, chunk) != 0) return (uint64_t)-U_EFAULT;
+                        pty_slave_write(cur_pty(), kbuf, chunk);
+                        done += chunk;
+                    }
+                    return count;
+                }
                 if (!dcon || !dcon->con_write) {
                     return (uint64_t)-1;
                 }
@@ -1876,6 +2050,13 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
                                   (int)regs->r10, (int)regs->r8);
         case SYS_POWER:
             return sys_power(regs->rdi);
+        case SYS_PTY_OPEN:
+            return sys_pty_open();
+        case SYS_PTY_SPAWN:
+            return sys_pty_spawn(regs->rdi, (const char *)(uintptr_t)regs->rsi,
+                                 (const char *)(uintptr_t)regs->rdx);
+        case SYS_PTY_IO:
+            return sys_pty_io(regs->rdi, regs->rsi, (char *)(uintptr_t)regs->rdx, regs->r10);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

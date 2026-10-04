@@ -111,11 +111,35 @@ A running QEMU holds `kernel.iso` open, so `make kernel.iso` fails with
 The taskbar launcher is a more reliable target than the desktop icons:
 one click opens the panel, one click launches.
 
+## Terminal and the pty layer
+
+The Terminal is a real terminal emulator now. The kernel has pseudo
+terminals (`kernel/tty/pty.c`): `pty_open` gives the caller a master,
+`pty_spawn` starts a program attached to it, and `pty_io` reads output,
+writes input or resizes. A process attached to a pty, and every child it
+spawns (the field is inherited), has its console calls redirected: writes
+go to the pty, key reads come from it, `read_line` is cooked with echo,
+clear/backspace/set-cursor become ANSI sequences, `console_size` reports
+the pty size, and the cursor query fails so programs know they are on a
+pty. Linux-personality `read`/`write` on stdio go through it too. Ctrl+C
+(0x03 from the master) kills the newest process under the shell; closing
+the Terminal kills everything attached.
+
+The Terminal runs `/apps/shell.app` and emulates VT100/xterm: cursor
+motion, erase, insert/delete, scroll regions, save/restore cursor, SGR
+colours (16 plus the low 256 range), bold, underline and inverse, with
+2000 lines of scrollback (wheel, Shift+PgUp/PgDn, scrollbar drag). The
+shell redraws its line with save/restore cursor on a pty and colours its
+prompt.
+
+This bumped the native ABI to v2: 73 calls (`SYS_PTY_OPEN` 70,
+`SYS_PTY_SPAWN` 71, `SYS_PTY_IO` 72). v1 numbers are unchanged.
+
 ## Known gap: Explorer cannot delete
 
-The VFS has no unlink primitive and the native ABI is frozen at exactly
-70 syscalls (`scripts/check-abi.sh` fails at 71). Adding delete means
-either a new syscall plus an ABI version bump, or an unlink inside the
+The VFS has no unlink primitive and `scripts/check-abi.sh` pins the
+native call count (73 in ABI v2). Adding delete means either a new
+syscall plus another ABI version bump, or an unlink inside the
 VFS behind an existing call. Until that is decided the menu entry is
 omitted and the Delete key says why. Rename is therefore
 copy-then-truncate, which the status line also states.

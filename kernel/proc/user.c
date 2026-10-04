@@ -6,6 +6,7 @@
 #include "../drivers/console/console.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
+#include "../tty/pty.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pf.h"
@@ -328,6 +329,7 @@ void user_request_exit_to_kernel(uint64_t code) {
     if (proc) {
         fd_proc_exit(proc);
         shm_proc_exit(proc);
+        pty_proc_exit(proc);
         proc->state = PROCESS_EXITED;
         proc->exit_code = code;
     }

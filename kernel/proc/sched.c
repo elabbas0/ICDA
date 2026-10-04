@@ -7,6 +7,7 @@
 #include "../cpu/fpu.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
+#include "../tty/pty.h"
 #include "../fs/vfs.h"
 #include "../drivers/console/console.h"
 
@@ -196,6 +197,7 @@ process_t *proc_create_empty(process_kind_t kind) {
     proc->addr_space = vmm_kernel_address_space();
     proc->parent = sched_current_process();
     proc->session_id = proc->parent ? proc->parent->session_id : proc->pid;
+    proc->pty = proc->parent ? proc->parent->pty : 0;
     proc->process_group_id = proc->pid;
     proc->cwd = proc->parent ? proc->parent->cwd : vfs_root();
     proc->main_thread = NULL;
@@ -228,6 +230,7 @@ void sched_init(void) {
     bootstrap_proc->state = PROCESS_RUNNING;
     bootstrap_proc->exit_code = 0;
     bootstrap_proc->session_id = bootstrap_proc->pid;
+    bootstrap_proc->pty = 0;
     bootstrap_proc->process_group_id = bootstrap_proc->pid;
     bootstrap_proc->addr_space = vmm_kernel_address_space();
     bootstrap_proc->main_thread = bootstrap_thread;
@@ -244,6 +247,7 @@ void sched_init(void) {
     idle_proc->state = PROCESS_READY;
     idle_proc->exit_code = 0;
     idle_proc->session_id = bootstrap_proc->session_id;
+    idle_proc->pty = 0;
     idle_proc->process_group_id = idle_proc->pid;
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
@@ -642,6 +646,7 @@ int sched_kill_process(uint64_t pid, uint64_t exit_code) {
 
     fd_proc_exit(target);
     shm_proc_exit(target);
+    pty_proc_exit(target);
     target->state = PROCESS_EXITED;
     target->exit_code = exit_code;
     thread->block_reason = THREAD_BLOCK_NONE;
@@ -677,6 +682,7 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
             p->state != PROCESS_EXITED && p->state != PROCESS_REAPED && t) {
             fd_proc_exit(p);
             shm_proc_exit(p);
+            pty_proc_exit(p);
             p->state = PROCESS_EXITED;
             p->exit_code = exit_code;
             t->block_reason = THREAD_BLOCK_NONE;
