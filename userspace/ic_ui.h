@@ -201,17 +201,22 @@ void ic_ui_empty_state(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, const char 
 
 #define IC_MENU_ITEMS_MAX 16
 #define IC_MENU_SEPARATOR ((const char *)1)
+#define IC_MENU_CHECK_OFF 1
+#define IC_MENU_CHECK_ON  2
 
 typedef struct {
     const char *labels[IC_MENU_ITEMS_MAX];   
     const char *shortcuts[IC_MENU_ITEMS_MAX];
     uint8_t     disabled[IC_MENU_ITEMS_MAX];
+    uint8_t     checked[IC_MENU_ITEMS_MAX];   
+    uint8_t     submenu[IC_MENU_ITEMS_MAX];   
     int         count;
     int         hover;                        
 } ic_menu_model_t;
 
 int  ic_ui_menu_width(const ic_menu_model_t *m);
 int  ic_ui_menu_height(const ic_menu_model_t *m);
+ic_rect_t ic_ui_menu_item_rect(const ic_menu_model_t *m, int mx, int my, int i);
 
 
 int  ic_ui_menu_hit(const ic_menu_model_t *m, int mx, int my, int x, int y);

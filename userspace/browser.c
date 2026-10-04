@@ -944,6 +944,15 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         br.scroll += ev->wheel * 3 * (reading()->line_h + 2);
         break;
     case IC_EV_KEY:
+        if ((ev->mods & IC_MOD_CTRL) && ev->key == 'l') {
+            br.addr_focused = 1;
+            break;
+        }
+        if (ev->mods & IC_MOD_ALT) {
+            if (ev->key == IC_KEY_LEFT) go_back();
+            else if (ev->key == IC_KEY_RIGHT) go_forward();
+            break;
+        }
         if (br.addr_focused) {
             switch (ev->key) {
             case IC_KEY_ENTER:
@@ -987,7 +996,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 break;
             }
             default:
-                if (ev->key >= 32 && ev->key < 127) {
+                if (ev->key >= 32 && ev->key < 127 && !(ev->mods & (IC_MOD_CTRL | IC_MOD_ALT))) {
                     int len = (int)ic_strlen(br.addr_buf);
                     if (len + 1 < BR_URL_CAP) {
                         for (int k = len; k > br.addr.cursor; k--) {

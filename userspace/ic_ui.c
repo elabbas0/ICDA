@@ -448,6 +448,13 @@ static int ic_menu_item_h(const ic_menu_model_t *m, int i) {
     return m->labels[i] == IC_MENU_SEPARATOR ? IC_MENU_SEP_H : IC_H_MENU_ITEM;
 }
 
+static int ic_menu_check_w(const ic_menu_model_t *m) {
+    for (int i = 0; i < m->count; i++) {
+        if (m->checked[i]) return 18;
+    }
+    return 0;
+}
+
 int ic_ui_menu_width(const ic_menu_model_t *m) {
     const ic_face_t *f = ic_font(IC_FONT_BODY);
     const ic_face_t *fs = ic_font(IC_FONT_BODY);
@@ -455,7 +462,8 @@ int ic_ui_menu_width(const ic_menu_model_t *m) {
     for (int i = 0; i < m->count; i++) {
         int iw;
         if (m->labels[i] == IC_MENU_SEPARATOR || !m->labels[i]) continue;
-        iw = 2 * IC_MENU_PAD_X + 2 * IC_MENU_TEXT_X + ic_text_measure(f, m->labels[i]);
+        iw = 2 * IC_MENU_PAD_X + 2 * IC_MENU_TEXT_X + ic_text_measure(f, m->labels[i]) + ic_menu_check_w(m);
+        if (m->submenu[i]) iw += IC_SP_5;
         if (m->shortcuts[i]) iw += IC_SP_6 + ic_text_measure(fs, m->shortcuts[i]);
         if (iw > w) w = iw;
     }
@@ -466,6 +474,13 @@ int ic_ui_menu_height(const ic_menu_model_t *m) {
     int h = 2 * IC_MENU_PAD_Y;
     for (int i = 0; i < m->count; i++) h += ic_menu_item_h(m, i);
     return h;
+}
+
+ic_rect_t ic_ui_menu_item_rect(const ic_menu_model_t *m, int mx, int my, int i) {
+    int w = ic_ui_menu_width(m);
+    int y = my + IC_MENU_PAD_Y;
+    for (int k = 0; k < i && k < m->count; k++) y += ic_menu_item_h(m, k);
+    return ic_rect_make(mx + IC_MENU_PAD_X, y, w - 2 * IC_MENU_PAD_X, i < m->count ? ic_menu_item_h(m, i) : 0);
 }
 
 int ic_ui_menu_hit(const ic_menu_model_t *m, int mx, int my, int x, int y) {
@@ -490,6 +505,7 @@ void ic_ui_menu(ic_canvas_t *c, const ic_menu_model_t *m, int mx, int my,
     int w = ic_ui_menu_width(m);
     int h = ic_ui_menu_height(m);
     int y = my + IC_MENU_PAD_Y;
+    int cw = ic_menu_check_w(m);
     ic_ui_panel(c, ic_rect_make(mx, my, w, h), IC_R_MENU, IC_ELEV_MENU, scratch, scratch_len);
     for (int i = 0; i < m->count; i++) {
         int ih = ic_menu_item_h(m, i);
@@ -500,9 +516,17 @@ void ic_ui_menu(ic_canvas_t *c, const ic_menu_model_t *m, int mx, int my,
             int hot = i == m->hover && !m->disabled[i];
             ic_color_t fg = m->disabled[i] ? p->label_disabled : (hot ? p->label_on_accent : p->label);
             if (hot) ic_gfx_rrect(c, row.x, row.y, row.w, row.h, IC_R_MENU_ITEM, p->accent);
-            ic_text_draw_in(c, f, ic_rect_make(row.x + IC_MENU_TEXT_X - IC_MENU_PAD_X, row.y,
-                                               row.w - 2 * IC_MENU_TEXT_X, row.h),
+            if (m->checked[i] == IC_MENU_CHECK_ON) {
+                ic_symbol_draw(c, IC_SYM_CHECK, (float)(row.x + IC_MENU_TEXT_X - IC_MENU_PAD_X + 6),
+                               (float)row.y + (float)row.h * 0.5f, 12.0f, hot ? fg : p->accent);
+            }
+            ic_text_draw_in(c, f, ic_rect_make(row.x + IC_MENU_TEXT_X - IC_MENU_PAD_X + cw, row.y,
+                                               row.w - 2 * IC_MENU_TEXT_X - cw, row.h),
                             m->labels[i], fg, IC_ALIGN_LEFT);
+            if (m->submenu[i]) {
+                ic_symbol_draw(c, IC_SYM_CHEVRON_RIGHT, (float)(row.x + row.w - IC_MENU_TEXT_X + 2),
+                               (float)row.y + (float)row.h * 0.5f, 10.0f, hot ? fg : p->label_secondary);
+            }
             if (m->shortcuts[i]) {
                 ic_text_draw_in(c, f, ic_rect_make(row.x, row.y, row.w - IC_MENU_TEXT_X + IC_MENU_PAD_X,
                                                    row.h),

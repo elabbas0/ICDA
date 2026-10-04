@@ -89,6 +89,11 @@ void      wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
 #define WM_LAUNCH_SHUTDOWN  (-10)
 #define WM_LAUNCH_RESTART   (-11)
 
+#define WM_LAUNCH_QUERY_CAP 32
+#define WM_LAUNCH_MAX_APPS  32
+extern char wm_launch_query[WM_LAUNCH_QUERY_CAP];
+int  wm_launch_visible(int *out);
+
 ic_rect_t wm_launcher_rect(int sw, int sh);
 
 

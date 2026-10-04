@@ -278,6 +278,7 @@ static void run_help(void) {
     log_print(TERM_ROLE_TEXT, "  storage           List disks, partitions and mounts");
     log_print(TERM_ROLE_MUTED, "Anything else is launched as a program.");
     log_print(TERM_ROLE_MUTED, "Up and Down walk the history, Page Up and Page Down scroll.");
+    log_print(TERM_ROLE_MUTED, "Ctrl+C cancels the line, Ctrl+L clears, Ctrl+U erases input.");
 }
 
 static void run_command(const char *raw) {
@@ -745,6 +746,27 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         break;
     case IC_EV_KEY:
         if (tr_menu_open) { tr_menu_open = 0; break; }
+        if (ev->mods & IC_MOD_CTRL) {
+            if (ev->key == 'c') {
+                char echo[PROMPT_LEN + TERM_CMD_MAX + 3];
+                ic_strcpy(echo, PROMPT, sizeof(echo));
+                ic_strlcat(echo, term.cmd, sizeof(echo));
+                ic_strlcat(echo, "^C", sizeof(echo));
+                log_print(TERM_ROLE_COMMAND, echo);
+                cmd_set("");
+                term.history_pos = -1;
+                term.scroll_rows = 0;
+            } else if (ev->key == 'l') {
+                log_clear();
+            } else if (ev->key == 'u') {
+                cmd_set("");
+            } else if (ev->key == 'a') {
+                term.cmd_cursor = 0;
+            } else if (ev->key == 'e') {
+                term.cmd_cursor = term.cmd_len;
+            }
+            break;
+        }
         switch (ev->key) {
         case IC_KEY_PAGE_UP:   scroll_by(term.rows); break;
         case IC_KEY_PAGE_DOWN: scroll_by(-term.rows); break;
@@ -779,7 +801,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             edit_key(ev->key);
             break;
         default:
-            if (ev->key >= 32 && ev->key < 127) type_char(ev->key);
+            if (ev->key >= 32 && ev->key < 127 && !(ev->mods & (IC_MOD_CTRL | IC_MOD_ALT))) type_char(ev->key);
             break;
         }
         break;

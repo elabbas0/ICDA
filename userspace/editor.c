@@ -32,6 +32,8 @@ static struct {
     int      scroll_row;
     int      scroll_col;
     uint64_t followed;
+    uint64_t anchor;
+    int      has_sel;
 
     
     int rows;
@@ -204,8 +206,75 @@ static void move_to(uint64_t pos) {
     ed.cursor = pos;
 }
 
+static int is_word_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static uint64_t word_left(uint64_t pos) {
+    while (pos > 0 && !is_word_char(ed.buf[pos - 1])) pos--;
+    while (pos > 0 && is_word_char(ed.buf[pos - 1])) pos--;
+    return pos;
+}
+
+static uint64_t word_right(uint64_t pos) {
+    while (pos < ed.len && !is_word_char(ed.buf[pos])) pos++;
+    while (pos < ed.len && is_word_char(ed.buf[pos])) pos++;
+    return pos;
+}
+
+static void sel_range(uint64_t *a, uint64_t *b) {
+    *a = ed.anchor < ed.cursor ? ed.anchor : ed.cursor;
+    *b = ed.anchor < ed.cursor ? ed.cursor : ed.anchor;
+}
+
+static int delete_selection(void) {
+    uint64_t a, b;
+    if (!ed.has_sel) return 0;
+    sel_range(&a, &b);
+    ed.has_sel = 0;
+    if (a == b) return 0;
+    for (uint64_t i = b; i <= ed.len; i++) ed.buf[a + i - b] = ed.buf[i];
+    ed.len -= b - a;
+    ed.cursor = a;
+    ed.modified = 1;
+    return 1;
+}
+
+static int handle_move_key(const ic_event_t *ev) {
+    int ctrl = (ev->mods & IC_MOD_CTRL) != 0;
+    uint64_t before = ed.cursor;
+    switch (ev->key) {
+    case IC_KEY_LEFT:  move_to(ctrl ? word_left(ed.cursor) : (ed.cursor > 0 ? ed.cursor - 1 : 0)); break;
+    case IC_KEY_RIGHT: move_to(ctrl ? word_right(ed.cursor) : ed.cursor + 1); break;
+    case IC_KEY_UP:    move_vertical(-1); break;
+    case IC_KEY_DOWN:  move_vertical(1); break;
+    case IC_KEY_HOME:  move_to(ctrl ? 0 : line_start(ed.cursor)); break;
+    case IC_KEY_END:   move_to(ctrl ? ed.len : line_end(ed.cursor)); break;
+    case IC_KEY_PAGE_UP:
+        for (int i = 0; i < ed.rows; i++) move_vertical(-1);
+        break;
+    case IC_KEY_PAGE_DOWN:
+        for (int i = 0; i < ed.rows; i++) move_vertical(1);
+        break;
+    default:
+        return 0;
+    }
+    if (ev->mods & IC_MOD_SHIFT) {
+        if (!ed.has_sel) {
+            ed.anchor = before;
+            ed.has_sel = 1;
+        }
+        if (ed.anchor == ed.cursor) ed.has_sel = 0;
+    } else {
+        ed.has_sel = 0;
+    }
+    return 1;
+}
+
+
 static void open_file(const char *path) {
     long n;
+    ed.has_sel = 0;
     ic_strcpy(ed.path, path, EDIT_PATH_CAP);
     n = (long)icda_read_file(ed.path, ed.buf, sizeof(ed.buf) - 1);
     if (n < 0) {
@@ -282,8 +351,29 @@ static void draw_text(ic_app_t *app, ic_canvas_t *c) {
     }
     ic_gfx_vline(c, EDIT_GUTTER_W, t.y, t.h, p->separator);
 
-    
-
+    if (ed.has_sel) {
+        uint64_t a, b;
+        ic_rect_t sel_saved;
+        sel_range(&a, &b);
+        ic_canvas_push_clip(c, ed.text_x, t.y, t.w - ed.text_x, t.h, &sel_saved);
+        for (int r = 0; r < ed.rows; r++) {
+            uint64_t row = (uint64_t)(ed.scroll_row + r);
+            uint64_t start, end, s0, s1;
+            int c0, c1;
+            if (row > last_row) break;
+            start = offset_of_row(row);
+            end = line_end(start);
+            if (b <= start || a > end) continue;
+            s0 = a > start ? a : start;
+            s1 = b < end ? b : end;
+            c0 = visual_col(s0);
+            c1 = visual_col(s1) + (b > end ? 1 : 0);
+            if (c1 <= c0) continue;
+            ic_gfx_fill(c, ed.text_x + (c0 - ed.scroll_col) * ed.cw, ed.text_y + r * ed.ch,
+                        (c1 - c0) * ed.cw, ed.ch, p->accent_soft);
+        }
+        ic_canvas_pop_clip(c, &sel_saved);
+    }
 
     for (int r = 0; r < ed.rows; r++) {
         uint64_t row = (uint64_t)(ed.scroll_row + r);
@@ -424,6 +514,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             }
             ed.confirm_new = 0;
             ic_strcpy(ed.path, "/home/untitled.txt", EDIT_PATH_CAP);
+            ed.has_sel = 0;
             ed.buf[0] = 0;
             ed.len = 0;
             ed.cursor = 0;
@@ -435,6 +526,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         }
         ed.confirm_new = 0;
         if (ed.hover_save) { save(); break; }
+        ed.has_sel = 0;
         click_to_cursor(ev->x, ev->y);
         break;
     case IC_EV_MOUSE_LEAVE:
@@ -449,25 +541,27 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     }
     case IC_EV_KEY:
         ed.confirm_new = 0;
+        if (handle_move_key(ev)) break;
+        if (ev->mods & IC_MOD_CTRL) {
+            if (ev->key == 's') save();
+            else if (ev->key == 'a') {
+                ed.anchor = 0;
+                ed.cursor = ed.len;
+                ed.has_sel = ed.len > 0;
+            }
+            break;
+        }
         switch (ev->key) {
-        case IC_KEY_LEFT:      move_to(ed.cursor > 0 ? ed.cursor - 1 : 0); break;
-        case IC_KEY_RIGHT:     move_to(ed.cursor + 1); break;
-        case IC_KEY_UP:        move_vertical(-1); break;
-        case IC_KEY_DOWN:      move_vertical(1); break;
-        case IC_KEY_HOME:      move_to(line_start(ed.cursor)); break;
-        case IC_KEY_END:       move_to(line_end(ed.cursor)); break;
-        case IC_KEY_PAGE_UP:
-            for (int i = 0; i < ed.rows; i++) move_vertical(-1);
-            break;
-        case IC_KEY_PAGE_DOWN:
-            for (int i = 0; i < ed.rows; i++) move_vertical(1);
-            break;
-        case IC_KEY_BACKSPACE: backspace(); break;
-        case IC_KEY_DELETE:    delete_forward(); break;
-        case IC_KEY_ENTER:     insert_char('\n'); break;
-        case IC_KEY_TAB:       insert_char('\t'); break;
+        case IC_KEY_BACKSPACE: if (!delete_selection()) backspace(); break;
+        case IC_KEY_DELETE:    if (!delete_selection()) delete_forward(); break;
+        case IC_KEY_ENTER:     delete_selection(); insert_char('\n'); break;
+        case IC_KEY_TAB:       delete_selection(); insert_char('\t'); break;
+        case IC_KEY_ESCAPE:    ed.has_sel = 0; break;
         default:
-            if (ev->key >= 32 && ev->key < 127) insert_char((char)ev->key);
+            if (ev->key >= 32 && ev->key < 127 && !(ev->mods & IC_MOD_ALT)) {
+                delete_selection();
+                insert_char((char)ev->key);
+            }
             break;
         }
         break;

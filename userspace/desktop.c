@@ -96,6 +96,7 @@ static struct {
 
     
     ic_menu_model_t menu;
+    int       menu_actions[IC_MENU_ITEMS_MAX];
     int  menu_x, menu_y;
     int  menu_open;
     int  menu_item;               
@@ -885,49 +886,44 @@ static int place_at(ic_app_t *app, int x, int y) {
     return -1;
 }
 
+enum {
+    MA_NONE = 0, MA_OPEN, MA_EDIT, MA_RENAME, MA_INFO, MA_NEW_FOLDER, MA_NEW_FILE,
+    MA_TERMINAL, MA_REFRESH, MA_VIEW_GRID, MA_VIEW_LIST
+};
+
+static int menu_add(int n, const char *label, int action, int disabled) {
+    if (n >= IC_MENU_ITEMS_MAX) return n;
+    ex.menu.labels[n] = label;
+    ex.menu.shortcuts[n] = 0;
+    ex.menu.disabled[n] = (uint8_t)disabled;
+    ex.menu.checked[n] = 0;
+    ex.menu.submenu[n] = 0;
+    ex.menu_actions[n] = action;
+    return n + 1;
+}
+
 static void build_menu(void) {
     int n = 0;
     ex.menu.count = 0;
     ex.menu.hover = -1;
     if (ex.menu_item >= 0 && ex.menu_item < ex.count) {
         ex_item_t *it = &ex.items[ex.menu_item];
-        ex.menu.labels[n] = "Open";
-        ex.menu.shortcuts[n] = 0;
-        ex.menu.disabled[n] = 0;
-        n++;
-        if (!it->is_dir) {
-            ex.menu.labels[n] = "Open in Editor";
-            ex.menu.shortcuts[n] = 0;
-            ex.menu.disabled[n] = 0;
-            n++;
-        }
-        ex.menu.labels[n] = "Rename";
-        ex.menu.shortcuts[n] = 0;
-        ex.menu.disabled[n] = it->is_dir;
-        n++;
-        ex.menu.labels[n] = "Get Info";
-        ex.menu.shortcuts[n] = 0;
-        ex.menu.disabled[n] = 0;
-        n++;
-        ex.menu.labels[n] = IC_MENU_SEPARATOR;
-        n++;
+        n = menu_add(n, "Open", MA_OPEN, 0);
+        if (!it->is_dir) n = menu_add(n, "Open in Editor", MA_EDIT, 0);
+        n = menu_add(n, "Rename", MA_RENAME, it->is_dir);
+        n = menu_add(n, "Get Info", MA_INFO, 0);
+        n = menu_add(n, IC_MENU_SEPARATOR, MA_NONE, 0);
     }
-    ex.menu.labels[n] = "New Folder";
-    ex.menu.shortcuts[n] = 0;
-    ex.menu.disabled[n] = 0;
-    n++;
-    ex.menu.labels[n] = "New File";
-    ex.menu.shortcuts[n] = 0;
-    ex.menu.disabled[n] = 0;
-    n++;
-    ex.menu.labels[n] = "Open in Terminal";
-    ex.menu.shortcuts[n] = 0;
-    ex.menu.disabled[n] = 0;
-    n++;
-    ex.menu.labels[n] = "Refresh";
-    ex.menu.shortcuts[n] = 0;
-    ex.menu.disabled[n] = 0;
-    n++;
+    n = menu_add(n, "New Folder", MA_NEW_FOLDER, 0);
+    n = menu_add(n, "New File", MA_NEW_FILE, 0);
+    n = menu_add(n, "Open in Terminal", MA_TERMINAL, 0);
+    n = menu_add(n, IC_MENU_SEPARATOR, MA_NONE, 0);
+    n = menu_add(n, "Icons", MA_VIEW_GRID, 0);
+    ex.menu.checked[n - 1] = ex.view == VIEW_GRID ? IC_MENU_CHECK_ON : IC_MENU_CHECK_OFF;
+    n = menu_add(n, "List", MA_VIEW_LIST, 0);
+    ex.menu.checked[n - 1] = ex.view == VIEW_LIST ? IC_MENU_CHECK_ON : IC_MENU_CHECK_OFF;
+    n = menu_add(n, IC_MENU_SEPARATOR, MA_NONE, 0);
+    n = menu_add(n, "Refresh", MA_REFRESH, 0);
     ex.menu.count = n;
 }
 
@@ -946,25 +942,23 @@ static void open_menu_at(ic_app_t *app, int x, int y) {
 }
 
 static void menu_activate(ic_app_t *app, int index) {
-    int i = index;
     int item = ex.menu_item;
+    int action = (index >= 0 && index < ex.menu.count) ? ex.menu_actions[index] : MA_NONE;
+    int has_item = item >= 0 && item < ex.count;
     ex.menu_open = 0;
-    
-    if (item >= 0 && item < ex.count) {
-        if (i == 0) { open_item(item); return; }
-        if (!ex.items[item].is_dir) {
-            if (i == 1) { open_in_editor(item); return; }
-            i--;
-        }
-        if (i == 1) { ex.menu_item = item; open_dialog(DLG_RENAME, "Rename", ex.items[item].name); return; }
-        if (i == 2) { ex.info_open = 1; return; }
-        i = 3; 
-    }
-    switch (i) {
-    case 3: open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
-    case 4: open_dialog(DLG_NEW_FILE, "New File", ""); break;
-    case 5: icda_spawn("/apps/terminal.app"); break;
-    case 6: refresh(); break;
+    switch (action) {
+    case MA_OPEN:       if (has_item) open_item(item); break;
+    case MA_EDIT:       if (has_item) open_in_editor(item); break;
+    case MA_RENAME:
+        if (has_item) open_dialog(DLG_RENAME, "Rename", ex.items[item].name);
+        break;
+    case MA_INFO:       if (has_item) ex.info_open = 1; break;
+    case MA_NEW_FOLDER: open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
+    case MA_NEW_FILE:   open_dialog(DLG_NEW_FILE, "New File", ""); break;
+    case MA_TERMINAL:   icda_spawn("/apps/terminal.app"); break;
+    case MA_REFRESH:    refresh(); break;
+    case MA_VIEW_GRID:  ex.view = VIEW_GRID; break;
+    case MA_VIEW_LIST:  ex.view = VIEW_LIST; break;
     default: break;
     }
     (void)app;
@@ -1102,7 +1096,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 }
                 break;
             default:
-                if (ev->key >= 32 && ev->key < 127 && len + 1 < DIALOG_CAP) {
+                if (ev->key >= 32 && ev->key < 127 && !(ev->mods & (IC_MOD_CTRL | IC_MOD_ALT)) && len + 1 < DIALOG_CAP) {
                     for (int k = len; k > ex.dialog_cursor; k--) {
                         ex.dialog_buf[k] = ex.dialog_buf[k - 1];
                     }

@@ -25,7 +25,7 @@ if ($magic -ne 'P6') { throw "not P6: $magic" }
 $w = [int](Read-Token $bytes ([ref]$i))
 $h = [int](Read-Token $bytes ([ref]$i))
 $maxv = [int](Read-Token $bytes ([ref]$i))
-Skip-Ws $bytes ([ref]$i)
+$i++
 $pixStart = $i
 Add-Type -AssemblyName System.Drawing
 $bmp = New-Object System.Drawing.Bitmap($w, $h)

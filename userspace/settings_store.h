@@ -40,6 +40,7 @@ typedef struct {
     int audio;
     int appearance;
     int accent;
+    int tz_minutes;
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -52,6 +53,7 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->audio = 1;
     s->appearance = ICDA_APPEARANCE_DARK;
     s->accent = 0;
+    s->tz_minutes = 0;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -85,6 +87,21 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         return;
     }
     if (key_len + 2 > len) {
+        return;
+    }
+    if (icda_settings_key_is(line + i, key_len, "tz")) {
+        uint64_t j = i + key_len + 1;
+        int sign = 1;
+        int v = 0;
+        if (j < len && (line[j] == '-' || line[j] == '+')) {
+            if (line[j] == '-') sign = -1;
+            j++;
+        }
+        while (j < len && line[j] >= '0' && line[j] <= '9' && v < 10000) {
+            v = v * 10 + (line[j] - '0');
+            j++;
+        }
+        if (v <= 14 * 60) s->tz_minutes = sign * v;
         return;
     }
     {
@@ -187,6 +204,20 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
         accent_line[2] = '\0';
         icda_settings_put(buf, sizeof(buf), &pos, "accent=");
         icda_settings_put(buf, sizeof(buf), &pos, accent_line);
+    }
+    {
+        char tz_line[12];
+        int v = s->tz_minutes < 0 ? -s->tz_minutes : s->tz_minutes;
+        int k = 0;
+        char digits[6];
+        int n = 0;
+        if (s->tz_minutes < 0) tz_line[k++] = '-';
+        do { digits[n++] = (char)('0' + v % 10); v /= 10; } while (v && n < 5);
+        while (n > 0) tz_line[k++] = digits[--n];
+        tz_line[k++] = '\n';
+        tz_line[k] = '\0';
+        icda_settings_put(buf, sizeof(buf), &pos, "tz=");
+        icda_settings_put(buf, sizeof(buf), &pos, tz_line);
     }
     if (pos == 0 || pos >= sizeof(buf)) {
         return -1;

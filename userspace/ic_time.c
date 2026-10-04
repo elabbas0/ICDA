@@ -9,6 +9,7 @@
 
 #include "ic_time.h"
 #include "icda_sys.h"
+#include "settings_store.h"
 
 #define IC_TICK_NS       10000000ULL  
 #define IC_CAL_TICKS     2ULL
@@ -98,6 +99,55 @@ static int ic_weekday(int y, int m, int d) {
     return (dow + 6) % 7;
 }
 
+static int ic_days_in_month(int y, int m) {
+    static const int days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    return m == 2 && leap ? 29 : days[m - 1];
+}
+
+static void ic_datetime_add_minutes(ic_datetime_t *t, int minutes) {
+    int total = t->hour * 60 + t->minute + minutes;
+    int day_shift = 0;
+    while (total < 0) { total += 24 * 60; day_shift--; }
+    while (total >= 24 * 60) { total -= 24 * 60; day_shift++; }
+    t->hour = total / 60;
+    t->minute = total % 60;
+    while (day_shift > 0) {
+        day_shift--;
+        if (++t->day > ic_days_in_month(t->year, t->month)) {
+            t->day = 1;
+            if (++t->month > 12) { t->month = 1; t->year++; }
+        }
+    }
+    while (day_shift < 0) {
+        day_shift++;
+        if (--t->day < 1) {
+            if (--t->month < 1) { t->month = 12; t->year--; }
+            t->day = ic_days_in_month(t->year, t->month);
+        }
+    }
+}
+
+static int ic_tz_cached = 0;
+static uint32_t ic_tz_loaded_ms = 0;
+static int ic_tz_loaded = 0;
+
+void ic_time_reload_tz(void) {
+    ic_tz_loaded = 0;
+}
+
+static int ic_tz_offset(void) {
+    uint32_t now = ic_time_ms();
+    if (!ic_tz_loaded || now - ic_tz_loaded_ms > 3000) {
+        icda_settings_t s;
+        icda_settings_load(&s);
+        ic_tz_cached = s.tz_minutes;
+        ic_tz_loaded_ms = now;
+        ic_tz_loaded = 1;
+    }
+    return ic_tz_cached;
+}
+
 int ic_wallclock(ic_datetime_t *out) {
     char buf[32];
     long n;
@@ -117,6 +167,7 @@ int ic_wallclock(ic_datetime_t *out) {
         return -1;
     }
     out->year = cc * 100 + yy;
+    ic_datetime_add_minutes(out, ic_tz_offset());
     out->weekday = ic_weekday(out->year, out->month, out->day);
     return 0;
 }

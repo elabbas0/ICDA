@@ -15,21 +15,38 @@
 typedef struct {
     int     state;     
     uint32_t param;
+    uint32_t param2;
     uint32_t esc_ms;
 } ic_keydec_t;
 
 #define IC_ESC_TIMEOUT_MS 50
 
-static void ic_app_emit_key(ic_app_t *app, uint32_t key) {
+static void ic_app_emit_key_mods(ic_app_t *app, uint32_t key, uint32_t mods) {
     ic_event_t ev;
     ev.type = IC_EV_KEY;
     ev.x = ev.y = 0;
     ev.button = 0;
     ev.key = key;
     ev.wheel = 0;
+    ev.mods = mods;
     if (app->desc->event) app->desc->event(app, &ev);
     ic_app_caret_reset(app);
     app->dirty = 1;
+}
+
+static void ic_app_emit_key(ic_app_t *app, uint32_t key) {
+    ic_app_emit_key_mods(app, key, 0);
+}
+
+static void ic_app_emit_plain(ic_app_t *app, uint32_t c, uint32_t mods) {
+    if (c == 127) {
+        ic_app_emit_key_mods(app, IC_KEY_BACKSPACE, mods);
+    } else if (c >= 1 && c <= 26 && c != IC_KEY_BACKSPACE && c != IC_KEY_TAB && c != IC_KEY_ENTER) {
+        ic_app_emit_key_mods(app, 'a' + c - 1, mods | IC_MOD_CTRL);
+    } else {
+        if (c >= 'A' && c <= 'Z') mods |= IC_MOD_SHIFT;
+        ic_app_emit_key_mods(app, c, mods);
+    }
 }
 
 static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
@@ -39,40 +56,54 @@ static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
             d->esc_ms = ic_time_ms();
             return;
         }
-        ic_app_emit_key(app, c == 127 ? IC_KEY_BACKSPACE : c);
+        ic_app_emit_plain(app, c, 0);
         return;
     }
     if (d->state == 1) {
         if (c == '[') {
             d->state = 2;
             d->param = 0;
+            d->param2 = 0;
             return;
         }
         d->state = 0;
+        if (c >= 32 && c < 127) {
+            ic_app_emit_plain(app, c, IC_MOD_ALT);
+            return;
+        }
         ic_app_emit_key(app, IC_KEY_ESCAPE);
         ic_app_feed_key(app, d, c);
         return;
     }
-    if (d->state == 2 || d->state == 3) {
+    if (d->state == 2 || d->state == 3 || d->state == 4) {
+        uint32_t mods;
         if (c >= '0' && c <= '9') {
-            d->param = d->param * 10 + (c - '0');
-            d->state = 3;
+            if (d->state == 4) d->param2 = d->param2 * 10 + (c - '0');
+            else d->param = d->param * 10 + (c - '0');
+            if (d->state == 2) d->state = 3;
+            return;
+        }
+        if (c == ';') {
+            d->state = 4;
             return;
         }
         d->state = 0;
+        mods = d->param2 > 1 ? d->param2 - 1 : 0;
         switch (c) {
-        case 'A': ic_app_emit_key(app, IC_KEY_UP); return;
-        case 'B': ic_app_emit_key(app, IC_KEY_DOWN); return;
-        case 'C': ic_app_emit_key(app, IC_KEY_RIGHT); return;
-        case 'D': ic_app_emit_key(app, IC_KEY_LEFT); return;
-        case 'H': ic_app_emit_key(app, IC_KEY_HOME); return;
-        case 'F': ic_app_emit_key(app, IC_KEY_END); return;
+        case 'A': ic_app_emit_key_mods(app, IC_KEY_UP, mods); return;
+        case 'B': ic_app_emit_key_mods(app, IC_KEY_DOWN, mods); return;
+        case 'C': ic_app_emit_key_mods(app, IC_KEY_RIGHT, mods); return;
+        case 'D': ic_app_emit_key_mods(app, IC_KEY_LEFT, mods); return;
+        case 'H': ic_app_emit_key_mods(app, IC_KEY_HOME, mods); return;
+        case 'F': ic_app_emit_key_mods(app, IC_KEY_END, mods); return;
+        case 'Z': ic_app_emit_key_mods(app, IC_KEY_TAB, mods | IC_MOD_SHIFT); return;
         case '~':
-            if (d->param == 3) ic_app_emit_key(app, IC_KEY_DELETE);
-            else if (d->param == 1 || d->param == 7) ic_app_emit_key(app, IC_KEY_HOME);
-            else if (d->param == 4 || d->param == 8) ic_app_emit_key(app, IC_KEY_END);
-            else if (d->param == 5) ic_app_emit_key(app, IC_KEY_PAGE_UP);
-            else if (d->param == 6) ic_app_emit_key(app, IC_KEY_PAGE_DOWN);
+            if (d->param == 3) ic_app_emit_key_mods(app, IC_KEY_DELETE, mods);
+            else if (d->param == 2) ic_app_emit_key_mods(app, IC_KEY_INSERT, mods);
+            else if (d->param == 1 || d->param == 7) ic_app_emit_key_mods(app, IC_KEY_HOME, mods);
+            else if (d->param == 4 || d->param == 8) ic_app_emit_key_mods(app, IC_KEY_END, mods);
+            else if (d->param == 5) ic_app_emit_key_mods(app, IC_KEY_PAGE_UP, mods);
+            else if (d->param == 6) ic_app_emit_key_mods(app, IC_KEY_PAGE_DOWN, mods);
             return;
         default:
             return;
@@ -88,6 +119,7 @@ static void ic_app_emit(ic_app_t *app, ic_event_type_t type, int x, int y, uint8
     ev.button = button;
     ev.key = 0;
     ev.wheel = 0;
+    ev.mods = 0;
     if (app->desc->event) app->desc->event(app, &ev);
     app->dirty = 1;
 }
@@ -127,6 +159,7 @@ static void ic_app_mouse(ic_app_t *app, const gui_msg_t *m) {
         ev.button = 0;
         ev.key = 0;
         ev.wheel = m->mouse.wheel;
+        ev.mods = 0;
         app->desc->event(app, &ev);
         app->dirty = 1;
     }
@@ -154,6 +187,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
     for (uint64_t i = 0; i < sizeof(app); i++) ((uint8_t *)&app)[i] = 0;
     keys.state = 0;
     keys.param = 0;
+    keys.param2 = 0;
     keys.esc_ms = 0;
     app.desc = desc;
     app.user = user;

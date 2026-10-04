@@ -304,6 +304,30 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
 #define WM_LAUNCH_FOOT_H  52
 #define WM_LAUNCH_ICON    44
 
+char wm_launch_query[WM_LAUNCH_QUERY_CAP];
+
+static int wm_lower(int c) {
+    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
+}
+
+static int wm_contains_ci(const char *hay, const char *needle) {
+    if (!needle[0]) return 1;
+    for (int i = 0; hay[i]; i++) {
+        int k = 0;
+        while (needle[k] && hay[i + k] && wm_lower(hay[i + k]) == wm_lower(needle[k])) k++;
+        if (!needle[k]) return 1;
+    }
+    return 0;
+}
+
+int wm_launch_visible(int *out) {
+    int n = 0;
+    for (int i = 0; i < wm_app_count; i++) {
+        if (wm_contains_ci(wm_apps[i].label, wm_launch_query)) out[n++] = i;
+    }
+    return n;
+}
+
 static int wm_launch_rows(void) {
     return (wm_app_count + WM_LAUNCH_COLS - 1) / WM_LAUNCH_COLS;
 }
@@ -337,8 +361,12 @@ static ic_rect_t wm_launch_power_button(ic_rect_t panel, int restart) {
 int wm_launcher_hit(int sw, int sh, int mx, int my) {
     ic_rect_t panel = wm_launcher_rect(sw, sh);
     if (!ic_ui_hit(panel, mx, my)) return WM_LAUNCH_OUTSIDE;
-    for (int i = 0; i < wm_app_count; i++) {
-        if (ic_ui_hit(ic_rect_inset(wm_launch_tile(panel, i), 4, 2), mx, my)) return i;
+    {
+        int vis[WM_LAUNCH_MAX_APPS];
+        int n = wm_launch_visible(vis);
+        for (int k = 0; k < n; k++) {
+            if (ic_ui_hit(ic_rect_inset(wm_launch_tile(panel, k), 4, 2), mx, my)) return vis[k];
+        }
     }
     if (ic_ui_hit(wm_launch_power_button(panel, 1), mx, my)) return WM_LAUNCH_RESTART;
     if (ic_ui_hit(wm_launch_power_button(panel, 0), mx, my)) return WM_LAUNCH_SHUTDOWN;
@@ -354,11 +382,34 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
     const ic_face_t *fl = ic_font(IC_FONT_FOOTNOTE);
 
     ic_ui_panel(c, panel, IC_R_PANEL, IC_ELEV_MENU, scratch, scratch_len);
-    ic_text_draw(c, ft, panel.x + WM_LAUNCH_PAD + 6, panel.y + WM_LAUNCH_PAD + 6 + ft->cap_h + 4,
-                 "Applications", p->label);
+    {
+        ic_textfield_t tf;
+        int len = 0;
+        while (wm_launch_query[len]) len++;
+        tf.text = wm_launch_query;
+        tf.cursor = len;
+        tf.sel_start = tf.sel_end = len;
+        tf.focused = 1;
+        tf.caret_on = 1;
+        tf.placeholder = "Search applications";
+        tf.leading = IC_SYM_SEARCH;
+        tf.scroll_px = 0;
+        ic_ui_textfield(c, ic_rect_make(panel.x + WM_LAUNCH_PAD, panel.y + WM_LAUNCH_PAD,
+                                        panel.w - 2 * WM_LAUNCH_PAD, IC_H_CONTROL), &tf);
+    }
+    (void)ft;
 
-    for (int i = 0; i < wm_app_count; i++) {
-        ic_rect_t tile = wm_launch_tile(panel, i);
+    {
+    int vis[WM_LAUNCH_MAX_APPS];
+    int nvis = wm_launch_visible(vis);
+    if (nvis == 0) {
+        ic_rect_t area = ic_rect_make(panel.x, panel.y + WM_LAUNCH_PAD + WM_LAUNCH_TITLE_H, panel.w,
+                                      foot.y - panel.y - WM_LAUNCH_PAD - WM_LAUNCH_TITLE_H);
+        ic_text_draw_in(c, fl, area, "No matching applications", p->label_secondary, IC_ALIGN_CENTER);
+    }
+    for (int k = 0; k < nvis; k++) {
+        int i = vis[k];
+        ic_rect_t tile = wm_launch_tile(panel, k);
         ic_rect_t hit = ic_rect_inset(tile, 4, 2);
         const ic_icon_t *icon = ic_icon_builtin(wm_apps[i].icon);
         if (!icon) icon = ic_icon_builtin("app");
@@ -369,6 +420,7 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
         }
         ic_text_draw_in(c, fl, ic_rect_make(tile.x + 4, tile.y + 60, tile.w - 8, 20),
                         wm_apps[i].label, p->label, IC_ALIGN_CENTER);
+    }
     }
 
     ic_gfx_hline(c, foot.x + WM_LAUNCH_PAD, foot.y, foot.w - 2 * WM_LAUNCH_PAD, p->separator);

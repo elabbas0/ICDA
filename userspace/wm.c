@@ -55,6 +55,7 @@ typedef struct {
     int       h;
     int       minimized;
     int       maximized;
+    int       snapped;
     int       closing;
     int       anim_kind;
     uint64_t  anim_t0;
@@ -118,6 +119,12 @@ static uint8_t mouse_buttons = 0;
 
 static int drag_win = -1;           
 static int drag_off_x = 0;
+static int snap_zone = 0;
+static int overview_open;
+static void overview_draw(void);
+static void overview_set(int open);
+static void overview_click(int mx, int my);
+static int overview_hit(int mx, int my);
 static int drag_off_y = 0;
 static int resize_win = -1;         
 static wm_hit_t resize_edge = WM_HIT_NONE;
@@ -663,6 +670,7 @@ enum {
     CTX_PROPS,
     CTX_ARRANGE,
     CTX_SETTINGS,
+    CTX_ADD_MENU,
     CTX_PIN_BASE = 16
 };
 
@@ -675,6 +683,12 @@ static ic_menu_model_t ctx_model;
 static int ctx_actions[IC_MENU_ITEMS_MAX];
 static char ctx_labels[IC_MENU_ITEMS_MAX][CTX_LABEL_LEN];
 static ic_tween_t ctx_fade;
+static int sub_open = 0;
+static int sub_x = 0;
+static int sub_y = 0;
+static int sub_hover = -1;
+static ic_menu_model_t sub_model;
+static int sub_actions[IC_MENU_ITEMS_MAX];
 
 static int props_open = 0;
 static int props_icon = -1;
@@ -684,8 +698,25 @@ static ic_tween_t props_fade;
 #define PROPS_W 300
 #define PROPS_H ic_ui_alert_height(IC_SYM_INFO, "")
 
-static ic_rect_t ctx_rect(void) {
+static ic_rect_t ctx_main_rect(void) {
     return ic_rect_make(ctx_x, ctx_y, ic_ui_menu_width(&ctx_model), ic_ui_menu_height(&ctx_model));
+}
+
+static ic_rect_t ctx_sub_rect(void) {
+    return ic_rect_make(sub_x, sub_y, ic_ui_menu_width(&sub_model), ic_ui_menu_height(&sub_model));
+}
+
+static ic_rect_t ctx_rect(void) {
+    ic_rect_t a = ctx_main_rect();
+    ic_rect_t b;
+    int x0, y0, x1, y1;
+    if (!sub_open) return a;
+    b = ctx_sub_rect();
+    x0 = a.x < b.x ? a.x : b.x;
+    y0 = a.y < b.y ? a.y : b.y;
+    x1 = a.x + a.w > b.x + b.w ? a.x + a.w : b.x + b.w;
+    y1 = a.y + a.h > b.y + b.h ? a.y + a.h : b.y + b.h;
+    return ic_rect_make(x0, y0, x1 - x0, y1 - y0);
 }
 
 static ic_rect_t props_rect(void) {
@@ -709,6 +740,7 @@ static void ctx_add(int action, const char *a, const char *b) {
     while (b && b[j] && i < CTX_LABEL_LEN - 1) ctx_labels[n][i++] = b[j++];
     ctx_labels[n][i] = '\0';
     ctx_model.labels[n] = ctx_labels[n];
+    ctx_model.submenu[n] = action == CTX_ADD_MENU;
     ctx_model.shortcuts[n] = 0;
     ctx_model.disabled[n] = 0;
     ctx_actions[n] = action;
@@ -718,6 +750,8 @@ static void ctx_add(int action, const char *a, const char *b) {
 static void ctx_close(void) {
     if (ctx_open) {
         ctx_open = 0;
+        mark_dirty_rect(reach_of(ctx_rect()));
+        sub_open = 0;
         ic_tween_to(&ctx_fade, 0.0f, (uint32_t)anim_ms(IC_DUR_INSTANT), IC_EASE_EXIT);
         mark_dirty_rect(reach_of(ctx_rect()));
     }
@@ -739,24 +773,37 @@ static void ctx_open_at(int x, int y, int icon) {
     for (int k = 0; k < IC_MENU_ITEMS_MAX; k++) {
         ctx_model.labels[k] = 0;
         ctx_model.shortcuts[k] = 0;
-        ctx_model.disabled[k] = 0;
+        ctx_model.checked[k] = 0;
+        ctx_model.submenu[k] = 0;
+        sub_model.labels[k] = 0;
+        sub_model.shortcuts[k] = 0;
+        sub_model.disabled[k] = 0;
+        sub_model.checked[k] = 0;
+        sub_model.submenu[k] = 0;
     }
     ctx_model.count = 0;
     ctx_model.hover = -1;
+    sub_model.count = 0;
+    sub_model.hover = -1;
+    sub_open = 0;
+    sub_hover = -1;
     if (icon >= 0 && icon < desk_icon_count) {
         ctx_add(CTX_OPEN, "Open", 0);
         ctx_add(0, 0, 0);
         ctx_add(CTX_TOGGLE_PIN, desk_icons[icon].pinned ? "Remove from Desktop" : "Add to Desktop", 0);
         ctx_add(CTX_PROPS, "Get Info", 0);
     } else {
-        int any = 0;
-        for (int j = 0; j < desk_icon_count && ctx_model.count < IC_MENU_ITEMS_MAX - 4; j++) {
+        for (int j = 0; j < desk_icon_count && sub_model.count < IC_MENU_ITEMS_MAX; j++) {
             if (!desk_icons[j].pinned) {
-                ctx_add(CTX_PIN_BASE + j, "Add ", desk_icons[j].label);
-                any = 1;
+                sub_model.labels[sub_model.count] = desk_icons[j].label;
+                sub_actions[sub_model.count] = CTX_PIN_BASE + j;
+                sub_model.count++;
             }
         }
-        if (any) ctx_add(0, 0, 0);
+        if (sub_model.count > 0) {
+            ctx_add(CTX_ADD_MENU, "Add to Desktop", 0);
+            ctx_add(0, 0, 0);
+        }
         ctx_add(CTX_ARRANGE, "Clean Up", 0);
         ctx_add(CTX_SETTINGS, "Appearance\xE2\x80\xA6", 0);
     }
@@ -846,14 +893,7 @@ static int desk_free_cell(int *cx, int *cy) {
     return 0;
 }
 
-static void desk_activate(int which) {
-    int a;
-
-    if (which < 0 || which >= ctx_model.count) {
-        ctx_close();
-        return;
-    }
-    a = ctx_actions[which];
+static void desk_run_action(int a) {
     if (a == CTX_OPEN && ctx_icon >= 0 && ctx_icon < desk_icon_count) {
         icda_spawn(desk_icons[ctx_icon].path);
     } else if (a == CTX_TOGGLE_PIN && ctx_icon >= 0 && ctx_icon < desk_icon_count) {
@@ -893,6 +933,39 @@ static void desk_activate(int which) {
         }
     }
     ctx_close();
+}
+
+static void desk_activate(int which) {
+    if (which < 0 || which >= ctx_model.count) {
+        ctx_close();
+        return;
+    }
+    if (ctx_actions[which] == CTX_ADD_MENU) return;
+    desk_run_action(ctx_actions[which]);
+}
+
+static void sub_show(int item) {
+    ic_rect_t main = ctx_main_rect();
+    ic_rect_t row = ic_ui_menu_item_rect(&ctx_model, ctx_x, ctx_y, item);
+    int pad = ic_ui_menu_item_rect(&sub_model, 0, 0, 0).y;
+    int sw = ic_ui_menu_width(&sub_model);
+    int sh = ic_ui_menu_height(&sub_model);
+    if (sub_open) return;
+    sub_x = main.x + main.w - 4;
+    if (sub_x + sw > scr_w - 4) sub_x = main.x - sw + 4;
+    sub_y = row.y - pad;
+    if (sub_y + sh > scr_h - WM_BAR_H - 4) sub_y = scr_h - WM_BAR_H - 4 - sh;
+    if (sub_y < 4) sub_y = 4;
+    sub_open = 1;
+    sub_hover = -1;
+    mark_dirty_rect(reach_of(ctx_rect()));
+}
+
+static void sub_hide(void) {
+    if (!sub_open) return;
+    mark_dirty_rect(reach_of(ctx_rect()));
+    sub_open = 0;
+    sub_hover = -1;
 }
 
 
@@ -1140,6 +1213,7 @@ static void mark_dirty_launcher(void) {
 static void launcher_set(int open) {
     if (launcher_open == open) return;
     launcher_open = open;
+    wm_launch_query[0] = 0;
     launcher_hover = WM_LAUNCH_NONE;
     ic_tween_to(&launcher_fade, open ? 1.0f : 0.0f,
                 (uint32_t)anim_ms(open ? IC_DUR_FAST : IC_DUR_INSTANT),
@@ -1159,8 +1233,8 @@ static void clock_refresh(void) {
         }
         return;
     }
-    if (t.minute != clock_minute) {
-        clock_minute = t.minute;
+    if ((t.day * 24 + t.hour) * 60 + t.minute != clock_minute) {
+        clock_minute = (t.day * 24 + t.hour) * 60 + t.minute;
         ic_format_hm(&t, clock_time, sizeof(clock_time));
         ic_format_day(&t, clock_date, sizeof(clock_date));
         mark_dirty_bar();
@@ -1582,10 +1656,13 @@ static void toggle_maximize(int idx) {
     if (!win->valid || win->closing) return;
     if (!win->maximized) {
         ic_rect_t wa = work_area();
-        win->restore_x = win->x;
-        win->restore_y = win->y;
-        win->restore_w = win->w;
-        win->restore_h = win->h;
+        if (!win->snapped) {
+            win->restore_x = win->x;
+            win->restore_y = win->y;
+            win->restore_w = win->w;
+            win->restore_h = win->h;
+        }
+        win->snapped = 0;
         to = ic_rect_make(wa.x, wa.y + WM_TITLE_H, wa.w, wa.h - WM_TITLE_H);
         win->anim_maximized = 1;
     } else {
@@ -1601,6 +1678,44 @@ static void toggle_maximize(int idx) {
         win->w = to.w;
         win->h = to.h;
         win->maximized = win->anim_maximized;
+        win->anim_kind = WM_ANIM_NONE;
+        win_resize_buffer(win, win->w, win->h);
+    }
+}
+
+static ic_rect_t snap_rect(int zone) {
+    ic_rect_t wa = work_area();
+    if (zone == 1) return ic_rect_make(wa.x, wa.y, wa.w / 2, wa.h);
+    if (zone == 2) return ic_rect_make(wa.x + wa.w / 2, wa.y, wa.w - wa.w / 2, wa.h);
+    return wa;
+}
+
+static void apply_snap(int idx, int zone) {
+    wm_window_t *win = &windows[idx];
+    ic_rect_t s, to;
+    if (!win->valid || win->closing) return;
+    if (zone == 3) {
+        if (!win->maximized) toggle_maximize(idx);
+        return;
+    }
+    if (!win->snapped && !win->maximized) {
+        win->restore_x = win->x;
+        win->restore_y = win->y;
+        win->restore_w = win->w;
+        win->restore_h = win->h;
+    }
+    s = snap_rect(zone);
+    to = ic_rect_make(s.x, s.y + WM_TITLE_H, s.w, s.h - WM_TITLE_H);
+    win->maximized = 0;
+    win->anim_maximized = 0;
+    win->snapped = 1;
+    anim_start(win, WM_ANIM_GEOMETRY, ic_rect_make(win->x, win->y, win->w, win->h), to,
+               IC_DUR_BASE + 40);
+    if (win->anim_ms == 0) {
+        win->x = to.x;
+        win->y = to.y;
+        win->w = to.w;
+        win->h = to.h;
         win->anim_kind = WM_ANIM_NONE;
         win_resize_buffer(win, win->w, win->h);
     }
@@ -1871,6 +1986,10 @@ static void draw_launcher_layer(ic_canvas_t *c) {
 static void draw_ctx_layer(ic_canvas_t *c) {
     ctx_model.hover = ctx_hover;
     ic_ui_menu(c, &ctx_model, ctx_x, ctx_y, blur_scratch, BLUR_SCRATCH_PX);
+    if (sub_open) {
+        sub_model.hover = sub_hover;
+        ic_ui_menu(c, &sub_model, sub_x, sub_y, blur_scratch, BLUR_SCRATCH_PX);
+    }
 }
 
 static void draw_props_layer(ic_canvas_t *c) {
@@ -1889,7 +2008,17 @@ static void draw_bar(void) {
 }
 
 static void draw_overlays(void) {
+    if (overview_open) {
+        overview_draw();
+        return;
+    }
     if (rubber_active) wm_rubber_band_draw(&scene, rubber_x0, rubber_y0, rubber_x1, rubber_y1);
+    if (snap_zone && drag_win >= 0) {
+        ic_rect_t s = ic_rect_inset(snap_rect(snap_zone), 6, 6);
+        const ic_palette_t *p = ic_palette();
+        ic_gfx_rrect(&scene, s.x, s.y, s.w, s.h, IC_R_WINDOW, ic_color_with_alpha(p->accent, 0x38));
+        ic_gfx_rrect_stroke(&scene, s.x, s.y, s.w, s.h, IC_R_WINDOW, 1.5f, ic_color_with_alpha(p->accent, 0xB0));
+    }
     if (desk_dragging && desk_drag_icon >= 0 && desk_drag_icon < desk_icon_count) {
         desk_icon_t *d = &desk_icons[desk_drag_icon];
         wm_desk_icon_draw(&scene, ic_rect_make(desk_ghost_x, desk_ghost_y, WM_DESK_CELL_W, WM_DESK_CELL_H),
@@ -2208,6 +2337,96 @@ static int handle_desktop_icon_click(int mx, int my) {
     return 0;
 }
 
+
+static int overview_open = 0;
+static int overview_hover = -1;
+
+static int overview_windows(int *out) {
+    int n = 0;
+    for (int i = 0; i < task_count; i++) {
+        int idx = task_order[i];
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        if (!windows[idx].valid || windows[idx].closing) continue;
+        out[n++] = idx;
+    }
+    return n;
+}
+
+static ic_rect_t overview_cell(int k, int n) {
+    ic_rect_t wa = ic_rect_inset(work_area(), 48, 48);
+    int cols = 1, rows;
+    while (cols * cols < n) cols++;
+    rows = (n + cols - 1) / cols;
+    if (rows < 1) rows = 1;
+    return ic_rect_make(wa.x + (k % cols) * (wa.w / cols), wa.y + (k / cols) * (wa.h / rows),
+                        wa.w / cols, wa.h / rows);
+}
+
+static ic_rect_t overview_thumb(int k, int n, const wm_window_t *win) {
+    ic_rect_t cell = ic_rect_inset(overview_cell(k, n), 16, 12);
+    int ah = cell.h - 28;
+    int w = cell.w, h = ah;
+    if (win->pix_w <= 0 || win->pix_h <= 0 || ah <= 0) return ic_rect_make(cell.x, cell.y, 0, 0);
+    if ((int64_t)w * win->pix_h > (int64_t)h * win->pix_w) w = h * win->pix_w / win->pix_h;
+    else h = w * win->pix_h / win->pix_w;
+    return ic_rect_make(cell.x + (cell.w - w) / 2, cell.y + (ah - h) / 2, w, h);
+}
+
+static int overview_hit(int mx, int my) {
+    int list[MAX_WINDOWS];
+    int n = overview_windows(list);
+    for (int k = 0; k < n; k++) {
+        if (ic_ui_hit(ic_rect_inset(overview_thumb(k, n, &windows[list[k]]), -6, -6), mx, my)) return k;
+    }
+    return -1;
+}
+
+static void overview_set(int open) {
+    int list[MAX_WINDOWS];
+    if (open && overview_windows(list) == 0) open = 0;
+    if (open == overview_open) return;
+    overview_open = open;
+    overview_hover = -1;
+    if (open) {
+        launcher_set(0);
+        ctx_close();
+    }
+    dirty_full = 1;
+}
+
+static void overview_draw(void) {
+    const ic_palette_t *p = ic_palette();
+    int list[MAX_WINDOWS];
+    int n = overview_windows(list);
+    ic_gfx_fill(&scene, 0, 0, scr_w, scr_h - WM_BAR_H, IC_BLACK_A(0xD8));
+    for (int k = 0; k < n; k++) {
+        wm_window_t *win = &windows[list[k]];
+        ic_rect_t t = overview_thumb(k, n, win);
+        ic_rect_t cell = ic_rect_inset(overview_cell(k, n), 16, 12);
+        if (t.w <= 0) continue;
+        ic_theme_shadow(&scene, t.x, t.y, t.w, t.h, IC_R_WINDOW * 0.6f, IC_ELEV_WINDOW);
+        ic_gfx_blit_scaled(&scene, t.x, t.y, t.w, t.h, win->pixels, win->pix_w, win->pix_h,
+                           win->pix_w, IC_R_WINDOW * 0.6f, win->minimized ? 150 : 255);
+        if (k == overview_hover) {
+            ic_gfx_rrect_stroke(&scene, t.x - 4, t.y - 4, t.w + 8, t.h + 8, IC_R_WINDOW, 2.5f, p->accent);
+        }
+        ic_text_draw_in(&scene, ic_font(IC_FONT_BODY),
+                        ic_rect_make(cell.x, t.y + t.h + 8, cell.w, 20), win->title,
+                        k == overview_hover ? IC_WHITE : IC_WHITE_A(0xC8), IC_ALIGN_CENTER);
+    }
+}
+
+static void overview_click(int mx, int my) {
+    int list[MAX_WINDOWS];
+    int n = overview_windows(list);
+    int k = overview_hit(mx, my);
+    overview_set(0);
+    if (k >= 0 && k < n) {
+        if (windows[list[k]].minimized) restore_window(list[k]);
+        bring_to_front(list[k]);
+    }
+}
+
 static void handle_bar_click(int hit) {
     if (hit == WM_BAR_LAUNCHER) {
         launcher_set(!launcher_open);
@@ -2307,6 +2526,10 @@ static void left_press(void) {
     int idx;
     wm_hit_t hit;
 
+    if (overview_open) {
+        overview_click(mouse_x, mouse_y);
+        return;
+    }
     if (props_open) {
         ic_rect_t r = props_rect();
         
@@ -2316,8 +2539,15 @@ static void left_press(void) {
         return;
     }
     if (ctx_open) {
-        int which = ic_ui_menu_hit(&ctx_model, ctx_x, ctx_y, mouse_x, mouse_y);
-        if (which >= 0) desk_activate(which);
+        int which;
+        if (sub_open && ic_ui_hit(ctx_sub_rect(), mouse_x, mouse_y)) {
+            which = ic_ui_menu_hit(&sub_model, sub_x, sub_y, mouse_x, mouse_y);
+            if (which >= 0) desk_run_action(sub_actions[which]);
+            return;
+        }
+        which = ic_ui_menu_hit(&ctx_model, ctx_x, ctx_y, mouse_x, mouse_y);
+        if (which >= 0 && ctx_actions[which] == CTX_ADD_MENU) sub_show(which);
+        else if (which >= 0) desk_activate(which);
         else ctx_close();
         return;
     }
@@ -2406,7 +2636,15 @@ static void left_release(void) {
         }
         press_hit = WM_HIT_NONE;
     }
-    if (drag_win >= 0) drag_win = -1;
+    if (drag_win >= 0) {
+        int idx = drag_win;
+        drag_win = -1;
+        if (snap_zone) {
+            mark_dirty_rect(snap_rect(snap_zone));
+            apply_snap(idx, snap_zone);
+            snap_zone = 0;
+        }
+    }
     if (resize_win >= 0) end_resize();
     if (capture_win >= 0) {
         wm_window_t *win = &windows[capture_win];
@@ -2433,6 +2671,10 @@ static void right_edge(uint8_t prev_buttons) {
     wm_hit_t hit;
 
     if (!pressed && !released) return;
+    if (overview_open) {
+        if (pressed) overview_set(0);
+        return;
+    }
     if (pressed && (ctx_open || props_open || launcher_open)) {
         ctx_close();
         props_close();
@@ -2475,6 +2717,14 @@ static void pointer_moved(void) {
     int idx;
     wm_hit_t hit;
 
+    if (overview_open) {
+        int h = overview_hit(mouse_x, mouse_y);
+        if (h != overview_hover) {
+            overview_hover = h;
+            dirty_full = 1;
+        }
+        return;
+    }
     desk_track_motion(mouse_x, mouse_y, mouse_buttons);
 
     if (drag_win >= 0) {
@@ -2482,12 +2732,11 @@ static void pointer_moved(void) {
         if (!win->valid || win->closing) {
             drag_win = -1;
         } else {
-            if (win->maximized) {
-                
-
+            if (win->maximized || win->snapped) {
                 int rw = win->restore_w;
                 mark_dirty_win(win);
                 win->maximized = 0;
+                win->snapped = 0;
                 drag_off_x = rw * drag_off_x / (win->w > 0 ? win->w : 1);
                 win->w = rw;
                 win->h = win->restore_h;
@@ -2498,6 +2747,14 @@ static void pointer_moved(void) {
             win->y = mouse_y - drag_off_y;
             clamp_window(win);
             mark_dirty_win(win);
+            {
+                int z = mouse_x <= 3 ? 1 : (mouse_x >= scr_w - 4 ? 2 : (mouse_y <= 3 ? 3 : 0));
+                if (z != snap_zone) {
+                    if (snap_zone) mark_dirty_rect(snap_rect(snap_zone));
+                    snap_zone = z;
+                    if (snap_zone) mark_dirty_rect(snap_rect(snap_zone));
+                }
+            }
         }
         return;
     }
@@ -2528,7 +2785,17 @@ static void pointer_moved(void) {
         }
     }
     if (ctx_open) {
-        int h = ic_ui_menu_hit(&ctx_model, ctx_x, ctx_y, mouse_x, mouse_y);
+        int in_sub = sub_open && ic_ui_hit(ctx_sub_rect(), mouse_x, mouse_y);
+        int h = in_sub ? ctx_hover : ic_ui_menu_hit(&ctx_model, ctx_x, ctx_y, mouse_x, mouse_y);
+        if (sub_open) {
+            int sh = in_sub ? ic_ui_menu_hit(&sub_model, sub_x, sub_y, mouse_x, mouse_y) : -1;
+            if (sh != sub_hover) {
+                sub_hover = sh;
+                mark_dirty_rect(ctx_sub_rect());
+            }
+        }
+        if (h >= 0 && ctx_actions[h] == CTX_ADD_MENU) sub_show(h);
+        else if (h >= 0) sub_hide();
         if (h != ctx_hover) {
             ctx_hover = h;
             mark_dirty_rect(ctx_rect());
@@ -2572,6 +2839,23 @@ static void pointer_moved(void) {
 }
 
 static void handle_key(long key) {
+    static int esc_swallow = 0;
+    if (esc_swallow == 1) {
+        esc_swallow = key == '[' ? 2 : 0;
+        if (esc_swallow) return;
+    } else if (esc_swallow == 2) {
+        if (key >= 0x40 && key <= 0x7E) esc_swallow = 0;
+        return;
+    }
+    if (key == 0x81) {
+        overview_set(!overview_open);
+        return;
+    }
+    if (key == 27 && overview_open) {
+        overview_set(0);
+        esc_swallow = 1;
+        return;
+    }
     if (key == 0x80) {
         
         wm_debug_overlay = !wm_debug_overlay;
@@ -2582,10 +2866,27 @@ static void handle_key(long key) {
         ctx_close();
         props_close();
         launcher_set(0);
+        esc_swallow = 1;
         return;
     }
     if (props_open && key == 13) {
         props_close();
+        return;
+    }
+    if (launcher_open) {
+        int len = 0;
+        while (wm_launch_query[len]) len++;
+        if (key == 13) {
+            int vis[WM_LAUNCH_MAX_APPS];
+            if (wm_launch_visible(vis) > 0) handle_launcher_click(vis[0]);
+        } else if (key == 8 || key == 127) {
+            if (len > 0) wm_launch_query[len - 1] = 0;
+        } else if (key >= 32 && key < 127 && len + 1 < WM_LAUNCH_QUERY_CAP) {
+            wm_launch_query[len] = (char)key;
+            wm_launch_query[len + 1] = 0;
+        }
+        launcher_hover = WM_LAUNCH_NONE;
+        mark_dirty_launcher();
         return;
     }
     if (focused_window_idx != -1) {
@@ -2720,6 +3021,7 @@ int main(int argc, char **argv) {
         }
 
         if (animations_tick()) need_frame = 1;
+        if (overview_open && (dirty_count > 0 || need_frame)) dirty_full = 1;
 
         
 

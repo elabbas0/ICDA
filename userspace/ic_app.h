@@ -35,7 +35,14 @@ enum {
     IC_KEY_HOME,
     IC_KEY_END,
     IC_KEY_PAGE_UP,
-    IC_KEY_PAGE_DOWN
+    IC_KEY_PAGE_DOWN,
+    IC_KEY_INSERT
+};
+
+enum {
+    IC_MOD_SHIFT = 1,
+    IC_MOD_ALT   = 2,
+    IC_MOD_CTRL  = 4
 };
 
 typedef enum {
@@ -57,6 +64,7 @@ typedef struct {
     uint8_t         button;   
     uint32_t        key;
     int             wheel;    
+    uint32_t        mods;     
 } ic_event_t;
 
 typedef struct ic_app ic_app_t;

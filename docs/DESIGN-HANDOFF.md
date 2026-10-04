@@ -153,10 +153,12 @@ patch lines 30-31 of `kernel/boot.asm` to request a fixed size;
 `scripts/build-resolution-iso.sh 1024x768 1920x1080` does that.
 
 Harness additions: `scripts/qmp-input.ps1` takes `-Key shift+minus`
-chords, `-Wheel N`, and `-Press`/`-Release` for drags. A screendump taken
-while QEMU is powering off can show rotated colour channels; that is a
-capture artifact, not a WM bug (a frame frozen with QMP `stop` mid-fade
-is correct).
+chords, `-Wheel N`, and `-Press`/`-Release` for drags. `ppm2png.ps1`
+used to skip every whitespace-valued byte after the PPM maxval, so a frame
+whose first pixel was dark (bytes 9, 10, 13 or 32) came out shifted by a
+byte or two, which looks exactly like rotated colour channels. It now
+skips exactly one byte, as P6 requires. Distrust any older screenshot of
+a dark full-screen overlay.
 
 ### P3: polish
 - Cursor: done. The WM builds 4x4-supersampled sprites with a dark rim
@@ -183,11 +185,35 @@ is correct).
   were inverted, and Explorer paging never worked (grid layout reset the
   scroll every frame; list view ignored the keys); both are fixed. Lists
   now follow the selection only when it changes, so wheel scrolling sticks.
-- Keyboard: no modifier info reaches apps, so no Cmd/Ctrl shortcuts or
-  Shift-select.
-- Timezone: `/dev/rtc` is shown as-is. Add a `timezone=` setting.
-- `ic_ui_menu` has no submenus or checkmarks; the launcher has no search.
-- Window snapping and a window overview.
+- Keyboard: done. The PS/2 driver emits xterm-style sequences with a
+  modifier parameter (`ESC [1;5A` for Ctrl+Up), Home/End/PgUp/PgDn/Insert
+  (they never reached apps before), right Ctrl/Alt, Shift+Tab as
+  `ESC [Z`, and an ESC prefix for Alt+key. `ic_app` decodes them into
+  `ev->mods` (`IC_MOD_SHIFT`, `IC_MOD_ALT`, `IC_MOD_CTRL`); Ctrl+letter
+  arrives as the letter with `IC_MOD_CTRL`. The WM swallows a whole
+  escape sequence when ESC closes an overlay. Editor: Shift-select with
+  highlight, typing replaces the selection, Ctrl+A/S, Ctrl+Home/End,
+  Ctrl+Left/Right by word. Terminal: Ctrl+C/L/U/A/E. Browser: Ctrl+L,
+  Alt+Left/Right. No clipboard yet.
+- Timezone: done. `tz=<minutes>` in the settings file (signed), set from
+  Settings > Date & Time in half-hour steps. `ic_wallclock` applies it
+  (re-read every 3 s, or at once after `ic_time_reload_tz()`), so the
+  taskbar clock and every app follow it. The taskbar clock now refreshes
+  when the hour or day changes, not only the minute.
+- Menus: done. `ic_menu_model_t` has `checked[]` (`IC_MENU_CHECK_OFF/ON`,
+  which also reserves the check column) and `submenu[]` (draws a
+  chevron); `ic_ui_menu_item_rect()` positions a child. Menu models must
+  be zero-initialised. The desktop menu groups "Add ..." under an
+  "Add to Desktop" submenu; Explorer shows Icons/List with a check.
+  Explorer's context menu used hard-coded indices that ran "New Folder"
+  for most entries; it now maps entries to action ids.
+- Launcher search: done. Typing while the launcher is open filters apps
+  by substring; Enter launches the first match, Backspace edits.
+- Snapping: done. Drag a title bar to the left or right edge for a half,
+  or to the top to maximize; a translucent preview shows the target.
+  Dragging a snapped window away restores its size.
+- Overview: done. F11 (kernel sentinel `0x81`) shows every window as a
+  scaled thumbnail; click one to bring it forward, Escape or F11 closes.
 
 ## Regenerating assets
 ```sh

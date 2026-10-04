@@ -341,7 +341,7 @@ static void draw_group(ic_app_t *app, ic_canvas_t *c, int i) {
         break;
     }
     case ROW_MENU: {
-        ic_menu_model_t m;
+        ic_menu_model_t m = {0};
         ic_rect_t mr = menu_rect_in(app, i);
         for (int k = 0; k < 3; k++) {
             m.labels[k] = MENU_LABELS[k];
@@ -431,7 +431,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 }
                 break;
             case ROW_MENU: {
-                ic_menu_model_t m;
+                ic_menu_model_t m = {0};
                 ic_rect_t mr = menu_rect_in(app, g);
                 for (int k = 0; k < 3; k++) {
                     m.labels[k] = MENU_LABELS[k];
@@ -574,7 +574,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         default:
-            if (ev->key >= 32 && ev->key < 127) {
+            if (ev->key >= 32 && ev->key < 127 && !(ev->mods & (IC_MOD_CTRL | IC_MOD_ALT))) {
                 int len = (int)ic_strlen(gd.field);
                 if (len + 1 < (int)sizeof(gd.field)) {
                     for (int k = len; k > gd.field_cursor; k--) gd.field[k] = gd.field[k - 1];

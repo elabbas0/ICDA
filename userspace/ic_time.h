@@ -37,6 +37,7 @@ typedef struct {
 
 
 int  ic_wallclock(ic_datetime_t *out);
+void ic_time_reload_tz(void);
 
 void ic_format_hm(const ic_datetime_t *t, char *buf, int cap);
 

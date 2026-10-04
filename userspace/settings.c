@@ -24,13 +24,13 @@
 #define GROUP_GAP     IC_SP_6
 #define ROW_H         IC_H_ROW_TALL
 
-enum { PANE_APPEARANCE = 0, PANE_MOTION, PANE_SOUND, PANE_ABOUT, PANE_COUNT };
+enum { PANE_APPEARANCE = 0, PANE_MOTION, PANE_SOUND, PANE_TIME, PANE_ABOUT, PANE_COUNT };
 
 static const char *const pane_titles[PANE_COUNT] = {
-    "Appearance", "Motion & Display", "Sound", "About"
+    "Appearance", "Motion & Display", "Sound", "Date & Time", "About"
 };
 static const ic_symbol_t pane_symbols[PANE_COUNT] = {
-    IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_INFO
+    IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_GLOBE, IC_SYM_INFO
 };
 
 
@@ -62,6 +62,7 @@ typedef struct {
     int             hover_row;        
     int             hover_swatch;
     int             hover_segment;
+    int             hover_tz;
     ic_tween_t      toggle_pos[TOG_COUNT];
     ic_tween_t      segment_pos;
     ic_tween_t      row_hover[4];
@@ -233,6 +234,71 @@ static void draw_toggles(ic_app_t *app, ic_canvas_t *c, int pane) {
     }
 }
 
+static ic_rect_t tz_group(ic_app_t *app) {
+    return group_rect(app, GROUP_Y, 2);
+}
+
+static ic_rect_t tz_button_rect(ic_app_t *app, int plus) {
+    ic_rect_t r = row_rect(tz_group(app), 0);
+    int x = r.x + r.w - IC_SP_3 - IC_H_CONTROL_SM;
+    if (!plus) x -= IC_H_CONTROL_SM + 96;
+    return ic_rect_make(x, r.y + (r.h - IC_H_CONTROL_SM) / 2, IC_H_CONTROL_SM, IC_H_CONTROL_SM);
+}
+
+static void tz_label(int minutes, char *out, int cap) {
+    int v = minutes < 0 ? -minutes : minutes;
+    char n[8];
+    out[0] = 0;
+    ic_strlcat(out, minutes < 0 ? "UTC-" : "UTC+", cap);
+    n[0] = (char)('0' + (v / 60) / 10);
+    n[1] = (char)('0' + (v / 60) % 10);
+    n[2] = ':';
+    n[3] = (char)('0' + (v % 60) / 10);
+    n[4] = (char)('0' + (v % 60) % 10);
+    n[5] = 0;
+    ic_strlcat(out, n, cap);
+}
+
+static void draw_time(ic_app_t *app, ic_canvas_t *c) {
+    const ic_palette_t *p = ic_palette();
+    ic_rect_t g = tz_group(app);
+    ic_rect_t r0 = row_rect(g, 0), r1 = row_rect(g, 1);
+    ic_rect_t minus = tz_button_rect(app, 0), plus = tz_button_rect(app, 1);
+    ic_datetime_t now;
+    char label[16];
+    char hm[8];
+    char day[24];
+
+    ic_ui_group(c, g);
+    ic_ui_row_text(c, ic_rect_make(r0.x, r0.y, minus.x - r0.x - IC_SP_3, r0.h), IC_SYM_GLOBE,
+                   IC_RGB(IC_TINT_TEAL), "Time zone", "Offset from UTC, in half hours");
+    ic_ui_icon_button(c, minus, IC_SYM_MINUS, st.hover_tz == 0 ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    ic_ui_icon_button(c, plus, IC_SYM_PLUS, st.hover_tz == 1 ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    tz_label(st.s.tz_minutes, label, sizeof(label));
+    ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL),
+                    ic_rect_make(minus.x + minus.w, r0.y, plus.x - minus.x - minus.w, r0.h), label,
+                    p->label, IC_ALIGN_CENTER);
+    ic_gfx_hline(c, r1.x + IC_SP_3, r1.y, r1.w - IC_SP_3, p->separator);
+    hm[0] = day[0] = 0;
+    if (ic_wallclock(&now) == 0) {
+        ic_format_hm(&now, hm, sizeof(hm));
+        ic_format_day(&now, day, sizeof(day));
+    }
+    ic_ui_row_text(c, ic_rect_make(r1.x, r1.y, r1.w / 2, r1.h), IC_SYM_SUN, IC_RGB(IC_TINT_ORANGE),
+                   "Local time", day[0] ? day : "The clock is not available");
+    ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r1.x + r1.w / 2, r1.y, r1.w / 2 - IC_SP_3, r1.h),
+                    hm, p->label_secondary, IC_ALIGN_RIGHT);
+}
+
+static void set_tz(int minutes) {
+    if (minutes < -12 * 60) minutes = -12 * 60;
+    if (minutes > 14 * 60) minutes = 14 * 60;
+    if (minutes == st.s.tz_minutes) return;
+    st.s.tz_minutes = minutes;
+    save();
+    ic_time_reload_tz();
+}
+
 static void draw_about(ic_app_t *app, ic_canvas_t *c) {
     const ic_palette_t *p = ic_palette();
     const ic_icon_t *icon = ic_icon_builtin("settings");
@@ -274,6 +340,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_pane_title(c, pane_titles[st.pane]);
     if (st.pane == PANE_APPEARANCE) draw_appearance(app, c);
     else if (st.pane == PANE_ABOUT) draw_about(app, c);
+    else if (st.pane == PANE_TIME) draw_time(app, c);
     else draw_toggles(app, c, st.pane);
 
     if (st.save_failed) {
@@ -301,7 +368,7 @@ static int current_rows(ic_app_t *app, ic_rect_t *rows) {
         rows[1] = row_rect(g, 1);
         return 2;
     }
-    if (st.pane == PANE_ABOUT) return 0;
+    if (st.pane == PANE_ABOUT || st.pane == PANE_TIME) return 0;
     {
         int ids[TOG_COUNT];
         int n = pane_toggles(st.pane, ids);
@@ -335,6 +402,11 @@ static void update_hover(ic_app_t *app, int x, int y) {
     set_row_hover(st.pane == PANE_APPEARANCE ? -1 : row);
     st.hover_swatch = -1;
     st.hover_segment = -1;
+    st.hover_tz = -1;
+    if (st.pane == PANE_TIME) {
+        if (ic_ui_hit(tz_button_rect(app, 0), x, y)) st.hover_tz = 0;
+        else if (ic_ui_hit(tz_button_rect(app, 1), x, y)) st.hover_tz = 1;
+    }
     if (st.pane == PANE_APPEARANCE) {
         for (int i = 0; i < IC_ACCENT_COUNT; i++) {
             if (ic_ui_hit(ic_rect_inset(swatch_rect(app, i), -4, -4), x, y)) st.hover_swatch = i;
@@ -379,6 +451,11 @@ static void click(ic_app_t *app, int x, int y) {
             select_pane(i);
             return;
         }
+    }
+    if (st.pane == PANE_TIME) {
+        if (ic_ui_hit(tz_button_rect(app, 0), x, y)) set_tz(st.s.tz_minutes - 30);
+        else if (ic_ui_hit(tz_button_rect(app, 1), x, y)) set_tz(st.s.tz_minutes + 30);
+        return;
     }
     if (st.pane == PANE_APPEARANCE) {
         int seg = ic_ui_segmented_hit(segmented_rect(app), 2, x, y);
