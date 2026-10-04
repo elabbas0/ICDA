@@ -57,11 +57,18 @@ ic_canvas_t ic_canvas_make(uint32_t *px, int w, int h) {
     c.clip_y = 0;
     c.clip_w = 0;
     c.clip_h = 0;
+    c.scale = 1;
     return c;
 }
 
 void ic_canvas_set_clip(ic_canvas_t *c, int x, int y, int w, int h) {
     if (!c) return;
+    if (c->scale > 1) {
+        x *= c->scale;
+        y *= c->scale;
+        w *= c->scale;
+        h *= c->scale;
+    }
     c->clip_x = x;
     c->clip_y = y;
     c->clip_w = w > 0 ? w : 0;
@@ -109,6 +116,21 @@ void ic_canvas_push_clip(ic_canvas_t *c, int x, int y, int w, int h, ic_rect_t *
         saved->h = c->clip_h;
     }
     if (!ic_canvas_bounds(c, &x0, &y0, &x1, &y1)) return;
+    if (c->scale > 1) {
+        int s = c->scale;
+        x *= s;
+        y *= s;
+        w *= s;
+        h *= s;
+        if (x > x0) x0 = x;
+        if (y > y0) y0 = y;
+        if (x + w < x1) x1 = x + w;
+        if (y + h < y1) y1 = y + h;
+        c->scale = 1;
+        ic_canvas_set_clip(c, x0, y0, x1 - x0, y1 - y0);
+        c->scale = s;
+        return;
+    }
     if (x > x0) x0 = x;
     if (y > y0) y0 = y;
     if (x + w < x1) x1 = x + w;
@@ -153,6 +175,13 @@ static inline void ic_plot(uint32_t *row, int x, uint32_t rgb, uint32_t a, float
 
 
 void ic_gfx_fill(ic_canvas_t *c, int x, int y, int w, int h, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_fill(&d, x * s, y * s, w * s, h * s, color);
+        return;
+    }
     int x0, y0, x1, y1;
     uint32_t a = IC_ALPHA(color);
     if (a == 0 || !ic_clip_rect(c, x, y, w, h, &x0, &y0, &x1, &y1)) return;
@@ -259,6 +288,13 @@ static void ic_rr_fill(ic_canvas_t *c, const ic_rr_t *g, ic_color_t top, ic_colo
 
 void ic_gfx_rrect4(ic_canvas_t *c, int x, int y, int w, int h,
                    float tl, float tr, float br, float bl, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_rrect4(&d, x * s, y * s, w * s, h * s, tl * s, tr * s, br * s, bl * s, color);
+        return;
+    }
     ic_rr_t g;
     if (IC_ALPHA(color) == 0 || w <= 0 || h <= 0) return;
     ic_rr_make(&g, x, y, w, h, tl, tr, br, bl);
@@ -271,6 +307,13 @@ void ic_gfx_rrect(ic_canvas_t *c, int x, int y, int w, int h, float r, ic_color_
 
 void ic_gfx_rrect_gradient_v(ic_canvas_t *c, int x, int y, int w, int h, float r,
                              ic_color_t top, ic_color_t bottom) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_rrect_gradient_v(&d, x * s, y * s, w * s, h * s, r * s, top, bottom);
+        return;
+    }
     ic_rr_t g;
     if (w <= 0 || h <= 0) return;
     ic_rr_make(&g, x, y, w, h, r, r, r, r);
@@ -280,6 +323,14 @@ void ic_gfx_rrect_gradient_v(ic_canvas_t *c, int x, int y, int w, int h, float r
 void ic_gfx_rrect4_stroke(ic_canvas_t *c, int x, int y, int w, int h,
                           float tl, float tr, float br, float bl,
                           float width, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_rrect4_stroke(&d, x * s, y * s, w * s, h * s, tl * s, tr * s, br * s, bl * s,
+                             width * s, color);
+        return;
+    }
     ic_rr_t outer, inner;
     int x0, y0, x1, y1;
     int iw = (int)(width + 0.5f);
@@ -343,6 +394,13 @@ static void ic_bbox_iter_bounds(const ic_canvas_t *c, float minx, float miny, fl
 }
 
 void ic_gfx_circle(ic_canvas_t *c, float cx, float cy, float r, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_circle(&d, cx * s, cy * s, r * s, color);
+        return;
+    }
     int x0, y0, x1, y1, ok;
     uint32_t rgb = color & 0xFFFFFFu, a = IC_ALPHA(color);
     if (a == 0 || r <= 0.0f) return;
@@ -360,6 +418,13 @@ void ic_gfx_circle(ic_canvas_t *c, float cx, float cy, float r, ic_color_t color
 }
 
 void ic_gfx_ring(ic_canvas_t *c, float cx, float cy, float r, float width, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_ring(&d, cx * s, cy * s, r * s, width * s, color);
+        return;
+    }
     int x0, y0, x1, y1, ok;
     uint32_t rgb = color & 0xFFFFFFu, a = IC_ALPHA(color);
     if (a == 0 || r <= 0.0f || width <= 0.0f) return;
@@ -379,6 +444,13 @@ void ic_gfx_ring(ic_canvas_t *c, float cx, float cy, float r, float width, ic_co
 
 void ic_gfx_line(ic_canvas_t *c, float ax, float ay, float bx, float by,
                  float width, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_line(&d, ax * s, ay * s, bx * s, by * s, width * s, color);
+        return;
+    }
     int x0, y0, x1, y1, ok;
     uint32_t rgb = color & 0xFFFFFFu, a = IC_ALPHA(color);
     float hw = width * 0.5f;
@@ -408,6 +480,13 @@ void ic_gfx_line(ic_canvas_t *c, float ax, float ay, float bx, float by,
 
 void ic_gfx_gradient_v(ic_canvas_t *c, int x, int y, int w, int h,
                        ic_color_t top, ic_color_t bottom) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_gradient_v(&d, x * s, y * s, w * s, h * s, top, bottom);
+        return;
+    }
     int x0, y0, x1, y1;
     if (!ic_clip_rect(c, x, y, w, h, &x0, &y0, &x1, &y1)) return;
     for (int py = y0; py < y1; py++) {
@@ -420,6 +499,14 @@ void ic_gfx_gradient_v(ic_canvas_t *c, int x, int y, int w, int h,
 
 void ic_gfx_blit(ic_canvas_t *c, int x, int y, const uint32_t *src, int sw, int sh,
                  int pitch, uint32_t opacity) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_blit_scaled4(&d, x * s, y * s, sw * s, sh * s, src, sw, sh, pitch, 0, 0, 0, 0,
+                            opacity);
+        return;
+    }
     int x0, y0, x1, y1;
     if (!src || opacity == 0 || !ic_clip_rect(c, x, y, sw, sh, &x0, &y0, &x1, &y1)) return;
     if (opacity > 255u) opacity = 255u;
@@ -436,6 +523,14 @@ void ic_gfx_blit(ic_canvas_t *c, int x, int y, const uint32_t *src, int sw, int 
 
 void ic_gfx_blit_rrect4(ic_canvas_t *c, int x, int y, const uint32_t *src, int sw, int sh,
                         int pitch, float tl, float tr, float br, float bl, uint32_t opacity) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_blit_scaled4(&d, x * s, y * s, sw * s, sh * s, src, sw, sh, pitch,
+                            tl * s, tr * s, br * s, bl * s, opacity);
+        return;
+    }
     ic_rr_t g;
     int x0, y0, x1, y1;
     if (!src || opacity == 0 || !ic_clip_rect(c, x, y, sw, sh, &x0, &y0, &x1, &y1)) return;
@@ -485,6 +580,14 @@ static inline uint32_t ic_bilerp(const uint32_t *src, int sw, int sh, int pitch,
 void ic_gfx_blit_scaled4(ic_canvas_t *c, int dx, int dy, int dw, int dh,
                          const uint32_t *src, int sw, int sh, int pitch,
                          float tl, float tr, float br, float bl, uint32_t opacity) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_blit_scaled4(&d, dx * s, dy * s, dw * s, dh * s, src, sw, sh, pitch,
+                            tl * s, tr * s, br * s, bl * s, opacity);
+        return;
+    }
     ic_rr_t g;
     int x0, y0, x1, y1;
     int32_t stepx, stepy;
@@ -530,6 +633,13 @@ void ic_gfx_blit_scaled(ic_canvas_t *c, int dx, int dy, int dw, int dh,
 
 void ic_gfx_image_rgba(ic_canvas_t *c, int x, int y, int dw, int dh,
                        const uint8_t *rgba, int sw, int sh, uint32_t opacity) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_image_rgba(&d, x * s, y * s, dw * s, dh * s, rgba, sw, sh, opacity);
+        return;
+    }
     int x0, y0, x1, y1;
     int32_t stepx, stepy;
     if (!rgba || sw <= 0 || sh <= 0 || opacity == 0) return;
@@ -586,8 +696,32 @@ void ic_gfx_image_rgba(ic_canvas_t *c, int x, int y, int dw, int dh,
     }
 }
 
+static void ic_mask_scaled(ic_canvas_t *c, int x, int y, const uint8_t *mask, int mw, int mh,
+                           int pitch, int s, ic_color_t color) {
+    int x0, y0, x1, y1;
+    uint32_t rgb = color & 0xFFFFFFu, a = IC_ALPHA(color);
+    if (!mask || a == 0 || !ic_clip_rect(c, x, y, mw * s, mh * s, &x0, &y0, &x1, &y1)) return;
+    for (int py = y0; py < y1; py++) {
+        uint32_t *d = c->px + (int64_t)py * c->w;
+        const uint8_t *m = mask + (int64_t)((py - y) / s) * pitch;
+        for (int px = x0; px < x1; px++) {
+            uint32_t k = m[(px - x) / s];
+            if (!k) continue;
+            k = (k * a + 127u) / 255u;
+            d[px] = k >= 255u ? rgb : ic_mix_px(d[px], rgb, k);
+        }
+    }
+}
+
 void ic_gfx_mask(ic_canvas_t *c, int x, int y, const uint8_t *mask, int mw, int mh,
                  int pitch, ic_color_t color) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_mask_scaled(&d, x * s, y * s, mask, mw, mh, pitch, s, color);
+        return;
+    }
     int x0, y0, x1, y1;
     uint32_t rgb = color & 0xFFFFFFu, a = IC_ALPHA(color);
     if (!mask || a == 0 || !ic_clip_rect(c, x, y, mw, mh, &x0, &y0, &x1, &y1)) return;
@@ -643,6 +777,13 @@ static void ic_blur_buf(uint32_t *px, int w, int h, int pitch, int radius,
 
 void ic_gfx_blur(ic_canvas_t *c, int x, int y, int w, int h, int radius,
                  uint32_t *scratch, int scratch_len) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_blur(&d, x * s, y * s, w * s, h * s, radius * s, scratch, scratch_len);
+        return;
+    }
     int x0, y0, x1, y1;
     if (radius <= 0 || !scratch) return;
     if (!ic_clip_rect(c, x, y, w, h, &x0, &y0, &x1, &y1)) return;
@@ -710,6 +851,13 @@ static const ic_shadow_tile_t *ic_shadow_tile(float radius, int blur) {
 
 void ic_gfx_shadow(ic_canvas_t *c, int x, int y, int w, int h, float radius,
                    int blur, int dy, uint32_t alpha) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_shadow(&d, x * s, y * s, w * s, h * s, radius * s, blur * s, dy * s, alpha);
+        return;
+    }
     const ic_shadow_tile_t *t;
     int ext, size, sx, sy, sw, sh;
     int x0, y0, x1, y1;
@@ -766,6 +914,14 @@ void ic_gfx_shadow(ic_canvas_t *c, int x, int y, int w, int h, float radius,
 
 void ic_gfx_backdrop(ic_canvas_t *c, int x, int y, int w, int h, float radius,
                      int blur, ic_color_t tint, uint32_t *scratch, int scratch_len) {
+    if (c && c->scale > 1) {
+        ic_canvas_t d = *c;
+        int s = c->scale;
+        d.scale = 1;
+        ic_gfx_backdrop(&d, x * s, y * s, w * s, h * s, radius * s, blur * s, tint, scratch,
+                        scratch_len);
+        return;
+    }
     int bx0, by0, bx1, by1;
     int x0, y0, x1, y1;
     ic_rr_t g;

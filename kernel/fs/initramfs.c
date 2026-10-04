@@ -15,6 +15,11 @@
 
 
 
+#if INITRAMFS_INCLUDE_ICON_ASSETS
+extern const char font_asset_ui2x_start[];
+extern const char font_asset_ui2x_end[];
+#endif
+
 #ifndef CI_IMAGE
 #define CI_IMAGE 0
 #endif
@@ -214,6 +219,10 @@ int initramfs_populate(void) {
         if (vfs_seed_readonly(generated_icon_assets[i].path, generated_icon_assets[i].data, size) != 0) {
             return -1;
         }
+    }
+    if (vfs_seed_readonly("/usr/share/fonts/ui-2x.icf", font_asset_ui2x_start,
+                          (uint64_t)(font_asset_ui2x_end - font_asset_ui2x_start)) != 0) {
+        return -1;
     }
 #endif
     return 0;

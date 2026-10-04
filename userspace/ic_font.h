@@ -70,6 +70,7 @@ typedef enum {
 } ic_align_t;
 
 const ic_face_t *ic_font(ic_font_style_t style);
+int  ic_font_attach_2x(const void *blob, uint64_t len);
 
 
 int  ic_text_measure(const ic_face_t *f, const char *s);

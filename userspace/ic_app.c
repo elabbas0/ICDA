@@ -4,6 +4,7 @@
 #include "ic_app.h"
 #include "ic_time.h"
 #include "ic_theme.h"
+#include "ic_font.h"
 #include "gui.h"
 #include "icda_sys.h"
 
@@ -197,9 +198,11 @@ static void ic_app_mouse(ic_app_t *app, const gui_msg_t *m) {
 }
 
 static void ic_app_paint(ic_app_t *app) {
-    ic_canvas_t c = ic_canvas_make(gui_pixel_buffer(), gui_window_width(), gui_window_height());
-    app->width = c.w;
-    app->height = c.h;
+    int s = gui_window_scale();
+    ic_canvas_t c = ic_canvas_make(gui_pixel_buffer(), gui_window_width() * s, gui_window_height() * s);
+    c.scale = s;
+    app->width = gui_window_width();
+    app->height = gui_window_height();
     app->animating = 0;
     app->wants_caret = 0;
     if (!c.px) return;
@@ -226,6 +229,10 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
     ic_time_init();
     ic_palette_reload();
     if (gui_open_window(desc->title, desc->width, desc->height) != 0) return -1;
+    if (gui_window_scale() > 1 && gui_font_shm()) {
+        uint64_t addr = icda_shm_map(gui_font_shm());
+        if (addr) ic_font_attach_2x((const void *)(uintptr_t)addr, 16ULL * 1024ULL * 1024ULL);
+    }
     app.width = gui_window_width();
     app.height = gui_window_height();
     app.focused = 1;

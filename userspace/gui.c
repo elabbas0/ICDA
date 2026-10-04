@@ -9,6 +9,8 @@ static uint32_t *win_pixels = NULL;
 static uint32_t *win_shm_pixels = NULL;
 static int win_w = 0;
 static int win_h = 0;
+static int win_scale = 1;
+static uint64_t win_font_shm = 0;
 static uint32_t win_id = 0;
 static uint64_t win_reply_queue = 0;
 
@@ -29,7 +31,7 @@ static void gui_copy_pixels(uint32_t *dst, const uint32_t *src, uint64_t count) 
 }
 
 static void gui_use_pixel_buffer(void) {
-    uint64_t pixels = (uint64_t)win_w * (uint64_t)win_h;
+    uint64_t pixels = (uint64_t)win_w * (uint64_t)win_h * (uint64_t)(win_scale * win_scale);
     if (pixels <= GUI_STAGING_PIXELS) {
         win_pixels = gui_staging;
         if (win_shm_pixels) gui_copy_pixels(win_pixels, win_shm_pixels, pixels);
@@ -59,6 +61,7 @@ static void gui_apply_resize(const gui_msg_t *msg) {
     win_shm_handle = new_handle;
     win_w = msg->resize.w;
     win_h = msg->resize.h;
+    win_scale = msg->resize.scale > 1 ? msg->resize.scale : 1;
     win_shm_pixels = (uint32_t*)addr;
     gui_use_pixel_buffer();
 }
@@ -121,6 +124,8 @@ int gui_open_window(const char *title, int w, int h) {
     win_w = reply.open_ok.w;
     win_h = reply.open_ok.h;
     win_reply_queue = reply.open_ok.reply_queue;
+    win_scale = reply.open_ok.scale > 1 ? reply.open_ok.scale : 1;
+    win_font_shm = reply.open_ok.font_shm;
 
     uint64_t addr = icda_shm_map(win_shm_handle);
     if (!addr) {
@@ -137,6 +142,8 @@ int gui_open_window(const char *title, int w, int h) {
 uint32_t *gui_pixel_buffer(void) { return win_pixels; }
 int gui_window_width(void) { return win_w; }
 int gui_window_height(void) { return win_h; }
+int gui_window_scale(void) { return win_scale; }
+uint64_t gui_font_shm(void) { return win_font_shm; }
 
 void gui_flush(void) {
     gui_msg_t msg;
@@ -144,7 +151,8 @@ void gui_flush(void) {
     if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
         
 
-        gui_copy_pixels(win_shm_pixels, win_pixels, (uint64_t)win_w * (uint64_t)win_h);
+        gui_copy_pixels(win_shm_pixels, win_pixels,
+                        (uint64_t)win_w * (uint64_t)win_h * (uint64_t)(win_scale * win_scale));
     }
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_FLUSH;

@@ -21,6 +21,8 @@ int  gui_open_window(const char *title, int w, int h);
 uint32_t *gui_pixel_buffer(void);
 int       gui_window_width(void);
 int       gui_window_height(void);
+int       gui_window_scale(void);
+uint64_t  gui_font_shm(void);
 
 
 void gui_flush(void);

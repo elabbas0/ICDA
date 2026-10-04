@@ -135,15 +135,23 @@ void wm_frame_draw(ic_canvas_t *c, const wm_frame_t *f,
     
 
     {
-        int cw = pw < f->w ? pw : f->w;
-        int ch = ph < f->h ? ph : f->h;
+        int s = c->scale > 1 ? c->scale : 1;
+        int cw = pw / s < f->w ? pw / s : f->w;
+        int ch = ph / s < f->h ? ph / s : f->h;
         if (!px || cw <= 0 || ch <= 0 || cw < f->w || ch < f->h) {
             ic_gfx_rrect4(c, f->x, f->y, f->w, f->h, 0.0f, 0.0f, r, r, p->window);
         }
         if (px && cw > 0 && ch > 0) {
             float bl = ch == f->h ? r : 0.0f;
             float br = (ch == f->h && cw == f->w) ? r : 0.0f;
-            ic_gfx_blit_rrect4(c, f->x, f->y, px, cw, ch, pw, 0.0f, 0.0f, br, bl, 255);
+            if (s > 1) {
+                ic_canvas_t d = *c;
+                d.scale = 1;
+                ic_gfx_blit_rrect4(&d, f->x * s, f->y * s, px, cw * s, ch * s, pw, 0.0f, 0.0f,
+                                   br * s, bl * s, 255);
+            } else {
+                ic_gfx_blit_rrect4(c, f->x, f->y, px, cw, ch, pw, 0.0f, 0.0f, br, bl, 255);
+            }
         }
     }
 

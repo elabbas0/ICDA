@@ -75,6 +75,11 @@ void wm_wallpaper_paint(ic_canvas_t *c, int sw, int sh) {
     uint32_t bottom = p->dark ? 0x0B0F1C : 0xEEF0F6;
     float diag = ic_sqrtf((float)sw * (float)sw + (float)sh * (float)sh);
     int x0, y0, x1, y1;
+    if (c->scale > 1) {
+        sw *= c->scale;
+        sh *= c->scale;
+        diag *= (float)c->scale;
+    }
     if (!ic_canvas_bounds(c, &x0, &y0, &x1, &y1) || sw <= 0 || sh <= 0) return;
     for (int y = y0; y < y1; y++) {
         uint32_t *row = c->px + (int64_t)y * c->w;

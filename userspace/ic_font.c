@@ -11,6 +11,51 @@
 #define IC_GLYPH_QUESTION ('?' - 32)
 #define IC_GLYPH_ELLIPSIS (95)          
 
+static ic_face_t ic_faces_hi[IC_FONT_STYLE_COUNT];
+static int ic_hi_ready;
+
+static uint32_t ic_rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int ic_font_attach_2x(const void *blob, uint64_t len) {
+    const uint8_t *b = (const uint8_t *)blob;
+    if (!b || len < 24 || b[0] != 'I' || b[1] != 'C' || b[2] != 'F' || b[3] != '2') return -1;
+    if (ic_rd32(b + 8) != IC_FONT_STYLE_COUNT || ic_rd32(b + 12) != IC_FONT_GLYPHS ||
+        ic_rd32(b + 16) != IC_FONT_SUBPIXEL || len < 24 + 32u * IC_FONT_STYLE_COUNT) {
+        return -1;
+    }
+    for (int i = 0; i < IC_FONT_STYLE_COUNT; i++) {
+        const uint8_t *t = b + 24 + 32 * i;
+        ic_face_t *f = &ic_faces_hi[i];
+        uint32_t adv = ic_rd32(t + 12), gl = ic_rd32(t + 16), kern = ic_rd32(t + 20);
+        uint32_t alpha = ic_rd32(t + 24);
+        if (adv >= len || gl >= len || kern > len || alpha > len || (adv | gl | kern) & 3) return -1;
+        f->px = t[0];
+        f->ascent = t[1];
+        f->descent = t[2];
+        f->line_h = t[3];
+        f->cap_h = t[4];
+        f->x_h = t[5];
+        f->upem = (uint16_t)(t[6] | (t[7] << 8));
+        f->nkern = (uint16_t)(t[8] | (t[9] << 8));
+        f->adv = (const uint16_t *)(b + adv);
+        f->glyphs = (const ic_fglyph_t *)(b + gl);
+        f->kern = (const ic_fkern_t *)(b + kern);
+        f->alpha = b + alpha;
+    }
+    ic_hi_ready = 1;
+    return 0;
+}
+
+static const ic_face_t *ic_face_hi(const ic_face_t *f) {
+    if (!ic_hi_ready) return 0;
+    for (int i = 0; i < IC_FONT_STYLE_COUNT; i++) {
+        if (ic_faces[i] == f) return &ic_faces_hi[i];
+    }
+    return 0;
+}
+
 const ic_face_t *ic_font(ic_font_style_t style) {
     if ((int)style < 0 || style >= IC_FONT_STYLE_COUNT) style = IC_FONT_BODY;
     return ic_faces[style];
@@ -126,24 +171,39 @@ int ic_text_draw_n(ic_canvas_t *c, const ic_face_t *f, int x, int y, const char 
                    int n, ic_color_t color) {
     int pen = x * 64, prev = -1, i = 0;
     const uint8_t *lut;
-    uint8_t mask[64 * 64];
+    static uint8_t mask[128 * 128];
+    const ic_face_t *hi = 0;
+    ic_canvas_t dev = ic_canvas_make(0, 0, 0);
+    int sc = 1;
     if (!f || !s) return 0;
     lut = ic_coverage_lut(color);
+    if (c && c->scale > 1 && (hi = ic_face_hi(f)) != 0) {
+        dev = *c;
+        dev.scale = 1;
+        sc = c->scale;
+    }
     while (i < n && s[i]) {
         int len;
         int g = ic_next_glyph(s + i, n - i, &len);
+        const ic_face_t *gf = hi ? hi : f;
         const ic_fglyph_t *gl;
-        int phase;
+        int phase, dpen;
         if (prev >= 0 && f->nkern) pen += ic_kern_q6(f, prev, g);
-        phase = ((pen & 63) * IC_FONT_SUBPIXEL) >> 6;
-        gl = &f->glyphs[g * IC_FONT_SUBPIXEL + phase];
+        dpen = pen * sc;
+        phase = ((dpen & 63) * IC_FONT_SUBPIXEL) >> 6;
+        gl = &gf->glyphs[g * IC_FONT_SUBPIXEL + phase];
         if (c && gl->w && gl->h) {
-            const uint8_t *src = f->alpha + gl->off;
+            const uint8_t *src = gf->alpha + gl->off;
             if (lut && gl->w * gl->h <= (int)sizeof(mask)) {
                 for (int k = 0; k < gl->w * gl->h; k++) mask[k] = lut[src[k]];
                 src = mask;
             }
-            ic_gfx_mask(c, (pen >> 6) + gl->ox, y + gl->oy, src, gl->w, gl->h, gl->w, color);
+            if (hi) {
+                ic_gfx_mask(&dev, (dpen >> 6) + gl->ox, y * sc + gl->oy, src, gl->w, gl->h, gl->w,
+                            color);
+            } else {
+                ic_gfx_mask(c, (pen >> 6) + gl->ox, y + gl->oy, src, gl->w, gl->h, gl->w, color);
+            }
         }
         pen += f->adv[g];
         prev = g;

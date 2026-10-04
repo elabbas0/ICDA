@@ -42,7 +42,9 @@ typedef struct {
             uint64_t shm_handle;  
             int32_t  w, h;
             uint64_t reply_queue; 
-            uint8_t  _pad[16];
+            uint64_t font_shm;
+            uint8_t  scale;
+            uint8_t  _pad[7];
         } open_ok;        
 
         
@@ -75,7 +77,8 @@ typedef struct {
         struct {
             uint64_t shm_handle;  
             int32_t  w, h;
-            uint8_t  _pad[24];
+            uint8_t  scale;
+            uint8_t  _pad[23];
         } resize;         
 
         

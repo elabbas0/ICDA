@@ -22,7 +22,7 @@
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
 #define BACK_BUFFER_HEIGHT 1600
-#define CURSOR_SAVE_DIM 48   
+#define CURSOR_SAVE_DIM 96   
 
 #define WIN_MIN_W 320
 #define WIN_MIN_H 200
@@ -90,7 +90,7 @@ static int focused_window_idx = -1;
 static uint32_t back_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t desktop_layer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
 static uint32_t layer_buffer[BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT];
-#define BLUR_SCRATCH_PX (512 * 1024)
+#define BLUR_SCRATCH_PX (2048 * 1024)
 static uint32_t blur_scratch[BLUR_SCRATCH_PX];
 static uint32_t cursor_scene_save[CURSOR_SAVE_DIM * CURSOR_SAVE_DIM];
 static icda_fb_info_t fb_info;
@@ -101,8 +101,15 @@ static uint32_t *real_fb = NULL;
 static int scr_w = 0;
 static int scr_h = 0;
 static int wm_scale = 1;
+static uint64_t wm_font_shm = 0;
 
 static ic_canvas_t scene;
+
+static ic_canvas_t wm_canvas(uint32_t *px) {
+    ic_canvas_t c = ic_canvas_make(px, scr_w * wm_scale, scr_h * wm_scale);
+    c.scale = wm_scale;
+    return c;
+}
 
 
 
@@ -146,6 +153,23 @@ static icda_settings_t wm_settings;
 static uint64_t settings_last_reload = 0;
 
 static void build_desktop_layer(void);
+
+static void load_hidpi_font(void) {
+    const char *path = "/usr/share/fonts/ui-2x.icf";
+    icda_stat_t st;
+    uint64_t addr;
+    long n;
+    if ((long)icda_stat(path, &st) < 0 || st.size == 0) return;
+    wm_font_shm = icda_shm_create(st.size);
+    if (!wm_font_shm) return;
+    addr = icda_shm_map(wm_font_shm);
+    n = addr ? (long)icda_read_file(path, (char *)(uintptr_t)addr, st.size) : -1;
+    if (n <= 0 || ic_font_attach_2x((const void *)(uintptr_t)addr, (uint64_t)n) != 0) {
+        if (addr) icda_shm_unmap(wm_font_shm);
+        icda_shm_close(wm_font_shm);
+        wm_font_shm = 0;
+    }
+}
 static void mark_dirty_full(void);
 
 static void settings_reload(void) {
@@ -495,10 +519,14 @@ static int cur_save_x, cur_save_y, cur_save_w, cur_save_h;
 
 static void draw_cursor_into_bb(int w, int h, int mx, int my) {
     const cur_sprite_t *s = &cur_sprites[cur_shape];
-    int ox = mx - s->hx, oy = my - s->hy;
+    int k = wm_scale;
+    int ox = (mx - s->hx) * k, oy = (my - s->hy) * k;
     int x0 = ox < 0 ? 0 : ox, y0 = oy < 0 ? 0 : oy;
-    int x1 = ox + CUR_DIM > w ? w : ox + CUR_DIM;
-    int y1 = oy + CUR_DIM > h ? h : oy + CUR_DIM;
+    int x1, y1;
+    w *= k;
+    h *= k;
+    x1 = ox + CUR_DIM * k > w ? w : ox + CUR_DIM * k;
+    y1 = oy + CUR_DIM * k > h ? h : oy + CUR_DIM * k;
 
     cur_save_w = 0;
     cur_save_h = 0;
@@ -512,7 +540,7 @@ static void draw_cursor_into_bb(int w, int h, int mx, int my) {
     }
     for (int py = y0; py < y1; py++) {
         for (int px = x0; px < x1; px++) {
-            const uint8_t *p = s->rgba[py - oy][px - ox];
+            const uint8_t *p = s->rgba[(py - oy) / k][(px - ox) / k];
             uint32_t src;
             if (p[3] == 0) continue;
             src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
@@ -522,6 +550,7 @@ static void draw_cursor_into_bb(int w, int h, int mx, int my) {
 }
 
 static void restore_cursor_scene(int w, int h, int mx, int my) {
+    w *= wm_scale;
     (void)h;
     (void)mx;
     (void)my;
@@ -1169,7 +1198,7 @@ static int desk_hit(int idx, int mx, int my) {
 }
 
 static ic_canvas_t desktop_canvas(void) {
-    return ic_canvas_make(desktop_layer, scr_w, scr_h);
+    return wm_canvas(desktop_layer);
 }
 
 
@@ -1592,12 +1621,15 @@ static void anim_start(wm_window_t *win, int kind, ic_rect_t from, ic_rect_t to,
 
 
 static void win_resize_buffer(wm_window_t *win, int nw, int nh) {
+    int lw = nw, lh = nh;
     uint64_t shm;
     uint64_t addr;
     uint32_t *px;
     gui_msg_t m;
     uint32_t bg = ic_palette()->window & 0xFFFFFFu;
     if (!win || !win->valid || nw <= 0 || nh <= 0) return;
+    nw *= wm_scale;
+    nh *= wm_scale;
     if (nw == win->pix_w && nh == win->pix_h) return;
     shm = icda_shm_create((uint64_t)nw * (uint64_t)nh * 4ULL);
     if (!shm) return;
@@ -1625,8 +1657,9 @@ static void win_resize_buffer(wm_window_t *win, int nw, int nh) {
     m.type = GUI_MSG_RESIZE;
     m.window_id = win->id;
     m.resize.shm_handle = shm;
-    m.resize.w = nw;
-    m.resize.h = nh;
+    m.resize.w = lw;
+    m.resize.h = lh;
+    m.resize.scale = (uint8_t)wm_scale;
     send_maybe(win->app_queue_handle, &m);
     mark_dirty_win(win);
 }
@@ -1821,7 +1854,7 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, uint32_t *ne
     if (win_w > wa.w - 24) win_w = wa.w - 24;
     if (win_h > wa.h - WM_TITLE_H - 24) win_h = wa.h - WM_TITLE_H - 24;
 
-    shm_hnd = icda_shm_create((uint64_t)win_w * win_h * 4);
+    shm_hnd = icda_shm_create((uint64_t)win_w * win_h * 4 * (uint64_t)(wm_scale * wm_scale));
     if (!shm_hnd) {
         clear_msg(&reply);
         reply.type = GUI_MSG_OPEN_FAIL;
@@ -1844,8 +1877,8 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, uint32_t *ne
     win->app_queue_handle = msg->window_id;
     win->shm_handle = shm_hnd;
     win->pixels = (uint32_t*)map_addr;
-    win->pix_w = win_w;
-    win->pix_h = win_h;
+    win->pix_w = win_w * wm_scale;
+    win->pix_h = win_h * wm_scale;
     win->w = win_w;
     win->h = win_h;
     
@@ -1890,6 +1923,8 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, uint32_t *ne
     reply.open_ok.w = win_w;
     reply.open_ok.h = win_h;
     reply.open_ok.reply_queue = wm_queue;
+    reply.open_ok.scale = (uint8_t)wm_scale;
+    reply.open_ok.font_shm = wm_font_shm;
     icda_msg_send(win->app_queue_handle, &reply);
 
     {
@@ -1923,7 +1958,7 @@ static void win_frame(const wm_window_t *win, int idx, wm_frame_t *f) {
 
 static void composite_window_zoom(wm_window_t *win, int idx, ic_rect_t outer, float opacity) {
     wm_frame_t f;
-    ic_canvas_t lc = ic_canvas_make(layer_buffer, scr_w, scr_h);
+    ic_canvas_t lc = wm_canvas(layer_buffer);
     int nw, nh;
     float sx, sy;
     win_frame(win, idx, &f);
@@ -1944,7 +1979,8 @@ static void composite_window_zoom(wm_window_t *win, int idx, ic_rect_t outer, fl
                           f.focused ? IC_ELEV_WINDOW : IC_ELEV_WINDOW_IDLE, opacity);
     ic_gfx_blit_scaled(&scene, outer.x - (int)(sx + 0.5f), outer.y - (int)(sy + 0.5f),
                        outer.w + 2 * (int)(sx + 0.5f), outer.h + 2 * (int)(sy + 0.5f),
-                       layer_buffer, nw, nh, scr_w, (IC_R_WINDOW + 1.0f) * sx,
+                       layer_buffer, nw * wm_scale, nh * wm_scale, scr_w * wm_scale,
+                       (IC_R_WINDOW + 1.0f) * sx,
                        (uint32_t)(opacity * 255.0f + 0.5f));
 }
 
@@ -1992,18 +2028,26 @@ static void composite_faded(ic_rect_t area, float opacity, layer_draw_fn draw) {
         draw(&scene);
         return;
     }
-    lc = ic_canvas_make(layer_buffer, scr_w, scr_h);
+    lc = wm_canvas(layer_buffer);
     if (!ic_canvas_bounds(&scene, &x0, &y0, &x1, &y1)) return;
-    ic_canvas_set_clip(&lc, x0, y0, x1 - x0, y1 - y0);
+    lc.clip_x = x0;
+    lc.clip_y = y0;
+    lc.clip_w = x1 - x0;
+    lc.clip_h = y1 - y0;
     ic_canvas_push_clip(&lc, area.x, area.y, area.w, area.h, 0);
     if (!ic_canvas_bounds(&lc, &x0, &y0, &x1, &y1)) return;
-    for (int y = y0; y < y1; y++) {
-        copy_pixels(layer_buffer + (int64_t)y * scr_w + x0, back_buffer + (int64_t)y * scr_w + x0,
-                    x1 - x0);
+    {
+        int dw = scr_w * wm_scale;
+        ic_canvas_t ds = scene;
+        for (int y = y0; y < y1; y++) {
+            copy_pixels(layer_buffer + (int64_t)y * dw + x0, back_buffer + (int64_t)y * dw + x0,
+                        x1 - x0);
+        }
+        draw(&lc);
+        ds.scale = 1;
+        ic_gfx_blit(&ds, x0, y0, layer_buffer + (int64_t)y0 * dw + x0, x1 - x0, y1 - y0, dw,
+                    (uint32_t)(opacity * 255.0f + 0.5f));
     }
-    draw(&lc);
-    ic_gfx_blit(&scene, x0, y0, layer_buffer + (int64_t)y0 * scr_w + x0, x1 - x0, y1 - y0, scr_w,
-                (uint32_t)(opacity * 255.0f + 0.5f));
 }
 
 static void draw_launcher_layer(ic_canvas_t *c) {
@@ -2129,32 +2173,6 @@ static uint32_t fb_pitch_pixels(void) {
 }
 
 
-static void blit_region_scaled(int x, int y, int rw, int rh) {
-    int s = wm_scale;
-    int bpp = fb_info.bpp == 32 ? 4 : 3;
-    for (int yy = y; yy < y + rh; yy++) {
-        const uint32_t *src = back_buffer + (uint64_t)yy * scr_w + x;
-        for (int k = 0; k < s; k++) {
-            uint8_t *row = (uint8_t *)real_fb + (uint64_t)(yy * s + k) * fb_info.pitch + (uint64_t)x * s * bpp;
-            if (bpp == 4) {
-                uint32_t *d = (uint32_t *)row;
-                for (int i = 0; i < rw; i++) {
-                    for (int j = 0; j < s; j++) d[i * s + j] = src[i];
-                }
-            } else {
-                for (int i = 0; i < rw; i++) {
-                    uint32_t c = src[i];
-                    for (int j = 0; j < s; j++) {
-                        uint8_t *p = row + (uint64_t)(i * s + j) * 3;
-                        p[0] = (uint8_t)c;
-                        p[1] = (uint8_t)(c >> 8);
-                        p[2] = (uint8_t)(c >> 16);
-                    }
-                }
-            }
-        }
-    }
-}
 
 static void blit_region(int x, int y, int rw, int rh) {
     uint32_t pitch = fb_pitch_pixels();
@@ -2163,19 +2181,20 @@ static void blit_region(int x, int y, int rw, int rh) {
     if (x + rw > scr_w) rw = scr_w - x;
     if (y + rh > scr_h) rh = scr_h - y;
     if (rw <= 0 || rh <= 0) return;
-    if (wm_scale > 1) {
-        blit_region_scaled(x, y, rw, rh);
-        return;
-    }
+    x *= wm_scale;
+    y *= wm_scale;
+    rw *= wm_scale;
+    rh *= wm_scale;
     if (fb_info.bpp != 32) {
         for (int yy = y; yy < y + rh; yy++) {
             blit_row_24((uint8_t *)real_fb + (uint64_t)yy * fb_info.pitch + (uint64_t)x * 3,
-                        back_buffer + (uint64_t)yy * scr_w + x, rw);
+                        back_buffer + (uint64_t)yy * scr_w * wm_scale + x, rw);
         }
         return;
     }
     for (int yy = y; yy < y + rh; yy++) {
-        copy_pixels(real_fb + (uint64_t)yy * pitch + x, back_buffer + (uint64_t)yy * scr_w + x, rw);
+        copy_pixels(real_fb + (uint64_t)yy * pitch + x, back_buffer + (uint64_t)yy * scr_w * wm_scale + x,
+                    rw);
     }
 }
 
@@ -2186,8 +2205,12 @@ static int rect_hit(int ax, int ay, int aw, int ah, ic_rect_t b) {
 
 static void composite_region(int x, int y, int rw, int rh) {
     ic_canvas_set_clip(&scene, x, y, rw, rh);
-    for (int yy = y; yy < y + rh; yy++) {
-        copy_pixels(back_buffer + (uint64_t)yy * scr_w + x, desktop_layer + (uint64_t)yy * scr_w + x, rw);
+    {
+        int s = wm_scale, dw = scr_w * wm_scale;
+        for (int yy = y * s; yy < (y + rh) * s; yy++) {
+            copy_pixels(back_buffer + (uint64_t)yy * dw + x * s, desktop_layer + (uint64_t)yy * dw + x * s,
+                        rw * s);
+        }
     }
     for (int zi = 0; zi < num_windows; zi++) {
         int idx = z_order[zi];
@@ -2323,13 +2346,13 @@ static void wm_power_sequence(int restart) {
         return;
     }
     composite_region(0, 0, scr_w, scr_h);
-    copy_pixels(layer_buffer, back_buffer, scr_w * scr_h);
+    copy_pixels(layer_buffer, back_buffer, scr_w * scr_h * wm_scale * wm_scale);
     t0 = ic_time_ns();
     for (;;) {
         float t = (float)(ic_time_ns() - t0) / ((float)dur * 1e6f);
         uint32_t *saved_fb = real_fb;
         if (t > 1.0f) t = 1.0f;
-        copy_pixels(back_buffer, layer_buffer, scr_w * scr_h);
+        copy_pixels(back_buffer, layer_buffer, scr_w * scr_h * wm_scale * wm_scale);
         wm_power_overlay_draw(&scene, scr_w, scr_h, ic_ease(IC_EASE_STANDARD, t), restart);
         if (gpu_info.flip_active) {
             real_fb = (uint32_t *)((uint8_t *)saved_fb +
@@ -3017,10 +3040,11 @@ int main(int argc, char **argv) {
              : (fb_info.width >= 2560 ? 2 : 1);
     scr_w = fb_info.width / wm_scale;
     scr_h = fb_info.height / wm_scale;
-    if (scr_w > BACK_BUFFER_WIDTH) scr_w = BACK_BUFFER_WIDTH;
-    if (scr_h > BACK_BUFFER_HEIGHT) scr_h = BACK_BUFFER_HEIGHT;
+    if (scr_w * wm_scale > BACK_BUFFER_WIDTH) scr_w = BACK_BUFFER_WIDTH / wm_scale;
+    if (scr_h * wm_scale > BACK_BUFFER_HEIGHT) scr_h = BACK_BUFFER_HEIGHT / wm_scale;
     if (scr_w < 320 || scr_h < 240) return -1;
-    scene = ic_canvas_make(back_buffer, scr_w, scr_h);
+    scene = wm_canvas(back_buffer);
+    if (wm_scale > 1) load_hidpi_font();
 
     wm_queue = icda_msg_open(WM_QUEUE_NAME);
     if (!wm_queue) return -1;

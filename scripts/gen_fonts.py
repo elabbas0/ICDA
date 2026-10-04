@@ -262,5 +262,87 @@ def build():
     print("wrote %s (%d faces, %d KiB glyph coverage)" % (OUT, len(FACES), total_alpha // 1024))
 
 
+
+BLOB_OUT = os.path.join(REPO, "resources", "fonts", "ui-2x.icf")
+
+
+def kern_rows(tt):
+    names = [cmap_glyph(tt, cp) for cp in CODEPOINTS]
+    index = {n: i for i, n in enumerate(names) if n}
+    pairs = gpos_kern_pairs(tt, [n for n in names if n])
+    rows = []
+    for (l, r), v in sorted(pairs.items(), key=lambda kv: (index[kv[0][0]], index[kv[0][1]])):
+        if abs(v) >= KERN_MIN_UNITS:
+            rows.append((index[l], index[r], v))
+    return rows
+
+
+def build_blob(scale):
+    """Write the scale-x atlases as one binary file (ui-2x.icf).
+
+    Layout (little endian, every section 4-byte aligned):
+      "ICF2", u32 version, u32 faces, u32 glyphs, u32 subpixel, u32 0
+      faces x 32 bytes: u8 px, ascent, descent, line_h, cap_h, x_h,
+        u16 upem, u16 nkern, u16 0, u32 adv, glyphs, kern, alpha offsets, u32 0
+      then per face: u16 adv[glyphs], {u8 w,h; i8 ox,oy; u32 off}[glyphs*subpixel],
+        {u8 l,r; i16 units}[nkern], u8 alpha[]
+    The records match ic_fglyph_t / ic_fkern_t so the runtime points into
+    the loaded file."""
+    import struct
+    fonts = {key: TTFont(os.path.join(FONT_DIR, fname)) for key, fname in FILES.items()}
+    kerns = {key: ([] if key.startswith("mono") else kern_rows(tt)) for key, tt in fonts.items()}
+    head = bytearray(b"ICF2" + struct.pack("<5I", 1, len(FACES), len(CODEPOINTS), SUBPIXEL, 0))
+    table_off = len(head)
+    body = bytearray()
+    base = table_off + 32 * len(FACES)
+    table = bytearray()
+
+    def align():
+        while (base + len(body)) % 4:
+            body.append(0)
+
+    for enum, key, px in FACES:
+        tt = fonts[key]
+        px *= scale
+        upem = tt["head"].unitsPerEm
+        hhea = tt["hhea"]
+        os2 = tt["OS/2"]
+        hmtx = tt["hmtx"]
+        pil = ImageFont.truetype(os.path.join(FONT_DIR, FILES[key]), px * OVERSAMPLE)
+        asc = round(hhea.ascent * px / upem)
+        desc = round(-hhea.descent * px / upem)
+        line_h = round((hhea.ascent - hhea.descent + hhea.lineGap) * px / upem)
+        cap_h = round(os2.sCapHeight * px / upem)
+        x_h = round(os2.sxHeight * px / upem)
+        adv = bytearray()
+        glyphs = bytearray()
+        alpha = bytearray()
+        for cp in CODEPOINTS:
+            gname = cmap_glyph(tt, cp)
+            ch = chr(cp)
+            if gname is None:
+                gname = cmap_glyph(tt, ord("?"))
+                ch = "?"
+            adv += struct.pack("<H", round(hmtx[gname][0] * px * 64 / upem))
+            for phase in range(SUBPIXEL):
+                w, h, ox, oy, data = render_glyph(pil, ch, phase)
+                glyphs += struct.pack("<BBbbI", w, h, ox, oy, len(alpha))
+                alpha += data
+        kern = b"".join(struct.pack("<BBh", l, r, v) for l, r, v in kerns[key])
+        offs = []
+        for part in (adv, glyphs, kern, alpha):
+            align()
+            offs.append(base + len(body))
+            body += part
+        table += struct.pack("<6BHHH4II", px, asc, desc, line_h, cap_h, x_h, upem,
+                             len(kerns[key]), 0, *offs, 0)
+    with open(BLOB_OUT, "wb") as f:
+        f.write(head + table + body)
+    print("wrote %s (%d KiB)" % (BLOB_OUT, (len(head) + len(table) + len(body)) // 1024))
+
+
 if __name__ == "__main__":
-    build()
+    if "--blob2x" in sys.argv:
+        build_blob(2)
+    else:
+        build()

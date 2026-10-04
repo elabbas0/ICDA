@@ -33,6 +33,7 @@ typedef struct {
     int       w;
     int       h;
     int       clip_x, clip_y, clip_w, clip_h;
+    int       scale;
 } ic_canvas_t;
 
 typedef uint32_t ic_color_t;

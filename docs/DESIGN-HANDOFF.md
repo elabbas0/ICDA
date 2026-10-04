@@ -299,8 +299,18 @@ left, smallest first:
   Ctrl+C/X/V (also Ctrl+V in its path prompt), and the Terminal pastes
   on right-click. The WM now forwards a whole escape sequence per frame,
   so End/Home/arrows no longer leak `[F`-style bytes into apps.
-- True 2x rendering: `scale=2` pixel-doubles; crisp HiDPI needs a scale
-  in `ic_canvas_t` and 2x font/icon atlases.
+- True 2x rendering: done. `ic_canvas_t` has a `scale`; every `ic_gfx`
+  primitive takes logical coordinates and draws at device resolution, so
+  shapes, corners, shadows and blur are crisp. The WM composes a
+  device-resolution scene, allocates window buffers at `w*scale x h*scale`,
+  and sends `scale` in `GUI_MSG_OPEN_OK` and `GUI_MSG_RESIZE`. Text uses
+  2x glyph atlases (`scripts/gen_fonts.py --blob2x` writes
+  `resources/fonts/ui-2x.icf`, which the kernel seeds at
+  `/usr/share/fonts/ui-2x.icf`). The WM loads that file once into shared
+  memory and passes the handle to apps (`open_ok.font_shm`), so no app
+  carries a copy. Layout still uses 1x metrics, so 1x and 2x line up.
+  Icons are still upscaled from their 1x bitmaps. 2x is chosen by
+  `scale=2`, or automatically at 2560 px wide and up.
 - Explorer delete: done (see "Explorer delete" above). Folder rename is
   still missing.
 
