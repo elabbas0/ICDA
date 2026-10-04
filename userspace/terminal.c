@@ -700,7 +700,7 @@ static void scrollbar_drag(ic_app_t *app, int y) {
     over = y - r.y - thumb / 2;
     if (over < 0) over = 0;
     if (over > usable) over = usable;
-    term.scroll_rows = (over * max_scroll() + usable / 2) / usable;
+    term.scroll_rows = max_scroll() - (over * max_scroll() + usable / 2) / usable;
 }
 
 static void event(ic_app_t *app, const ic_event_t *ev) {
@@ -740,17 +740,20 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         term.hover_scroll = 0;
         term.dragging_scroll = 0;
         break;
+    case IC_EV_SCROLL:
+        scroll_by(-ev->wheel * 3);
+        break;
     case IC_EV_KEY:
         if (tr_menu_open) { tr_menu_open = 0; break; }
         switch (ev->key) {
-        case IC_KEY_PAGE_UP:   scroll_by(-term.rows); break;
-        case IC_KEY_PAGE_DOWN: scroll_by(term.rows); break;
+        case IC_KEY_PAGE_UP:   scroll_by(term.rows); break;
+        case IC_KEY_PAGE_DOWN: scroll_by(-term.rows); break;
         case IC_KEY_UP:
-            if (term.scroll_rows > 0) scroll_by(-1);
+            if (term.scroll_rows > 0) scroll_by(1);
             else history_step(-1);
             break;
         case IC_KEY_DOWN:
-            if (term.scroll_rows > 0) scroll_by(1);
+            if (term.scroll_rows > 0) scroll_by(-1);
             else history_step(1);
             break;
         case IC_KEY_END:

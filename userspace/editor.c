@@ -31,6 +31,7 @@ static struct {
     int      modified;
     int      scroll_row;
     int      scroll_col;
+    uint64_t followed;
 
     
     int rows;
@@ -134,6 +135,8 @@ static void ed_status(const char *text) {
 
 
 static void scroll_to_cursor(void) {
+    if (ed.cursor == ed.followed) return;
+    ed.followed = ed.cursor;
     uint64_t row = row_of(ed.cursor);
     int col = visual_col(ed.cursor);
     if ((int)row < ed.scroll_row) ed.scroll_row = (int)row;
@@ -437,6 +440,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     case IC_EV_MOUSE_LEAVE:
         ed.hover_new = ed.hover_save = 0;
         break;
+    case IC_EV_SCROLL: {
+        int max_row = (int)row_of(ed.len);
+        ed.scroll_row += ev->wheel * 3;
+        if (ed.scroll_row > max_row) ed.scroll_row = max_row;
+        if (ed.scroll_row < 0) ed.scroll_row = 0;
+        break;
+    }
     case IC_EV_KEY:
         ed.confirm_new = 0;
         switch (ev->key) {

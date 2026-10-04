@@ -6,6 +6,7 @@
 #include "../cpu/gdt.h"
 #include "../cpu/fpu.h"
 #include "../fs/fd.h"
+#include "../ipc/shm.h"
 #include "../fs/vfs.h"
 #include "../drivers/console/console.h"
 
@@ -640,6 +641,7 @@ int sched_kill_process(uint64_t pid, uint64_t exit_code) {
     }
 
     fd_proc_exit(target);
+    shm_proc_exit(target);
     target->state = PROCESS_EXITED;
     target->exit_code = exit_code;
     thread->block_reason = THREAD_BLOCK_NONE;
@@ -674,6 +676,7 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
         if (p->kind == PROCESS_USER &&
             p->state != PROCESS_EXITED && p->state != PROCESS_REAPED && t) {
             fd_proc_exit(p);
+            shm_proc_exit(p);
             p->state = PROCESS_EXITED;
             p->exit_code = exit_code;
             t->block_reason = THREAD_BLOCK_NONE;

@@ -16,7 +16,10 @@ param(
     
     
     
-    [switch]$Sync
+    [switch]$Sync,
+    [int]$Wheel = 0,
+    [switch]$Press,
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
@@ -211,6 +214,7 @@ try {
 
     [void](Send-Qmp "qmp_capabilities" $null)
 
+    if ($Press) { Send-Btn "left" $true; Start-Sleep -Milliseconds 120 }
     if ($Move) {
         
         Send-Rel "x" -5; Start-Sleep -Milliseconds 200
@@ -278,6 +282,7 @@ try {
         }
     }
 
+    if ($Release) { Start-Sleep -Milliseconds 120; Send-Btn "left" $false; Start-Sleep -Milliseconds 120 }
     if ($Click -or $Double) {
         Send-Btn "left" $true;  Start-Sleep -Milliseconds 80
         Send-Btn "left" $false; Start-Sleep -Milliseconds 60
@@ -291,18 +296,28 @@ try {
         Send-Btn "left" $false; Start-Sleep -Milliseconds 200
     }
     if ($Right) {
-        $xy = $Right -split ','
         Send-Rel "x" 0
         Send-Btn "right" $true;  Start-Sleep -Milliseconds 60
         Send-Btn "right" $false; Start-Sleep -Milliseconds 120
-        $xy = $Right -split ','
-        $tx = [int]$xy[0]; $ty = [int]$xy[1]
-        "$tx $ty" | Set-Content -LiteralPath $CursorFile -Encoding ASCII
+    }
+    if ($Wheel -ne 0) {
+        $wb = if ($Wheel -gt 0) { "wheel-down" } else { "wheel-up" }
+        for ($i = 0; $i -lt [Math]::Abs($Wheel); $i++) {
+            Send-Btn $wb $true; Start-Sleep -Milliseconds 30
+            Send-Btn $wb $false; Start-Sleep -Milliseconds 60
+        }
+        Write-Host "wheel $Wheel"
     }
     if ($Key) {
-        $k = @{ type = "key"; data = @{ key = @{ type = "qcode"; data = $Key }; down = $true } }
-        $ku = @{ type = "key"; data = @{ key = @{ type = "qcode"; data = $Key }; down = $false } }
-        [void](Send-Qmp "input-send-event" @{ events = @($k, $ku) })
+        $parts = @($Key -split "\+")
+        $events = @()
+        foreach ($p in $parts) {
+            $events += @{ type = "key"; data = @{ key = @{ type = "qcode"; data = $p }; down = $true } }
+        }
+        for ($i = $parts.Count - 1; $i -ge 0; $i--) {
+            $events += @{ type = "key"; data = @{ key = @{ type = "qcode"; data = $parts[$i] }; down = $false } }
+        }
+        [void](Send-Qmp "input-send-event" @{ events = $events })
         Write-Host "key $Key"
     }
 

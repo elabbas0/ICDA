@@ -111,3 +111,26 @@ uint64_t shm_size(uint64_t handle) {
     shm_region_t *r = &shm_table[handle - 1];
     return r->valid ? r->size : 0;
 }
+
+void shm_proc_exit(struct process *p) {
+    process_t *proc = (process_t *)p;
+    if (!proc || !proc->addr_space) return;
+    for (uint64_t idx = 0; idx < SHM_MAX_REGIONS; idx++) {
+        shm_region_t *r = &shm_table[idx];
+        uint64_t virt_base = SHM_VIRT_BASE + idx * SHM_SLOT_SIZE;
+        uint64_t phys;
+        if (!r->valid || r->num_pages == 0) continue;
+        phys = vmm_virt_to_phys(proc->addr_space, virt_base);
+        if (!phys || (phys & ~(SHM_PAGE_SZ - 1)) != r->phys_pages[0]) continue;
+        for (uint64_t i = 0; i < r->num_pages; i++)
+            vmm_unmap_page(proc->addr_space, virt_base + i * SHM_PAGE_SZ, 0);
+        if (r->ref_count > 0) r->ref_count--;
+        if (r->ref_count == 0) {
+            for (uint64_t i = 0; i < r->num_pages; i++)
+                pmm_free(r->phys_pages[i]);
+            r->valid     = 0;
+            r->size      = 0;
+            r->num_pages = 0;
+        }
+    }
+}

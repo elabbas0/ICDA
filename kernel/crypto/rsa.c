@@ -18,52 +18,6 @@ static int der_read_tag(const uint8_t *der, int der_len, int *pos, uint8_t *tag,
     return 0;
 }
 
-static int der_skip_constructed(const uint8_t *der, int der_len, int *pos) {
-    uint8_t tag;
-    int len;
-    while (*pos < der_len) {
-        if (der_read_tag(der, der_len, pos, &tag, &len) != 0) return -1;
-        if ((tag & 0x20) && len > 0) {
-            int end = *pos + len;
-            while (*pos < end) {
-                if (der_skip_constructed(der, der_len, pos) != 0) return -1;
-            }
-        } else {
-            *pos += len;
-        }
-    }
-    return 0;
-}
-
-static int der_find_in_sequence(const uint8_t *der, int der_len, int *pos, uint8_t target_tag, const uint8_t **out_data, int *out_len) {
-    uint8_t tag;
-    int len;
-    int start = *pos;
-    if (der_read_tag(der, der_len, pos, &tag, &len) != 0) return -1;
-    if (tag != 0x30) return -1;
-    int end = *pos + len;
-    while (*pos < end) {
-        if (*pos >= der_len) return -1;
-        if (der[*pos] == target_tag) {
-            int saved = *pos;
-            uint8_t t;
-            int l;
-            if (der_read_tag(der, der_len, pos, &t, &l) != 0) return -1;
-            if (t == target_tag) {
-                *out_data = der + *pos;
-                *out_len = l;
-                *pos = end;
-                return 0;
-            }
-            *pos = saved;
-        }
-        uint8_t t;
-        int l;
-        if (der_read_tag(der, der_len, pos, &t, &l) != 0) return -1;
-        *pos += l;
-    }
-    return -1;
-}
 
 int rsa_pubkey_from_cert_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
     int pos = 0;
@@ -135,7 +89,6 @@ int rsa_pubkey_from_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
 
     if (pos + 2 > seq_end) return -1;
     if (der[pos] == 0x30) {
-        int alg_id_end;
         uint8_t alg_tag;
         int alg_len;
         if (der_read_tag(der, der_len, &pos, &alg_tag, &alg_len) != 0) return -1;
@@ -160,7 +113,6 @@ int rsa_pubkey_from_der(const uint8_t *der, int der_len, rsa_pubkey_t *key) {
     if (der_read_tag(der + bitstring_start, bs_len - 1, &inner_pos, &inner_tag, &inner_len) != 0) return -1;
     if (inner_tag != 0x30) return -1;
     int rsa_seq_start = bitstring_start + inner_pos;
-    int rsa_seq_end = rsa_seq_start + inner_len;
 
     int rpos = rsa_seq_start;
     uint8_t rtag;

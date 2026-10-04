@@ -19,6 +19,8 @@
 #define MOUSE_CMD_RESET          0xFF
 #define MOUSE_CMD_ENABLE_STREAM  0xF4
 #define MOUSE_CMD_SET_DEFAULTS   0xF6
+#define MOUSE_CMD_SET_RATE       0xF3
+#define MOUSE_CMD_GET_ID         0xF2
 
 #define MOUSE_BUF_CAP 256
 
@@ -33,7 +35,8 @@ static uint8_t mouse_btn = 0;
 static int screen_w = 1280;
 static int screen_h = 720;
 
-static uint8_t mouse_packet[3];
+static uint8_t mouse_packet[4];
+static int     mouse_packet_len = 3;
 static int     mouse_packet_idx = 0;
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -68,6 +71,13 @@ static void ps2_data_write(uint8_t data) {
 static void mouse_send(uint8_t cmd) {
     ps2_cmd(PS2_CMD_SEND_TO_AUX);
     ps2_data_write(cmd);
+}
+
+static void mouse_set_rate(uint8_t rate) {
+    mouse_send(MOUSE_CMD_SET_RATE);
+    (void)ps2_read();
+    mouse_send(rate);
+    (void)ps2_read();
 }
 
 
@@ -109,6 +119,17 @@ void mouse_init(void) {
     
     mouse_send(MOUSE_CMD_SET_DEFAULTS);
     (void)ps2_read();
+
+    mouse_set_rate(200);
+    mouse_set_rate(100);
+    mouse_set_rate(80);
+    mouse_send(MOUSE_CMD_GET_ID);
+    (void)ps2_read();
+    {
+        uint8_t id = ps2_read();
+        mouse_packet_len = (id == 3 || id == 4) ? 4 : 3;
+    }
+    mouse_set_rate(100);
 
     
     mouse_send(MOUSE_CMD_ENABLE_STREAM);
@@ -192,12 +213,17 @@ void mouse_irq(struct registers *regs) {
 
         mouse_packet[mouse_packet_idx++] = byte;
 
-        if (mouse_packet_idx == 3) {
+        if (mouse_packet_idx == mouse_packet_len) {
             mouse_packet_idx = 0;
 
             uint8_t flags = mouse_packet[0];
             int32_t dx = (int32_t)(int8_t)mouse_packet[1];
             int32_t dy = (int32_t)(int8_t)mouse_packet[2];
+            int32_t dz = 0;
+            if (mouse_packet_len == 4) {
+                int32_t z = mouse_packet[3] & 0x0F;
+                dz = (z & 0x08) ? z - 16 : z;
+            }
 
 
             
@@ -238,6 +264,7 @@ void mouse_irq(struct registers *regs) {
             mouse_buf[mouse_buf_head].dx      = dx;
             mouse_buf[mouse_buf_head].dy      = dy;
             mouse_buf[mouse_buf_head].buttons = mouse_btn;
+            mouse_buf[mouse_buf_head].dz      = (int8_t)dz;
             mouse_buf_head = next;
             
 

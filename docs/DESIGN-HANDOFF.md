@@ -40,7 +40,7 @@ powershell -File scripts/qmp-screendump.ps1 -Port 4444 -Out .verify/app.png
 | Editor | `editor.c` | Toolbar + text + status | **yes** |
 | Disk Utility | `diskman.c` | Toolbar + sidebar + detail | **yes** |
 | Browser | `browser.c` | Toolbar + address + page | **yes** |
-| ICDA Demo | `gui_demo.c` | Control gallery (CI image) | no |
+| ICDA Demo | `gui_demo.c` | Control gallery (CI image) | **yes** |
 
 What the verified apps cover:
 
@@ -118,35 +118,71 @@ in `ic_theme.c` and `wm_shell.c` (wallpaper glows). Everything else uses
 `IC_WHITE`/`IC_BLACK`/`IC_*_A()` (`ic_gfx.h`) or `IC_TINT_*` (`ic_theme.h`).
 The hex values left in `libicda.c` and `nptestlx.c` are not colors.
 
-### P2: verification still owed
-- The five unverified apps above (Activity, Editor, Disk Utility, Browser,
-  ICDA Demo).
-- `scripts/run-selftest-gates.sh` has not completed a clean run yet.
-- WM interaction paths: caption buttons could not be confirmed, because
-  aiming precisely enough at a 22px target through a lossy PS/2 mouse is
-  impractical. Until they are exercised, treat minimize, maximize/restore,
-  close and their fade animations as unverified. Note that a double-click
-  on the title bar *did* zoom correctly, and the zoomed window reflowed
-  its app correctly.
-- Edge resize, context menu actions, Get Info alert, shutdown/restart
-  overlay, and both 1920x1080 and 1024x768 layouts.
-- Shm lifetime on resize: the WM unmaps the old region and the app's
-  `gui_apply_resize` frees it, so an app that never processes RESIZE
-  leaks a region (32 max).
+### P2: verification
+
+Done.
+- All eight apps are verified running (table above). The ICDA Demo only
+  exists in the CI image (`make kernel.iso CI_IMAGE=1`); start it from the
+  Terminal with `gui_demo.app`.
+- `scripts/run-selftest-gates.sh` passes both gates (nptest, nptestlx:
+  `NPTEST DONE ALL-PASS`). The script now fails a gate when its build
+  fails instead of booting a stale image. Do not run it while a QEMU holds
+  `kernel.iso` open.
+- WM paths exercised by screenshot: maximize, restore, minimize and
+  restore from the taskbar, close, edge resize (the app reflows), desktop
+  context menu ("Add Editor"), icon context menu and Get Info, and the
+  shutdown/restart overlay (QEMU powers off). Both 1024x768 and 1920x1080
+  layouts render correctly.
+- Shm lifetime: the kernel now releases a process's shm mappings when it
+  exits (`shm_proc_exit`, called next to every `fd_proc_exit`), so a
+  region an app never adopted or closed no longer leaks when the app dies.
+  Regions still in flight to a live app that never processes RESIZE are
+  only reclaimed when that app exits.
+
+Bugs this pass found and fixed: caption hover stayed on a button after a
+click until the pointer moved; the launcher, context menu and Get Info
+left a ghost of their last fade frame because nothing repainted after the
+fade ended; the Demo laid its sections out under the header with labels
+inside the previous group, never applied the switch/segmented tweens,
+hit-tested buttons by guessed x ranges, and printed 40% as "04%".
+
+Testing other resolutions: GRUB's `gfxmode` is ignored because the kernel's
+multiboot2 framebuffer tag decides the mode (width/height 0 gives GRUB's
+default, 800x600x24 under QEMU). Variant builds
+patch lines 30-31 of `kernel/boot.asm` to request a fixed size;
+`scripts/build-resolution-iso.sh 1024x768 1920x1080` does that.
+
+Harness additions: `scripts/qmp-input.ps1` takes `-Key shift+minus`
+chords, `-Wheel N`, and `-Press`/`-Release` for drags. A screendump taken
+while QEMU is powering off can show rotated colour channels; that is a
+capture artifact, not a WM bug (a frame frozen with QMP `stop` mid-fade
+is correct).
 
 ### P3: polish
-- Cursor: replace the polygon sprite with an antialiased sprite plus a
-  shadow, and add resize/text cursors. The "black bar" beside the arrow
-  is the sprite rim.
+- Cursor: done. The WM builds 4x4-supersampled sprites with a dark rim
+  and a blurred drop shadow at startup (`build_cursor_sprite`), each with
+  its own hotspot: arrow, and east-west, north-south and both diagonal
+  resize shapes chosen from the frame hit under the pointer. A text
+  cursor needs apps to tell the WM where text is (a new message type);
+  not done.
 - Blur cost: `ic_gfx_backdrop` re-blurs the whole taskbar and panel on
   every damaged frame. Cache the blurred wallpaper strip.
 - Composite cost: zoom animations re-render the frame per damage region;
   render once per frame.
 - HiDPI: no scale factor. Add a logical-to-physical scale in
   `ic_canvas_t` and 2x font/icon atlases.
-- Mouse wheel: the PS/2 IntelliMouse handshake is absent
-  (`kernel/drivers/input/mouse.c`), so there is no wheel or inertial
-  scrolling. Needs a `dz` field in `icda_mouse_event_t` (append-only).
+- Mouse wheel: done. The PS/2 driver does the IntelliMouse handshake
+  (rates 200/100/80, then ID 3 means 4-byte packets) and reports `dz`.
+  `dz` is appended to `mouse_event_t`, `syscall_mouse_event_t` and
+  `icda_mouse_event_t`; it fits in existing padding, so the struct size
+  is unchanged. The WM forwards it in `gui_msg_t.mouse.wheel` to the
+  window under the pointer, and `ic_app` emits `IC_EV_SCROLL` with
+  `ev->wheel` (positive scrolls down). Terminal, Editor, Explorer, Music,
+  Activity, Browser and the Demo scroll 3 rows per notch. No inertia.
+  Wiring this up exposed that Terminal Page Up/Down and scrollbar drag
+  were inverted, and Explorer paging never worked (grid layout reset the
+  scroll every frame; list view ignored the keys); both are fixed. Lists
+  now follow the selection only when it changes, so wheel scrolling sticks.
 - Keyboard: no modifier info reaches apps, so no Cmd/Ctrl shortcuts or
   Shift-select.
 - Timezone: `/dev/rtc` is shown as-is. Add a `timezone=` setting.

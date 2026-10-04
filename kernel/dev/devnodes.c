@@ -107,14 +107,13 @@ static int dev_con_rows(void) {
 }
 
 static const dev_calls_t dev_console_calls = {
-    dev_con_write,
-    dev_con_clear,
-    dev_con_backspace,
-    dev_con_set_cursor,
-    dev_con_get_cursor,
-    dev_con_columns,
-    dev_con_rows,
-    0, 0, 0, 0, 0, 0,
+    .con_write      = dev_con_write,
+    .con_clear      = dev_con_clear,
+    .con_backspace  = dev_con_backspace,
+    .con_set_cursor = dev_con_set_cursor,
+    .con_get_cursor = dev_con_get_cursor,
+    .con_columns    = dev_con_columns,
+    .con_rows       = dev_con_rows,
 };
 
 

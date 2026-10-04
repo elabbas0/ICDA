@@ -26,6 +26,7 @@ static void ic_app_emit_key(ic_app_t *app, uint32_t key) {
     ev.x = ev.y = 0;
     ev.button = 0;
     ev.key = key;
+    ev.wheel = 0;
     if (app->desc->event) app->desc->event(app, &ev);
     ic_app_caret_reset(app);
     app->dirty = 1;
@@ -86,6 +87,7 @@ static void ic_app_emit(ic_app_t *app, ic_event_type_t type, int x, int y, uint8
     ev.y = y;
     ev.button = button;
     ev.key = 0;
+    ev.wheel = 0;
     if (app->desc->event) app->desc->event(app, &ev);
     app->dirty = 1;
 }
@@ -116,6 +118,17 @@ static void ic_app_mouse(ic_app_t *app, const gui_msg_t *m) {
             app->buttons &= (uint8_t)~bit;
             ic_app_emit(app, IC_EV_MOUSE_UP, x, y, bit);
         }
+    }
+    if (m->mouse.wheel && app->desc->event) {
+        ic_event_t ev;
+        ev.type = IC_EV_SCROLL;
+        ev.x = x;
+        ev.y = y;
+        ev.button = 0;
+        ev.key = 0;
+        ev.wheel = m->mouse.wheel;
+        app->desc->event(app, &ev);
+        app->dirty = 1;
     }
 }
 

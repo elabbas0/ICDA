@@ -23,7 +23,12 @@ gate() {
     trap 'printf "%s\n" "$pristine" > boot/grub/grub.cfg' EXIT INT TERM HUP
     sed -i "s|multiboot2 /boot/kernel.bin icda.live=1|multiboot2 /boot/kernel.bin icda.live=1 icda.test=$flag|" boot/grub/grub.cfg
     make clean >/dev/null 2>&1 || true
-    make kernel.iso CI_SELFTEST=1 CI_IMAGE=1 >/dev/null
+    if ! make kernel.iso CI_SELFTEST=1 CI_IMAGE=1 >/dev/null; then
+        echo "gate $name: FAIL (build failed)"
+        printf "%s\n" "$pristine" > boot/grub/grub.cfg
+        trap - EXIT INT TERM HUP
+        return 1
+    fi
     QEMU_LOG="/tmp/$flag.log" QEMU_TIMEOUT="${QEMU_TIMEOUT:-300}" \
         sh scripts/qemu-smoke.sh kernel.iso || true
     if grep -aq "NPTEST DONE ALL-PASS" "/tmp/$flag.log"; then

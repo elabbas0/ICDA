@@ -33,6 +33,7 @@ static struct {
     int        count;
     int        selected;
     int        scroll;
+    int        followed;
 
     
     int rows;
@@ -99,8 +100,11 @@ static void layout(ic_app_t *app) {
     int rows = l.h / IC_H_ROW;
     if (rows < 1) rows = 1;
     ap.rows = rows;
-    if (ap.selected < ap.scroll) ap.scroll = ap.selected;
-    if (ap.selected >= ap.scroll + rows) ap.scroll = ap.selected - rows + 1;
+    if (ap.selected != ap.followed) {
+        if (ap.selected < ap.scroll) ap.scroll = ap.selected;
+        if (ap.selected >= ap.scroll + rows) ap.scroll = ap.selected - rows + 1;
+        ap.followed = ap.selected;
+    }
     if (ap.scroll < 0) ap.scroll = 0;
     if (ap.scroll > ap.count - rows) ap.scroll = ap.count - rows;
     if (ap.scroll < 0) ap.scroll = 0;
@@ -385,6 +389,9 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     case IC_EV_MOUSE_LEAVE:
         ap.hover_row = -1;
         ap.hover_play = ap.hover_stop = ap.hover_refresh = 0;
+        break;
+    case IC_EV_SCROLL:
+        ap.scroll += ev->wheel * 3;
         break;
     case IC_EV_KEY:
         switch (ev->key) {

@@ -8,6 +8,7 @@
 #include "../proc/sched.h"
 #include "../proc/process.h"
 #include "../fs/fd.h"
+#include "../ipc/shm.h"
 
 
 
@@ -243,6 +244,7 @@ static void page_fault_handler(struct registers *regs) {
         thread_t *thread = sched_current_thread();
         if (proc && proc->kind == PROCESS_USER && thread) {
             fd_proc_exit(proc);
+            shm_proc_exit(proc);
             pf_serial_dump(regs, cr2);
             serial_write("  user process killed\n");
             proc->state = PROCESS_EXITED;

@@ -11,6 +11,7 @@ typedef struct {
     int32_t dx;
     int32_t dy;
     uint8_t buttons;   
+    int8_t  dz;
 } mouse_event_t;
 
 void    mouse_init(void);

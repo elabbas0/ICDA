@@ -47,7 +47,8 @@ typedef enum {
     IC_EV_FOCUS,            
     IC_EV_BLUR,             
     IC_EV_RESIZE,           
-    IC_EV_APPEARANCE        
+    IC_EV_APPEARANCE,       
+    IC_EV_SCROLL            
 } ic_event_type_t;
 
 typedef struct {
@@ -55,6 +56,7 @@ typedef struct {
     int             x, y;
     uint8_t         button;   
     uint32_t        key;
+    int             wheel;    
 } ic_event_t;
 
 typedef struct ic_app ic_app_t;

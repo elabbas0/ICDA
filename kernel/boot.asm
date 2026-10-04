@@ -42,7 +42,7 @@ multiboot_end:
 
 
 section .bss
-align 4096
+alignb 4096
 pml4_table:     resb 4096
 pdp_table:      resb 4096
 
@@ -112,11 +112,11 @@ pd_table_61:    resb 4096
 pd_table_62:    resb 4096
 pd_table_63:    resb 4096
 
-align 8
+alignb 8
 multiboot_info_ptr: resq 1
 
 
-align 16
+alignb 16
 stack_bottom:
     resb 16384
 stack_top:

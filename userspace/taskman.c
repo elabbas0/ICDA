@@ -545,6 +545,9 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         tm.hover_row = -1;
         tm.hover_refresh = tm.hover_suspend = tm.hover_kill = 0;
         break;
+    case IC_EV_SCROLL:
+        tm.scroll += ev->wheel * 3;
+        break;
     case IC_EV_KEY:
         if (tm.alert_action != TM_NONE) {
             if (ev->key == IC_KEY_ESCAPE) {

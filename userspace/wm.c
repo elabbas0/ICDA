@@ -22,8 +22,6 @@
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
 #define BACK_BUFFER_HEIGHT 1600
-#define CURSOR_W 19
-#define CURSOR_H 30
 #define CURSOR_SAVE_DIM 48   
 
 #define WIN_MIN_W 320
@@ -273,104 +271,173 @@ static void wm_power_sequence(int restart);
 
 
 
-typedef struct { int n; int x[8]; int y[8]; } cursor_poly_t;
-static const cursor_poly_t cursor_outline = {7, {0,0,5,9,14,10,18}, {0,26,21,29,27,18,18}};
-static uint8_t cursor_rgba[CURSOR_H][CURSOR_W][4];
-static uint16_t cursor_poly_x[8];
-static uint16_t cursor_poly_y[8];
-static int cursor_point_in_poly(int x, int y) {
-    int inside=0;
-    for(int i=0,j=cursor_outline.n-1;i<cursor_outline.n;j=i++){
-        int xi=cursor_poly_x[i], yi=cursor_poly_y[i];
-        int xj=cursor_poly_x[j], yj=cursor_poly_y[j];
-        if(((yi>y)!=(yj>y)) && (x < (int)((int64_t)(xj-xi)*(y-yi)/(yj-yi))+xi)) inside=!inside;
+#define CUR_DIM 32
+
+typedef enum { CUR_ARROW = 0, CUR_EW, CUR_NS, CUR_NWSE, CUR_NESW, CUR_COUNT } cur_shape_t;
+
+typedef struct {
+    int     hx, hy;
+    uint8_t rgba[CUR_DIM][CUR_DIM][4];
+} cur_sprite_t;
+
+typedef struct { int n; float x[12]; float y[12]; } cur_poly_t;
+
+static cur_sprite_t cur_sprites[CUR_COUNT];
+static int cur_shape = CUR_ARROW;
+
+static int cur_inside(const cur_poly_t *p, float x, float y) {
+    int inside = 0;
+    for (int i = 0, j = p->n - 1; i < p->n; j = i++) {
+        float xi = p->x[i], yi = p->y[i], xj = p->x[j], yj = p->y[j];
+        if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
     }
     return inside;
 }
-static int64_t cursor_seg_dist2(int x,int y,int ax,int ay,int bx,int by){
-    int dx=bx-ax, dy=by-ay;
-    int64_t len2=(int64_t)dx*dx+(int64_t)dy*dy;
-    int64_t t;
-    int64_t cx,cy;
-    if(len2==0) return (int64_t)(x-ax)*(x-ax)+(int64_t)(y-ay)*(y-ay);
-    t=(int64_t)(x-ax)*dx+(int64_t)(y-ay)*dy;
-    if(t<0) t=0;
-    if(t>len2) t=len2;
-    cx=ax+t*dx/len2; cy=ay+t*dy/len2;
-    return (int64_t)(x-cx)*(x-cx)+(int64_t)(y-cy)*(y-cy);
+
+static float cur_edge_dist2(const cur_poly_t *p, float x, float y) {
+    float best = -1.0f;
+    for (int i = 0, j = p->n - 1; i < p->n; j = i++) {
+        float ax = p->x[j], ay = p->y[j], dx = p->x[i] - ax, dy = p->y[i] - ay;
+        float len2 = dx * dx + dy * dy, t = 0.0f, cx, cy, d2;
+        if (len2 > 0.0f) {
+            t = ((x - ax) * dx + (y - ay) * dy) / len2;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+        cx = ax + t * dx - x;
+        cy = ay + t * dy - y;
+        d2 = cx * cx + cy * cy;
+        if (best < 0.0f || d2 < best) best = d2;
+    }
+    return best;
 }
-#define CURSOR_RIM_R2 ((int64_t)22*22)
-static void build_cursor_sprite(void){
-    static const int sub[4]={2,6,10,14};
-    for(int i=0;i<cursor_outline.n;i++){cursor_poly_x[i]=cursor_outline.x[i]*16; cursor_poly_y[i]=cursor_outline.y[i]*16;}
-    for(int py=0;py<CURSOR_H;py++) for(int px=0;px<CURSOR_W;px++){
-        int w_hits=0,b_hits=0;
-        for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){
-            int ix=px*16+sub[sx], iy=py*16+sub[sy];
-            if(!cursor_point_in_poly(ix,iy)) continue;
-            int64_t d2=-1;
-            for(int e=0,j=cursor_outline.n-1;e<cursor_outline.n;j=e++){
-                int64_t dd=cursor_seg_dist2(ix,iy,cursor_poly_x[j],cursor_poly_y[j],cursor_poly_x[e],cursor_poly_y[e]);
-                if(d2<0||dd<d2) d2=dd;
+
+static void cur_rotate(cur_poly_t *p, float cx, float cy, float c, float s) {
+    for (int i = 0; i < p->n; i++) {
+        float dx = p->x[i] - cx, dy = p->y[i] - cy;
+        p->x[i] = cx + dx * c - dy * s;
+        p->y[i] = cy + dx * s + dy * c;
+    }
+}
+
+static void cur_render(cur_sprite_t *out, const cur_poly_t *p, int hx, int hy) {
+    static uint8_t alpha[CUR_DIM][CUR_DIM];
+    static uint16_t sh[CUR_DIM][CUR_DIM], tmp[CUR_DIM][CUR_DIM];
+    const float rim2 = 1.15f * 1.15f;
+    out->hx = hx;
+    out->hy = hy;
+    for (int py = 0; py < CUR_DIM; py++) {
+        for (int px = 0; px < CUR_DIM; px++) {
+            int white = 0, dark = 0;
+            uint8_t *o = out->rgba[py][px];
+            for (int sy = 0; sy < 4; sy++) {
+                for (int sx = 0; sx < 4; sx++) {
+                    float x = (float)px + 0.125f + 0.25f * (float)sx;
+                    float y = (float)py + 0.125f + 0.25f * (float)sy;
+                    if (!cur_inside(p, x, y)) continue;
+                    if (cur_edge_dist2(p, x, y) <= rim2) dark++;
+                    else white++;
+                }
             }
-            if(d2<=CURSOR_RIM_R2) b_hits++; else w_hits++;
+            if (white + dark == 0) {
+                o[0] = o[1] = o[2] = o[3] = 0;
+            } else {
+                int v = (white * 255 + dark * 24) / (white + dark);
+                o[0] = o[1] = o[2] = (uint8_t)v;
+                o[3] = (uint8_t)((white + dark) * 255 / 16);
+            }
+            alpha[py][px] = o[3];
         }
-        int total=w_hits+b_hits;
-        uint8_t *out=cursor_rgba[py][px];
-        if(total==0) out[0]=out[1]=out[2]=out[3]=0;
-        else{
-            int w_share=w_hits*255/total, b_share=255-w_share;
-            out[0]=(255*w_share+32*b_share)/255;
-            out[1]=(255*w_share+32*b_share)/255;
-            out[2]=(255*w_share+38*b_share)/255;
-            out[3]=total*255/16;
+    }
+    for (int y = 0; y < CUR_DIM; y++) {
+        for (int x = 0; x < CUR_DIM; x++) {
+            int sx = x - 1, sy = y - 2;
+            sh[y][x] = (sx >= 0 && sy >= 0) ? alpha[sy][sx] : 0;
         }
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int y = 0; y < CUR_DIM; y++) {
+            for (int x = 0; x < CUR_DIM; x++) {
+                int sum = 0, n = 0;
+                for (int k = -1; k <= 1; k++) {
+                    if (x + k < 0 || x + k >= CUR_DIM) continue;
+                    sum += sh[y][x + k];
+                    n++;
+                }
+                tmp[y][x] = (uint16_t)(sum / n);
+            }
+        }
+        for (int y = 0; y < CUR_DIM; y++) {
+            for (int x = 0; x < CUR_DIM; x++) {
+                int sum = 0, n = 0;
+                for (int k = -1; k <= 1; k++) {
+                    if (y + k < 0 || y + k >= CUR_DIM) continue;
+                    sum += tmp[y + k][x];
+                    n++;
+                }
+                sh[y][x] = (uint16_t)(sum / n);
+            }
+        }
+    }
+    for (int y = 0; y < CUR_DIM; y++) {
+        for (int x = 0; x < CUR_DIM; x++) {
+            uint8_t *o = out->rgba[y][x];
+            int sa = sh[y][x] * 90 / 255;
+            int fa = o[3];
+            int oa = fa + sa * (255 - fa) / 255;
+            if (oa == 0) continue;
+            o[0] = (uint8_t)(o[0] * fa / oa);
+            o[1] = (uint8_t)(o[1] * fa / oa);
+            o[2] = (uint8_t)(o[2] * fa / oa);
+            o[3] = (uint8_t)oa;
+        }
+    }
+}
+
+static void build_cursor_sprite(void) {
+    static const cur_poly_t arrow = {
+        7, { 1.0f, 1.0f, 5.5f, 9.0f, 12.5f, 9.5f, 15.5f },
+           { 1.0f, 21.5f, 17.0f, 24.5f, 23.0f, 15.5f, 15.5f }
+    };
+    static const cur_poly_t ew = {
+        10, { 5.0f, 10.0f, 10.0f, 22.0f, 22.0f, 27.0f, 22.0f, 22.0f, 10.0f, 10.0f },
+            { 16.0f, 11.0f, 14.0f, 14.0f, 11.0f, 16.0f, 21.0f, 18.0f, 18.0f, 21.0f }
+    };
+    cur_poly_t p;
+    const float r = 0.70710678f;
+
+    cur_render(&cur_sprites[CUR_ARROW], &arrow, 1, 1);
+    cur_render(&cur_sprites[CUR_EW], &ew, 16, 16);
+    p = ew;
+    cur_rotate(&p, 16.0f, 16.0f, 0.0f, 1.0f);
+    cur_render(&cur_sprites[CUR_NS], &p, 16, 16);
+    p = ew;
+    cur_rotate(&p, 16.0f, 16.0f, r, r);
+    cur_render(&cur_sprites[CUR_NWSE], &p, 16, 16);
+    p = ew;
+    cur_rotate(&p, 16.0f, 16.0f, r, -r);
+    cur_render(&cur_sprites[CUR_NESW], &p, 16, 16);
+}
+
+static void set_cursor_shape(int shape) {
+    if (shape < 0 || shape >= CUR_COUNT) shape = CUR_ARROW;
+    cur_shape = shape;
+}
+
+static int cursor_shape_for_hit(wm_hit_t hit) {
+    switch (hit) {
+    case WM_HIT_RESIZE_L:
+    case WM_HIT_RESIZE_R:  return CUR_EW;
+    case WM_HIT_RESIZE_B:  return CUR_NS;
+    case WM_HIT_RESIZE_BR: return CUR_NWSE;
+    case WM_HIT_RESIZE_BL: return CUR_NESW;
+    default:               return CUR_ARROW;
     }
 }
 
 static void clear_msg(gui_msg_t *msg) {
     for (int i = 0; i < 64; i++) ((uint8_t*)msg)[i] = 0;
 }
-
-static int cursor_icon_dims(const ic_icon_t **icon_out, int *w_out, int *h_out) {
-    const ic_icon_t *icon = ic_icon_builtin("cursor");
-    int w;
-    int h;
-
-    if (!icon) icon = ic_icon_builtin("mouse");
-    if (!icon || !ic_icon_valid(icon)) return 0;
-
-    w = icon->w;
-    h = icon->h;
-    if (w <= 0 || h <= 0) return 0;
-    if (w > 48 || h > 48) {
-        if (w >= h) {
-            h = h * 48 / w;
-            w = 48;
-        } else {
-            w = w * 48 / h;
-            h = 48;
-        }
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
-    }
-    if (icon_out) *icon_out = icon;
-    if (w_out) *w_out = w;
-    if (h_out) *h_out = h;
-    return 1;
-}
-
-static void cursor_dims(int *w_out, int *h_out) {
-    int cw = CURSOR_W;
-    int ch = CURSOR_H;
-    if (!cursor_icon_dims(0, &cw, &ch)) {
-        cw = CURSOR_W;
-        ch = CURSOR_H;
-    }
-    if (w_out) *w_out = cw;
-    if (h_out) *h_out = ch;
-}
-
 
 static void copy_pixels(uint32_t *dst, const uint32_t *src, int count) {
     uint64_t *d = (uint64_t *)dst;
@@ -403,121 +470,47 @@ static uint32_t blend_over(uint32_t dst, uint32_t src, int alpha) {
 
 
 
+static int cur_save_x, cur_save_y, cur_save_w, cur_save_h;
+
 static void draw_cursor_into_bb(int w, int h, int mx, int my) {
-    const ic_icon_t *icon = NULL;
-    int dw = CURSOR_W;
-    int dh = CURSOR_H;
-    int sx0, sy0, cw, ch;
+    const cur_sprite_t *s = &cur_sprites[cur_shape];
+    int ox = mx - s->hx, oy = my - s->hy;
+    int x0 = ox < 0 ? 0 : ox, y0 = oy < 0 ? 0 : oy;
+    int x1 = ox + CUR_DIM > w ? w : ox + CUR_DIM;
+    int y1 = oy + CUR_DIM > h ? h : oy + CUR_DIM;
 
-    if (!cursor_icon_dims(&icon, &dw, &dh)) {
-        icon = NULL;
-        dw = CURSOR_W;
-        dh = CURSOR_H;
+    cur_save_w = 0;
+    cur_save_h = 0;
+    if (x1 <= x0 || y1 <= y0) return;
+    cur_save_x = x0;
+    cur_save_y = y0;
+    cur_save_w = x1 - x0;
+    cur_save_h = y1 - y0;
+    for (int y = 0; y < cur_save_h; y++) {
+        copy_pixels(&cursor_scene_save[y * cur_save_w], &back_buffer[(y0 + y) * w + x0], cur_save_w);
     }
-    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
-    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
-
-    sx0 = 0;
-    sy0 = 0;
-    if (mx < 0) { sx0 = -mx; }
-    if (my < 0) { sy0 = -my; }
-    cw = dw - sx0;
-    ch = dh - sy0;
-    if (mx + sx0 + cw > w) cw = w - mx - sx0;
-    if (my + sy0 + ch > h) ch = h - my - sy0;
-    if (cw <= 0 || ch <= 0) return;
-
-    {
-        int screen_x = mx + sx0;
-        int screen_y = my + sy0;
-        if (screen_x < 0) screen_x = 0;
-        if (screen_y < 0) screen_y = 0;
-        for (int y = 0; y < ch; y++) {
-            copy_pixels(&cursor_scene_save[y * cw],
-                        &back_buffer[(screen_y + y) * w + screen_x], cw);
-        }
-    }
-
-    if (icon) {
-        for (int dy = sy0; dy < sy0 + ch && dy < dh; dy++) {
-            int py = my + dy;
-            int sy = (int)((uint64_t)dy * icon->h / dh);
-            if (py < 0 || py >= h) continue;
-            if (sy >= icon->h) sy = icon->h - 1;
-            for (int dx = sx0; dx < sx0 + cw && dx < dw; dx++) {
-                int px = mx + dx;
-                int sx = (int)((uint64_t)dx * icon->w / dw);
-                const uint8_t *p;
-                uint32_t src;
-                uint32_t dst;
-                if (px < 0 || px >= w) continue;
-                if (sx >= icon->w) sx = icon->w - 1;
-                p = icon->rgba + (uint64_t)(sy * icon->w + sx) * 4;
-                if (p[3] == 0) continue;
-                src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
-                dst = back_buffer[py * w + px];
-                back_buffer[py * w + px] =
-                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
-            }
-        }
-        return;
-    }
-
-    for (int cy = 0; cy < CURSOR_H; cy++) {
-        int py = my + cy;
-        if (py < 0 || py >= h) continue;
-        for (int cx = 0; cx < CURSOR_W; cx++) {
-            const uint8_t *p = cursor_rgba[cy][cx];
-            int px = mx + cx;
-            if (px < 0 || px >= w) continue;
+    for (int py = y0; py < y1; py++) {
+        for (int px = x0; px < x1; px++) {
+            const uint8_t *p = s->rgba[py - oy][px - ox];
+            uint32_t src;
             if (p[3] == 0) continue;
-            {
-                uint32_t src = ((uint32_t)p[0] << 16) |
-                               ((uint32_t)p[1] << 8) | p[2];
-                uint32_t dst = back_buffer[py * w + px];
-                back_buffer[py * w + px] =
-                    p[3] == 255 ? src : blend_over(dst, src, p[3]);
-            }
+            src = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+            back_buffer[py * w + px] = p[3] == 255 ? src : blend_over(back_buffer[py * w + px], src, p[3]);
         }
     }
 }
 
 static void restore_cursor_scene(int w, int h, int mx, int my) {
-    const ic_icon_t *icon = NULL;
-    int dw = CURSOR_W;
-    int dh = CURSOR_H;
-    int sx0, sy0, cw, ch;
-
-    if (!cursor_icon_dims(&icon, &dw, &dh)) {
-        dw = CURSOR_W;
-        dh = CURSOR_H;
+    (void)h;
+    (void)mx;
+    (void)my;
+    for (int y = 0; y < cur_save_h; y++) {
+        copy_pixels(&back_buffer[(cur_save_y + y) * w + cur_save_x], &cursor_scene_save[y * cur_save_w],
+                    cur_save_w);
     }
-    if (dw > CURSOR_SAVE_DIM) dw = CURSOR_SAVE_DIM;
-    if (dh > CURSOR_SAVE_DIM) dh = CURSOR_SAVE_DIM;
-
-    sx0 = 0;
-    sy0 = 0;
-    if (mx < 0) { sx0 = -mx; }
-    if (my < 0) { sy0 = -my; }
-    cw = dw - sx0;
-    ch = dh - sy0;
-    if (mx + sx0 + cw > w) cw = w - mx - sx0;
-    if (my + sy0 + ch > h) ch = h - my - sy0;
-    if (cw <= 0 || ch <= 0) return;
-
-    {
-        int screen_x = mx + sx0;
-        int screen_y = my + sy0;
-        if (screen_x < 0) screen_x = 0;
-        if (screen_y < 0) screen_y = 0;
-        for (int y = 0; y < ch; y++) {
-            copy_pixels(&back_buffer[(screen_y + y) * w + screen_x],
-                        &cursor_scene_save[y * cw], cw);
-        }
-    }
+    cur_save_w = 0;
+    cur_save_h = 0;
 }
-
-
 
 
 #define DESK_MAX_ICONS 12
@@ -689,7 +682,7 @@ static int props_hover = -1;
 static char props_body[160];
 static ic_tween_t props_fade;
 #define PROPS_W 300
-#define PROPS_H 190
+#define PROPS_H ic_ui_alert_height(IC_SYM_INFO, "")
 
 static ic_rect_t ctx_rect(void) {
     return ic_rect_make(ctx_x, ctx_y, ic_ui_menu_width(&ctx_model), ic_ui_menu_height(&ctx_model));
@@ -1382,6 +1375,27 @@ static void send_mouse(wm_window_t *win, int x, int y, uint8_t buttons) {
 
 
 
+static int window_at(int mx, int my, wm_hit_t *hit_out);
+
+static void send_wheel(int dz) {
+    wm_hit_t hit = WM_HIT_NONE;
+    int idx = capture_win >= 0 ? capture_win : window_at(mouse_x, mouse_y, &hit);
+    wm_window_t *win;
+    gui_msg_t m;
+    if (idx < 0) return;
+    if (capture_win < 0 && hit != WM_HIT_CLIENT) return;
+    win = &windows[idx];
+    if (!win->valid || win->closing || win->minimized) return;
+    clear_msg(&m);
+    m.type = GUI_MSG_MOUSE_EVENT;
+    m.window_id = win->id;
+    m.mouse.x = mouse_x - win->x;
+    m.mouse.y = mouse_y - win->y;
+    m.mouse.buttons = mouse_buttons;
+    m.mouse.wheel = (int8_t)dz;
+    send_maybe(win->app_queue_handle, &m);
+}
+
 static ic_rect_t work_area(void) {
     return ic_rect_make(0, 0, scr_w, scr_h - WM_BAR_H);
 }
@@ -1628,17 +1642,18 @@ static int animations_tick(void) {
         }
         mark_dirty_win(win);
     }
-    if (ic_tween_running(&launcher_fade)) {
-        mark_dirty_launcher();
-        running = 1;
-    }
-    if (ic_tween_running(&ctx_fade)) {
-        mark_dirty_rect(reach_of(ctx_rect()));
-        running = 1;
-    }
-    if (ic_tween_running(&props_fade)) {
-        mark_dirty_rect(reach_of(props_rect()));
-        running = 1;
+    {
+        static int launcher_was, ctx_was, props_was;
+        int l = ic_tween_running(&launcher_fade);
+        int x = ic_tween_running(&ctx_fade);
+        int p = ic_tween_running(&props_fade);
+        if (l || launcher_was) mark_dirty_launcher();
+        if (x || ctx_was) mark_dirty_rect(reach_of(ctx_rect()));
+        if (p || props_was) mark_dirty_rect(reach_of(props_rect()));
+        if (l || x || p) running = 1;
+        launcher_was = l;
+        ctx_was = x;
+        props_was = p;
     }
     return running;
 }
@@ -2007,17 +2022,19 @@ static void composite_region(int x, int y, int rw, int rh) {
 }
 
 static void cursor_bbox(int mx, int my, int pmx, int pmy, int *ox, int *oy, int *ow, int *oh) {
-    int cw, ch;
-    cursor_dims(&cw, &ch);
+    const int pad = CUR_DIM / 2;
+    const int cw = CUR_DIM, ch = CUR_DIM;
     if (scr_w <= 0 || scr_h <= 0) { *ox = *oy = *ow = *oh = 0; return; }
     if (mx < 0) mx = 0; else if (mx >= scr_w) mx = scr_w - 1;
     if (my < 0) my = 0; else if (my >= scr_h) my = scr_h - 1;
     if (pmx < 0) pmx = 0; else if (pmx >= scr_w) pmx = scr_w - 1;
     if (pmy < 0) pmy = 0; else if (pmy >= scr_h) pmy = scr_h - 1;
-    *ox = pmx < mx ? pmx : mx;
-    *oy = pmy < my ? pmy : my;
+    *ox = (pmx < mx ? pmx : mx) - pad;
+    *oy = (pmy < my ? pmy : my) - pad;
     *ow = (pmx > mx ? pmx : mx) + cw + 2 - *ox;
     *oh = (pmy > my ? pmy : my) + ch + 2 - *oy;
+    if (*ox < 0) { *ow += *ox; *ox = 0; }
+    if (*oy < 0) { *oh += *oy; *oy = 0; }
     if (*ox + *ow > scr_w) *ow = scr_w - *ox;
     if (*oy + *oh > scr_h) *oh = scr_h - *oy;
 }
@@ -2398,6 +2415,12 @@ static void left_release(void) {
         }
         capture_win = -1;
     }
+    {
+        wm_hit_t now_hit;
+        int now_idx = window_at(mouse_x, mouse_y, &now_hit);
+        set_caption_hover(now_idx, now_hit);
+        set_cursor_shape(cursor_shape_for_hit(now_hit));
+    }
     desk_left_release(mouse_x, mouse_y);
 }
 
@@ -2486,6 +2509,7 @@ static void pointer_moved(void) {
     
     idx = window_at(mouse_x, mouse_y, &hit);
     set_caption_hover(press_win >= 0 ? press_win : idx, press_win >= 0 ? press_hit : hit);
+    set_cursor_shape(cursor_shape_for_hit(press_win >= 0 ? press_hit : hit));
     {
         wm_bar_t b;
         int bh;
@@ -2683,6 +2707,7 @@ int main(int argc, char **argv) {
                 right_edge(prev_btn);
                 if ((mouse_buttons & 1) && !(prev_btn & 1)) left_press();
                 else if (!(mouse_buttons & 1) && (prev_btn & 1)) left_release();
+                if (mev.dz) send_wheel(mev.dz);
             }
             if (mouse_moved && (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
                 pointer_moved();

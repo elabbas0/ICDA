@@ -940,6 +940,9 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         br.hover_back = br.hover_forward = br.hover_reload = br.hover_go = 0;
         br.hover_link = -1;
         break;
+    case IC_EV_SCROLL:
+        br.scroll += ev->wheel * 3 * (reading()->line_h + 2);
+        break;
     case IC_EV_KEY:
         if (br.addr_focused) {
             switch (ev->key) {

@@ -75,6 +75,7 @@ static struct {
     int       rows;               
     int       cols;               
     int       first_item;         
+    int       followed;
     int       last_item;
 
     
@@ -226,9 +227,12 @@ static void layout(ic_app_t *app) {
         if (rows < 1) rows = 1;
         ex.rows = rows;
         ex.cols = 1;
-        if (ex.selected < 0) ex.first_item = 0;
-        else if (ex.selected < ex.first_item) ex.first_item = ex.selected;
-        else if (ex.selected >= ex.first_item + rows) ex.first_item = ex.selected - rows + 1;
+        if (ex.selected != ex.followed) {
+            if (ex.selected < 0) ex.first_item = 0;
+            else if (ex.selected < ex.first_item) ex.first_item = ex.selected;
+            else if (ex.selected >= ex.first_item + rows) ex.first_item = ex.selected - rows + 1;
+            ex.followed = ex.selected;
+        }
         if (ex.first_item > ex.count - rows) ex.first_item = ex.count - rows;
         if (ex.first_item < 0) ex.first_item = 0;
         ex.last_item = ex.first_item + rows;
@@ -241,12 +245,25 @@ static void layout(ic_app_t *app) {
         if (rows < 1) rows = 1;
         ex.cols = cols;
         ex.rows = rows;
-        
-        if (ex.selected < 0) ex.scroll = 0;
-        else {
-            int page = cols * rows;
-            int first_page = (ex.selected / page) * page;
-            ex.scroll = first_page;
+        if (ex.selected != ex.followed) {
+            if (ex.selected < 0) {
+                ex.scroll = 0;
+            } else {
+                int row = ex.selected / cols;
+                int top = ex.scroll / cols;
+                if (row < top) ex.scroll = row * cols;
+                else if (row >= top + rows) ex.scroll = (row - rows + 1) * cols;
+            }
+            ex.followed = ex.selected;
+        }
+        {
+            int total_rows = (ex.count + cols - 1) / cols;
+            int max_top = total_rows - rows;
+            int top = ex.scroll / cols;
+            if (max_top < 0) max_top = 0;
+            if (top > max_top) top = max_top;
+            if (top < 0) top = 0;
+            ex.scroll = top * cols;
         }
     }
 }
@@ -348,6 +365,7 @@ static void refresh(void) {
     ex.count = 0;
     ex.hover = -1;
     ex.scroll = 0;
+    ex.first_item = 0;
 
     rc = icda_list_dir(ex.path, ex.list_buf, sizeof(ex.list_buf) - 1);
     if ((long)rc < 0) {
@@ -411,6 +429,7 @@ static void navigate_to(const char *path, int record_history) {
     d_copy(ex.path, path, PATH_CAP);
     ex.selected = -1;
     ex.scroll = 0;
+    ex.first_item = 0;
     refresh();
 }
 
@@ -420,6 +439,7 @@ static void go_back(void) {
     d_copy(ex.path, ex.history[ex.history_pos], PATH_CAP);
     ex.selected = -1;
     ex.scroll = 0;
+    ex.first_item = 0;
     refresh();
 }
 
@@ -1043,6 +1063,10 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         ex.hover_back = ex.hover_up = ex.hover_view = 0;
         ex.hover_new_folder = ex.hover_new_file = 0;
         break;
+    case IC_EV_SCROLL:
+        if (ex.view == VIEW_LIST) ex.first_item += ev->wheel * 3;
+        else ex.scroll += ev->wheel * ex.cols;
+        break;
     case IC_EV_KEY:
         if (ex.info_open) {
             if (ev->key == IC_KEY_ESCAPE || ev->key == IC_KEY_ENTER) ex.info_open = 0;
@@ -1112,10 +1136,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             }
             break;
         case IC_KEY_PAGE_UP:
-            ex.scroll -= ex.cols * ex.rows;
-            if (ex.scroll < 0) ex.scroll = 0;
+            if (ex.view == VIEW_LIST) ex.first_item -= ex.rows;
+            else ex.scroll -= ex.cols * ex.rows;
             break;
-        case IC_KEY_PAGE_DOWN: ex.scroll += ex.cols * ex.rows; break;
+        case IC_KEY_PAGE_DOWN:
+            if (ex.view == VIEW_LIST) ex.first_item += ex.rows;
+            else ex.scroll += ex.cols * ex.rows;
+            break;
         case IC_KEY_ESCAPE:
             ex.menu_item = ex.selected;
             open_menu_at(app, app->mouse_x, app->mouse_y);
@@ -1154,6 +1181,7 @@ static void init(ic_app_t *app) {
     ex.hover = -1;
     ex.view = VIEW_GRID;
     ex.scroll = 0;
+    ex.first_item = 0;
     ex.history_count = 0;
     ex.history_pos = -1;
     ex.dialog = DLG_NONE;

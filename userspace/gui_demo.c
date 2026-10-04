@@ -89,38 +89,51 @@ static uint32_t scratch[GD_SCRATCH_PX];
 
 
 
+#define LABEL_H      28
+#define SECTION_GAP  IC_SP_4
+#define DEMO_STATUS_H 24
+
 static ic_rect_t view_rect(ic_app_t *app) {
-    return ic_rect_make(0, IC_H_TITLEBAR, app->width, app->height - IC_H_TITLEBAR);
+    return ic_rect_make(0, IC_H_TITLEBAR, app->width, app->height - IC_H_TITLEBAR - DEMO_STATUS_H);
 }
 
 static ic_rect_t status_rect(ic_app_t *app) {
-    return ic_rect_make(0, app->height - 24, app->width, 24);
+    return ic_rect_make(0, app->height - DEMO_STATUS_H, app->width, DEMO_STATUS_H);
 }
 
-
+static int section_h(int i) {
+    switch (ROWS[i].kind) {
+    case ROW_LIST:    return 3 * IC_H_ROW + 2 * IC_SP_1;
+    case ROW_TABLE:   return 3 * IC_H_ROW + 2 * IC_SP_1;
+    case ROW_SIDEBAR: return 3 * IC_H_ROW + IC_SP_2 + 2 * IC_SP_2;
+    case ROW_MENU:    return 3 * IC_H_MENU_ITEM + 2 * IC_SP_2 + 2 * IC_SP_2;
+    default:          return ROW_H;
+    }
+}
 
 static int group_y(int i) {
-    int y = GROUP_PAD;
-    for (int k = 0; k < i; k++) y += ROW_H + 8 + ROW_H + IC_SP_4;
+    int y = IC_SP_4;
+    for (int k = 0; k < i; k++) y += LABEL_H + section_h(k) + SECTION_GAP;
     return y;
 }
 
-static int group_h(void) { return ROW_H + 8 + ROW_H; }
+static int section_top(int i) { return IC_H_TITLEBAR + group_y(i) - gd.scroll; }
 
 static int group_at(int y) {
     for (int i = 0; i < ROW_COUNT; i++) {
-        int top = group_y(i) - gd.scroll;
-        if (y >= top && y < top + group_h()) return i;
+        int top = section_top(i);
+        if (y >= top && y < top + LABEL_H + section_h(i)) return i;
     }
     return -1;
 }
 
-static int control_top(int i) { return group_y(i) + ROW_H + 8; }
-
+static ic_rect_t box_rect(ic_app_t *app, int i) {
+    return ic_rect_make(GROUP_PAD, section_top(i) + LABEL_H, app->width - 2 * GROUP_PAD, section_h(i));
+}
 
 static ic_rect_t control_rect(ic_app_t *app, int i) {
-    int top = control_top(i) - gd.scroll;
-    return ic_rect_make(GROUP_PAD, top, app->width - 2 * GROUP_PAD, ROW_H);
+    ic_rect_t b = box_rect(app, i);
+    return ic_rect_make(b.x + IC_SP_3, b.y, b.w - 2 * IC_SP_3, b.h);
 }
 
 static ic_rect_t toggle_rect(ic_app_t *app, int i) {
@@ -142,7 +155,7 @@ static ic_rect_t progress_rect(ic_app_t *app, int i) {
 
 static ic_rect_t field_rect(ic_app_t *app, int i) {
     ic_rect_t r = control_rect(app, i);
-    return ic_rect_make(r.x, r.y + (r.h - IC_H_CONTROL) / 2, r.w - IC_SP_6, IC_H_CONTROL);
+    return ic_rect_make(r.x, r.y + (r.h - IC_H_CONTROL) / 2, r.w, IC_H_CONTROL);
 }
 
 static ic_rect_t segmented_rect(ic_app_t *app, int i) {
@@ -152,86 +165,86 @@ static ic_rect_t segmented_rect(ic_app_t *app, int i) {
 }
 
 static ic_rect_t list_row_rect(ic_app_t *app, int i, int k) {
-    ic_rect_t r = control_rect(app, i);
-    return ic_rect_make(r.x, r.y + k * IC_H_ROW, r.w, IC_H_ROW);
+    ic_rect_t b = box_rect(app, i);
+    return ic_rect_make(b.x, b.y + IC_SP_1 + k * IC_H_ROW, b.w, IC_H_ROW);
 }
 
 static ic_rect_t sidebar_rect_in(ic_app_t *app, int i) {
     ic_rect_t r = control_rect(app, i);
-    return ic_rect_make(r.x, r.y, 180, 3 * IC_H_ROW + IC_SP_2);
+    return ic_rect_make(r.x, r.y + IC_SP_2, 180, 3 * IC_H_ROW + IC_SP_2);
 }
 
 static ic_rect_t menu_rect_in(ic_app_t *app, int i) {
     ic_rect_t r = control_rect(app, i);
-    return ic_rect_make(r.x, r.y, 200, 3 * IC_H_MENU_ITEM + 2 * IC_SP_2);
+    return ic_rect_make(r.x, r.y + IC_SP_2, 200, 3 * IC_H_MENU_ITEM + 2 * IC_SP_2);
+}
+
+enum { BTN_DEFAULT = 0, BTN_PRIMARY, BTN_DELETE, BTN_DISABLED, BTN_ICON, BTN_PLAIN, BTN_COUNT };
+
+static const char *const BTN_LABELS[BTN_COUNT] = { "Default", "Primary", "Delete", "Disabled", 0, "Plain" };
+static const ic_symbol_t BTN_SYMS[BTN_COUNT] = {
+    IC_SYM_NONE, IC_SYM_PLAY, IC_SYM_TRASH, IC_SYM_NONE, IC_SYM_RELOAD, IC_SYM_NONE
+};
+
+static ic_rect_t button_rect(ic_app_t *app, int i, int k) {
+    ic_rect_t r = control_rect(app, i);
+    int y = r.y + (r.h - IC_H_CONTROL) / 2;
+    int x = r.x;
+    for (int j = 0; j <= k; j++) {
+        int w = BTN_LABELS[j] ? ic_ui_button_width(BTN_LABELS[j], BTN_SYMS[j]) : IC_H_CONTROL;
+        if (j == k) return ic_rect_make(x, y, w, IC_H_CONTROL);
+        x += w + IC_SP_2;
+    }
+    return ic_rect_make(0, 0, 0, 0);
 }
 
 static void layout(ic_app_t *app) {
     ic_rect_t v = view_rect(app);
     gd.view_h = v.h;
-    gd.content_h = group_y(ROW_COUNT) + IC_SP_6;
+    gd.content_h = group_y(ROW_COUNT) + IC_SP_4;
     if (gd.scroll > gd.content_h - gd.view_h) gd.scroll = gd.content_h - gd.view_h;
     if (gd.scroll < 0) gd.scroll = 0;
 }
 
-
-
 static void draw_buttons(ic_app_t *app, ic_canvas_t *c, int i) {
-    ic_rect_t r = control_rect(app, i);
-    int y = r.y + (r.h - IC_H_CONTROL) / 2;
-    int x = r.x;
-    int hover = gd.hover_button;
-    ic_state_t st = (hover == 0) ? IC_STATE_HOVER : IC_STATE_NORMAL;
-
-    ic_ui_button(c, ic_rect_make(x, y, ic_ui_button_width("Default", IC_SYM_NONE), IC_H_CONTROL),
-                 "Default", IC_SYM_NONE, IC_BUTTON_DEFAULT, st);
-    x += ic_ui_button_width("Default", IC_SYM_NONE) + IC_SP_2;
-    ic_ui_button(c, ic_rect_make(x, y, ic_ui_button_width("Primary", IC_SYM_PLAY), IC_H_CONTROL),
-                 "Primary", IC_SYM_PLAY, IC_BUTTON_PRIMARY, IC_STATE_NORMAL);
-    x += ic_ui_button_width("Primary", IC_SYM_PLAY) + IC_SP_2;
-    ic_ui_button(c, ic_rect_make(x, y, ic_ui_button_width("Delete", IC_SYM_TRASH), IC_H_CONTROL),
-                 "Delete", IC_SYM_TRASH, IC_BUTTON_DESTRUCTIVE, IC_STATE_NORMAL);
-    x += ic_ui_button_width("Delete", IC_SYM_TRASH) + IC_SP_2;
-    ic_ui_button(c, ic_rect_make(x, y, ic_ui_button_width("Disabled", IC_SYM_NONE), IC_H_CONTROL),
-                 "Disabled", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_DISABLED);
-    x += ic_ui_button_width("Disabled", IC_SYM_NONE) + IC_SP_2;
-    ic_ui_icon_button(c, ic_rect_make(x, y + 1, 28, 28), IC_SYM_RELOAD,
-                      hover == 4 ? IC_STATE_HOVER : IC_STATE_NORMAL);
-    x += 28 + IC_SP_2;
-    ic_ui_button(c, ic_rect_make(x, y, ic_ui_button_width("Plain", IC_SYM_NONE), IC_H_CONTROL),
-                 "Plain", IC_SYM_NONE, IC_BUTTON_PLAIN, hover == 5 ? IC_STATE_HOVER
-                                                                  : IC_STATE_NORMAL);
+    static const ic_button_style_t kinds[BTN_COUNT] = {
+        IC_BUTTON_DEFAULT, IC_BUTTON_PRIMARY, IC_BUTTON_DESTRUCTIVE, IC_BUTTON_DEFAULT,
+        IC_BUTTON_DEFAULT, IC_BUTTON_PLAIN
+    };
+    for (int k = 0; k < BTN_COUNT; k++) {
+        ic_rect_t b = button_rect(app, i, k);
+        ic_state_t st = k == BTN_DISABLED ? IC_STATE_DISABLED
+                      : (gd.hover_button == k ? IC_STATE_HOVER : IC_STATE_NORMAL);
+        if (k == BTN_ICON) ic_ui_icon_button(c, b, BTN_SYMS[k], st);
+        else ic_ui_button(c, b, BTN_LABELS[k], BTN_SYMS[k], kinds[k], st);
+    }
 }
 
 static const char *const LIST_ITEMS[3] = { "Inter views", "Kernel sources", "Release notes" };
 static const char *const SIDEBAR_ITEMS[3] = { "Documents", "Pictures", "Music" };
-static const char *const TABLE_HEAD[3] = { "NAME", "SIZE", "KIND" };
+static const char *const TABLE_HEAD[3] = { "Name", "Size", "Kind" };
 static const int TABLE_WIDTHS[3] = { 240, 120, 140 };
 static const char *const TABLE_ROWS[2][3] = {
     { "kernel.iso", "34 MB", "Image" },
     { "notes.txt", "2 KB", "Text" }
 };
-static const char *const MENU_LABELS[3] = { "Open", "Rename", IC_MENU_SEPARATOR };
-static const char *const MENU_SHORTCUTS[3] = { "", "F2", "" };
+static const char *const MENU_LABELS[3] = { "Open", "Rename", "Duplicate" };
+static const char *const MENU_SHORTCUTS[3] = { "", "F2", "D" };
 
 static void draw_group(ic_app_t *app, ic_canvas_t *c, int i) {
     const ic_palette_t *p = ic_palette();
-    int top = group_y(i) - gd.scroll;
-    int ctrl = control_top(i) - gd.scroll;
-    float hover = ic_tween_value(&gd.row_tw[i]);
-    int h = group_h();
+    int top = section_top(i);
+    ic_rect_t box = box_rect(app, i);
 
-    if (ctrl + h < 0 || top > gd.view_h) return;      
+    if (box.y + box.h < IC_H_TITLEBAR || top > IC_H_TITLEBAR + gd.view_h) return;
 
-    ic_ui_group(c, ic_rect_make(GROUP_PAD, ctrl, app->width - 2 * GROUP_PAD, h));
-    ic_ui_group_row(c, ic_rect_make(GROUP_PAD, top, app->width - 2 * GROUP_PAD, ROW_H), 0, 1,
-                    hover);
     ic_text_draw_in(c, ic_font(IC_FONT_HEADLINE),
-                    ic_rect_make(GROUP_PAD + IC_SP_3, top, app->width / 2, ROW_H),
+                    ic_rect_make(GROUP_PAD + IC_SP_1, top, app->width / 2 - GROUP_PAD, LABEL_H),
                     ROWS[i].label, p->label, IC_ALIGN_LEFT);
     ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
-                    ic_rect_make(app->width / 2, top, app->width / 2 - GROUP_PAD - IC_SP_3, ROW_H),
+                    ic_rect_make(app->width / 2, top, app->width / 2 - GROUP_PAD - IC_SP_1, LABEL_H),
                     ROWS[i].note, p->label_tertiary, IC_ALIGN_RIGHT);
+    ic_ui_group(c, box);
 
     switch (ROWS[i].kind) {
     case ROW_BUTTONS:
@@ -251,12 +264,8 @@ static void draw_group(ic_app_t *app, ic_canvas_t *c, int i) {
                      gd.dragging_slider ? IC_STATE_PRESSED : IC_STATE_NORMAL);
         {
             char v[16];
-            char *pct = v;
-            int n = (int)(gd.slider * 100.0f);
-            *pct++ = (char)('0' + (n / 100) % 10);
-            *pct++ = (char)('0' + (n / 10) % 10);
-            *pct++ = '%';
-            *pct = 0;
+            ic_snprintf_u64(v, sizeof(v), (uint64_t)(gd.slider * 100.0f + 0.5f));
+            ic_strlcat(v, "%", sizeof(v));
             ic_text_draw_in(c, ic_font(IC_FONT_MONO_SMALL),
                             ic_rect_make(slider_rect(app, i).x + slider_rect(app, i).w + IC_SP_3,
                                          control_rect(app, i).y, 60, ROW_H),
@@ -288,22 +297,25 @@ static void draw_group(ic_app_t *app, ic_canvas_t *c, int i) {
             ic_rect_t lr = list_row_rect(app, i, k);
             ic_color_t text = ic_ui_list_row(c, lr, k == gd.selected_row, gd.list_focused,
                                              k == gd.hover_list ? 1.0f : 0.0f);
-            ic_text_draw_in(c, ic_font(IC_FONT_BODY), lr, LIST_ITEMS[k], text, IC_ALIGN_LEFT);
+            ic_text_draw_in(c, ic_font(IC_FONT_BODY),
+                            ic_rect_make(lr.x + IC_SP_4, lr.y, lr.w - 2 * IC_SP_4, lr.h),
+                            LIST_ITEMS[k], text, IC_ALIGN_LEFT);
         }
         break;
     case ROW_TABLE:
-        ic_ui_table_header(c, ic_rect_make(control_rect(app, i).x, control_rect(app, i).y,
+        ic_ui_table_header(c, ic_rect_make(control_rect(app, i).x, list_row_rect(app, i, 0).y,
                                            control_rect(app, i).w, IC_H_ROW),
                            TABLE_HEAD, TABLE_WIDTHS, 3);
         for (int k = 0; k < 2; k++) {
             ic_rect_t lr = list_row_rect(app, i, k + 1);
+            int x = control_rect(app, i).x + IC_SP_3;
             for (int col = 0; col < 3; col++) {
                 ic_text_draw_in(c, col == 1 ? ic_font(IC_FONT_MONO_SMALL) : ic_font(IC_FONT_BODY),
-                                ic_rect_make(lr.x + TABLE_WIDTHS[0] * col, lr.y,
-                                             TABLE_WIDTHS[0] - IC_SP_2, lr.h),
+                                ic_rect_make(x, lr.y, TABLE_WIDTHS[col] - IC_SP_2, lr.h),
                                 TABLE_ROWS[k][col],
                                 col == 2 ? p->label_secondary : p->label,
-                                col == 0 ? IC_ALIGN_LEFT : IC_ALIGN_RIGHT);
+                                col == 1 ? IC_ALIGN_RIGHT : IC_ALIGN_LEFT);
+                x += TABLE_WIDTHS[col];
             }
         }
         break;
@@ -363,6 +375,8 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
                     "Every control, in the current appearance", p->label_tertiary,
                     IC_ALIGN_RIGHT);
 
+    gd.toggle = ic_tween_value(&gd.toggle_tw);
+    gd.segment = ic_tween_value(&gd.segment_tw);
     ic_canvas_push_clip(c, v.x, v.y, v.w, v.h, &saved);
     for (int i = 0; i < ROW_COUNT; i++) draw_group(app, c, i);
     ic_canvas_pop_clip(c, &saved);
@@ -428,22 +442,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 gd.hover_menu = ic_ui_menu_hit(&m, mr.x, mr.y, ev->x, ev->y);
                 break;
             }
-            case ROW_BUTTONS: {
-                ic_rect_t r = control_rect(app, g);
-                int y = r.y + (r.h - IC_H_CONTROL) / 2;
-                if (ev->x >= r.x && ev->x < r.x + 24 && ic_ui_hit(
-                        ic_rect_make(r.x, y, ic_ui_button_width("Default", IC_SYM_NONE),
-                                     IC_H_CONTROL), ev->x, ev->y)) {
-                    gd.hover_button = 0;
-                } else if (ev->x < r.x + 320) {
-                    gd.hover_button = 5;
-                } else if (ev->x > r.x + r.w - 32) {
-                    gd.hover_button = 4;
-                } else {
-                    gd.hover_button = -1;
+            case ROW_BUTTONS:
+                for (int k = 0; k < BTN_COUNT; k++) {
+                    if (k != BTN_DISABLED && ic_ui_hit(button_rect(app, g, k), ev->x, ev->y)) {
+                        gd.hover_button = k;
+                    }
                 }
                 break;
-            }
             default:
                 break;
             }
@@ -457,6 +462,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         g = group_at(ev->y);
         if (ev->button != GUI_BTN_LEFT || g < 0) break;
         switch (ROWS[g].kind) {
+        case ROW_BUTTONS:
+            for (int k = 0; k < BTN_COUNT; k++) {
+                if (k != BTN_DISABLED && ic_ui_hit(button_rect(app, g, k), ev->x, ev->y)) {
+                    set_status(k == BTN_ICON ? "Reload pressed" : BTN_LABELS[k]);
+                }
+            }
+            break;
         case ROW_TOGGLE:
             if (ic_ui_hit(toggle_rect(app, g), ev->x, ev->y)) {
                 ic_tween_to(&gd.toggle_tw, gd.toggle > 0.5f ? 0.0f : 1.0f, IC_DUR_BASE,
@@ -525,6 +537,9 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         gd.hover_toggle = gd.hover_segment = gd.hover_button = 0;
         gd.hover_list = -1;
         gd.hover_menu = -1;
+        break;
+    case IC_EV_SCROLL:
+        gd.scroll += ev->wheel * 40;
         break;
     case IC_EV_KEY: {
         int fi = row_of_kind(ROW_TEXTFIELD);

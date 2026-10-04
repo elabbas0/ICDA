@@ -5,6 +5,7 @@
 #include "../cpu/gdt.h"
 #include "../drivers/console/console.h"
 #include "../fs/fd.h"
+#include "../ipc/shm.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pf.h"
@@ -326,6 +327,7 @@ void user_request_exit_to_kernel(uint64_t code) {
     process_t *proc = sched_current_process();
     if (proc) {
         fd_proc_exit(proc);
+        shm_proc_exit(proc);
         proc->state = PROCESS_EXITED;
         proc->exit_code = code;
     }

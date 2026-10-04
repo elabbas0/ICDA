@@ -55,7 +55,8 @@ typedef struct {
         struct {
             int32_t  x, y;        
             uint8_t  buttons;     
-            uint8_t  _pad[31];
+            int8_t   wheel;       
+            uint8_t  _pad[30];
         } mouse;          
 
         

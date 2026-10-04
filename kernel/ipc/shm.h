@@ -25,6 +25,10 @@ int shm_unmap(uint64_t handle);
 int shm_close(uint64_t handle);
 
 
+struct process;
+void shm_proc_exit(struct process *proc);
+
+
 uint64_t shm_size(uint64_t handle);
 
 #endif

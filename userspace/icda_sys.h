@@ -225,6 +225,7 @@ typedef struct {
     int32_t  dx;
     int32_t  dy;
     uint8_t  buttons;
+    int8_t   dz;
 } icda_mouse_event_t;
 
 static inline uint64_t icda_shm_create(uint64_t size) { return sys_call1(SYS_SHM_CREATE, size); }
