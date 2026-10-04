@@ -108,6 +108,8 @@ void wm_rubber_band_draw(ic_canvas_t *c, int x0, int y0, int x1, int y1);
 
 void wm_power_overlay_draw(ic_canvas_t *c, int sw, int sh, float t, int restart);
 
+void wm_boot_overlay_draw(ic_canvas_t *c, int sw, int sh, float t);
+
 
 void wm_debug_draw(ic_canvas_t *c, const char *const *lines, int count);
 

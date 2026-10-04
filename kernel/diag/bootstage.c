@@ -69,20 +69,8 @@ void bootstage_set(uint32_t stage, const char *label) {
         serial_write("\n");
     }
 
-    if (fb_available()) {
-        if (splash_active()) {
-            
-
-            splash_progress(stage, label);
-        } else {
-            
-
-
-
-            fb_write_at_cells(8, 8, stamp, FB_YELLOW, FB_BLACK);
-        }
-    } else {
-        vga_write_at(0, 60, stamp, VGA_YELLOW_ON_BLACK);
+    if (fb_available() && splash_active()) {
+        splash_progress(stage, label);
     }
 }
 

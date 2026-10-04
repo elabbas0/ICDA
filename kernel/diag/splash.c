@@ -1,210 +1,97 @@
 #include "splash.h"
-
-#include "../drivers/display/font.h"
+#include "boot_logo.h"
+#include "boot_layout.h"
 #include "../drivers/display/framebuffer.h"
-#include "version.h"
 
 static int splash_on = 0;
+static uint32_t splash_fill = 0;
 
-static const uint32_t splash_bg      = 0x000F172A;
-static const uint32_t splash_accent  = 0x0038BDF8;
-static const uint32_t splash_track   = 0x001E293B;
-static const uint32_t splash_muted   = 0x0094A3B8;
-static const uint32_t splash_white   = 0x00F1F5F9;
+static const uint32_t splash_ink = 0x00F2F2F5;
+static const uint32_t splash_track = 0x002C2C30;
 
-static uint32_t splash_last_fill = 0;                
-static uint32_t splash_frame = 0;                    
+static int splash_scale(void) {
+    return fb_width >= BOOT_AUTO_2X_WIDTH ? 2 : 1;
+}
 
+static uint32_t mix_black(uint32_t color, uint32_t a) {
+    uint32_t r = ((color >> 16) & 0xFF) * a / 255U;
+    uint32_t g = ((color >> 8) & 0xFF) * a / 255U;
+    uint32_t b = (color & 0xFF) * a / 255U;
+    return (r << 16) | (g << 8) | b;
+}
 
-
-static void splash_glyph_scaled(int x0, int y0, char c, int scale,
-                                uint32_t fg, uint32_t bg) {
-    unsigned char uc = (unsigned char)c;
-    const unsigned char *glyph;
-
-    if (uc < FONT_FIRST || uc > FONT_LAST) uc = '?';
-    glyph = font_data[uc - FONT_FIRST];
-
-    for (int row = 0; row < FONT_HEIGHT; row++) {
-        unsigned char bits = glyph[row];
-        for (int col = 0; col < FONT_WIDTH; col++) {
-            uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
-            for (int sy = 0; sy < scale; sy++) {
-                for (int sx = 0; sx < scale; sx++) {
-                    fb_put_pixel(x0 + col * scale + sx, y0 + row * scale + sy, color);
-                }
-            }
+static void draw_logo(void) {
+    int s = splash_scale();
+    int lw = BOOT_LOGO_W * s, lh = BOOT_LOGO_H_PX * s;
+    int x0 = fb_width / 2 - lw / 2;
+    int y0 = fb_height / 2 + BOOT_LOGO_CENTER_DY * s - lh / 2;
+    for (int y = 0; y < lh; y++) {
+        for (int x = 0; x < lw; x++) {
+            uint32_t a = boot_logo_alpha[(y / s) * BOOT_LOGO_W + (x / s)];
+            if (a) fb_put_pixel(x0 + x, y0 + y, mix_black(splash_ink, a));
         }
     }
 }
 
-static void splash_wordmark(const char *text, int center_x, int y, int scale) {
-    int len = 0;
-    while (text[len]) len++;
-    int total = len * FONT_WIDTH * scale;
-    int x = center_x - total / 2;
-    for (int i = 0; i < len; i++) {
-        splash_glyph_scaled(x, y, text[i], scale, splash_white, splash_bg);
-        x += FONT_WIDTH * scale;
-    }
+static int inside_capsule(int sx, int sy, int w, int h) {
+    int r = h * 2;
+    int cy = h * 2;
+    int cx;
+    if (sx < r) cx = r;
+    else if (sx > w * 4 - r) cx = w * 4 - r;
+    else return sy >= 0 && sy < h * 4;
+    return (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy) <= r * r;
 }
 
-
-static void splash_text_center(const char *text, int center_x, int y,
-                               uint32_t color) {
-    int len = 0;
-    while (text[len]) len++;
-    int total = len * FONT_CELL_WIDTH;
-    int x = center_x - total / 2;
-    for (int i = 0; i < len; i++) {
-        fb_draw_char(x, y, text[i], color, splash_bg);
-        x += FONT_CELL_WIDTH;
+static void draw_bar(uint32_t permille) {
+    int s = splash_scale();
+    int w = BOOT_BAR_W * s, h = BOOT_BAR_H * s;
+    int x0 = fb_width / 2 - w / 2;
+    int y0 = fb_height / 2 + BOOT_BAR_TOP_DY * s;
+    int fill = (int)((uint64_t)w * permille / 1000U);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint32_t hits = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                for (int sx = 0; sx < 4; sx++) {
+                    hits += (uint32_t)inside_capsule(x * 4 + sx, y * 4 + sy, w, h);
+                }
+            }
+            fb_put_pixel(x0 + x, y0 + y, mix_black(x < fill ? splash_ink : splash_track, hits * 255U / 16U));
+        }
     }
 }
 
 static uint32_t splash_progress_permille(uint32_t stage) {
-    if (stage >= 120 && stage <= 125) {
-        
-        return 380 + (stage - 119) * 50;
-    }
-    if (stage >= 13 && stage <= 21) {
-        return 680 + (stage - 13) * 29;
-    }
-    if (stage >= 22) {
-        return 1000;
-    }
-    if (stage <= 12) {
-        return stage * 30;
-    }
+    if (stage >= 120 && stage <= 125) return 380 + (stage - 119) * 50;
+    if (stage >= 1200) return 420;
+    if (stage >= 13 && stage <= 21) return 680 + (stage - 13) * 35;
+    if (stage >= 22) return 1000;
+    if (stage <= 12) return stage * 30;
     return 0;
 }
 
 void splash_init(void) {
-    int w;
-    int h;
-    int bar_w;
-    int bar_x;
-    int bar_y;
-
-    if (!fb_available() || splash_on) return;
-    w = fb_width;
-    h = fb_height;
-    if (w <= 0 || h <= 0) return;
-
-    fb_clear(splash_bg);
-
-    
-    splash_wordmark("ICDA", w / 2, h / 2 - 190, 8);
-    splash_text_center("operating system", w / 2, h / 2 - 40, splash_muted);
-    
-
-    {
-        char ver[24];
-        int vi = 0;
-        const char *prefix = "v";
-        const char *p;
-        for (p = prefix; *p && vi < 23; p++) ver[vi++] = *p;
-        for (p = ICDA_VERSION_STRING; *p && vi < 23; p++) ver[vi++] = *p;
-        ver[vi] = '\0';
-        splash_text_center(ver, w / 2, h / 2 - 10, splash_muted);
-    }
-
-    
-    bar_w = w / 2;
-    if (bar_w > 640) bar_w = 640;
-    bar_x = (w - bar_w) / 2;
-    bar_y = h / 2 + 60;
-    fb_fill_rect(bar_x, bar_y, bar_w, 6, splash_track);
-    fb_fill_rect(bar_x, bar_y + 6, bar_w, 1, 0x00202A40);
-
-    splash_text_center("starting", w / 2, bar_y + 22, splash_muted);
-
-    splash_last_fill = 0;
-    splash_frame = 0;
+    if (!fb_available() || splash_on || fb_width <= 0 || fb_height <= 0) return;
+    fb_clear(0x00000000);
+    draw_logo();
+    splash_fill = 0;
+    draw_bar(0);
     splash_on = 1;
-    splash_progress(1, "serial");
-}
-
-
-
-
-
-static void splash_spinner(int cx, int cy, uint32_t frame) {
-    static const int off_x[8] = { 0, 10, 14, 10, 0, -10, -14, -10 };
-    static const int off_y[8] = { -14, -10, 0, 10, 14, 10, 0, -10 };
-    uint32_t active = frame % 8U;
-    int i;
-
-    
-
-
-    fb_fill_rect(cx - 18, cy - 18, 36, 36, splash_bg);
-    for (i = 0; i < 8; i++) {
-        uint32_t color = ((uint32_t)i == active) ? splash_accent : splash_track;
-        int dx = off_x[i];
-        int dy = off_y[i];
-        int sz = ((uint32_t)i == active) ? 6 : 4;
-        int off = sz / 2;
-        if (dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767) {
-            continue;
-        }
-        fb_fill_rect(cx + dx - off, cy + dy - off, sz, sz, color);
-    }
 }
 
 void splash_progress(uint32_t stage, const char *label) {
-    int w;
-    int h;
-    int bar_w;
-    int bar_x;
-    int bar_y;
     uint32_t permille = splash_progress_permille(stage);
-    uint32_t fill;
-
+    (void)label;
     if (!splash_on) return;
-    w = fb_width;
-    h = fb_height;
-    if (w <= 0 || h <= 0) return;
-    bar_w = w / 2;
-    if (bar_w > 640) bar_w = 640;
-    bar_x = (w - bar_w) / 2;
-    bar_y = h / 2 + 60;
-
     if (permille > 1000) permille = 1000;
-    if (permille < splash_last_fill) permille = splash_last_fill;
-    fill = (uint32_t)((uint64_t)bar_w * permille / 1000);
-    if (fill > splash_last_fill) {
-        
-
-
-        uint32_t lead = (splash_frame & 1U) ? 0x007DD3FC : splash_accent;
-        uint32_t chunk = fill - splash_last_fill;
-        if (chunk > 8) {
-            fb_fill_rect(bar_x + (int)splash_last_fill, bar_y,
-                         (int)(chunk - 4), 6, splash_accent);
-            fb_fill_rect(bar_x + (int)fill - 4, bar_y, 4, 6, lead);
-        } else {
-            fb_fill_rect(bar_x + (int)splash_last_fill, bar_y,
-                         (int)(fill - splash_last_fill), 6, lead);
-        }
-        splash_last_fill = fill;
-    }
-
-    
-
-    if (label && *label) {
-        splash_text_center(label, w / 2, bar_y + 40, splash_muted);
-    }
-
-    
-
-    if (h > 0 && bar_y + 78 + 18 < h && bar_y + 78 - 18 > 0) {
-        splash_spinner(w / 2, bar_y + 78, splash_frame);
-    }
-    splash_frame++;
+    if (permille <= splash_fill) return;
+    splash_fill = permille;
+    draw_bar(permille);
 }
 
 void splash_finish(void) {
+    if (splash_on) draw_bar(1000);
     splash_on = 0;
 }
 

@@ -413,6 +413,28 @@ progress over the desktop, and `console_clear` respects the framebuffer mute.
 - `.verify/dualboot-test.ps1` runs install, reboot and the GRUB menu end to
   end.
 
+## Boot animation
+
+Startup mirrors the shutdown animation (which fades the desktop to black and
+shows an icon and a caption):
+- **Kernel splash** (`kernel/diag/splash.c`): pure black, a centred "ICDA"
+  wordmark and a thin rounded progress bar. It is drawn with integer 4x4
+  subpixel anti-aliasing, because the kernel builds without SSE. The wordmark
+  is an alpha mask rendered from Inter Display Bold by
+  `scripts/gen_boot_logo.py` into `kernel/diag/boot_logo.h`.
+  `kernel/diag/boot_layout.h` holds the shared geometry and the auto-2x rule.
+- **Handoff:** when the GUI is about to start, the kernel leaves the finished
+  splash (bar at 100%) on screen instead of clearing it.
+- **WM intro:** the WM's first frames (`wm_intro_sequence` in `wm.c`,
+  `wm_boot_overlay_draw` in `wm_shell.c`) redraw the identical splash from the
+  same mask. Over 0.9 s the wordmark and bar fade out and the desktop fades in
+  from black. It respects the existing boot-animation setting.
+- **Stage stamps:** `bootstage_set` no longer draws `[S22 shell]`-style
+  stamps on screen; stage names go to the serial log only.
+
+`.verify/burst.ps1` takes rapid screendumps over one QMP connection, which is
+how the fade was checked frame by frame.
+
 ## Explorer delete (native ABI v3)
 
 The VFS now has `vfs_remove`, exposed as `SYS_VFS_REMOVE` (73), which

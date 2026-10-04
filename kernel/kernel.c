@@ -459,15 +459,11 @@ void kernel_main(void *multiboot_info) {
     {
         splash_finish();
         if (has_fb) {
-            console_clear();
-            
-
-
-
-
-            fb_clear(FB_BLACK);
             if (vt_is_gui()) {
                 console_mute_fb(1);
+            } else {
+                console_clear();
+                fb_clear(FB_BLACK);
             }
         }
         bootstage_set(22, "shell");

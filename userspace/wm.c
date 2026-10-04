@@ -2337,6 +2337,35 @@ static void present_frame(int do_present, int full, int cursor_only) {
 
 
 
+static void wm_intro_sequence(void) {
+    uint64_t t0;
+    const uint32_t dur = 900u;
+    if (!wm_settings.boot_anim || scr_w < 320 || scr_h < 240) return;
+    composite_region(0, 0, scr_w, scr_h);
+    copy_pixels(layer_buffer, back_buffer, scr_w * scr_h * wm_scale * wm_scale);
+    t0 = ic_time_ns();
+    for (;;) {
+        float t = (float)(ic_time_ns() - t0) / ((float)dur * 1e6f);
+        uint32_t *saved_fb = real_fb;
+        if (t > 1.0f) t = 1.0f;
+        copy_pixels(back_buffer, layer_buffer, scr_w * scr_h * wm_scale * wm_scale);
+        wm_boot_overlay_draw(&scene, scr_w, scr_h, t);
+        if (gpu_info.flip_active) {
+            real_fb = (uint32_t *)((uint8_t *)saved_fb +
+                (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+        }
+        blit_region(0, 0, scr_w, scr_h);
+        icda_gpu_present_flags(wm_settings.vsync ? 1ULL : 0ULL);
+        if (gpu_info.flip_active) {
+            wm_flip_page ^= 1;
+            real_fb = saved_fb;
+        }
+        if (t >= 1.0f) break;
+        icda_sleep(1);
+    }
+    mark_dirty_full();
+}
+
 static void wm_power_sequence(int restart) {
     uint64_t t0;
     uint32_t dur = wm_settings.boot_anim ? 700u : 0u;
@@ -3065,6 +3094,7 @@ int main(int argc, char **argv) {
     desk_load();
     build_desktop_layer();
     clock_refresh();
+    wm_intro_sequence();
     mark_dirty_full();
 
     for (;;) {

@@ -3,6 +3,8 @@
 
 
 #include "wm_shell.h"
+#include "kernel/diag/boot_logo.h"
+#include "kernel/diag/boot_layout.h"
 
 
 
@@ -483,5 +485,21 @@ void wm_debug_draw(ic_canvas_t *c, const char *const *lines, int count) {
     for (int i = 0; i < count; i++) {
         ic_text_draw(c, f, r.x + IC_SP_3, r.y + IC_SP_3 + i * f->line_h + f->ascent, lines[i],
                      i == 0 ? p->accent : IC_RGB(0xE6E6EA));
+    }
+}
+
+void wm_boot_overlay_draw(ic_canvas_t *c, int sw, int sh, float t) {
+    float k = ic_clampf(t, 0.0f, 1.0f);
+    float veil = 1.0f - ic_ease(IC_EASE_STANDARD, ic_clampf((k - 0.25f) / 0.75f, 0.0f, 1.0f));
+    float ink = 1.0f - ic_ease(IC_EASE_STANDARD, ic_clampf(k / 0.45f, 0.0f, 1.0f));
+    int lx = sw / 2 - BOOT_LOGO_W / 2;
+    int ly = sh / 2 + BOOT_LOGO_CENTER_DY - BOOT_LOGO_H_PX / 2;
+    int bx = sw / 2 - BOOT_BAR_W / 2;
+    int by = sh / 2 + BOOT_BAR_TOP_DY;
+    if (veil > 0.0f) ic_gfx_fill(c, 0, 0, sw, sh, IC_RGBA(0x000000, (uint32_t)(veil * 255.0f + 0.5f)));
+    if (ink > 0.0f) {
+        ic_gfx_mask(c, lx, ly, boot_logo_alpha, BOOT_LOGO_W, BOOT_LOGO_H_PX, BOOT_LOGO_W,
+                    ic_color_fade(IC_RGB(0xF2F2F5), ink));
+        ic_gfx_rrect(c, bx, by, BOOT_BAR_W, BOOT_BAR_H, BOOT_BAR_H * 0.5f, ic_color_fade(IC_RGB(0xF2F2F5), ink));
     }
 }
