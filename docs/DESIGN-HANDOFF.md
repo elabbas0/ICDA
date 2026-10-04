@@ -260,6 +260,51 @@ shell all work on volumes through the normal VFS calls. `libctest` checks
 ranged reads against `.verify/mkwin.sh`'s 40 MB pattern file when it is
 present.
 
+### Writable exFAT
+`kernel/fs/exfatfs.c` is an exFAT read/write driver:
+- **Mount** checks the boot region checksum and finds the allocation bitmap
+  and upcase table in the root directory.
+- **Allocation** uses the bitmap (one-sector write-back cache) and prefers a
+  contiguous run with NoFatChain, as Windows does. Otherwise it falls back to a
+  FAT chain (one-sector FAT cache).
+- **Entry sets** (file, stream extension, names) are written with the spec's
+  set checksum and a name hash over the volume's upcase table. The table is
+  loaded once per mount; the compressed format is supported.
+- **Directories** grow when full. A NoFatChain directory that cannot grow in
+  place is converted to a FAT chain, and its size in the parent's entry set is
+  updated.
+- **Reads** are ranged and respect ValidDataLength, with the same cluster hint
+  as FAT32. Write (replace), mkdir-p and recursive remove are supported.
+- **Read-only cases:** volumes with two FATs (TexFAT) or a fragmented bitmap
+  mount read-only.
+
+`kernel/fs/volumes.c` now owns the mount table, the VFS write-through hook and
+the lazy loader for both filesystems, and dispatches by mount id.
+`fat32.c`/`exfat.c` are thin wrappers. exFAT volumes mount at
+`/volumes/exfat-N`, and storage info marks only the truly read-only mounts
+with `(ro)`. Format, create, delete and resize all remount the volumes.
+
+The exFAT formatter (`diskfmt_format_exfat_partition`) was rewritten. The old
+one wrote a single boot sector, which no OS would mount. It now writes:
+- main and backup boot regions with checksum sectors;
+- a FAT sized for the cluster count;
+- the allocation bitmap;
+- the standard compressed upcase table from the specification
+  (`exfat_upcase.h`, 5836 bytes, checksum 0xE619D30D);
+- a root directory with label, bitmap and upcase entries.
+
+Clusters are 4 KB up to 256 MB, 32 KB up to 32 GB, then 128 KB.
+
+Verification uses a separate `icda-verify` Docker image (Debian with
+exfatprogs, gdisk, mtools, dosfstools and gcc). A privileged container
+loop-mounts images with the Linux exFAT driver:
+- `.verify/mkex.sh` builds a disk with an exFAT volume made by `mkfs.exfat`
+  and filled through Linux.
+- `.verify/checkex.sh` runs `fsck.exfat` and reads the files back with Linux.
+
+`libctest` adds a 200-file create/read/delete test on `/volumes/exfat-0` when
+present, which also forces directory growth.
+
 ### Installing next to other systems
 - **Boot files:** everything goes in `\EFI\ICDA\` (`GRUBX64.EFI`,
   `KERNEL.BIN`). `\EFI\BOOT\BOOTX64.EFI` and `STARTUP.NSH` are written only

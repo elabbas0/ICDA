@@ -7,6 +7,7 @@
 #include "ntfs.h"
 #include "persistfs.h"
 #include "fatfs.h"
+#include "exfat_upcase.h"
 #include "../memory/heap.h"
 
 #define DISK_SECTOR_SIZE 512U
@@ -408,50 +409,168 @@ static int diskfmt_format_fat32(block_device_t *dev) {
     return 0;
 }
 
-static int diskfmt_format_exfat_partition(block_device_t *dev, uint32_t part_start, uint32_t part_sectors) {
+static uint32_t exfat_boot_sum(const uint8_t *region) {
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < 11U * DISK_SECTOR_SIZE; i++) {
+        if (i == 106 || i == 107 || i == 112) continue;
+        sum = ((sum & 1U) ? 0x80000000U : 0U) + (sum >> 1) + region[i];
+    }
+    return sum;
+}
+
+static void put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static void put64(uint8_t *p, uint64_t v) {
+    put32(p, (uint32_t)v);
+    put32(p + 4, (uint32_t)(v >> 32));
+}
+
+static int exfat_write_clusters(block_device_t *dev, uint64_t lba, uint32_t sectors, const uint8_t *data,
+                                uint64_t bytes) {
     uint8_t sector[DISK_SECTOR_SIZE];
-    uint32_t fat_offset = 128;
-    uint32_t fat_length = 128;
-    uint32_t cluster_heap_offset = 256;
-    uint32_t cluster_count;
-
-    if (!dev || !dev->write || dev->sector_size != DISK_SECTOR_SIZE) return -1;
-    if (part_sectors <= cluster_heap_offset + 1024U) return -1;
-    cluster_count = (part_sectors - cluster_heap_offset) / 8U;
-
-    zero_region(dev, part_start, 32);
-    zero_bytes(sector, sizeof(sector));
-    sector[0] = 0xEB; sector[1] = 0x76; sector[2] = 0x90;
-    sector[3] = 'E'; sector[4] = 'X'; sector[5] = 'F'; sector[6] = 'A'; sector[7] = 'T'; sector[8] = ' '; sector[9] = ' '; sector[10] = ' ';
-    sector[64] = (uint8_t)(part_start & 0xFF);
-    sector[65] = (uint8_t)((part_start >> 8) & 0xFF);
-    sector[66] = (uint8_t)((part_start >> 16) & 0xFF);
-    sector[67] = (uint8_t)((part_start >> 24) & 0xFF);
-    sector[72] = (uint8_t)(part_sectors & 0xFF);
-    sector[73] = (uint8_t)((part_sectors >> 8) & 0xFF);
-    sector[74] = (uint8_t)((part_sectors >> 16) & 0xFF);
-    sector[75] = (uint8_t)((part_sectors >> 24) & 0xFF);
-    sector[80] = (uint8_t)(fat_offset & 0xFF);
-    sector[81] = (uint8_t)((fat_offset >> 8) & 0xFF);
-    sector[84] = (uint8_t)(fat_length & 0xFF);
-    sector[85] = (uint8_t)((fat_length >> 8) & 0xFF);
-    sector[88] = (uint8_t)(cluster_heap_offset & 0xFF);
-    sector[89] = (uint8_t)((cluster_heap_offset >> 8) & 0xFF);
-    sector[92] = (uint8_t)(cluster_count & 0xFF);
-    sector[93] = (uint8_t)((cluster_count >> 8) & 0xFF);
-    sector[94] = (uint8_t)((cluster_count >> 16) & 0xFF);
-    sector[95] = (uint8_t)((cluster_count >> 24) & 0xFF);
-    sector[96] = 0x02;
-    sector[100] = 0x78; sector[101] = 0x56; sector[102] = 0x34; sector[103] = 0x12;
-    sector[104] = 0x00; sector[105] = 0x01;
-    sector[108] = 9;
-    sector[109] = 3;
-    sector[110] = 1;
-    sector[111] = 0x80;
-    sector[112] = 0xFF;
-    sector[510] = 0x55; sector[511] = 0xAA;
-    if (dev->write(dev->context, part_start, 1, sector) != 0) return -1;
+    for (uint32_t s = 0; s < sectors; s++) {
+        uint64_t off = (uint64_t)s * DISK_SECTOR_SIZE;
+        zero_bytes(sector, DISK_SECTOR_SIZE);
+        if (data && off < bytes) {
+            uint64_t take = bytes - off < DISK_SECTOR_SIZE ? bytes - off : DISK_SECTOR_SIZE;
+            copy_bytes((char *)sector, (const char *)data + off, (uint32_t)take);
+        }
+        if (dev->write(dev->context, lba + s, 1, sector) != 0) return -1;
+    }
     return 0;
+}
+
+static int diskfmt_format_exfat_partition(block_device_t *dev, uint32_t part_start, uint32_t part_sectors) {
+    uint32_t spc_shift = part_sectors <= 524288U ? 3U : part_sectors <= 67108864U ? 6U : 8U;
+    uint32_t spc = 1U << spc_shift, cbytes = spc * DISK_SECTOR_SIZE;
+    uint32_t fat_offset = 128, fat_length = 0, heap_offset = 0, clusters = 0;
+    uint32_t bmp_clusters, up_clusters, bmp_first = 2, up_first, root;
+    uint64_t bmp_bytes, up_bytes = EXFAT_UPCASE_BYTES;
+    uint32_t up_sum = 0;
+    uint8_t *region, *buf;
+    uint64_t base = part_start;
+    int rc = -1;
+
+    if (!dev || !dev->write || dev->sector_size != DISK_SECTOR_SIZE || part_sectors < 8192U) return -1;
+    for (int pass = 0; pass < 3; pass++) {
+        heap_offset = (fat_offset + fat_length + spc - 1U) / spc * spc;
+        clusters = (part_sectors - heap_offset) / spc;
+        fat_length = ((clusters + 2U) * 4U + DISK_SECTOR_SIZE - 1U) / DISK_SECTOR_SIZE;
+    }
+    heap_offset = (fat_offset + fat_length + spc - 1U) / spc * spc;
+    clusters = (part_sectors - heap_offset) / spc;
+    bmp_bytes = (clusters + 7U) / 8U;
+    bmp_clusters = (uint32_t)((bmp_bytes + cbytes - 1U) / cbytes);
+    up_clusters = (uint32_t)((up_bytes + cbytes - 1U) / cbytes);
+    up_first = bmp_first + bmp_clusters;
+    root = up_first + up_clusters;
+    if (root + 1U >= clusters + 2U) return -1;
+
+    region = (uint8_t *)kmalloc(12U * DISK_SECTOR_SIZE);
+    buf = (uint8_t *)kmalloc(up_bytes > cbytes ? up_bytes : cbytes);
+    if (!region || !buf) goto out;
+
+    copy_bytes((char *)buf, (const char *)exfat_upcase_table, EXFAT_UPCASE_BYTES);
+    for (uint64_t i = 0; i < up_bytes; i++) up_sum = ((up_sum & 1U) ? 0x80000000U : 0U) + (up_sum >> 1) + buf[i];
+    if (exfat_write_clusters(dev, base + heap_offset + (uint64_t)(up_first - 2U) * spc, up_clusters * spc, buf,
+                             up_bytes) != 0) {
+        goto out;
+    }
+
+    {
+        uint32_t used = root - 1U;
+        uint64_t written = 0;
+        for (uint32_t k = 0; k < bmp_clusters; k++) {
+            zero_bytes(buf, cbytes);
+            for (uint32_t b = 0; b < cbytes * 8U; b++) {
+                uint64_t bit = (uint64_t)k * cbytes * 8U + b;
+                if (bit < used) buf[b / 8U] = (uint8_t)(buf[b / 8U] | (1U << (b % 8U)));
+            }
+            if (exfat_write_clusters(dev, base + heap_offset + (uint64_t)(bmp_first - 2U + k) * spc, spc, buf,
+                                     cbytes) != 0) {
+                goto out;
+            }
+            written += cbytes;
+        }
+        (void)written;
+    }
+
+    zero_bytes(buf, cbytes);
+    buf[0] = 0x83;
+    buf[32] = 0x81;
+    put32(buf + 32 + 20, bmp_first);
+    put64(buf + 32 + 24, bmp_bytes);
+    buf[64] = 0x82;
+    put32(buf + 64 + 4, up_sum);
+    put32(buf + 64 + 20, up_first);
+    put64(buf + 64 + 24, up_bytes);
+    if (exfat_write_clusters(dev, base + heap_offset + (uint64_t)(root - 2U) * spc, spc, buf, cbytes) != 0) goto out;
+
+    {
+        uint32_t entries_per = DISK_SECTOR_SIZE / 4U;
+        uint8_t sector[DISK_SECTOR_SIZE];
+        for (uint32_t s = 0; s < fat_length; s++) {
+            zero_bytes(sector, DISK_SECTOR_SIZE);
+            for (uint32_t i = 0; i < entries_per; i++) {
+                uint32_t c = s * entries_per + i, val = 0;
+                if (c == 0) val = 0xFFFFFFF8U;
+                else if (c == 1) val = 0xFFFFFFFFU;
+                else if (c >= bmp_first && c < up_first) val = c + 1U < up_first ? c + 1U : 0xFFFFFFFFU;
+                else if (c >= up_first && c < root) val = c + 1U < root ? c + 1U : 0xFFFFFFFFU;
+                else if (c == root) val = 0xFFFFFFFFU;
+                else if (c > root) break;
+                put32(sector + i * 4U, val);
+            }
+            if (dev->write(dev->context, base + fat_offset + s, 1, sector) != 0) goto out;
+            if (s * entries_per > root + entries_per) {
+                zero_region(dev, base + fat_offset + s + 1U, fat_length - s - 1U);
+                break;
+            }
+        }
+    }
+
+    zero_bytes(region, 12U * DISK_SECTOR_SIZE);
+    region[0] = 0xEB;
+    region[1] = 0x76;
+    region[2] = 0x90;
+    copy_bytes((char *)region + 3, "EXFAT   ", 8);
+    put64(region + 64, part_start);
+    put64(region + 72, part_sectors);
+    put32(region + 80, fat_offset);
+    put32(region + 84, fat_length);
+    put32(region + 88, heap_offset);
+    put32(region + 92, clusters);
+    put32(region + 96, root);
+    put32(region + 100, (uint32_t)guid_seed());
+    region[104] = 0x00;
+    region[105] = 0x01;
+    region[108] = 9;
+    region[109] = (uint8_t)spc_shift;
+    region[110] = 1;
+    region[111] = 0x80;
+    region[112] = 0xFF;
+    region[510] = 0x55;
+    region[511] = 0xAA;
+    for (uint32_t s = 1; s <= 8; s++) {
+        region[s * DISK_SECTOR_SIZE + 510] = 0x55;
+        region[s * DISK_SECTOR_SIZE + 511] = 0xAA;
+    }
+    {
+        uint32_t sum = exfat_boot_sum(region);
+        for (uint32_t i = 0; i < DISK_SECTOR_SIZE / 4U; i++) put32(region + 11U * DISK_SECTOR_SIZE + i * 4U, sum);
+    }
+    if (dev->write(dev->context, base, 12, region) != 0) goto out;
+    if (dev->write(dev->context, base + 12, 12, region) != 0) goto out;
+    rc = 0;
+out:
+    if (region) kfree(region);
+    if (buf) kfree(buf);
+    return rc;
 }
 
 static int diskfmt_format_exfat(block_device_t *dev) {
@@ -612,6 +731,7 @@ int diskfmt_format_partition(uint32_t partition_index, diskfmt_fs_t fs_type) {
         return rc;
     }
     (void)partition_scan_all();
+    (void)fat32_mount_detected();
     return 0;
 }
 
@@ -870,6 +990,7 @@ int diskfmt_delete_partition(uint32_t partition_index) {
         return -17;
     }
     (void)partition_scan_all();
+    (void)fat32_mount_detected();
     return rc;
 }
 
@@ -953,5 +1074,6 @@ int diskfmt_resize_partition(uint32_t partition_index, uint64_t new_sectors) {
         return -18;
     }
     (void)partition_scan_all();
+    (void)fat32_mount_detected();
     return rc;
 }

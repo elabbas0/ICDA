@@ -11,6 +11,7 @@
 #include "../drivers/storage/partition.h"
 #include "../fs/diskfmt.h"
 #include "../fs/fatfs.h"
+#include "../fs/volumes.h"
 #include "../firmware/efi.h"
 #include "../fs/fat32.h"
 #include "../fs/exfat.h"
@@ -1340,12 +1341,12 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
         for (uint32_t i = 0; i < fat32_mount_count(); i++) {
             out = append_text(buf, out, cap, "  /volumes/fat32-");
             out = append_uint(buf, out, cap, i);
-            out = append_text(buf, out, cap, "\n");
+            out = append_text(buf, out, cap, volumes_is_writable(i, VOLUME_FAT32) ? "\n" : " (ro)\n");
         }
         for (uint32_t i = 0; i < exfat_mount_count(); i++) {
             out = append_text(buf, out, cap, "  /volumes/exfat-");
             out = append_uint(buf, out, cap, i);
-            out = append_text(buf, out, cap, " (ro)\n");
+            out = append_text(buf, out, cap, volumes_is_writable(i, VOLUME_EXFAT) ? "\n" : " (ro)\n");
         }
         for (uint32_t i = 0; i < ntfs_mount_count(); i++) {
             out = append_text(buf, out, cap, "  /volumes/ntfs-");

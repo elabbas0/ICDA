@@ -126,12 +126,59 @@ static void test_files(void) {
     check(remove(path) == 0 && fopen(path, "r") == 0, "remove");
 }
 
+static void test_volume_writes(const char *root) {
+    char dir[96], path[200], expect[64], got[64];
+    static char listing[65536];
+    int ok = 1, count = 0;
+    icda_stat_t st;
+    if ((long)icda_stat(root, &st) < 0) return;
+    snprintf(dir, sizeof(dir), "%s/icda write test", root);
+    printf("  write test in %s\n", dir);
+    check((long)icda_mkdir(dir) >= 0, "mkdir on a volume");
+    for (int i = 0; i < 200 && ok; i++) {
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/file number %03d with a fairly long name for testing.txt", dir, i);
+        f = fopen(path, "w");
+        if (!f) {
+            ok = 0;
+            break;
+        }
+        fprintf(f, "contents of file %d", i);
+        ok = fclose(f) == 0;
+    }
+    check(ok, "create 200 long-named files on a volume");
+    for (int i = 0; i < 200 && ok; i++) {
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/file number %03d with a fairly long name for testing.txt", dir, i);
+        snprintf(expect, sizeof(expect), "contents of file %d", i);
+        f = fopen(path, "r");
+        ok = f && fgets(got, sizeof(got), f) && strcmp(got, expect) == 0;
+        if (f) fclose(f);
+    }
+    check(ok, "read back 200 files from a volume");
+    for (int i = 0; i < 200 && ok; i += 2) {
+        snprintf(path, sizeof(path), "%s/file number %03d with a fairly long name for testing.txt", dir, i);
+        ok = remove(path) == 0;
+    }
+    check(ok, "delete 100 files from a volume");
+    if ((long)icda_list_dir(dir, listing, sizeof(listing) - 1) >= 0) {
+        for (char *p = listing; *p; p++) {
+            if ((p == listing || p[-1] == '\n') && *p != '.') count++;
+        }
+    }
+    check(count == 100, "volume listing after deletes");
+}
+
 static void test_volume_ranges(void) {
-    static const char *path = "/volumes/fat32-1/rangetest.bin";
+    static const char *paths[2] = { "/volumes/fat32-1/rangetest.bin", "/volumes/exfat-0/rangetest.bin" };
     static const unsigned long offsets[4] = { 0UL, 4095UL, 5000003UL, 41934000UL };
     static char buf[8192];
     icda_stat_t st;
-    if ((long)icda_stat(path, &st) < 0) return;
+    const char *path = 0;
+    for (int p = 0; p < 2 && !path; p++) {
+        if ((long)icda_stat(paths[p], &st) >= 0) path = paths[p];
+    }
+    if (!path) return;
     printf("  range test on %s (%lu bytes)\n", path, (unsigned long)st.size);
     for (int k = 0; k < 4; k++) {
         long got = (long)icda_read_file_at(path, offsets[k], buf, sizeof(buf));
@@ -151,6 +198,7 @@ int main(int argc, char **argv) {
     test_memory();
     test_files();
     test_volume_ranges();
+    test_volume_writes("/volumes/exfat-0");
     printf("libctest: %d/%d passed\n", passed, passed + failed);
     return failed ? 1 : 0;
 }
