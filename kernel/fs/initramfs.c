@@ -34,6 +34,8 @@ extern const char userprog_pid_elf_start[];
 extern const char userprog_pid_elf_end[];
 extern const char userprog_argc_elf_start[];
 extern const char userprog_argc_elf_end[];
+extern const char userprog_libctest_elf_start[];
+extern const char userprog_libctest_elf_end[];
 extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
 extern const char userprog_audioplay_start[];
@@ -132,6 +134,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/hello.elf", 0, 0 },
     { "/bin/pid.elf", 0, 0 },
     { "/bin/argc.elf", 0, 0 },
+    { "/bin/libctest.elf", 0, 0 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
     { "/apps/terminal.app", 0, 0 },
@@ -182,6 +185,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_hello_elf_start, userprog_hello_elf_end);
     initramfs_seed_at(&n, userprog_pid_elf_start, userprog_pid_elf_end);
     initramfs_seed_at(&n, userprog_argc_elf_start, userprog_argc_elf_end);
+    initramfs_seed_at(&n, userprog_libctest_elf_start, userprog_libctest_elf_end);
     initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
     initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);
     initramfs_seed_at(&n, userprog_terminal_start, userprog_terminal_end);

@@ -558,7 +558,7 @@ static void perform_rename(void) {
         ex_status("That item could not be read");
         return;
     }
-    n = (long)icda_read_file(from, data, st.size);
+    n = (long)icda_read_file(from, data, st.size + 1);
     if (n < 0 || icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
         ic_free(data);
         ex_status(n < 0 ? "That item could not be read" : "That name could not be written");

@@ -333,6 +333,30 @@ userspace/pid.elf: userspace/pid_elf.o userspace/user.ld
 userspace/argc.elf: userspace/argc_elf.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o userspace/argc.elf userspace/argc_elf.o
 
+LIBC_HEADERS = userspace/libc/include/stdio.h userspace/libc/include/stdlib.h \
+               userspace/libc/include/string.h userspace/libc/include/ctype.h
+LIBC_CFLAGS = $(USR_CFLAGS) -fno-builtin -fno-tree-loop-distribute-patterns
+
+libc_core.o: userspace/libc/libc.c $(LIBC_HEADERS) userspace/icda_sys.h userspace/ic_mem.h
+	$(CC) $(LIBC_CFLAGS) -c userspace/libc/libc.c -o /tmp/icda-libc_core.o
+	cp -f /tmp/icda-libc_core.o libc_core.o
+
+libc.o: libc_core.o ic_mem.o
+	ld -r -o /tmp/icda-libc.o libc_core.o ic_mem.o
+	cp -f /tmp/icda-libc.o libc.o
+
+crt1.o: userspace/libc/crt1.asm
+	$(ASM) -f elf64 userspace/libc/crt1.asm -o crt1.o
+
+libctest.o: userspace/libctest.c $(LIBC_HEADERS)
+	$(CC) $(USR_CFLAGS) -Iuserspace/libc/include -c userspace/libctest.c -o /tmp/icda-libctest.o
+	cp -f /tmp/icda-libctest.o libctest.o
+
+userspace/libctest.elf: crt1.o libctest.o libc.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-libctest.elf crt1.o libctest.o libc.o
+	printf '\377' | dd of=/tmp/icda-libctest.elf bs=1 seek=7 conv=notrunc status=none
+	cp -f /tmp/icda-libctest.elf userspace/libctest.elf
+
 nptestlx_start.o: userspace/nptestlx_start.asm
 	$(ASM) -f elf64 userspace/nptestlx_start.asm -o /tmp/icda-nptestlx_start.o
 	cp -f /tmp/icda-nptestlx_start.o nptestlx_start.o
@@ -609,7 +633,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)
@@ -746,4 +770,11 @@ else
 	@echo "usb-sync: installed kernel.iso -> $(VENTOY_ISO)"
 endif
 
-.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync
+.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync sdk
+
+sdk: crt1.o libc.o userspace/user.ld $(LIBC_HEADERS) userspace/libc/sdk/Makefile
+	rm -rf sdk
+	mkdir -p sdk/include sdk/lib
+	cp $(LIBC_HEADERS) userspace/icda_sys.h userspace/ic_mem.h sdk/include/
+	cp crt1.o libc.o userspace/user.ld sdk/lib/
+	cp userspace/libc/sdk/Makefile userspace/libc/sdk/hello.c userspace/libc/sdk/README.txt sdk/

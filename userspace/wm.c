@@ -160,10 +160,10 @@ static void load_hidpi_font(void) {
     uint64_t addr;
     long n;
     if ((long)icda_stat(path, &st) < 0 || st.size == 0) return;
-    wm_font_shm = icda_shm_create(st.size);
+    wm_font_shm = icda_shm_create(st.size + 1);
     if (!wm_font_shm) return;
     addr = icda_shm_map(wm_font_shm);
-    n = addr ? (long)icda_read_file(path, (char *)(uintptr_t)addr, st.size) : -1;
+    n = addr ? (long)icda_read_file(path, (char *)(uintptr_t)addr, st.size + 1) : -1;
     if (n <= 0 || ic_font_attach_2x((const void *)(uintptr_t)addr, (uint64_t)n) != 0) {
         if (addr) icda_shm_unmap(wm_font_shm);
         icda_shm_close(wm_font_shm);

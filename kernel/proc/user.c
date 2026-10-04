@@ -662,7 +662,8 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
     }
 
     user_proc->state = PROCESS_READY;
-    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') {
+    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/' &&
+        !(image_size > 7 && (uint8_t)image[7] == USER_ELF_OSABI_ICDA)) {
         user_proc->linux_personality = 1;
     }
     if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {

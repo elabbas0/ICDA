@@ -110,4 +110,6 @@ typedef struct {
     uint64_t d_val;
 } __attribute__((packed)) elf64_dyn_t;
 
+#define USER_ELF_OSABI_ICDA 0xFF
+
 #endif

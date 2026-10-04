@@ -169,6 +169,39 @@ the kernel on free. Apps are single-threaded, so there is no locking. The
 Editor buffer now grows as needed (the 64 KB cap is gone; a 923 KB file opens),
 and Explorer rename has no size limit.
 
+## C library and SDK
+
+`userspace/libc` is a small static C library for native programs:
+- **Headers:** `string.h`, `stdlib.h`, `ctype.h` and `stdio.h`. `stdint.h`,
+  `stddef.h` and `stdarg.h` come from GCC's freestanding headers.
+- **printf family:** supports widths, precision, flags and the `l`/`ll`/`z`
+  length modifiers.
+- **Console:** `stdout` is line-buffered to the console or pty. `stdin` reads
+  cooked lines through `SYS_INPUT_READLINE`.
+- **Files:** `FILE*` streams load the whole file on `fopen` and write it back
+  on `fflush`/`fclose`, because the VFS has whole-file read/write calls. Modes
+  r, w, a and + work, and so do seeking and `remove`/`rename`.
+- **Memory:** malloc maps onto `ic_mem`.
+- **Startup:** `crt1.asm` calls `main` through `exit()`, so atexit handlers run
+  and buffered output is flushed.
+- **Build:** `libc.o` is `libc_core.o` plus `ic_mem.o`. It is compiled with
+  `-fno-builtin -fno-tree-loop-distribute-patterns` so GCC does not turn
+  `memset`/`memcpy` loops into calls to themselves.
+
+Native vs Linux binaries: the loader runs ELFs under `/bin/` with the Linux
+personality, except when byte 7 of the ELF header (`EI_OSABI`) is `0xFF`
+(`USER_ELF_OSABI_ICDA`). The libc link step writes that byte.
+
+`/bin/libctest.elf` is the regression test (run `libctest.elf` in the
+Terminal; expected `32/32 passed`). It caught a real bug: `SYS_VFS_READ`
+stores at most `cap - 1` bytes and a NUL, so a read sized to the file's exact
+length drops the last byte. Pass `size + 1`.
+
+`make sdk` writes `sdk/` (gitignored) with the headers, `crt1.o`, `libc.o`,
+`user.ld`, a Makefile and `hello.c`. Running `make` there builds `hello.elf`
+with the host gcc/ld. Copy the result onto a volume ICDA mounts, or fetch it
+with curl, and run it by path.
+
 ## Explorer delete (native ABI v3)
 
 The VFS now has `vfs_remove`, exposed as `SYS_VFS_REMOVE` (73), which

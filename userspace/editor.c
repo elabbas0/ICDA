@@ -645,7 +645,7 @@ static void open_file(const char *path) {
         icda_stat_t st;
         n = -1;
         if ((long)icda_stat(ed.path, &st) >= 0 && ensure_cap(st.size + 1)) {
-            n = (long)icda_read_file(ed.path, ed.buf, st.size);
+            n = (long)icda_read_file(ed.path, ed.buf, st.size + 1);
         }
     }
     if (n < 0) {

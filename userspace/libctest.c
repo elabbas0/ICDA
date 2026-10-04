@@ -1,0 +1,137 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+static int passed, failed;
+
+static void check(int ok, const char *what) {
+    if (ok) {
+        passed++;
+    } else {
+        failed++;
+        printf("  FAIL: %s\n", what);
+    }
+}
+
+static int cmp_int(const void *a, const void *b) {
+    return *(const int *)a - *(const int *)b;
+}
+
+static void test_strings(void) {
+    char buf[64];
+    char tok[] = "a,b,,c";
+    check(strlen("hello") == 5, "strlen");
+    check(strcmp("abc", "abd") < 0 && strcmp("b", "a") > 0 && strcmp("x", "x") == 0, "strcmp");
+    check(strncmp("abcdef", "abcxyz", 3) == 0, "strncmp");
+    strcpy(buf, "foo");
+    strcat(buf, "bar");
+    check(strcmp(buf, "foobar") == 0, "strcpy/strcat");
+    check(strchr(buf, 'b') == buf + 3 && strrchr(buf, 'o') == buf + 2, "strchr/strrchr");
+    check(strstr(buf, "oba") == buf + 2 && strstr(buf, "zz") == 0, "strstr");
+    check(strspn("aab", "a") == 2 && strcspn("abc", "c") == 2, "strspn/strcspn");
+    check(strcmp(strtok(tok, ","), "a") == 0 && strcmp(strtok(0, ","), "b") == 0 &&
+          strcmp(strtok(0, ","), "c") == 0 && strtok(0, ",") == 0, "strtok");
+    memset(buf, 'x', 4);
+    check(memcmp(buf, "xxxxar", 6) == 0, "memset/memcmp");
+    memmove(buf + 1, buf, 5);
+    check(memcmp(buf, "xxxxxa", 6) == 0, "memmove overlap");
+    check(isdigit('7') && !isdigit('a') && isspace('\t') && toupper('q') == 'Q', "ctype");
+}
+
+static void test_numbers(void) {
+    char *end;
+    check(atoi("-42") == -42, "atoi");
+    check(strtol("0x1F", &end, 0) == 31 && *end == 0, "strtol hex");
+    check(strtol("0755", 0, 0) == 493, "strtol octal");
+    check(strtoul("123abc", &end, 10) == 123 && strcmp(end, "abc") == 0, "strtoul end");
+    check(strtoll("-9000000000", 0, 10) == -9000000000LL, "strtoll 64-bit");
+}
+
+static void test_format(void) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%d|%5d|%-5d|%05d|%x|%X|%#x", -12, 42, 42, 42, 255, 255, 255);
+    check(strcmp(buf, "-12|   42|42   |00042|ff|FF|0xff") == 0, "printf integers");
+    snprintf(buf, sizeof(buf), "%s|%8s|%-4s|%.2s|%c|%%", "hi", "pad", "l", "trunc", 'Z');
+    check(strcmp(buf, "hi|     pad|l   |tr|Z|%") == 0, "printf strings");
+    snprintf(buf, sizeof(buf), "%lu %lld %zu", 4000000000UL, -5LL, (size_t)7);
+    check(strcmp(buf, "4000000000 -5 7") == 0, "printf long sizes");
+    check(snprintf(buf, 4, "abcdef") == 6 && strcmp(buf, "abc") == 0, "snprintf truncation");
+}
+
+static void test_memory(void) {
+    char *blocks[200];
+    int ok = 1;
+    char *big, *grown;
+    int nums[] = { 5, 3, 9, 1, 7, 2 };
+    for (int i = 0; i < 200; i++) {
+        blocks[i] = (char *)malloc((size_t)(i * 37 % 900 + 1));
+        if (!blocks[i]) ok = 0;
+        else memset(blocks[i], i, (size_t)(i * 37 % 900 + 1));
+    }
+    for (int i = 0; i < 200 && ok; i++) {
+        if (blocks[i][0] != (char)i || blocks[i][i * 37 % 900] != (char)i) ok = 0;
+    }
+    for (int i = 0; i < 200; i += 2) free(blocks[i]);
+    for (int i = 0; i < 200; i += 2) blocks[i] = (char *)malloc(64);
+    for (int i = 1; i < 200 && ok; i += 2) {
+        if (blocks[i][0] != (char)i) ok = 0;
+    }
+    for (int i = 0; i < 200; i++) free(blocks[i]);
+    check(ok, "malloc/free 200 blocks keep their contents");
+    big = (char *)malloc(3 * 1024 * 1024);
+    check(big != 0, "malloc 3 MB");
+    if (big) {
+        big[0] = 1;
+        big[3 * 1024 * 1024 - 1] = 2;
+        free(big);
+    }
+    grown = (char *)malloc(16);
+    strcpy(grown, "keep");
+    grown = (char *)realloc(grown, 500000);
+    check(grown && strcmp(grown, "keep") == 0, "realloc keeps data");
+    free(grown);
+    grown = (char *)calloc(1000, 4);
+    ok = grown != 0;
+    for (int i = 0; ok && i < 4000; i++) ok = grown[i] == 0;
+    check(ok, "calloc zeroes");
+    free(grown);
+    qsort(nums, 6, sizeof(int), cmp_int);
+    check(nums[0] == 1 && nums[5] == 9 && nums[2] == 3, "qsort");
+}
+
+static void test_files(void) {
+    const char *path = "/home/.libctest.txt";
+    char line[64];
+    FILE *f = fopen(path, "w");
+    check(f != 0, "fopen w");
+    if (!f) return;
+    fprintf(f, "line %d\n", 1);
+    fputs("second\n", f);
+    fclose(f);
+    f = fopen(path, "a");
+    fputs("third\n", f);
+    fclose(f);
+    f = fopen(path, "r");
+    check(f && fgets(line, sizeof(line), f) && strcmp(line, "line 1\n") == 0, "fgets first line");
+    check(f && fgets(line, sizeof(line), f) && strcmp(line, "second\n") == 0, "fgets second line");
+    check(f && fgets(line, sizeof(line), f) && strcmp(line, "third\n") == 0, "append mode");
+    check(f && fgets(line, sizeof(line), f) == 0 && feof(f), "eof");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        check(ftell(f) == 20, "fseek/ftell");
+        fclose(f);
+    }
+    check(remove(path) == 0 && fopen(path, "r") == 0, "remove");
+}
+
+int main(int argc, char **argv) {
+    printf("libctest: %s (argc=%d)\n", argc > 0 ? argv[0] : "?", argc);
+    test_strings();
+    test_numbers();
+    test_format();
+    test_memory();
+    test_files();
+    printf("libctest: %d/%d passed\n", passed, passed + failed);
+    return failed ? 1 : 0;
+}
