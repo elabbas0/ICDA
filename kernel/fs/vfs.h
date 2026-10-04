@@ -29,6 +29,7 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path);
 int vfs_getcwd(vfs_node_t *node, char *buf, size_t size);
 int vfs_mkdir(vfs_node_t *cwd, const char *path);
 int vfs_create(vfs_node_t *cwd, const char *path);
+int vfs_remove(vfs_node_t *cwd, const char *path);
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size);
 
 

@@ -38,10 +38,10 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v2: first number moved");
-_Static_assert(SYS_PROC_STATS == 69, "native ABI v2: v1 numbers moved");
-_Static_assert(SYS_PTY_IO == 72, "native ABI v2: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 73, "native ABI v2: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v3: first number moved");
+_Static_assert(SYS_PTY_IO == 72, "native ABI v3: v2 numbers moved");
+_Static_assert(SYS_VFS_REMOVE == 73, "native ABI v3: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 74, "native ABI v3: count changed");
 
 
 
@@ -603,6 +603,21 @@ static uint64_t sys_create(const char *path) {
     }
 
     return vfs_create(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_vfs_remove(const char *path) {
+    process_t *proc = sched_current_process();
+
+    if (!proc || !path) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(path)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    if (!*path) {
+        return (uint64_t)-1;
+    }
+    return vfs_remove(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_stat(const char *path, vfs_stat_t *out) {
@@ -2057,6 +2072,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
                                  (const char *)(uintptr_t)regs->rdx);
         case SYS_PTY_IO:
             return sys_pty_io(regs->rdi, regs->rsi, (char *)(uintptr_t)regs->rdx, regs->r10);
+        case SYS_VFS_REMOVE:
+            return sys_vfs_remove((const char *)(uintptr_t)regs->rdi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

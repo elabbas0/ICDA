@@ -33,7 +33,7 @@
 enum { VIEW_GRID = 0, VIEW_LIST };
 
 
-enum { DLG_NONE = 0, DLG_NEW_FILE, DLG_NEW_FOLDER, DLG_GOTO, DLG_RENAME };
+enum { DLG_NONE = 0, DLG_NEW_FILE, DLG_NEW_FOLDER, DLG_GOTO, DLG_RENAME, DLG_DELETE };
 
 
 
@@ -525,10 +525,13 @@ static void create_entry(int make_dir) {
 
 
 
+static void open_dialog(int kind, const char *title, const char *initial);
+
 static void perform_rename(void) {
+    static char data[262144];
     char from[PATH_CAP];
     char to[PATH_CAP];
-    char data[4096];
+    icda_stat_t st;
     long n;
     if (ex.menu_item < 0 || ex.menu_item >= ex.count) {
         ex_status("Select something to rename");
@@ -538,21 +541,56 @@ static void perform_rename(void) {
         ex_status("That name cannot be used");
         return;
     }
+    if (ex.items[ex.menu_item].is_dir) {
+        ex_status("Folders cannot be renamed yet");
+        return;
+    }
     d_copy(from, ex.items[ex.menu_item].path, sizeof(from));
     path_join(to, sizeof(to), ex.path, ex.dialog_buf);
     if (d_streq(from, to)) return;
-    n = (long)icda_read_file(from, data, sizeof(data) - 1);
-    if (n < 0) {
-        ex_status("That item could not be read");
-        return;
-    }
-    if (icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
+    if ((long)icda_stat(to, &st) >= 0) {
         ex_status("The new name is already taken");
         return;
     }
+    n = (long)icda_read_file(from, data, sizeof(data));
+    if (n < 0 || (uint64_t)n >= sizeof(data)) {
+        ex_status(n < 0 ? "That item could not be read" : "That file is too large to rename");
+        return;
+    }
+    if (icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
+        ex_status("That name could not be written");
+        return;
+    }
+    icda_remove(from);
     refresh();
-    ex_status(ex.items[ex.menu_item].is_dir ? "Folders cannot be renamed yet"
-                                           : "Renamed (the old name is now empty)");
+    for (int i = 0; i < ex.count; i++) {
+        if (d_streq(ex.items[i].name, ex.dialog_buf)) ex.selected = i;
+    }
+    ex_status("Renamed");
+}
+
+static void perform_delete(void) {
+    int was_dir;
+    if (ex.menu_item < 0 || ex.menu_item >= ex.count) return;
+    was_dir = ex.items[ex.menu_item].is_dir;
+    if (icda_remove(ex.items[ex.menu_item].path) < 0) {
+        ex_status("That item is protected and cannot be deleted");
+        return;
+    }
+    refresh();
+    if (ex.selected >= ex.count) ex.selected = ex.count - 1;
+    ex_status(was_dir ? "Folder deleted" : "File deleted");
+}
+
+static void ask_delete(int item) {
+    char title[DIALOG_CAP + 16];
+    if (item < 0 || item >= ex.count) return;
+    ex.menu_item = item;
+    d_copy(title, "Delete \"", sizeof(title));
+    d_copy(title + d_strlen(title), ex.items[item].name, sizeof(title) - d_strlen(title));
+    d_copy(title + d_strlen(title), "\"?", sizeof(title) - d_strlen(title));
+    open_dialog(DLG_DELETE, title, ex.items[item].is_dir ? "The folder and everything in it will be removed."
+                                                         : "This file will be removed.");
 }
 
 
@@ -573,14 +611,16 @@ static void close_dialog(void) {
 
 static void commit_dialog(void) {
     int kind = ex.dialog;
-    close_dialog();
+    ex.dialog = DLG_NONE;
     switch (kind) {
     case DLG_NEW_FILE:    create_entry(0); break;
     case DLG_NEW_FOLDER:  create_entry(1); break;
     case DLG_GOTO:        navigate_to(ex.dialog_buf, 1); break;
     case DLG_RENAME:      perform_rename(); break;
+    case DLG_DELETE:      perform_delete(); break;
     default: break;
     }
+    close_dialog();
 }
 
 
@@ -759,6 +799,20 @@ static void draw_dialog(ic_app_t *app, ic_canvas_t *c) {
     ic_text_draw_in(c, ic_font(IC_FONT_TITLE3), ic_rect_make(r.x + IC_SP_5, r.y + IC_SP_4,
                                                              r.w - 2 * IC_SP_5, 20),
                     ex.dialog_title, p->label, IC_ALIGN_LEFT);
+    if (ex.dialog == DLG_DELETE) {
+        int bw = ic_ui_button_width("Create", IC_SYM_NONE);
+        int cw = ic_ui_button_width("Cancel", IC_SYM_NONE);
+        int by = r.y + r.h - IC_H_CONTROL - IC_SP_4;
+        ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r.x + IC_SP_5, r.y + IC_SP_4 + 30,
+                                                               r.w - 2 * IC_SP_5, 20),
+                        ex.dialog_buf, p->label_secondary, IC_ALIGN_LEFT);
+        ic_ui_button(c, ic_rect_make(r.x + r.w - bw - IC_SP_5, by, bw, IC_H_CONTROL),
+                     "Delete", IC_SYM_NONE, IC_BUTTON_DESTRUCTIVE, IC_STATE_NORMAL);
+        ic_ui_button(c, ic_rect_make(r.x + r.w - bw - cw - IC_SP_5 - IC_SP_3, by, cw,
+                                     IC_H_CONTROL),
+                     "Cancel", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+        return;
+    }
     d_copy(buf, ex.dialog_buf, sizeof(buf));
     tf.text = buf;
     tf.cursor = ex.dialog_cursor;
@@ -887,7 +941,7 @@ static int place_at(ic_app_t *app, int x, int y) {
 }
 
 enum {
-    MA_NONE = 0, MA_OPEN, MA_EDIT, MA_RENAME, MA_INFO, MA_NEW_FOLDER, MA_NEW_FILE,
+    MA_NONE = 0, MA_OPEN, MA_EDIT, MA_RENAME, MA_DELETE, MA_INFO, MA_NEW_FOLDER, MA_NEW_FILE,
     MA_TERMINAL, MA_REFRESH, MA_VIEW_GRID, MA_VIEW_LIST
 };
 
@@ -911,6 +965,7 @@ static void build_menu(void) {
         n = menu_add(n, "Open", MA_OPEN, 0);
         if (!it->is_dir) n = menu_add(n, "Open in Editor", MA_EDIT, 0);
         n = menu_add(n, "Rename", MA_RENAME, it->is_dir);
+        n = menu_add(n, "Delete", MA_DELETE, 0);
         n = menu_add(n, "Get Info", MA_INFO, 0);
         n = menu_add(n, IC_MENU_SEPARATOR, MA_NONE, 0);
     }
@@ -952,6 +1007,7 @@ static void menu_activate(ic_app_t *app, int index) {
     case MA_RENAME:
         if (has_item) open_dialog(DLG_RENAME, "Rename", ex.items[item].name);
         break;
+    case MA_DELETE:     if (has_item) ask_delete(item); break;
     case MA_INFO:       if (has_item) ex.info_open = 1; break;
     case MA_NEW_FOLDER: open_dialog(DLG_NEW_FOLDER, "New Folder", ""); break;
     case MA_NEW_FILE:   open_dialog(DLG_NEW_FILE, "New File", ""); break;
@@ -1066,6 +1122,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             if (ev->key == IC_KEY_ESCAPE || ev->key == IC_KEY_ENTER) ex.info_open = 0;
             break;
         }
+        if (ex.dialog == DLG_DELETE) {
+            if (ev->key == IC_KEY_ENTER) commit_dialog();
+            else if (ev->key == IC_KEY_ESCAPE) close_dialog();
+            break;
+        }
         if (ex.dialog != DLG_NONE) {
             int len = (int)d_strlen(ex.dialog_buf);
             ic_rect_t f = ic_rect_make((app->width - 420) / 2 + IC_SP_5,
@@ -1142,8 +1203,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             open_menu_at(app, app->mouse_x, app->mouse_y);
             break;
         case IC_KEY_DELETE:
-            
-            ex_status("Deleting is not available yet: the file system has no remove");
+            ask_delete(ex.selected);
             break;
         case IC_KEY_HOME: ex.selected = 0; break;
         case IC_KEY_END:  if (ex.count) ex.selected = ex.count - 1; break;

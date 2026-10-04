@@ -382,6 +382,46 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
     return vfs_sync();
 }
 
+static int subtree_has_readonly(vfs_node_t *node) {
+    if (node->readonly) {
+        return 1;
+    }
+    for (vfs_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (subtree_has_readonly(c)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int vfs_remove(vfs_node_t *cwd, const char *path) {
+    vfs_node_t *node = vfs_resolve(cwd, path);
+    vfs_node_t *parent;
+    vfs_node_t **link;
+
+    if (!node || node == vfs_root_node || !node->parent || subtree_has_readonly(node)) {
+        return -1;
+    }
+    for (vfs_node_t *p = cwd; p; p = p->parent) {
+        if (p == node) {
+            return -1;
+        }
+    }
+
+    parent = node->parent;
+    link = &parent->first_child;
+    while (*link && *link != node) {
+        link = &(*link)->next_sibling;
+    }
+    if (!*link) {
+        return -1;
+    }
+    *link = node->next_sibling;
+    node->next_sibling = 0;
+    parent->modified = vfs_tick++;
+    return vfs_sync();
+}
+
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size) {
     vfs_node_t *node = vfs_resolve(cwd, path);
     char *next;

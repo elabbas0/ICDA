@@ -153,14 +153,21 @@ Save in the toolbar.
   from `ic_syntax_color()` in `ic_theme.c` and have light and dark
   variants. The status bar shows the detected language.
 
-## Known gap: Explorer cannot delete
+## Explorer delete (native ABI v3)
 
-The VFS has no unlink primitive and `scripts/check-abi.sh` pins the
-native call count (73 in ABI v2). Adding delete means either a new
-syscall plus another ABI version bump, or an unlink inside the
-VFS behind an existing call. Until that is decided the menu entry is
-omitted and the Delete key says why. Rename is therefore
-copy-then-truncate, which the status line also states.
+The VFS now has `vfs_remove`, exposed as `SYS_VFS_REMOVE` (73), which
+bumps the native ABI to v3 with 74 calls (`scripts/check-abi.sh` checks
+this). It unlinks a file or a whole folder from the tree and persists the
+change. It refuses the root, anything read-only (seeded system files), and
+the caller's own working directory or its parents. Removed nodes are
+detached but not freed, so open fds and other processes' cwd pointers
+never dangle; the small leak is the price of that.
+
+In Explorer, the context menu has Delete and the Delete key works. Both
+ask for confirmation first. Rename now writes the new name and removes
+the old one (files up to 256 KB; folders still cannot be renamed). There
+was also a dialog bug that cleared the typed name before it was used,
+which broke New Folder, New File, Go to Folder and Rename. That is fixed.
 
 ## Remaining work
 
@@ -294,7 +301,8 @@ left, smallest first:
   so End/Home/arrows no longer leak `[F`-style bytes into apps.
 - True 2x rendering: `scale=2` pixel-doubles; crisp HiDPI needs a scale
   in `ic_canvas_t` and 2x font/icon atlases.
-- Explorer delete: still blocked on the ABI decision above.
+- Explorer delete: done (see "Explorer delete" above). Folder rename is
+  still missing.
 
 ## Regenerating assets
 ```sh

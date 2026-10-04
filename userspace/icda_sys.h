@@ -76,7 +76,8 @@ enum {
     SYS_PROC_STATS        = 69,
     SYS_PTY_OPEN          = 70,
     SYS_PTY_SPAWN         = 71,
-    SYS_PTY_IO            = 72
+    SYS_PTY_IO            = 72,
+    SYS_VFS_REMOVE        = 73
 };
 
 typedef struct {
@@ -287,5 +288,6 @@ static inline uint64_t icda_proc_stats(uint64_t pid, icda_proc_stats_t *out) { r
 static inline long icda_pty_open(void) { return (long)sys_call0(SYS_PTY_OPEN); }
 static inline long icda_pty_spawn(long pty, const char *path, const char *args) { return (long)sys_call3(SYS_PTY_SPAWN, (uint64_t)pty, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)args); }
 static inline long icda_pty_io(long pty, uint64_t op, void *buf, uint64_t len) { return (long)sys_call4(SYS_PTY_IO, (uint64_t)pty, op, (uint64_t)(uintptr_t)buf, len); }
+static inline long icda_remove(const char *path) { return (long)sys_call1(SYS_VFS_REMOVE, (uint64_t)(uintptr_t)path); }
 
 #endif
