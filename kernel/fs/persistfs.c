@@ -382,7 +382,6 @@ int persistfs_init(void) {
     persistfs_header_t *header = (persistfs_header_t *)sector;
     uint8_t *buffer = 0;
     uint64_t sectors;
-    uint8_t *cursor;
     block_device_t *dev = 0;
 
     persistfs_available = 0;

@@ -119,9 +119,7 @@ static const dev_calls_t dev_console_calls = {
 
 
 static const dev_calls_t dev_input_calls = {
-    0, 0, 0, 0, 0, 0, 0,
-    input_read_char,
-    0, 0, 0, 0, 0,
+    .in_read_char = input_read_char,
 };
 
 
@@ -278,12 +276,11 @@ static int dev_gpu_set_cursor(int x, int y, const uint32_t *image,
 }
 
 static const dev_calls_t dev_fb_calls = {
-    0, 0, 0, 0, 0, 0, 0, 0,
-    dev_fb_claim_map,
-    dev_fb_is_claimed,
-    dev_gpu_query,
-    dev_gpu_present_fn,
-    dev_gpu_set_cursor,
+    .fb_claim_map = dev_fb_claim_map,
+    .fb_claimed   = dev_fb_is_claimed,
+    .gpu_query    = dev_gpu_query,
+    .gpu_present  = dev_gpu_present_fn,
+    .gpu_set_cursor = dev_gpu_set_cursor,
 };
 
 

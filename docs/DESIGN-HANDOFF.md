@@ -6,8 +6,20 @@ commit bodies for exactly what was imported versus rewritten.
 
 Current state:
 
-- **Builds clean.** `make` exits 0, `scripts/check-abi.sh` reports the
-  70 native calls in sync, and every app compiles with zero warnings.
+- **Builds clean.** A clean `make` exits 0 with zero compiler warnings
+  in the kernel and userspace (only the linker's build-id note remains),
+  and `scripts/check-abi.sh` reports the 70 native calls in sync. Getting
+  there removed dead code left by the v1.5.0 cleanup (the kernel shell's
+  old job control and line editor, unused HDA amp helpers, `zero_bytes`
+  in fat32) and switched the console, input and fb `dev_calls_t` tables
+  to designated initialisers.
+- **The comment-strip pass was audited.** Comparing every C file before
+  and after it with comments removed (`gcc -fpreprocessed -E`) showed one
+  real change outside the intended legacy-UI removal: the Browser's
+  protocol-relative link prefix had become `"https://"`, so `//host/x`
+  resolved to `https:////host/x`. Restored. Assembly, shell scripts and
+  the Makefile only lost comments; the three PowerShell scripts that lost
+  `<# #>` blocks were repaired and all scripts now parse.
 - **Boots.** Verified under QEMU: the desktop renders (wallpaper, icons,
   taskbar with live clock, window frames).
 - **Smoke tests pass**, but they prove only that the kernel reaches its
@@ -224,6 +236,18 @@ a dark full-screen overlay.
   Dragging a snapped window away restores its size.
 - Overview: done. F11 (kernel sentinel `0x81`) shows every window as a
   scaled thumbnail; click one to bring it forward, Escape or F11 closes.
+
+### Still open
+
+Everything in P1-P3 is done or partly done as described above. What is
+left, smallest first:
+- Text cursor: needs a WM message for apps to report text regions.
+- Wheel inertia: the wheel scrolls in fixed steps.
+- Clipboard: Shift-select exists in the Editor, but there is nowhere to
+  copy to.
+- True 2x rendering: `scale=2` pixel-doubles; crisp HiDPI needs a scale
+  in `ic_canvas_t` and 2x font/icon atlases.
+- Explorer delete: still blocked on the ABI decision above.
 
 ## Regenerating assets
 ```sh

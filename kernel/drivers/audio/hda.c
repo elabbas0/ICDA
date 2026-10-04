@@ -236,47 +236,6 @@ static int hda_widget_type(uint8_t nid, uint8_t *type_out) {
     return 0;
 }
 
-static int hda_widget_caps(uint8_t nid, uint32_t *caps_out) {
-    return hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, caps_out);
-}
-
-static uint8_t hda_amp_zero_db_gain(uint8_t nid, uint8_t input, uint8_t *ok_out) {
-    uint32_t caps = 0;
-    uint8_t gain = 0;
-    uint8_t ok = 0;
-
-    if (hda_get_param(nid, input ? HDA_PARAM_AMP_IN_CAP : HDA_PARAM_AMP_OUT_CAP, &caps) == 0) {
-        gain = (uint8_t)(caps & 0x7FU);
-        ok = 1;
-    }
-
-    if (ok_out) {
-        *ok_out = ok;
-    }
-    return gain;
-}
-
-static void hda_unmute_output_amp(uint8_t nid) {
-    uint8_t ok = 0;
-    uint16_t gain = hda_amp_zero_db_gain(nid, 0, &ok);
-    if (!ok) {
-        return;
-    }
-    (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
-                        (uint16_t)(HDA_AMP_SET_OUTPUT | HDA_AMP_SET_LEFT | HDA_AMP_SET_RIGHT | gain), 0);
-}
-
-static void hda_unmute_input_amp(uint8_t nid, uint8_t index) {
-    uint8_t ok = 0;
-    uint16_t gain = hda_amp_zero_db_gain(nid, 1, &ok);
-    if (!ok) {
-        return;
-    }
-    (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
-                        (uint16_t)(HDA_AMP_SET_INPUT | HDA_AMP_SET_LEFT | HDA_AMP_SET_RIGHT |
-                                   ((uint16_t)index << 8) | gain), 0);
-}
-
 static int hda_get_connections(uint8_t nid, uint8_t *out, uint8_t *count_out) {
     uint32_t parm;
     uint8_t count;

@@ -36,10 +36,6 @@ typedef struct {
 
 static uint32_t mounted_fat32 = 0;
 
-static void zero_bytes(uint8_t *dst, uint64_t size) {
-    for (uint64_t i = 0; i < size; i++) dst[i] = 0;
-}
-
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
     while (text && text[len]) len++;

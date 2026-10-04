@@ -340,7 +340,7 @@ static void resolve_href(const char *href, char *out, uint64_t cap) {
         return;
     }
     if (ic_strprefix(href, "//")) {
-        ic_strcpy(out, use_tls ? "https://" : "http://", cap);
+        ic_strcpy(out, use_tls ? "https:" : "http:", cap);
         ic_strcat(out, href, cap);
         return;
     }

@@ -5,8 +5,6 @@
 
 #define SHELL_LINE_CAP 128
 #define SHELL_BUF_CAP 1024
-#define SHELL_JOB_CAP 16
-#define SHELL_JOB_CMD_CAP 80
 #define SHELL_HISTORY_CAP 16
 #define SHELL_EDIT_BUF_CAP 4096
 #define SHELL_EDIT_VIEW_ROWS 18
@@ -15,18 +13,7 @@
 #define SHELL_CURL_REQUEST_PATH "/home/.curl.request"
 #define SHELL_SCRIPT_CAP 16384
 
-#define PROC_STATE_STOPPED 4
-#define PROC_STATE_EXITED 5
-#define PROC_STATE_REAPED 6
 
-typedef struct {
-    uint64_t pid;
-    uint64_t active;
-    uint64_t notified_done;
-    char command[SHELL_JOB_CMD_CAP];
-} shell_job_t;
-
-static shell_job_t shell_job_table[SHELL_JOB_CAP];
 static char shell_history[SHELL_HISTORY_CAP][SHELL_LINE_CAP];
 static uint64_t shell_history_count = 0;
 enum {
@@ -100,41 +87,6 @@ static void write_uint(uint64_t v) {
         v /= 10;
     }
     icda_write(&buf[i]);
-}
-
-static void write_uint_pad(uint64_t v, uint64_t width) {
-    char buf[32];
-    uint64_t i = sizeof(buf) - 1;
-    uint64_t len;
-    buf[i] = 0;
-    if (v == 0) {
-        buf[--i] = '0';
-    } else {
-        while (v && i > 0) {
-            buf[--i] = (char)('0' + (v % 10));
-            v /= 10;
-        }
-    }
-    len = str_len(&buf[i]);
-    while (len < width) {
-        icda_write(" ");
-        len++;
-    }
-    icda_write(&buf[i]);
-}
-
-static void write_repeat(char ch, uint64_t count) {
-    char buf[65];
-    uint64_t chunk = sizeof(buf) - 1;
-    for (uint64_t i = 0; i < chunk; i++) buf[i] = ch;
-    buf[chunk] = 0;
-    while (count) {
-        uint64_t take = count > chunk ? chunk : count;
-        buf[take] = 0;
-        icda_write(buf);
-        buf[take] = ch;
-        count -= take;
-    }
 }
 
 static int parse_uint64(const char *text, uint64_t *out) {
@@ -286,87 +238,6 @@ static void shell_curl(const char *arg) {
     shell_launch_foreground_request(SHELL_CURL_REQUEST_PATH, request, "/apps/curl.app", "usage: curl <http://host[:port]/path> <out-path>\n", 0);
 }
 
-static const char *proc_state_name(uint64_t state) {
-    switch (state) {
-        case 0: return "new";
-        case 1: return "ready";
-        case 2: return "running";
-        case 3: return "blocked";
-        case 4: return "stopped";
-        case 5: return "exited";
-        case 6: return "reaped";
-        default: return "unknown";
-    }
-}
-
-static shell_job_t *shell_find_job(uint64_t pid) {
-    for (uint64_t i = 0; i < SHELL_JOB_CAP; i++) {
-        if (shell_job_table[i].active && shell_job_table[i].pid == pid) {
-            return &shell_job_table[i];
-        }
-    }
-    return 0;
-}
-
-static shell_job_t *shell_add_job(uint64_t pid, const char *command) {
-    shell_job_t *job = shell_find_job(pid);
-    if (job) {
-        job->notified_done = 0;
-        copy_text(job->command, command, sizeof(job->command));
-        return job;
-    }
-    for (uint64_t i = 0; i < SHELL_JOB_CAP; i++) {
-        if (!shell_job_table[i].active) {
-            shell_job_table[i].active = 1;
-            shell_job_table[i].pid = pid;
-            shell_job_table[i].notified_done = 0;
-            copy_text(shell_job_table[i].command, command, sizeof(shell_job_table[i].command));
-            return &shell_job_table[i];
-        }
-    }
-    return 0;
-}
-
-static void shell_remove_job(uint64_t pid) {
-    shell_job_t *job = shell_find_job(pid);
-    if (!job) return;
-    job->active = 0;
-    job->pid = 0;
-    job->notified_done = 0;
-    job->command[0] = 0;
-}
-
-static void shell_poll_jobs(int notify) {
-    for (uint64_t i = 0; i < SHELL_JOB_CAP; i++) {
-        icda_proc_info_t info;
-        shell_job_t *job = &shell_job_table[i];
-
-        if (!job->active) continue;
-        if ((long)icda_proc_info(job->pid, &info) < 0) {
-            job->active = 0;
-            job->pid = 0;
-            job->command[0] = 0;
-            continue;
-        }
-        if (info.state == PROC_STATE_REAPED) {
-            job->active = 0;
-            job->pid = 0;
-            job->command[0] = 0;
-            continue;
-        }
-        if (notify && !job->notified_done && info.state == PROC_STATE_EXITED) {
-            icda_write("[job ");
-            write_uint(info.pid);
-            icda_write("] done exit=");
-            write_uint(info.exit_code);
-            icda_write(" ");
-            icda_write(job->command);
-            icda_write("\n");
-            job->notified_done = 1;
-        }
-    }
-}
-
 static void shell_history_add(const char *line) {
     if (!line || !*line) return;
     if (shell_history_count && str_eq(shell_history[(shell_history_count - 1) % SHELL_HISTORY_CAP], line)) {
@@ -374,15 +245,6 @@ static void shell_history_add(const char *line) {
     }
     copy_text(shell_history[shell_history_count % SHELL_HISTORY_CAP], line, SHELL_LINE_CAP);
     shell_history_count++;
-}
-
-static void shell_rewrite_line(const char *line, uint64_t *shown_len) {
-    while (*shown_len) {
-        icda_backspace();
-        (*shown_len)--;
-    }
-    icda_write(line);
-    *shown_len = str_len(line);
 }
 
 static void shell_render_line(const char *line, uint64_t len, uint64_t cursor, uint64_t prompt_x, uint64_t prompt_y, uint64_t *shown_len) {
@@ -415,31 +277,6 @@ static void shell_cursor_hide(int *visible) {
 
 static long shell_wait_key_byte(uint64_t timeout_ticks) {
     return icda_read_char_timeout(timeout_ticks);
-}
-
-static long shell_read_key(void) {
-    long c = shell_wait_key_byte(0);
-    if (c != 27) {
-        return c;
-    }
-
-    {
-        long c1 = shell_wait_key_byte(2);
-        if (c1 != '[') {
-            return c;
-        }
-
-        switch (shell_wait_key_byte(2)) {
-            case 'A': return KEY_UP;
-            case 'B': return KEY_DOWN;
-            case 'C': return KEY_RIGHT;
-            case 'D': return KEY_LEFT;
-            case '3':
-                if (shell_wait_key_byte(2) == '~') return KEY_DELETE;
-                return c;
-            default: return c;
-        }
-    }
 }
 
 static uint64_t shell_collect_matches(const char *dir, const char *prefix, char matches[][SHELL_LINE_CAP], uint64_t max_matches) {
@@ -679,200 +516,6 @@ static int shell_read_line(char *line, uint64_t cap) {
     }
 }
 
-static uint64_t editor_line_start(const char *buf, uint64_t len, uint64_t pos) {
-    if (pos > len) pos = len;
-    while (pos > 0 && buf[pos - 1] != '\n') pos--;
-    return pos;
-}
-
-static uint64_t editor_line_end(const char *buf, uint64_t len, uint64_t pos) {
-    if (pos > len) pos = len;
-    while (pos < len && buf[pos] != '\n') pos++;
-    return pos;
-}
-
-static uint64_t editor_column(const char *buf, uint64_t len, uint64_t pos) {
-    return pos - editor_line_start(buf, len, pos);
-}
-
-static uint64_t editor_line_number(const char *buf, uint64_t pos) {
-    uint64_t line = 1;
-    for (uint64_t i = 0; i < pos && buf[i]; i++) {
-        if (buf[i] == '\n') line++;
-    }
-    return line;
-}
-
-static uint64_t editor_line_count(const char *buf, uint64_t len) {
-    uint64_t lines = 1;
-    for (uint64_t i = 0; i < len; i++) {
-        if (buf[i] == '\n') lines++;
-    }
-    return lines;
-}
-
-static uint64_t editor_find_row_start(const char *buf, uint64_t len, uint64_t target_row) {
-    uint64_t row = 0;
-    uint64_t pos = 0;
-    while (pos < len && row < target_row) {
-        if (buf[pos++] == '\n') row++;
-    }
-    return pos;
-}
-
-static uint64_t editor_cursor_row(const char *buf, uint64_t pos) {
-    uint64_t row = 0;
-    for (uint64_t i = 0; i < pos && buf[i]; i++) {
-        if (buf[i] == '\n') row++;
-    }
-    return row;
-}
-
-static uint64_t editor_view_top_for_cursor(const char *buf, uint64_t cursor) {
-    uint64_t row = editor_cursor_row(buf, cursor);
-    if (row < 3) return 0;
-    if (row + 4 < SHELL_EDIT_VIEW_ROWS) return 0;
-    return row - 3;
-}
-
-static void editor_write_line_segment(const char *buf, uint64_t len, uint64_t start, uint64_t cursor, uint64_t *cursor_shown) {
-    uint64_t end = editor_line_end(buf, len, start);
-    uint64_t pos = start;
-    uint64_t shown = 0;
-    while (pos < end) {
-        if (shown >= SHELL_EDIT_VIEW_COLS) break;
-        if (pos == cursor && !*cursor_shown && shown < SHELL_EDIT_VIEW_COLS) {
-            icda_write("|");
-            *cursor_shown = 1;
-            shown++;
-            if (shown >= SHELL_EDIT_VIEW_COLS) break;
-        }
-        {
-            char out[2] = { buf[pos], 0 };
-            icda_write(out);
-            shown++;
-        }
-        pos++;
-    }
-    if (cursor == end && !*cursor_shown && shown < SHELL_EDIT_VIEW_COLS) {
-        icda_write("|");
-        *cursor_shown = 1;
-        shown++;
-    }
-    if (shown < SHELL_EDIT_VIEW_COLS) {
-        write_repeat(' ', SHELL_EDIT_VIEW_COLS - shown);
-    }
-}
-
-static void editor_redraw(const char *path, const char *buf, uint64_t len, uint64_t cursor, int modified) {
-    uint64_t top_row = editor_view_top_for_cursor(buf, cursor);
-    uint64_t start = editor_find_row_start(buf, len, top_row);
-    uint64_t line_no = top_row + 1;
-    uint64_t cursor_shown = 0;
-    uint64_t lines_total = editor_line_count(buf, len);
-
-    icda_set_cursor(0, 0);
-    icda_write("####################################################################\n");
-    icda_write("# ICDA editor  ");
-    icda_write(path);
-    icda_write(modified ? "   *modified" : "   saved");
-    write_repeat(' ', 68);
-    icda_write("\n");
-    icda_write("# Ctrl+S save   Ctrl+X exit   arrows move   backspace/delete       #\n");
-    icda_write("####################################################################\n");
-
-    for (uint64_t row = 0; row < SHELL_EDIT_VIEW_ROWS; row++) {
-        if (start > len) start = len;
-        write_uint_pad(line_no, 4);
-        icda_write(" # ");
-        if (start <= len) {
-            editor_write_line_segment(buf, len, start, cursor, &cursor_shown);
-            start = editor_line_end(buf, len, start);
-            if (start < len && buf[start] == '\n') start++;
-        } else {
-            write_repeat(' ', SHELL_EDIT_VIEW_COLS);
-        }
-        icda_write(" #\n");
-        line_no++;
-    }
-
-    icda_write("####################################################################\n");
-    icda_write("# Ln ");
-    write_uint(editor_line_number(buf, cursor));
-    icda_write("/");
-    write_uint(lines_total);
-    icda_write("   Col ");
-    write_uint(editor_column(buf, len, cursor) + 1);
-    icda_write("   Size ");
-    write_uint(len);
-    icda_write(" bytes");
-    if (!cursor_shown) {
-        icda_write("   [cursor off-screen]");
-    }
-    write_repeat(' ', 68);
-    icda_write("\n");
-    icda_write("####################################################################\n");
-}
-
-static void editor_insert_char(char *buf, uint64_t *len, uint64_t *cursor, char ch, uint64_t cap) {
-    if (!buf || !len || !cursor || *len + 1 >= cap) return;
-    for (uint64_t i = *len; i > *cursor; i--) {
-        buf[i] = buf[i - 1];
-    }
-    buf[*cursor] = ch;
-    (*len)++;
-    (*cursor)++;
-    buf[*len] = 0;
-}
-
-static void editor_backspace(char *buf, uint64_t *len, uint64_t *cursor) {
-    if (!buf || !len || !cursor || *cursor == 0) return;
-    for (uint64_t i = *cursor - 1; i < *len; i++) {
-        buf[i] = buf[i + 1];
-    }
-    (*cursor)--;
-    (*len)--;
-    buf[*len] = 0;
-}
-
-static void editor_delete(char *buf, uint64_t *len, uint64_t *cursor) {
-    if (!buf || !len || !cursor || *cursor >= *len) return;
-    for (uint64_t i = *cursor; i < *len; i++) {
-        buf[i] = buf[i + 1];
-    }
-    (*len)--;
-    buf[*len] = 0;
-}
-
-static void editor_move_left(uint64_t *cursor) {
-    if (*cursor > 0) (*cursor)--;
-}
-
-static void editor_move_right(uint64_t len, uint64_t *cursor) {
-    if (*cursor < len) (*cursor)++;
-}
-
-static void editor_move_vertical(const char *buf, uint64_t len, uint64_t *cursor, int direction) {
-    uint64_t current_start = editor_line_start(buf, len, *cursor);
-    uint64_t current_col = *cursor - current_start;
-    uint64_t target_start;
-    uint64_t target_end;
-
-    if (direction < 0) {
-        if (current_start == 0) return;
-        target_end = current_start - 1;
-        target_start = editor_line_start(buf, len, target_end);
-    } else {
-        target_end = editor_line_end(buf, len, current_start);
-        if (target_end >= len) return;
-        target_start = target_end + 1;
-        target_end = editor_line_end(buf, len, target_start);
-    }
-
-    *cursor = target_start + current_col;
-    if (*cursor > target_end) *cursor = target_end;
-}
-
 static void shell_edit(const char *path) {
     char resolved[SHELL_LINE_CAP];
 
@@ -902,27 +545,6 @@ static void shell_help(void) {
     icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl run exit\n");
 }
 
-static void shell_money(void) {
-    icda_write("            *            \n");
-    icda_write("           * *           \n");
-    icda_write("          *   *          \n");
-    icda_write("         *     *         \n");
-    icda_write("*********       *********\n");
-    icda_write(" *                     * \n");
-    icda_write("  *                   *  \n");
-    icda_write("   *                 *   \n");
-    icda_write("    ***************    \n");
-    icda_write("   *                 *   \n");
-    icda_write("  *                   *  \n");
-    icda_write(" *                     * \n");
-    icda_write("*********       *********\n");
-    icda_write("         *     *         \n");
-    icda_write("          *   *          \n");
-    icda_write("           * *           \n");
-    icda_write("            *            \n");
-    shell_play_wav_path("/usr/share/audio/hava_clip.wav");
-}
-
 static void shell_pwd(void) {
     char cwd[80];
     if ((long)icda_getcwd(cwd, sizeof(cwd)) < 0) {
@@ -931,16 +553,6 @@ static void shell_pwd(void) {
     }
     icda_write(cwd);
     icda_write("\n");
-}
-
-static void shell_ps(void) {
-    char buf[SHELL_BUF_CAP];
-    long ret = (long)icda_list_procs(buf, sizeof(buf));
-    if (ret < 0) {
-        icda_write("ps failed\n");
-        return;
-    }
-    icda_write(buf);
 }
 
 static void shell_ls(const char *path) {
@@ -1066,54 +678,6 @@ static void shell_stat(const char *path) {
     icda_write("\n");
 }
 
-static void shell_spawn_path(const char *path) {
-    uint64_t pid;
-    if (!path || !*path) {
-        icda_write("usage: spawn <path>\n");
-        return;
-    }
-    pid = icda_spawn(path);
-    if ((long)pid < 0) {
-        icda_write("spawn failed: ");
-        icda_write(path);
-        icda_write("\n");
-        return;
-    }
-    if (!shell_add_job(pid, path)) {
-        icda_write("warning: job table full, process still running\n");
-    }
-    icda_write("spawned pid=");
-    write_uint(pid);
-    icda_write("\n");
-}
-
-static void shell_wait_pid(const char *arg) {
-    uint64_t pid = 0;
-    uint64_t code;
-
-    if (!arg || !*arg) {
-        icda_write("usage: wait <pid>\n");
-        return;
-    }
-    if (!parse_uint64(arg, &pid)) {
-        icda_write("usage: wait <pid>\n");
-        return;
-    }
-    code = icda_waitpid(pid);
-    if ((long)code < 0) {
-        icda_write("wait failed: ");
-        write_uint(pid);
-        icda_write("\n");
-        return;
-    }
-    shell_remove_job(pid);
-    icda_write("pid=");
-    write_uint(pid);
-    icda_write(" exit=");
-    write_uint(code);
-    icda_write("\n");
-}
-
 static void shell_run_path(const char *path) {
     char launch_path[160];
     const char *args = 0;
@@ -1179,33 +743,12 @@ static int shell_run_script(const char *path) {
     return 0;
 }
 
-static void shell_yield_once(void) {
-    icda_yield();
-}
-
 static void shell_sync(void) {
     if ((long)icda_sync() < 0) {
         icda_write("sync failed\n");
         return;
     }
     icda_write("synced\n");
-}
-
-static void shell_install(void) {
-    uint64_t files = 0;
-    uint64_t bytes = 0;
-
-    if ((long)icda_install_system(&files, &bytes) < 0) {
-        icda_write("install failed\n");
-        return;
-    }
-
-    icda_write("installed ");
-    write_uint(files);
-    icda_write(" files, ");
-    write_uint(bytes);
-    icda_write(" bytes persisted\n");
-    icda_write("details: /system/install/state.txt and /system/install/manifest.txt\n");
 }
 
 static void shell_install_target(const char *arg) {
@@ -1337,146 +880,6 @@ static void shell_mount(const char *arg) {
     write_uint(part);
     icda_write(" at ");
     icda_write(mount_path);
-    icda_write("\n");
-}
-
-static void shell_sleep_ticks(const char *arg) {
-    uint64_t ticks = 0;
-
-    if (!arg || !*arg || !parse_uint64(arg, &ticks)) {
-        icda_write("usage: sleep <ticks>\n");
-        return;
-    }
-    icda_sleep(ticks);
-}
-
-static void shell_jobs(void) {
-    int any = 0;
-
-    shell_poll_jobs(0);
-    for (uint64_t i = 0; i < SHELL_JOB_CAP; i++) {
-        icda_proc_info_t info;
-        shell_job_t *job = &shell_job_table[i];
-
-        if (!job->active) continue;
-        if ((long)icda_proc_info(job->pid, &info) < 0) continue;
-
-        any = 1;
-        icda_write("pid=");
-        write_uint(info.pid);
-        icda_write(" sid=");
-        write_uint(info.sid);
-        icda_write(" pgid=");
-        write_uint(info.pgid);
-        icda_write(" state=");
-        icda_write(proc_state_name(info.state));
-        icda_write(" exit=");
-        write_uint(info.exit_code);
-        icda_write(" cmd=");
-        icda_write(job->command);
-        icda_write("\n");
-    }
-
-    if (!any) {
-        icda_write("no background jobs\n");
-    }
-}
-
-static void shell_wait_all(void) {
-    int waited = 0;
-
-    for (uint64_t i = 0; i < SHELL_JOB_CAP; i++) {
-        uint64_t code;
-        shell_job_t *job = &shell_job_table[i];
-
-        if (!job->active) continue;
-        code = icda_waitpid(job->pid);
-        if ((long)code >= 0) {
-            icda_write("pid=");
-            write_uint(job->pid);
-            icda_write(" exit=");
-            write_uint(code);
-            icda_write("\n");
-        }
-        shell_remove_job(job->pid);
-        waited = 1;
-    }
-
-    if (!waited) {
-        icda_write("no background jobs\n");
-    }
-}
-
-static void shell_fg(const char *arg) {
-    uint64_t pid = 0;
-    icda_proc_info_t info;
-
-    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
-        icda_write("usage: fg <pid>\n");
-        return;
-    }
-    if ((long)icda_proc_info(pid, &info) >= 0 && info.state == PROC_STATE_STOPPED) {
-        if ((long)icda_resume(pid) < 0) {
-            icda_write("resume failed: ");
-            write_uint(pid);
-            icda_write("\n");
-            return;
-        }
-    }
-    shell_wait_pid(arg);
-}
-
-static void shell_stop_pid(const char *arg) {
-    uint64_t pid = 0;
-
-    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
-        icda_write("usage: stop <pid>\n");
-        return;
-    }
-    if ((long)icda_suspend(pid) < 0) {
-        icda_write("stop failed: ");
-        write_uint(pid);
-        icda_write("\n");
-        return;
-    }
-    icda_write("stopped pid=");
-    write_uint(pid);
-    icda_write("\n");
-}
-
-static void shell_resume_pid(const char *arg) {
-    uint64_t pid = 0;
-
-    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
-        icda_write("usage: resume <pid>\n");
-        return;
-    }
-    if ((long)icda_resume(pid) < 0) {
-        icda_write("resume failed: ");
-        write_uint(pid);
-        icda_write("\n");
-        return;
-    }
-    icda_write("resumed pid=");
-    write_uint(pid);
-    icda_write("\n");
-}
-
-static void shell_kill_pid(const char *arg) {
-    uint64_t pid = 0;
-
-    if (!arg || !*arg || !parse_uint64(arg, &pid)) {
-        icda_write("usage: kill <pid>\n");
-        return;
-    }
-    if ((long)icda_kill(pid, 143) < 0) {
-        icda_write("kill failed: ");
-        write_uint(pid);
-        icda_write("\n");
-        return;
-    }
-    icda_write("killed pid=");
-    write_uint(pid);
     icda_write("\n");
 }
 
