@@ -131,4 +131,4 @@ compile_commands.json
 *.ppm
 *.log
 gui-cursor.txt
-sdk/
+/sdk/
