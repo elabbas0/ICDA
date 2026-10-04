@@ -152,6 +152,16 @@ void gui_flush(void) {
     icda_msg_send(win_reply_queue, &msg);
 }
 
+void gui_set_cursor(int shape) {
+    gui_msg_t msg;
+    if (!win_reply_queue) return;
+    for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
+    msg.type = GUI_MSG_SET_CURSOR;
+    msg.window_id = win_id;
+    msg.cursor.shape = (uint8_t)shape;
+    icda_msg_send(win_reply_queue, &msg);
+}
+
 int gui_poll_event(gui_msg_t *out) {
     if (!app_queue) return 0;
     if (icda_msg_poll(app_queue) <= 0) return 0;

@@ -412,6 +412,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
         g = group_at(ev->y);
+        {
+            int fi = row_of_kind(ROW_TEXTFIELD);
+            ic_app_set_cursor(app, fi >= 0 && ic_ui_hit(field_rect(app, fi), ev->x, ev->y)
+                                       ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
+        }
         gd.hover_toggle = 0;
         gd.hover_segment = 0;
         gd.hover_list = -1;

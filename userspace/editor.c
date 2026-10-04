@@ -502,6 +502,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
         ed.hover_new = ic_ui_hit(new_rect(app), ev->x, ev->y);
+        ic_app_set_cursor(app, ic_ui_hit(text_rect(app), ev->x, ev->y) && ev->x >= EDIT_GUTTER_W
+                                   ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
         ed.hover_save = ic_ui_hit(save_rect(app), ev->x, ev->y);
         break;
     case IC_EV_MOUSE_DOWN:

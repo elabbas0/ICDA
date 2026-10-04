@@ -21,6 +21,44 @@ typedef struct {
 
 #define IC_ESC_TIMEOUT_MS 50
 
+static float ic_wheel_vel = 0.0f;
+static uint32_t ic_wheel_last_ms = 0;
+static uint32_t ic_wheel_coast_ms = 0;
+
+static void ic_app_emit_scroll(ic_app_t *app, int wheel) {
+    ic_event_t ev;
+    ev.type = IC_EV_SCROLL;
+    ev.x = app->mouse_x;
+    ev.y = app->mouse_y;
+    ev.button = 0;
+    ev.key = 0;
+    ev.wheel = wheel;
+    ev.mods = 0;
+    if (app->desc->event) app->desc->event(app, &ev);
+    app->dirty = 1;
+}
+
+static void ic_app_wheel_input(int wheel) {
+    uint32_t now = ic_time_ms();
+    if (now - ic_wheel_last_ms < 120u && (ic_wheel_vel > 0.0f) == (wheel > 0)) ic_wheel_vel += (float)wheel;
+    else ic_wheel_vel = (float)wheel;
+    if (ic_wheel_vel > 12.0f) ic_wheel_vel = 12.0f;
+    if (ic_wheel_vel < -12.0f) ic_wheel_vel = -12.0f;
+    ic_wheel_last_ms = now;
+    ic_wheel_coast_ms = now;
+}
+
+static void ic_app_wheel_coast(ic_app_t *app) {
+    uint32_t now = ic_time_ms();
+    float speed = ic_wheel_vel < 0.0f ? -ic_wheel_vel : ic_wheel_vel;
+    if (speed < 3.0f) return;
+    if (now - ic_wheel_last_ms < 80u) return;
+    if (now - ic_wheel_coast_ms < 45u) return;
+    ic_wheel_coast_ms = now;
+    ic_app_emit_scroll(app, ic_wheel_vel > 0.0f ? 1 : -1);
+    ic_wheel_vel *= 0.8f;
+}
+
 static void ic_app_emit_key_mods(ic_app_t *app, uint32_t key, uint32_t mods) {
     ic_event_t ev;
     ev.type = IC_EV_KEY;
@@ -131,6 +169,7 @@ static void ic_app_mouse(ic_app_t *app, const gui_msg_t *m) {
     if (x < 0 && y < 0) {
         if (app->mouse_inside) {
             app->mouse_inside = 0;
+            ic_app_set_cursor(app, IC_CURSOR_ARROW);
             ic_app_emit(app, IC_EV_MOUSE_LEAVE, app->mouse_x, app->mouse_y, 0);
         }
         return;
@@ -151,17 +190,9 @@ static void ic_app_mouse(ic_app_t *app, const gui_msg_t *m) {
             ic_app_emit(app, IC_EV_MOUSE_UP, x, y, bit);
         }
     }
-    if (m->mouse.wheel && app->desc->event) {
-        ic_event_t ev;
-        ev.type = IC_EV_SCROLL;
-        ev.x = x;
-        ev.y = y;
-        ev.button = 0;
-        ev.key = 0;
-        ev.wheel = m->mouse.wheel;
-        ev.mods = 0;
-        app->desc->event(app, &ev);
-        app->dirty = 1;
+    if (m->mouse.wheel) {
+        ic_app_emit_scroll(app, m->mouse.wheel);
+        ic_app_wheel_input(m->mouse.wheel);
     }
 }
 
@@ -244,6 +275,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
             ic_app_emit_key(&app, IC_KEY_ESCAPE);
         }
         if (desc->tick) desc->tick(&app);
+        ic_app_wheel_coast(&app);
 
         {
             uint32_t now = ic_time_ms();
@@ -265,6 +297,12 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
     }
     gui_close_window();
     return 0;
+}
+
+void ic_app_set_cursor(ic_app_t *app, int shape) {
+    if (!app || app->cursor == shape) return;
+    app->cursor = shape;
+    gui_set_cursor(shape);
 }
 
 void ic_app_invalidate(ic_app_t *app) {

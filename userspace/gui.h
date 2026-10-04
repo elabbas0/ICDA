@@ -24,6 +24,7 @@ int       gui_window_height(void);
 
 
 void gui_flush(void);
+void gui_set_cursor(int shape);
 
 
 int gui_poll_event(gui_msg_t *out);

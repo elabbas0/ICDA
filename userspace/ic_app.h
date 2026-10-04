@@ -40,6 +40,11 @@ enum {
 };
 
 enum {
+    IC_CURSOR_ARROW = 0,
+    IC_CURSOR_TEXT  = 1
+};
+
+enum {
     IC_MOD_SHIFT = 1,
     IC_MOD_ALT   = 2,
     IC_MOD_CTRL  = 4
@@ -97,6 +102,7 @@ struct ic_app {
     int      wants_caret;
     int      quit;
     uint64_t caret_epoch_ms;
+    int      cursor;
 };
 
 int  ic_app_run(const ic_app_desc_t *desc, void *user);
@@ -112,5 +118,7 @@ int  ic_app_caret_visible(ic_app_t *app);
 void ic_app_caret_reset(ic_app_t *app);
 
 void ic_app_quit(ic_app_t *app);
+
+void ic_app_set_cursor(ic_app_t *app, int shape);
 
 #endif 

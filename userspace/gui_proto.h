@@ -16,6 +16,7 @@
 #define GUI_MSG_MOUSE_EVENT    7   
 #define GUI_MSG_RESIZE         8   
 #define GUI_MSG_FOCUS          9   
+#define GUI_MSG_SET_CURSOR    10   
 
 
 #define GUI_BTN_LEFT    0x01
@@ -64,6 +65,11 @@ typedef struct {
             uint8_t  focused;     
             uint8_t  _pad[39];
         } focus;          
+
+        struct {
+            uint8_t  shape;
+            uint8_t  _pad[39];
+        } cursor;
 
         
         struct {

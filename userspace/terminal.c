@@ -580,16 +580,16 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             if (n > term.cols) n = term.cols;
             if (row >= first && row < last) {
                 ic_rect_t saved;
-                ic_canvas_push_clip(c, r.x, r.y + row * ch, r.w, ch, &saved);
+                ic_canvas_push_clip(c, r.x, r.y + (row - first) * ch, r.w, ch, &saved);
                 if (line->role == TERM_ROLE_COMMAND && col < PROMPT_LEN) {
                     int pn = PROMPT_LEN - col < n ? PROMPT_LEN - col : n;
-                    ic_text_draw_n(c, f, r.x, baseline0 + row * ch, line->text + col, pn,
+                    ic_text_draw_n(c, f, r.x, baseline0 + (row - first) * ch, line->text + col, pn,
                                    p->success);
                     ic_text_draw_n(c, f, r.x + ic_text_measure_n(f, line->text + col, pn),
-                                   baseline0 + row * ch, line->text + col + pn, n - pn,
+                                   baseline0 + (row - first) * ch, line->text + col + pn, n - pn,
                                    p->label);
                 } else {
-                    ic_text_draw_n(c, f, r.x, baseline0 + row * ch, line->text + col, n,
+                    ic_text_draw_n(c, f, r.x, baseline0 + (row - first) * ch, line->text + col, n,
                                    role_color(line->role));
                 }
                 ic_canvas_pop_clip(c, &saved);
@@ -612,19 +612,19 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             if (n > term.cols) n = term.cols;
             if (crow >= first) {
                 ic_rect_t saved;
-                ic_canvas_push_clip(c, r.x, r.y + crow * ch, r.w, ch, &saved);
+                ic_canvas_push_clip(c, r.x, r.y + (crow - first) * ch, r.w, ch, &saved);
                 if (pcol < PROMPT_LEN) {
                     int pn = PROMPT_LEN - pcol;
                     if (pn > n) pn = n;
-                    ic_text_draw_n(c, f, r.x, baseline0 + crow * ch, PROMPT + pcol, pn,
+                    ic_text_draw_n(c, f, r.x, baseline0 + (crow - first) * ch, PROMPT + pcol, pn,
                                    p->success);
                     if (pn < n) {
                         ic_text_draw_n(c, f, r.x + ic_text_measure_n(f, PROMPT + pcol, pn),
-                                       baseline0 + crow * ch, cmdline + PROMPT_LEN, n - pn,
+                                       baseline0 + (crow - first) * ch, cmdline + PROMPT_LEN, n - pn,
                                        p->label);
                     }
                 } else {
-                    ic_text_draw_n(c, f, r.x, baseline0 + crow * ch, cmdline + pcol, n,
+                    ic_text_draw_n(c, f, r.x, baseline0 + (crow - first) * ch, cmdline + pcol, n,
                                    p->label);
                 }
                 ic_canvas_pop_clip(c, &saved);
@@ -711,6 +711,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     case IC_EV_MOUSE_MOVE: {
         int track_x = r.x + r.w - 6;
         term.hover_scroll = ev->x >= track_x - 2 && ic_ui_hit(r, ev->x, ev->y);
+        ic_app_set_cursor(app, ic_ui_hit(r, ev->x, ev->y) && !term.hover_scroll
+                                   ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
         if (term.dragging_scroll) scrollbar_drag(app, ev->y);
         break;
     }

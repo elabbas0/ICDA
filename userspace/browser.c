@@ -871,10 +871,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
 
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
-        if (br.addr_focused) {
-            
-            if (!ic_ui_hit(a, ev->x, ev->y)) br.addr_focused = 0;
-        }
+        ic_app_set_cursor(app, ic_ui_hit(a, ev->x, ev->y) ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
         br.hover_back = ic_ui_hit(back_rect(app), ev->x, ev->y);
         br.hover_forward = ic_ui_hit(forward_rect(app), ev->x, ev->y);
         br.hover_reload = ic_ui_hit(reload_rect(app), ev->x, ev->y);

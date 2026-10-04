@@ -56,6 +56,7 @@ typedef struct {
     int       minimized;
     int       maximized;
     int       snapped;
+    int       app_cursor;
     int       closing;
     int       anim_kind;
     uint64_t  anim_t0;
@@ -281,7 +282,7 @@ static void wm_power_sequence(int restart);
 
 #define CUR_DIM 32
 
-typedef enum { CUR_ARROW = 0, CUR_EW, CUR_NS, CUR_NWSE, CUR_NESW, CUR_COUNT } cur_shape_t;
+typedef enum { CUR_ARROW = 0, CUR_EW, CUR_NS, CUR_NWSE, CUR_NESW, CUR_TEXT, CUR_COUNT } cur_shape_t;
 
 typedef struct {
     int     hx, hy;
@@ -425,6 +426,13 @@ static void build_cursor_sprite(void) {
     p = ew;
     cur_rotate(&p, 16.0f, 16.0f, r, -r);
     cur_render(&cur_sprites[CUR_NESW], &p, 16, 16);
+    {
+        static const cur_poly_t ibeam = {
+            12, { 10.5f, 21.5f, 21.5f, 18.0f, 18.0f, 21.5f, 21.5f, 10.5f, 10.5f, 14.0f, 14.0f, 10.5f },
+                { 5.5f, 5.5f, 9.5f, 9.5f, 22.5f, 22.5f, 26.5f, 26.5f, 22.5f, 22.5f, 9.5f, 9.5f }
+        };
+        cur_render(&cur_sprites[CUR_TEXT], &ibeam, 16, 16);
+    }
 }
 
 static void set_cursor_shape(int shape) {
@@ -441,6 +449,11 @@ static int cursor_shape_for_hit(wm_hit_t hit) {
     case WM_HIT_RESIZE_BL: return CUR_NESW;
     default:               return CUR_ARROW;
     }
+}
+
+static int pointer_shape(int idx, wm_hit_t hit) {
+    if (hit == WM_HIT_CLIENT && idx >= 0 && idx < MAX_WINDOWS && windows[idx].app_cursor == 1) return CUR_TEXT;
+    return cursor_shape_for_hit(hit);
 }
 
 static void clear_msg(gui_msg_t *msg) {
@@ -2726,7 +2739,7 @@ static void left_release(void) {
         wm_hit_t now_hit;
         int now_idx = window_at(mouse_x, mouse_y, &now_hit);
         set_caption_hover(now_idx, now_hit);
-        set_cursor_shape(cursor_shape_for_hit(now_hit));
+        set_cursor_shape(pointer_shape(now_idx, now_hit));
     }
     desk_left_release(mouse_x, mouse_y);
 }
@@ -2835,7 +2848,7 @@ static void pointer_moved(void) {
     
     idx = window_at(mouse_x, mouse_y, &hit);
     set_caption_hover(press_win >= 0 ? press_win : idx, press_win >= 0 ? press_hit : hit);
-    set_cursor_shape(cursor_shape_for_hit(press_win >= 0 ? press_hit : hit));
+    set_cursor_shape(press_win >= 0 ? cursor_shape_for_hit(press_hit) : pointer_shape(idx, hit));
     {
         wm_bar_t b;
         int bh;
@@ -3051,6 +3064,16 @@ int main(int argc, char **argv) {
                 if (slot != -1 && !windows[slot].closing) {
                     send_close_to_app(&windows[slot]);
                     start_close(&windows[slot]);
+                }
+            } else if (msg.type == GUI_MSG_SET_CURSOR) {
+                int slot = find_window_by_id(msg.window_id);
+                if (slot != -1) {
+                    wm_hit_t h;
+                    windows[slot].app_cursor = msg.cursor.shape;
+                    if (window_at(mouse_x, mouse_y, &h) == slot && press_win < 0) {
+                        set_cursor_shape(pointer_shape(slot, h));
+                        mark_dirty(mouse_x - CUR_DIM, mouse_y - CUR_DIM, 2 * CUR_DIM, 2 * CUR_DIM);
+                    }
                 }
             } else if (msg.type == GUI_MSG_FLUSH) {
                 int slot = find_window_by_id(msg.window_id);

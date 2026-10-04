@@ -176,9 +176,11 @@ a dark full-screen overlay.
 - Cursor: done. The WM builds 4x4-supersampled sprites with a dark rim
   and a blurred drop shadow at startup (`build_cursor_sprite`), each with
   its own hotspot: arrow, and east-west, north-south and both diagonal
-  resize shapes chosen from the frame hit under the pointer. A text
-  cursor needs apps to tell the WM where text is (a new message type);
-  not done.
+  resize shapes chosen from the frame hit under the pointer, plus an
+  I-beam. Apps request it with `ic_app_set_cursor(app, IC_CURSOR_TEXT)`
+  (sent as `GUI_MSG_SET_CURSOR` only on change); the WM shows it while
+  the pointer is over that window's client area. Editor, Terminal, the
+  Browser address bar and the Demo text field use it.
 - Blur cost: done differently. `ic_gfx_backdrop` now blurs only the clip
   rectangle plus the blur's reach (3 box passes of radius blur/2), which
   is pixel-identical inside the clip (checked against a full blur on the
@@ -202,7 +204,9 @@ a dark full-screen overlay.
   is unchanged. The WM forwards it in `gui_msg_t.mouse.wheel` to the
   window under the pointer, and `ic_app` emits `IC_EV_SCROLL` with
   `ev->wheel` (positive scrolls down). Terminal, Editor, Explorer, Music,
-  Activity, Browser and the Demo scroll 3 rows per notch. No inertia.
+  Activity, Browser and the Demo scroll 3 rows per notch. `ic_app` adds
+  inertia: notches under 120 ms apart build velocity, and after a fast
+  flick it keeps emitting decaying scroll steps.
   Wiring this up exposed that Terminal Page Up/Down and scrollbar drag
   were inverted, and Explorer paging never worked (grid layout reset the
   scroll every frame; list view ignored the keys); both are fixed. Lists
@@ -241,8 +245,6 @@ a dark full-screen overlay.
 
 Everything in P1-P3 is done or partly done as described above. What is
 left, smallest first:
-- Text cursor: needs a WM message for apps to report text regions.
-- Wheel inertia: the wheel scrolls in fixed steps.
 - Clipboard: Shift-select exists in the Editor, but there is nowhere to
   copy to.
 - True 2x rendering: `scale=2` pixel-doubles; crisp HiDPI needs a scale
