@@ -180,3 +180,15 @@ void ic_theme_shadow(ic_canvas_t *c, int x, int y, int w, int h, float radius,
                      ic_elevation_t level) {
     ic_theme_shadow_faded(c, x, y, w, h, radius, level, 1.0f);
 }
+
+ic_color_t ic_syntax_color(ic_syntax_t kind) {
+    static const uint32_t dark[IC_SYN_COUNT] = {
+        0xD4D4D4, 0xC586C0, 0x4EC9B0, 0xCE9178, 0xB5CEA8, 0x6A9955, 0x569CD6, 0xDCDCAA
+    };
+    static const uint32_t light[IC_SYN_COUNT] = {
+        0x1F1F1F, 0xAF00DB, 0x267F99, 0xA31515, 0x098658, 0x008000, 0x0000FF, 0x795E26
+    };
+    const ic_palette_t *p = ic_palette();
+    if ((int)kind <= 0 || kind >= IC_SYN_COUNT) return p->label;
+    return IC_RGB(p->dark ? dark[kind] : light[kind]);
+}

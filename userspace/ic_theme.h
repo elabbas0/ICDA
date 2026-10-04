@@ -170,4 +170,18 @@ void ic_palette_build(ic_palette_t *p, int dark, ic_accent_t accent);
 
 ic_color_t ic_accent_swatch(ic_accent_t accent);
 
+typedef enum {
+    IC_SYN_PLAIN = 0,
+    IC_SYN_KEYWORD,
+    IC_SYN_TYPE,
+    IC_SYN_STRING,
+    IC_SYN_NUMBER,
+    IC_SYN_COMMENT,
+    IC_SYN_PREPROC,
+    IC_SYN_FUNCTION,
+    IC_SYN_COUNT
+} ic_syntax_t;
+
+ic_color_t ic_syntax_color(ic_syntax_t kind);
+
 #endif 

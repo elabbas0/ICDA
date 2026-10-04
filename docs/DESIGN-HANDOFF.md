@@ -135,6 +135,24 @@ prompt.
 This bumped the native ABI to v2: 73 calls (`SYS_PTY_OPEN` 70,
 `SYS_PTY_SPAWN` 71, `SYS_PTY_IO` 72). v1 numbers are unchanged.
 
+## Editor
+
+The Editor is laid out like VS Code: a folder tree on the left that you
+can toggle (grid button or Ctrl+B), plus Open Folder, Open File, New and
+Save in the toolbar.
+
+- **Opening things.** Ctrl+O opens a file. Typing a directory into the
+  file prompt opens it as a folder.
+- **The tree.** Folders are listed first, sorted by name, and dotfiles
+  are hidden. Clicking a folder expands or collapses it, and clicking a
+  file opens it.
+- **Unsaved changes.** An action that would drop unsaved changes asks
+  once. Repeating it discards them.
+- **Highlighting.** Syntax highlighting is chosen by file extension: C,
+  JS/TS, Python, Shell, Makefile, ASM, JSON and Markdown. Colours come
+  from `ic_syntax_color()` in `ic_theme.c` and have light and dark
+  variants. The status bar shows the detected language.
+
 ## Known gap: Explorer cannot delete
 
 The VFS has no unlink primitive and `scripts/check-abi.sh` pins the
