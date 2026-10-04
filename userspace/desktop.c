@@ -530,7 +530,7 @@ static void create_entry(int make_dir) {
 static void open_dialog(int kind, const char *title, const char *initial);
 
 static void perform_rename(void) {
-    static char data[262144];
+    char *data;
     char from[PATH_CAP];
     char to[PATH_CAP];
     icda_stat_t st;
@@ -554,15 +554,17 @@ static void perform_rename(void) {
         ex_status("The new name is already taken");
         return;
     }
-    n = (long)icda_read_file(from, data, sizeof(data));
-    if (n < 0 || (uint64_t)n >= sizeof(data)) {
-        ex_status(n < 0 ? "That item could not be read" : "That file is too large to rename");
+    if ((long)icda_stat(from, &st) < 0 || !(data = (char *)ic_malloc(st.size + 1))) {
+        ex_status("That item could not be read");
         return;
     }
-    if (icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
-        ex_status("That name could not be written");
+    n = (long)icda_read_file(from, data, st.size);
+    if (n < 0 || icda_write_file(to, data, (uint64_t)n) == (uint64_t)-1) {
+        ic_free(data);
+        ex_status(n < 0 ? "That item could not be read" : "That name could not be written");
         return;
     }
+    ic_free(data);
     icda_remove(from);
     refresh();
     for (int i = 0; i < ex.count; i++) {

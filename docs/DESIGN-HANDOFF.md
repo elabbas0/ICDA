@@ -153,6 +153,22 @@ Save in the toolbar.
   from `ic_syntax_color()` in `ic_theme.c` and have light and dark
   variants. The status bar shows the detected language.
 
+## Userspace memory (native ABI v4)
+
+Native apps now have a heap. `SYS_VM_ALLOC` (74) maps zeroed anonymous pages
+and returns their address; `SYS_VM_FREE` (75) unmaps them. Both share
+`uvm_map_anon` in `syscall.c` with the Linux `mmap` path. The region starts at
+`0x70000000`, and `SYS_VM_FREE` only unmaps inside it, so it cannot release
+program image or shared-memory pages. A failed map rolls back the pages it
+already mapped.
+
+`ic_mem.c` in libicda builds `ic_malloc`, `ic_calloc`, `ic_realloc` and
+`ic_free` on top of those calls. Small blocks use boundary tags with coalescing
+in 1 MB arenas. Blocks of 256 KB or more get their own mapping and go back to
+the kernel on free. Apps are single-threaded, so there is no locking. The
+Editor buffer now grows as needed (the 64 KB cap is gone; a 923 KB file opens),
+and Explorer rename has no size limit.
+
 ## Explorer delete (native ABI v3)
 
 The VFS now has `vfs_remove`, exposed as `SYS_VFS_REMOVE` (73), which
@@ -165,7 +181,7 @@ never dangle; the small leak is the price of that.
 
 In Explorer, the context menu has Delete and the Delete key works. Both
 ask for confirmation first. Rename now writes the new name and removes
-the old one (files up to 256 KB; folders still cannot be renamed). There
+the old one (any size since ABI v4; folders still cannot be renamed). There
 was also a dialog bug that cleared the typed name before it was used,
 which broke New Folder, New File, Go to Folder and Rename. That is fixed.
 

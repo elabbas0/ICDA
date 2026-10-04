@@ -35,9 +35,9 @@ USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -Wpedantic -Wno-unused-command-lin
 
 
 
-IC_MODULES = ic_time ic_anim ic_gfx ic_font ic_theme ic_ui ic_symbols ic_app
+IC_MODULES = ic_time ic_anim ic_gfx ic_font ic_theme ic_ui ic_symbols ic_app ic_mem
 IC_MODULE_OBJS = $(addsuffix .o,$(IC_MODULES))
-IC_HEADERS = userspace/libicda.h userspace/ic_time.h userspace/ic_anim.h userspace/ic_gfx.h \
+IC_HEADERS = userspace/libicda.h userspace/ic_mem.h userspace/ic_time.h userspace/ic_anim.h userspace/ic_gfx.h \
              userspace/ic_font.h userspace/ic_fonts_gen.h userspace/ic_theme.h userspace/ic_ui.h \
              userspace/ic_app.h userspace/gui.h userspace/gui_proto.h \
              userspace/settings_store.h userspace/icda_sys.h

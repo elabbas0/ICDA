@@ -41,6 +41,7 @@
 #include "gui_proto.h"
 
 
+#include "ic_mem.h"
 #include "ic_time.h"    
 #include "ic_anim.h"    
 #include "ic_gfx.h"     

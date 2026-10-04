@@ -38,10 +38,10 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v3: first number moved");
-_Static_assert(SYS_PTY_IO == 72, "native ABI v3: v2 numbers moved");
-_Static_assert(SYS_VFS_REMOVE == 73, "native ABI v3: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 74, "native ABI v3: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v4: first number moved");
+_Static_assert(SYS_VFS_REMOVE == 73, "native ABI v4: v3 numbers moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v4: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 76, "native ABI v4: count changed");
 
 
 
@@ -603,6 +603,53 @@ static uint64_t sys_create(const char *path) {
     }
 
     return vfs_create(proc->cwd ? proc->cwd : vfs_root(), path) == 0 ? 0 : (uint64_t)-1;
+}
+
+
+#define UVM_ANON_BASE 0x70000000ULL
+#define UVM_ANON_END  0x500000000ULL
+
+static uint64_t uvm_map_anon(process_t *proc, uint64_t addr, uint64_t length, int writable) {
+    uint64_t pages, size;
+    if (!proc || !proc->addr_space || length == 0) return (uint64_t)-1;
+    pages = (length + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    size = pages * PAGE_SIZE_4K;
+    if (addr == 0) {
+        if (proc->linux_mmap_next == 0) proc->linux_mmap_next = UVM_ANON_BASE;
+        addr = proc->linux_mmap_next;
+        if (addr + size < addr || addr + size > UVM_ANON_END) return (uint64_t)-1;
+        proc->linux_mmap_next += size;
+    }
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t phys = pmm_alloc();
+        char *dst;
+        if (!phys || vmm_map_page(proc->addr_space, addr + i * PAGE_SIZE_4K, phys,
+                                  writable ? VMM_FLAGS_USER_RW : VMM_FLAGS_USER_RO) != 0) {
+            if (phys) pmm_free(phys);
+            for (uint64_t k = 0; k < i; k++) vmm_unmap_page(proc->addr_space, addr + k * PAGE_SIZE_4K, 1);
+            return (uint64_t)-1;
+        }
+        dst = (char *)PHYS_TO_VIRT(phys);
+        for (int j = 0; j < (int)PAGE_SIZE_4K; j++) dst[j] = 0;
+    }
+    return addr;
+}
+
+static uint64_t sys_vm_alloc(uint64_t length) {
+    process_t *proc = sched_current_process();
+    if (length == 0 || length > UVM_ANON_END - UVM_ANON_BASE) return (uint64_t)-U_EINVAL;
+    return uvm_map_anon(proc, 0, length, 1);
+}
+
+static uint64_t sys_vm_free(uint64_t addr, uint64_t length) {
+    process_t *proc = sched_current_process();
+    uint64_t end = addr + length;
+    if (!proc || !proc->addr_space || length == 0 || (addr & 0xFFFULL)) return (uint64_t)-U_EINVAL;
+    if (addr < UVM_ANON_BASE || end < addr || end > proc->linux_mmap_next) return (uint64_t)-U_EINVAL;
+    for (uint64_t page = addr; page < end; page += PAGE_SIZE_4K) {
+        if (vmm_virt_to_phys(proc->addr_space, page)) vmm_unmap_page(proc->addr_space, page, 1);
+    }
+    return 0;
 }
 
 static uint64_t sys_vfs_remove(const char *path) {
@@ -1603,26 +1650,7 @@ static uint64_t linux_syscall_dispatch(struct registers *regs) {
             (void)flags;
             (void)fd;
             (void)a5;
-            if (length == 0) return (uint64_t)-1;
-            uint64_t pages = (length + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
-            if (addr == 0) {
-                if (proc->linux_mmap_next == 0) proc->linux_mmap_next = 0x70000000;
-                addr = proc->linux_mmap_next;
-                proc->linux_mmap_next += pages * PAGE_SIZE_4K;
-            }
-            for (uint64_t i = 0; i < pages; i++) {
-                uint64_t phys = pmm_alloc();
-                if (!phys) return (uint64_t)-1;
-                uint64_t vmm_flags = VMM_FLAGS_USER_RW;
-                if (!(prot & 2)) vmm_flags = VMM_FLAGS_USER_RO;
-                if (vmm_map_page(proc->addr_space, addr + i * PAGE_SIZE_4K, phys, vmm_flags) != 0) {
-                    pmm_free(phys);
-                    return (uint64_t)-1;
-                }
-                char *dst = (char *)PHYS_TO_VIRT(phys);
-                for (int j = 0; j < (int)PAGE_SIZE_4K; j++) dst[j] = 0;
-            }
-            return addr;
+            return uvm_map_anon(proc, addr, length, (prot & 2) != 0);
         }
         case 10: { 
             uint64_t addr = a0;
@@ -2074,6 +2102,10 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return sys_pty_io(regs->rdi, regs->rsi, (char *)(uintptr_t)regs->rdx, regs->r10);
         case SYS_VFS_REMOVE:
             return sys_vfs_remove((const char *)(uintptr_t)regs->rdi);
+        case SYS_VM_ALLOC:
+            return sys_vm_alloc(regs->rdi);
+        case SYS_VM_FREE:
+            return sys_vm_free(regs->rdi, regs->rsi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

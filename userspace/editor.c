@@ -3,7 +3,6 @@
 #define WIN_W 860
 #define WIN_H 560
 
-#define EDIT_BUF_CAP    65536
 #define EDIT_PATH_CAP   256
 #define EDIT_STATUS_CAP 128
 #define EDIT_GUTTER_W   46
@@ -28,7 +27,8 @@ typedef struct {
 
 static struct {
     char     path[EDIT_PATH_CAP];
-    char     buf[EDIT_BUF_CAP];
+    char    *buf;
+    uint64_t cap;
     uint64_t len;
     uint64_t cursor;
     int      modified;
@@ -164,11 +164,23 @@ static void scroll_to_cursor(void) {
     if (ed.scroll_col < 0) ed.scroll_col = 0;
 }
 
-static void insert_char(char ch) {
-    if (ed.len + 1 >= EDIT_BUF_CAP) {
-        ed_status("Document is full (64 KB)");
-        return;
+static int ensure_cap(uint64_t need) {
+    uint64_t cap = ed.cap ? ed.cap : 4096;
+    char *grown;
+    if (need <= ed.cap) return 1;
+    while (cap < need) cap *= 2;
+    grown = (char *)ic_realloc(ed.buf, cap);
+    if (!grown) {
+        ed_status("Out of memory");
+        return 0;
     }
+    ed.buf = grown;
+    ed.cap = cap;
+    return 1;
+}
+
+static void insert_char(char ch) {
+    if (!ensure_cap(ed.len + 2)) return;
     for (uint64_t i = ed.len; i > ed.cursor; i--) ed.buf[i] = ed.buf[i - 1];
     ed.buf[ed.cursor] = ch;
     ed.len++;
@@ -178,15 +190,22 @@ static void insert_char(char ch) {
 }
 
 static void paste(void) {
-    static char clip[EDIT_BUF_CAP];
+    icda_stat_t st;
+    char *clip;
     uint64_t n = 0;
-    long got = ic_clipboard_get(clip, sizeof(clip));
+    long got;
+    if ((long)icda_stat(IC_CLIPBOARD_PATH, &st) < 0 || st.size == 0) return;
+    clip = (char *)ic_malloc(st.size + 1);
+    if (!clip) {
+        ed_status("Out of memory");
+        return;
+    }
+    got = ic_clipboard_get(clip, st.size + 1);
     for (long k = 0; k < got; k++) {
         if (clip[k] != '\r') clip[n++] = clip[k];
     }
-    if (n == 0) return;
-    if (ed.len + n >= EDIT_BUF_CAP) {
-        ed_status("Document is full (64 KB)");
+    if (n == 0 || !ensure_cap(ed.len + n + 1)) {
+        ic_free(clip);
         return;
     }
     for (uint64_t i = ed.len; i > ed.cursor; i--) ed.buf[i - 1 + n] = ed.buf[i - 1];
@@ -195,6 +214,7 @@ static void paste(void) {
     ed.cursor += n;
     ed.buf[ed.len] = 0;
     ed.modified = 1;
+    ic_free(clip);
 }
 
 static void backspace(void) {
@@ -621,7 +641,13 @@ static void open_file(const char *path) {
     long n;
     ed.has_sel = 0;
     ic_strcpy(ed.path, path, EDIT_PATH_CAP);
-    n = (long)icda_read_file(ed.path, ed.buf, sizeof(ed.buf) - 1);
+    {
+        icda_stat_t st;
+        n = -1;
+        if ((long)icda_stat(ed.path, &st) >= 0 && ensure_cap(st.size + 1)) {
+            n = (long)icda_read_file(ed.path, ed.buf, st.size);
+        }
+    }
     if (n < 0) {
         ed.buf[0] = 0;
         ed.len = 0;
@@ -629,7 +655,7 @@ static void open_file(const char *path) {
     } else {
         ed.len = (uint64_t)n;
         ed.buf[ed.len] = 0;
-        ed_status(ed.len == sizeof(ed.buf) - 1 ? "Opened (truncated at 64 KB)" : "Opened");
+        ed_status("Opened");
     }
     ed.lang = detect_lang(ed.path);
     ed.cursor = 0;
@@ -1148,6 +1174,8 @@ static void init(ic_app_t *app) {
     char req[EDIT_PATH_CAP];
     long n = (long)icda_read_file("/home/.edit.request", req, sizeof(req) - 1);
     const char *arg = (const char *)app->user;
+    ensure_cap(4096);
+    ed.buf[0] = 0;
     ed.hover_tb = -1;
     ed.tree_hover = -1;
     ed.root[0] = 0;
