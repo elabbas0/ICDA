@@ -52,6 +52,26 @@ static const uint8_t gpt_type_basic[16] = {
 static const uint8_t gpt_type_swap[16] = {
     0x6D,0xFD,0x57,0x06,0xAB,0xA4,0xC4,0x43,0x84,0xE5,0x09,0x33,0xC8,0x4B,0x4F,0x4F
 };
+static const uint8_t gpt_type_icda[16] = {
+    0x8C,0x3F,0x2A,0x5E,0x4B,0x1D,0x6A,0x4E,0x9C,0x7D,0x1C,0xDA,0x00,0x00,0x00,0x01
+};
+static const uint8_t gpt_type_msr[16] = {
+    0x16,0xE3,0xC9,0xE3,0x5C,0x0B,0xB8,0x4D,0x81,0x7D,0xF9,0x2D,0xF0,0x02,0x15,0xAE
+};
+static const uint8_t gpt_type_recovery[16] = {
+    0xA4,0xBB,0x94,0xDE,0xD1,0x06,0x40,0x4D,0xA1,0x6A,0xBF,0xD5,0x01,0x79,0xD6,0xAC
+};
+static const uint8_t gpt_type_linux[16] = {
+    0xAF,0x3D,0xC6,0x0F,0x83,0x84,0x72,0x47,0x8E,0x79,0x3D,0x69,0xD8,0x47,0x7D,0xE4
+};
+
+static int str_eq_full(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
 
 static int str_eq8(const char *a, const char *b) {
     for (uint32_t i = 0; i < 8; i++) {
@@ -125,10 +145,18 @@ static partition_role_t detect_role(partition_kind_t kind, uint8_t mbr_type, con
     if (kind == PARTITION_KIND_GPT && type_guid) {
         if (guid_eq(type_guid, gpt_type_efi)) return PARTITION_ROLE_EFI;
         if (guid_eq(type_guid, gpt_type_swap)) return PARTITION_ROLE_SWAP;
-        if (guid_eq(type_guid, gpt_type_basic)) return PARTITION_ROLE_SYSTEM;
+        if (guid_eq(type_guid, gpt_type_icda)) return PARTITION_ROLE_SYSTEM;
+        if (guid_eq(type_guid, gpt_type_basic)) return PARTITION_ROLE_DATA;
+        if (guid_eq(type_guid, gpt_type_msr)) return PARTITION_ROLE_MSR;
+        if (guid_eq(type_guid, gpt_type_recovery)) return PARTITION_ROLE_RECOVERY;
+        if (guid_eq(type_guid, gpt_type_linux)) return PARTITION_ROLE_LINUX;
     }
     if (kind == PARTITION_KIND_MBR) {
         if (mbr_type == 0xEF) return PARTITION_ROLE_EFI;
+        if (mbr_type == 0x07 || mbr_type == 0x0B || mbr_type == 0x0C || mbr_type == 0x0E) return PARTITION_ROLE_DATA;
+        if (mbr_type == 0x27) return PARTITION_ROLE_RECOVERY;
+        if (mbr_type == 0x82) return PARTITION_ROLE_SWAP;
+        if (mbr_type == 0x83) return PARTITION_ROLE_LINUX;
     }
     return PARTITION_ROLE_UNKNOWN;
 }
@@ -158,6 +186,9 @@ static void add_partition(block_device_t *device, uint64_t start_lba, uint64_t s
     } else {
         copy_text(part->name, "part", sizeof(part->name));
         append_u32(part->name, sizeof(part->name), partitions_found - 1);
+    }
+    if (part->role == PARTITION_ROLE_DATA && str_eq_full(part->name, "ICDA System")) {
+        part->role = PARTITION_ROLE_SYSTEM;
     }
 }
 
@@ -288,6 +319,10 @@ const char *partition_role_name(partition_role_t role) {
         case PARTITION_ROLE_EFI: return "efi";
         case PARTITION_ROLE_SYSTEM: return "system";
         case PARTITION_ROLE_SWAP: return "swap";
+        case PARTITION_ROLE_DATA: return "data";
+        case PARTITION_ROLE_MSR: return "msr";
+        case PARTITION_ROLE_RECOVERY: return "recovery";
+        case PARTITION_ROLE_LINUX: return "linux";
         default: return "unknown";
     }
 }
