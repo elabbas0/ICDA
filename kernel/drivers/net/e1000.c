@@ -55,7 +55,7 @@
 #define E1000_RX_STATUS_DD         0x01U
 #define E1000_RX_STATUS_EOP        0x02U
 
-#define E1000_RING_COUNT           16U
+#define E1000_RING_COUNT           256U
 #define E1000_BUF_SIZE             2048U
 
 typedef struct {

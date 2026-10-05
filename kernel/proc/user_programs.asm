@@ -22,6 +22,10 @@ global userprog_libctest_elf_start
 global userprog_libctest_elf_end
 global userprog_busybox_start
 global userprog_busybox_end
+global userprog_fetch_start
+global userprog_fetch_end
+global userprog_cacert_start
+global userprog_cacert_end
 global userprog_ticker_start
 global userprog_ticker_end
 global userprog_audioplay_start
@@ -84,6 +88,14 @@ userprog_libctest_elf_end:
 userprog_busybox_start:
     incbin "resources/linux/busybox"
 userprog_busybox_end:
+
+userprog_fetch_start:
+    incbin "userspace/fetch.elf"
+userprog_fetch_end:
+
+userprog_cacert_start:
+    incbin "resources/ssl/cacert.pem"
+userprog_cacert_end:
 
 userprog_ticker_start:
     incbin "userspace/ticker.icx"

@@ -108,7 +108,8 @@ typedef enum {
     SYS_DISK_EDIT         = 76,
     SYS_VFS_WRITE_AT      = 77,
     SYS_VFS_TRUNCATE      = 78,
-    SYS_VFS_RENAME        = 79
+    SYS_VFS_RENAME        = 79,
+    SYS_NET               = 80
 } syscall_number_t;
 
 typedef struct {

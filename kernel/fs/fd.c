@@ -3,6 +3,7 @@
 #include "../syscall/syscall.h"
 #include "vfs.h"
 #include "../linux/lx.h"
+#include "../net/sock.h"
 
 void fd_table_ensure(process_t *proc) {
     int i;
@@ -135,6 +136,7 @@ void fd_proc_exit(process_t *proc) {
     int i;
 
     lx_proc_exit(proc);
+    sock_proc_exit(proc);
     if (!proc || !proc->fds_inited) {
         return;
     }

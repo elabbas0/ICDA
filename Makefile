@@ -75,6 +75,9 @@ net_drv.o: kernel/drivers/net/net_drv.c kernel/drivers/net/net_drv.h Makefile \
            kernel/drivers/net/e1000.h kernel/drivers/net/virtio_net.h kernel/drivers/serial/serial.h
 	$(CC) $(CFLAGS) -c kernel/drivers/net/net_drv.c -o net_drv.o
 
+sock.o: kernel/net/sock.c kernel/net/sock.h kernel/net/net.h kernel/drivers/net/net_drv.h kernel/syscall/uaccess.h
+	$(CC) $(CFLAGS) -c kernel/net/sock.c -o sock.o
+
 net.o: kernel/net/net.c kernel/net/net.h kernel/net/tls.h Makefile \
        kernel/drivers/net/net_drv.h kernel/fs/vfs.h kernel/memory/heap.h kernel/proc/sched.h
 	$(CC) $(CFLAGS) -c kernel/net/net.c -o net.o
@@ -384,6 +387,30 @@ userspace/libctest.elf: crt1.o libctest.o libc.o userspace/user.ld
 	printf '\377' | dd of=/tmp/icda-libctest.elf bs=1 seek=7 conv=notrunc status=none
 	cp -f /tmp/icda-libctest.elf userspace/libctest.elf
 
+# Surfer: native web browser.  Its network library (sockets, HTTP, TLS 1.3)
+# reuses the kernel's crypto sources, compiled for userspace.
+SURFER_CFLAGS = $(USR_CFLAGS) -Iuserspace/libc/include -Iuserspace/surfer -Ikernel/crypto -Wno-pedantic
+SURFER_HEADERS = $(wildcard userspace/surfer/*.h) $(LIBC_HEADERS) userspace/icda_sys.h
+SURFER_NET_OBJS = surfer_net.o surfer_http.o surfer_tls.o surfer_x509.o surfer_ecdsa.o surfer_sha512.o ucrypto_sha256.o ucrypto_sha1.o ucrypto_aes.o \
+                  ucrypto_gcm.o ucrypto_bn.o ucrypto_rsa.o ucrypto_x25519.o
+
+surfer_%.o: userspace/surfer/%.c $(SURFER_HEADERS)
+	$(CC) $(SURFER_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+surfer_%.o: userspace/surfer/crypto/%.c $(SURFER_HEADERS) $(wildcard userspace/surfer/crypto/*.h)
+	$(CC) $(SURFER_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+ucrypto_%.o: kernel/crypto/%.c $(wildcard kernel/crypto/*.h)
+	$(CC) $(SURFER_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+userspace/fetch.elf: crt1.o surfer_fetch.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-fetch.elf crt1.o surfer_fetch.o $(SURFER_NET_OBJS) libc.o
+	printf '\377' | dd of=/tmp/icda-fetch.elf bs=1 seek=7 conv=notrunc status=none
+	cp -f /tmp/icda-fetch.elf userspace/fetch.elf
+
 nptestlx_start.o: userspace/nptestlx_start.asm
 	$(ASM) -f elf64 userspace/nptestlx_start.asm -o /tmp/icda-nptestlx_start.o
 	cp -f /tmp/icda-nptestlx_start.o nptestlx_start.o
@@ -660,7 +687,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)
@@ -668,23 +695,23 @@ else
 USER_PROGS_ALL = $(USER_PROGS_PROD)
 endif
 
-user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox
+user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox resources/ssl/cacert.pem
 	$(ASM) -f elf64 -DCI_IMAGE=$(CI_IMAGE) kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc

@@ -1,15 +1,35 @@
 #include "tls.h"
 #include "net.h"
-#include "sock.h"
-#include "crypto/sha256.h"
-#include "crypto/hmac.h"
-#include "crypto/aes.h"
-#include "crypto/rsa.h"
-#include "crypto/x25519.h"
-#include "crypto/gcm.h"
-#include "../drivers/net/net_drv.h"
-#include "../drivers/console/console.h"
-#include "../memory/heap.h"
+#include "sha256.h"
+#include "hmac.h"
+#include "aes.h"
+#include "rsa.h"
+#include "x25519.h"
+#include "gcm.h"
+#include "x509.h"
+#include <string.h>
+#include <stdlib.h>
+#ifdef TLS_HOST
+#include <time.h>
+#include <stdio.h>
+#endif
+
+#define kmalloc(n) malloc(n)
+#define kfree(p) free(p)
+#define sched_ticks() icda_ticks()
+#define sched_sleep(n) icda_sleep(n)
+/* Diagnostics: off unless tls_debug is set (fetch -d); they go to
+ * /dev/serial inside ICDA and to stderr in the host test build. */
+int tls_debug;
+static void tls_dbg_str(const char *s);
+static void tls_dbg_num(unsigned long v);
+#define console_write(text, style) tls_dbg_str(text)
+#define console_write_dec64(value, style) tls_dbg_num((unsigned long)(value))
+
+static uint8_t tls_rand_byte(void);
+static const char *tls_error_text;
+static int tls13_check_certificate(tls_conn_t *conn, const uint8_t *msg, uint32_t len);
+static int tls13_check_cert_verify(tls_conn_t *conn, const uint8_t *msg, uint32_t len);
 
 #define TLS_VERSION_MAJOR 3
 #define TLS_VERSION_MINOR 3  
@@ -126,21 +146,32 @@ struct tls_conn {
 
     uint8_t tx_buf[TLS_CAP];
     uint32_t tx_len;
+
+    int sock;
+    int nonblock;
+    int alert;          /* last alert description + 1, 0 if none */
+    int eof;
+    uint8_t app_buf[TLS_CAP + 256];
+    uint32_t app_off, app_len;
+
+    char host[256];
+    uint8_t *cert_msg;
+    cert_t certs[10];
+    int cert_count;
+    int cert_ok, cv_ok;
+    const char *verify_error;
 };
 
-static uint16_t tls_next_src_port = 45000;
 
 static void tls_log(const char *msg) {
     (void)msg;
+    console_write("[tls ", 0);
+    console_write_dec64(sched_ticks() * 10, 0);
+    console_write("ms] ", 0);
+    console_write(msg, 0);
+    console_write("\n", 0);
 }
 
-static uint16_t tls_alloc_src_port(void) {
-    uint16_t port = tls_next_src_port++;
-    if (tls_next_src_port < 45000 || tls_next_src_port >= 60000) {
-        tls_next_src_port = 45000;
-    }
-    return port;
-}
 
 static void tls_hmac(const uint8_t *key, uint32_t key_len,
                      tls_mac_alg_t alg,
@@ -277,41 +308,8 @@ static int tls13_send_record(tls_conn_t *conn, const uint8_t exp[176], const uin
 
     uint16_t frame_len = (uint16_t)(5 + ct_len);
 
-    uint8_t eth_frame[NET_FRAME_CAP];
-    eth_hdr_t *eth = (eth_hdr_t *)eth_frame;
-    ipv4_hdr_t *ip = (ipv4_hdr_t *)(eth_frame + sizeof(eth_hdr_t));
-    tcp_hdr_t *tcp = (tcp_hdr_t *)(eth_frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t));
-    uint8_t *tcp_data = eth_frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t);
-    uint16_t ip_len = (uint16_t)(sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t) + frame_len);
-    uint16_t eth_frame_len = (uint16_t)(sizeof(eth_hdr_t) + ip_len);
-
-    if (eth_frame_len > sizeof(eth_frame)) { kfree(frame); return -1; }
-    for (uint64_t i = 0; i < eth_frame_len; i++) eth_frame[i] = 0;
-
-    build_eth(eth, conn->dst_mac, ETH_TYPE_IPV4);
-    ip->ver_ihl = 0x45;
-    ip->total_len_be = htons16(ip_len);
-    ip->ident_be = htons16((uint16_t)conn->tcp_seq);
-    ip->ttl = 64;
-    ip->proto = IP_PROTO_TCP;
-    ip->src_be = net_state.ip;
-    ip->dst_be = conn->dst_ip;
-    ip->checksum_be = htons16((uint16_t)ip_checksum(ip, sizeof(ipv4_hdr_t)));
-
-    tcp->src_port_be = htons16(conn->src_port);
-    tcp->dst_port_be = htons16(conn->dst_port);
-    tcp->seq_be = htonl32(conn->tcp_seq);
-    tcp->ack_be = htonl32(conn->tcp_ack);
-    tcp->data_offset = (uint8_t)(sizeof(tcp_hdr_t) / 4U) << 4;
-    tcp->flags = TCP_FLAG_ACK | TCP_FLAG_PSH;
-    tcp->window_be = htons16(4096);
-    tcp->urgent_be = 0;
-    for (uint16_t i = 0; i < frame_len; i++) tcp_data[i] = frame[i];
-    tcp->checksum_be = htons16(tcp_checksum(ip, tcp, tcp_data, frame_len));
-
-    int rc = net_drv_send_frame(eth_frame, eth_frame_len);
+    int rc = net_send_all(conn->sock, frame, frame_len);
     kfree(frame);
-    if (rc == 0) conn->tcp_seq += frame_len;
     return rc;
 }
 
@@ -331,12 +329,13 @@ static int tls13_recv_record(tls_conn_t *conn, const uint8_t exp[176], const uin
 
             if (rtype == TLS_CONTENT_CHANGE_CIPHER_SPEC) continue;
             if (rtype == TLS_CONTENT_ALERT && rlen >= 2) {
+                conn->alert = (int)p[6] + 1;
                 console_write("[tls] alert desc=", CONSOLE_STYLE_WARN);
                 console_write_dec64(p[6], CONSOLE_STYLE_WARN);
                 console_write("\n", CONSOLE_STYLE_WARN);
                 return -1;
             }
-            if (rtype != TLS_CONTENT_APPLICATION_DATA || rlen < 17 || rlen > out_cap + 16) {
+            if (rtype != TLS_CONTENT_APPLICATION_DATA || rlen < 17 || rlen > out_cap + 17) {
                 return -1;
             }
 
@@ -361,6 +360,7 @@ static int tls13_recv_record(tls_conn_t *conn, const uint8_t exp[176], const uin
             return 1;
         }
 
+        if (conn->nonblock) return 0;
         int rc = tls_recv_frame(conn, 200);
         if (rc < 0) return -1;
     }
@@ -425,12 +425,12 @@ static int tls13_handshake(tls_conn_t *conn) {
     int rc_fail = 0;
 
     while (!got_finished && !rc_fail) {
-        uint8_t *rec = (uint8_t *)kmalloc(TLS_CAP);
+        uint8_t *rec = (uint8_t *)kmalloc(TLS_CAP + 256);
         if (!rec) { rc_fail = 1; break; }
         uint8_t rtype = 0;
         uint16_t rlen = 0;
         int rr = tls13_recv_record(conn, conn->s_hs_exp, conn->s_hs_iv, &conn->hs_seq_in,
-                                   &rtype, rec, &rlen, TLS_CAP);
+                                   &rtype, rec, &rlen, TLS_CAP + 256);
         if (rr <= 0) { tls_log("tls13 recv record failed"); kfree(rec); rc_fail = 1; break; }
         if (rtype == TLS_CONTENT_ALERT) {
             if (rlen >= 2) {
@@ -471,20 +471,24 @@ static int tls13_handshake(tls_conn_t *conn) {
                     rc_fail = 1;
                     break;
                 }
+                if (!conn->cert_ok || !conn->cv_ok) {
+                    tls_log("server finished before its certificate was verified");
+                    rc_fail = 1;
+                    break;
+                }
                 got_finished = 1;
             } else if (ht == TLS_HANDSHAKE_ENCRYPTED_EXTENSIONS) {
                 
-            } else if (ht == TLS_HANDSHAKE_CERTIFICATE ||
-                       ht == TLS_HANDSHAKE_CERTIFICATE_VERIFY) {
-                
-
-
-
-
-
-                tls_log("FAIL-CLOSED: server certificate cannot be verified (no CA store), refusing TLS");
-                rc_fail = 1;
-                break;
+            } else if (ht == TLS_HANDSHAKE_CERTIFICATE) {
+                if (tls13_check_certificate(conn, acc + off + 4, mlen) != 0) {
+                    rc_fail = 1;
+                    break;
+                }
+            } else if (ht == TLS_HANDSHAKE_CERTIFICATE_VERIFY) {
+                if (tls13_check_cert_verify(conn, acc + off + 4, mlen) != 0) {
+                    rc_fail = 1;
+                    break;
+                }
             } else if (ht == TLS_HANDSHAKE_CERTIFICATE_REQUEST) {
                 tls_log("client cert requested, unsupported");
                 rc_fail = 1;
@@ -596,9 +600,8 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
 
         uint8_t *body = frame + sizeof(tls_record_hdr_t);
         uint8_t iv[AES_BLOCK_SIZE];
-        uint32_t rseed = (uint32_t)(conn->seq_out + sched_ticks());
         for (int i = 0; i < AES_BLOCK_SIZE; i++) {
-            iv[i] = (uint8_t)(rseed + i * 13);
+            iv[i] = tls_rand_byte();
             body[i] = iv[i];
         }
         aes128_cbc_encrypt(conn->client_enc_expanded, iv, plaintext, pt_len, body + 16);
@@ -619,41 +622,8 @@ static int tls_send_record(tls_conn_t *conn, uint8_t type, const uint8_t *data, 
         frame_len = sizeof(tls_record_hdr_t) + len;
     }
 
-    uint8_t eth_frame[NET_FRAME_CAP];
-    eth_hdr_t *eth = (eth_hdr_t *)eth_frame;
-    ipv4_hdr_t *ip = (ipv4_hdr_t *)(eth_frame + sizeof(eth_hdr_t));
-    tcp_hdr_t *tcp = (tcp_hdr_t *)(eth_frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t));
-    uint8_t *tcp_data = eth_frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t);
-    uint16_t ip_len = (uint16_t)(sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t) + frame_len);
-    uint16_t eth_frame_len = (uint16_t)(sizeof(eth_hdr_t) + ip_len);
-
-    if (eth_frame_len > sizeof(eth_frame)) { kfree(frame); return -1; }
-    for (uint64_t i = 0; i < eth_frame_len; i++) eth_frame[i] = 0;
-
-    build_eth(eth, conn->dst_mac, ETH_TYPE_IPV4);
-    ip->ver_ihl = 0x45;
-    ip->total_len_be = htons16(ip_len);
-    ip->ident_be = htons16((uint16_t)conn->tcp_seq);
-    ip->ttl = 64;
-    ip->proto = IP_PROTO_TCP;
-    ip->src_be = net_state.ip;
-    ip->dst_be = conn->dst_ip;
-    ip->checksum_be = htons16((uint16_t)ip_checksum(ip, sizeof(ipv4_hdr_t)));
-
-    tcp->src_port_be = htons16(conn->src_port);
-    tcp->dst_port_be = htons16(conn->dst_port);
-    tcp->seq_be = htonl32(conn->tcp_seq);
-    tcp->ack_be = htonl32(conn->tcp_ack);
-    tcp->data_offset = (uint8_t)(sizeof(tcp_hdr_t) / 4U) << 4;
-    tcp->flags = TCP_FLAG_ACK | TCP_FLAG_PSH;
-    tcp->window_be = htons16(4096);
-    tcp->urgent_be = 0;
-    for (int i = 0; i < frame_len; i++) tcp_data[i] = frame[i];
-    tcp->checksum_be = htons16(tcp_checksum(ip, tcp, tcp_data, frame_len));
-
-    int rc = net_drv_send_frame(eth_frame, eth_frame_len);
+    int rc = net_send_all(conn->sock, frame, frame_len);
     kfree(frame);
-    if (rc == 0) conn->tcp_seq += frame_len;
     return rc;
 }
 
@@ -672,71 +642,30 @@ static int tls_send_handshake(tls_conn_t *conn, uint8_t htype, const uint8_t *da
 }
 
 static int tls_recv_frame(tls_conn_t *conn, uint64_t timeout_ticks) {
-    uint8_t frame[NET_FRAME_CAP];
-    uint16_t len = 0;
     uint64_t deadline = sched_ticks() + timeout_ticks;
 
     
     if (conn->rx_offset == conn->rx_len) {
         conn->rx_offset = 0;
         conn->rx_len = 0;
-    } else if (conn->rx_len >= TLS_RECORD_CAP - 2048 && conn->rx_offset > 0) {
+    } else if (conn->rx_offset > 0 && TLS_RECORD_CAP - conn->rx_len < TLS_CAP + 1024) {
         uint32_t rem = conn->rx_len - conn->rx_offset;
         for (uint32_t i = 0; i < rem; i++) conn->rx_buf[i] = conn->rx_buf[conn->rx_offset + i];
         conn->rx_len = rem;
         conn->rx_offset = 0;
     }
 
-    while (sched_ticks() < deadline) {
-        int rc = net_rx_frame(frame, sizeof(frame), &len);
-        if (rc < 0) return -1;
-        if (rc == 0) { sched_sleep(1); continue; }
-
-        tcp_packet_info_t pkt;
-        if (!parse_tcp_packet(frame, len, conn->dst_ip, conn->dst_port, conn->src_port, &pkt)) {
-            continue;
-        }
-
-        if (pkt.flags & 0x04U) return -2;
-        if (pkt.payload_len && pkt.seq == conn->tcp_ack) {
-            uint32_t copy = pkt.payload_len;
-            if (conn->rx_len + copy > TLS_RECORD_CAP) copy = (uint32_t)(TLS_RECORD_CAP - conn->rx_len);
-            for (uint32_t i = 0; i < copy; i++) conn->rx_buf[conn->rx_len + i] = pkt.payload[i];
-            conn->rx_len += copy;
-            conn->tcp_ack += pkt.payload_len;
-
-            uint8_t ack_frame[sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t)];
-            eth_hdr_t *ae = (eth_hdr_t *)ack_frame;
-            ipv4_hdr_t *ai = (ipv4_hdr_t *)(ack_frame + sizeof(eth_hdr_t));
-            tcp_hdr_t *at = (tcp_hdr_t *)(ack_frame + sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t));
-
-            for (int i = 0; i < (int)sizeof(ack_frame); i++) ack_frame[i] = 0;
-            build_eth(ae, conn->dst_mac, ETH_TYPE_IPV4);
-            ai->ver_ihl = 0x45;
-            ai->total_len_be = htons16((uint16_t)(sizeof(ipv4_hdr_t) + sizeof(tcp_hdr_t)));
-            ai->ident_be = htons16((uint16_t)conn->tcp_seq);
-            ai->ttl = 64;
-            ai->proto = IP_PROTO_TCP;
-            ai->src_be = net_state.ip;
-            ai->dst_be = conn->dst_ip;
-            ai->checksum_be = htons16((uint16_t)ip_checksum(ai, sizeof(ipv4_hdr_t)));
-            at->src_port_be = htons16(conn->src_port);
-            at->dst_port_be = htons16(conn->dst_port);
-            at->seq_be = htonl32(conn->tcp_seq);
-            at->ack_be = htonl32(conn->tcp_ack);
-            at->data_offset = (uint8_t)(sizeof(tcp_hdr_t) / 4U) << 4;
-            at->flags = TCP_FLAG_ACK;
-            at->window_be = htons16(4096);
-            at->checksum_be = htons16(tcp_checksum(ai, at, 0, 0));
-            net_drv_send_frame(ack_frame, sizeof(ack_frame));
+    for (;;) {
+        long n = net_recv(conn->sock, conn->rx_buf + conn->rx_len, TLS_RECORD_CAP - conn->rx_len);
+        if (n > 0) {
+            conn->rx_len += (uint32_t)n;
             return 1;
         }
-        if (pkt.flags & TCP_FLAG_FIN) {
-            conn->tcp_ack += 1U;
-            return -3;
-        }
+        if (n == 0) return -3;
+        if (n != NET_EAGAIN) return -2;
+        if (sched_ticks() >= deadline) return 0;
+        net_wait(conn->sock, NET_POLL_IN, (int)((deadline - sched_ticks()) * 10));
     }
-    return 0;
 }
 
 static int tls_decrypt_record(tls_conn_t *conn, uint8_t record_type, uint8_t *data, uint16_t len, uint8_t *out, uint16_t *out_len) {
@@ -800,7 +729,7 @@ static int tls_decrypt_record(tls_conn_t *conn, uint8_t record_type, uint8_t *da
 static int tls_parse_record(tls_conn_t *conn, uint8_t *content_type, uint8_t *payload, uint16_t *payload_len) {
     if (conn->tls13 && conn->handshake_done) {
         return tls13_recv_record(conn, conn->s_ap_exp, conn->s_ap_iv, &conn->ap_seq_in,
-                                 content_type, payload, payload_len, TLS_CAP);
+                                 content_type, payload, payload_len, TLS_CAP + 256);
     }
     while (conn->rx_offset + 5 <= conn->rx_len) {
         uint8_t *p = conn->rx_buf + conn->rx_offset;
@@ -840,34 +769,19 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     if (!conn) return -1;
     for (uint64_t i = 0; i < sizeof(tls_conn_t); i++) ((uint8_t*)conn)[i] = 0;
 
-    uint32_t arp_target = ip_same_subnet(net_state.ip, ip, net_state.netmask) ? ip : net_state.gateway;
-    if (net_arp_resolve(arp_target, conn->dst_mac) != 0) {
-        tls_log("arp failed");
-        kfree(conn);
-        return -2;
-    }
-
-    conn->dst_ip = ip;
-    conn->dst_port = port;
-    conn->src_port = tls_alloc_src_port();
-    conn->tcp_seq = 0x12345679;
-
-    tls_log("tcp connecting...");
     {
-        int rc = tcp_connect(conn->dst_mac, conn->dst_ip, conn->dst_port, conn->src_port,
-                             &conn->tcp_seq, &conn->tcp_ack);
-        if (rc == -2) {
-            tls_log("tcp refused");
-            kfree(conn);
-            return -4;
-        }
-        if (rc != 0) {
-            tls_log("tcp connect timeout");
-            kfree(conn);
-            return -3;
-        }
+        size_t hl = strlen(server_name ? server_name : "");
+        if (hl >= sizeof(conn->host)) hl = sizeof(conn->host) - 1;
+        memcpy(conn->host, server_name ? server_name : "", hl);
+        conn->host[hl] = 0;
     }
-    tls_log("tcp connected, starting handshake");
+    tls_error_text = "";
+    conn->sock = net_connect(ip, port, 1000);
+    if (conn->sock < 0) {
+        int err = conn->sock;
+        kfree(conn);
+        return err == -111 ? -4 : -3;
+    }
 
     sha256_init(&conn->handshake_hash);
     conn->cipher_suite = TLS_CIPHER_RSA_AES128_CBC_SHA256;
@@ -877,9 +791,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
 
     
 
-    uint32_t rand_seed = sched_ticks();
     for (int i = 0; i < 32; i++) {
-        conn->x25519_priv[i] = (uint8_t)(rand_seed + i * 29 + (sched_ticks() & 0xFF) + i * i);
+        conn->x25519_priv[i] = tls_rand_byte();
     }
     uint8_t x25519_pub[32];
     x25519_public(x25519_pub, conn->x25519_priv);
@@ -891,13 +804,13 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
     ch[ch_len++] = TLS_VERSION_MINOR;
 
     for (int i = 0; i < 32; i++) {
-        conn->client_random[i] = (uint8_t)(rand_seed + i * 17 + (sched_ticks() & 0xFF));
+        conn->client_random[i] = tls_rand_byte();
         ch[ch_len++] = conn->client_random[i];
     }
     
     ch[ch_len++] = 32;
     for (int i = 0; i < 32; i++) {
-        ch[ch_len++] = (uint8_t)(rand_seed + i * 7 + 0xA5);
+        ch[ch_len++] = tls_rand_byte();
     }
     
     ch[ch_len++] = 0;
@@ -940,17 +853,17 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x0d;
         ch[ch_len++] = 0x00;
-        ch[ch_len++] = 0x0e;
+        ch[ch_len++] = 0x12;
         ch[ch_len++] = 0x00;
-        ch[ch_len++] = 0x0c;
-        ch[ch_len++] = 0x04; ch[ch_len++] = 0x03; 
-        ch[ch_len++] = 0x08; ch[ch_len++] = 0x04; 
-        ch[ch_len++] = 0x04; ch[ch_len++] = 0x01; 
-        ch[ch_len++] = 0x05; ch[ch_len++] = 0x01; 
-        ch[ch_len++] = 0x06; ch[ch_len++] = 0x01; 
-        ch[ch_len++] = 0x02; ch[ch_len++] = 0x01; 
-
-        
+        ch[ch_len++] = 0x10;
+        ch[ch_len++] = 0x04; ch[ch_len++] = 0x03;
+        ch[ch_len++] = 0x05; ch[ch_len++] = 0x03;
+        ch[ch_len++] = 0x08; ch[ch_len++] = 0x04;
+        ch[ch_len++] = 0x08; ch[ch_len++] = 0x05;
+        ch[ch_len++] = 0x08; ch[ch_len++] = 0x06;
+        ch[ch_len++] = 0x04; ch[ch_len++] = 0x01;
+        ch[ch_len++] = 0x05; ch[ch_len++] = 0x01;
+        ch[ch_len++] = 0x06; ch[ch_len++] = 0x01;
         ch[ch_len++] = 0x00;
         ch[ch_len++] = 0x2b;
         ch[ch_len++] = 0x00;
@@ -1175,9 +1088,8 @@ int tls_connect(tls_conn_t **conn_out, uint32_t ip, uint16_t port, const char *s
 
     conn->pre_master_secret[0] = TLS_VERSION_MAJOR;
     conn->pre_master_secret[1] = TLS_VERSION_MINOR;
-    uint32_t rseed = sched_ticks();
     for (int i = 2; i < 48; i++) {
-        conn->pre_master_secret[i] = (uint8_t)(rseed + i * 31 + (sched_ticks() & 0xFF));
+        conn->pre_master_secret[i] = tls_rand_byte();
     }
 
     int mod_bytes = 0;
@@ -1300,40 +1212,212 @@ int tls_write(tls_conn_t *conn, const uint8_t *data, uint32_t len) {
     return 0;
 }
 
-int tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, uint32_t *out_len) {
-    
-    uint8_t *payload = (uint8_t *)kmalloc(TLS_CAP);
-    if (!payload) return -1;
-    uint64_t deadline = sched_ticks() + 1000;
-
-    while (sched_ticks() < deadline) {
-        uint16_t plen = 0;
-        uint8_t ctype = 0;
-
-        int rc = tls_recv_frame(conn, 100);
-        if (rc < 0) { kfree(payload); return -1; }
-
-        while (1) {
-            int ret = tls_parse_record(conn, &ctype, payload, &plen);
-            if (ret <= 0) break;
-            if (ctype == TLS_CONTENT_APPLICATION_DATA) {
-                uint32_t copy = plen < cap ? plen : cap;
-                for (uint32_t i = 0; i < copy; i++) buf[i] = payload[i];
-                *out_len = copy;
-                kfree(payload);
-                return 0;
+/* Returns plaintext bytes (>0), 0 at end of stream, TLS_WOULD_BLOCK when
+ * nothing arrived within timeout_ms, or another negative value on error. */
+long tls_read(tls_conn_t *conn, uint8_t *buf, uint32_t cap, int timeout_ms) {
+    uint64_t deadline = sched_ticks() + (uint64_t)(timeout_ms > 0 ? (timeout_ms + 9) / 10 : 0);
+    for (;;) {
+        if (conn->app_len) {
+            uint32_t n = conn->app_len < cap ? conn->app_len : cap;
+            for (uint32_t i = 0; i < n; i++) buf[i] = conn->app_buf[conn->app_off + i];
+            conn->app_off += n;
+            conn->app_len -= n;
+            return (long)n;
+        }
+        for (;;) {
+            uint8_t ctype = 0;
+            uint16_t plen = 0;
+            int ret;
+            conn->nonblock = 1;
+            ret = tls_parse_record(conn, &ctype, conn->app_buf, &plen);
+            conn->nonblock = 0;
+            if (ret < 0) return conn->alert == 1 ? 0 : -1;
+            if (ret == 0) break;
+            if (ctype == TLS_CONTENT_APPLICATION_DATA && plen) {
+                conn->app_off = 0;
+                conn->app_len = plen;
+                break;
+            }
+            if (ctype == TLS_CONTENT_ALERT && plen >= 2) {
+                conn->alert = conn->app_buf[1] + 1;
+                return conn->alert == 1 ? 0 : -1;
             }
         }
-        sched_sleep(1);
+        if (conn->app_len) continue;
+        if (conn->eof) return 0;
+        {
+            uint64_t t = sched_ticks();
+            int rc = tls_recv_frame(conn, deadline > t ? deadline - t : 0);
+            if (rc == -3) {
+                conn->eof = 1;
+                continue;
+            }
+            if (rc < 0) return -1;
+            if (rc == 0) return TLS_WOULD_BLOCK;
+        }
     }
-    kfree(payload);
-    return -1;
+}
+
+int tls_socket(tls_conn_t *conn) {
+    return conn ? conn->sock : -1;
 }
 
 void tls_close(tls_conn_t *conn) {
     if (!conn) return;
-    send_tcp_packet(conn->dst_mac, conn->dst_ip, conn->src_port, conn->dst_port,
-                    conn->tcp_seq, conn->tcp_ack, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
-    conn->tcp_seq++;
+    net_close(conn->sock);
+    free(conn->cert_msg);
     kfree(conn);
+}
+
+const char *tls_last_error(void) {
+    return tls_error_text;
+}
+
+/* Random bytes from a SHA-256 chain over the TSC and a counter. */
+static uint8_t tls_rand_byte(void) {
+    static uint8_t pool[32];
+    static int avail;
+    static uint64_t counter;
+    if (!avail) {
+        sha256_ctx_t c;
+        uint32_t lo, hi;
+        uint8_t seed[48];
+        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        for (int i = 0; i < 32; i++) seed[i] = pool[i];
+        for (int i = 0; i < 8; i++) seed[32 + i] = (uint8_t)((((uint64_t)hi << 32) | lo) >> (i * 8));
+        for (int i = 0; i < 8; i++) seed[40 + i] = (uint8_t)(counter >> (i * 8));
+        counter++;
+        sha256_init(&c);
+        sha256_update(&c, seed, sizeof(seed));
+        sha256_final(&c, pool);
+        avail = 32;
+    }
+    return pool[--avail];
+}
+
+/* ---- certificate checks (TLS 1.3) --------------------------------------- */
+
+static const char *tls_error_text = "";
+
+static int64_t tls_now(void) {
+#ifdef TLS_HOST
+    return (int64_t)time(0);
+#else
+    char b[32];
+    long n = (long)icda_read_file("/dev/rtc", b, sizeof(b) - 1);
+    int v[7], k = 0;
+    if (n < 19) return 0;
+    for (int i = 0; i < 19 && k < 7; i += (i == 0 ? 2 : 3), k++) {
+        v[k] = (b[i] - '0') * 10 + (b[i + 1] - '0');
+    }
+    /* "CCYY-MM-DD HH:MM:SS": v = CC YY MM DD hh mm ss */
+    {
+        int64_t y = v[0] * 100 + v[1], m = v[2], d = v[3], era, yoe, doy, doe, days;
+        y -= m <= 2;
+        era = (y >= 0 ? y : y - 399) / 400;
+        yoe = y - era * 400;
+        doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+        doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        days = era * 146097 + doe - 719468;
+        return days * 86400 + v[4] * 3600 + v[5] * 60 + v[6];
+    }
+#endif
+}
+
+static int tls13_check_certificate(tls_conn_t *conn, const uint8_t *msg, uint32_t len) {
+    uint32_t off, list_len, end;
+    if (len < 4) return -1;
+    free(conn->cert_msg);
+    conn->cert_msg = (uint8_t *)malloc(len);
+    if (!conn->cert_msg) return -1;
+    memcpy(conn->cert_msg, msg, len);
+    msg = conn->cert_msg;
+    off = 1 + msg[0];
+    if (off + 3 > len) return -1;
+    list_len = r24(msg + off);
+    off += 3;
+    end = off + list_len;
+    if (end > len) return -1;
+    conn->cert_count = 0;
+    while (off + 3 <= end && conn->cert_count < 10) {
+        uint32_t clen = r24(msg + off);
+        off += 3;
+        if (off + clen + 2 > end) return -1;
+        if (x509_parse(msg + off, clen, &conn->certs[conn->cert_count]) == 0) conn->cert_count++;
+        else if (conn->cert_count == 0) {
+            tls_error_text = "the site sent a certificate that could not be read";
+            return -1;
+        }
+        off += clen;
+        off += 2 + r16(msg + off);
+    }
+    tls_log("certificate received");
+    if (x509_verify_chain(conn->certs, conn->cert_count, conn->host, tls_now(), &tls_error_text) != 0) {
+        tls_log(tls_error_text);
+        return -1;
+    }
+    tls_log("chain verified");
+    conn->cert_ok = 1;
+    return 0;
+}
+
+static int tls13_check_cert_verify(tls_conn_t *conn, const uint8_t *msg, uint32_t len) {
+    static const char label[] = "TLS 1.3, server CertificateVerify";
+    uint8_t content[64 + sizeof(label) + 32];
+    uint16_t scheme, sig_len;
+    int hash, pss = 0;
+    const cert_t *leaf = &conn->certs[0];
+    if (!conn->cert_ok || len < 4) return -1;
+    scheme = r16(msg);
+    sig_len = r16(msg + 2);
+    if (4u + sig_len > len) return -1;
+    switch (scheme) {
+    case 0x0403: hash = HASH_SHA256; if (leaf->key_type != KEY_EC_P256) return -1; break;
+    case 0x0503: hash = HASH_SHA384; if (leaf->key_type != KEY_EC_P384) return -1; break;
+    case 0x0804: hash = HASH_SHA256; pss = 1; if (leaf->key_type != KEY_RSA) return -1; break;
+    case 0x0805: hash = HASH_SHA384; pss = 1; if (leaf->key_type != KEY_RSA) return -1; break;
+    case 0x0806: hash = HASH_SHA512; pss = 1; if (leaf->key_type != KEY_RSA) return -1; break;
+    default:
+        tls_error_text = "the site used an unsupported signature";
+        return -1;
+    }
+    memset(content, 0x20, 64);
+    memcpy(content + 64, label, sizeof(label));          /* includes the 0 separator */
+    {
+        sha256_ctx_t tmp = conn->handshake_hash;
+        sha256_final(&tmp, content + 64 + sizeof(label));
+    }
+    if (x509_verify_sig(leaf, hash, pss, content, sizeof(content), msg + 4, sig_len) != 0) {
+        tls_error_text = "the site could not prove it owns its certificate";
+        tls_log(tls_error_text);
+        return -1;
+    }
+    tls_log("certificate verify ok");
+    conn->cv_ok = 1;
+    return 0;
+}
+
+static void tls_dbg_str(const char *s) {
+    if (!tls_debug) return;
+#ifdef TLS_HOST
+    fputs(s, stderr);
+#else
+    icda_write_file("/dev/serial", s, strlen(s));
+#endif
+}
+
+static void tls_dbg_num(unsigned long v) {
+    char b[24];
+    int n = 0;
+    do {
+        b[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    for (int i = 0; i < n / 2; i++) {
+        char t = b[i];
+        b[i] = b[n - 1 - i];
+        b[n - 1 - i] = t;
+    }
+    b[n] = 0;
+    tls_dbg_str(b);
 }

@@ -38,6 +38,7 @@
 
 #include "cpu/gdt.h"
 #include "linux/lx.h"
+#include "net/sock.h"
 #include "cpu/smp.h"
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
@@ -96,6 +97,7 @@ static void pit_set_frequency(uint32_t hz) {
 
 static void timer_handler(struct registers *regs) {
     keyboard_pump();
+    sock_tick();
     
 
     vt_tick();

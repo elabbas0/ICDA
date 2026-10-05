@@ -1,4 +1,5 @@
 #include "net.h"
+#include "sock.h"
 #include "tls.h"
 #include "drivers/net/net_drv.h"
 #include "drivers/serial/serial.h"
@@ -381,7 +382,7 @@ int net_arp_resolve(uint32_t target_ip, uint8_t mac_out[6]) {
     net_log("arp request sent");
     deadline = sched_ticks() + 50;
     while (sched_ticks() < deadline) {
-        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_rx_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
         if (rc > 0 && try_parse_arp_reply(frame, len, target_ip, mac_out)) {
             net_log("arp reply received");
@@ -587,7 +588,7 @@ int tcp_connect(const uint8_t dst_mac[6], uint32_t dst_ip, uint16_t dst_port,
     net_log("tcp syn sent");
     deadline = sched_ticks() + 500;
     while (sched_ticks() < deadline) {
-        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_rx_frame(frame, sizeof(frame), &len);
         if (rc < 0) return -1;
         if (rc > 0) debug_dump_tcp_frame(frame, len);
         if (rc > 0 && parse_tcp_packet(frame, len, dst_ip, dst_port, src_port, &pkt)) {
@@ -735,7 +736,7 @@ int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out) {
 
         deadline = sched_ticks() + 300;
         while (sched_ticks() < deadline) {
-            int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
+            int rc = net_rx_frame(frame, sizeof(frame), &len);
             if (rc < 0) {
                 break;
             }
@@ -886,7 +887,7 @@ static int net_dhcp_discover(void) {
     
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline && !got_offer) {
-        int rc = net_drv_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        int rc = net_rx_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
@@ -972,7 +973,7 @@ static int net_dhcp_discover(void) {
 
     deadline = sched_ticks() + 200;
     while (sched_ticks() < deadline) {
-        int rc = net_drv_recv_frame(frame_buf, sizeof(frame_buf), &len);
+        int rc = net_rx_frame(frame_buf, sizeof(frame_buf), &len);
         if (rc < 0) break;
         if (rc == 0) { sched_sleep(1); continue; }
 
@@ -1120,7 +1121,7 @@ static int net_http_get_ipv4_follow(uint32_t ipv4_addr, uint16_t port, const cha
 
     deadline = sched_ticks() + 3000;
     while (sched_ticks() < deadline) {
-        int rc = net_drv_recv_frame(frame, sizeof(frame), &len);
+        int rc = net_rx_frame(frame, sizeof(frame), &len);
         if (rc < 0) {
             kfree(rx_body);
             return -1;

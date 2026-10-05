@@ -742,6 +742,45 @@ Regenerating fonts needs network for pip. Inside Docker, pass
 `--dns 8.8.8.8`:
 `docker run --rm --dns 8.8.8.8 -v "$PWD:/workspace" -w /workspace python:3.12-slim sh -c 'pip install -q pillow fonttools && python scripts/gen_fonts.py && python scripts/gen_fonts.py --blob2x'`
 
+### Surfer, milestone 1: networking
+
+**Kernel sockets** (`kernel/net/sock.c`, `SYS_NET` = 80, ABI v8).
+- One syscall carries the TCP and UDP operations: socket, connect, send,
+  recv, close, poll, status, sendto, recvfrom and info.
+- TCP supports many concurrent connections, with an ARP cache, MSS 1460,
+  a 64 KB send buffer and receive window, retransmission with exponential
+  RTO, slow start and congestion avoidance, and zero-window probes.
+- Frames are pumped from the timer tick and from socket calls.
+  `net_rx_frame()` hands frames the stack does not consume to the older
+  blocking fetchers in `net.c`/`tls.c`.
+- The e1000 rings went from 16 to 256 descriptors, because a 64 KB window
+  used to overflow the ring and stall on RTO.
+- `/dev/serial` writes go to the serial log, which serves as test output.
+
+**Userspace library** (`userspace/surfer/`):
+- `net.c` wraps the sockets and adds a UDP DNS resolver with a cache.
+- `http.c` is an HTTP/1.1 client (redirects, chunked, URL resolution, one
+  retry).
+- `tls.c` derives from the kernel TLS, which still serves `curl`. It is TLS
+  1.3 only for now (X25519, AES-128-GCM); the TLS 1.2 path still fails
+  closed.
+- `x509.c` plus `crypto/` (SHA-384/512, ECDSA P-256/P-384) verify the
+  certificate chain to the Mozilla roots in `/etc/ssl/certs.pem`
+  (`resources/ssl/cacert.pem`). This covers RSA PKCS#1 and PSS signatures,
+  hostname (SAN and wildcard) checks, expiry against `/dev/rtc`, and the
+  TLS 1.3 CertificateVerify.
+
+**`/bin/fetch [-v] [-s] [-d] url...`** is the command-line client. `-s`
+writes its result lines to the serial log, and `-d` prints TLS
+diagnostics. `.verify/fetchrun.sh` boots ICDA, runs it and prints those
+lines. `.verify/tlshost/` builds the same TLS/HTTP code against Linux
+sockets for fast debugging.
+
+**Measured in QEMU:** Wikipedia (635 KB) loads in 2.1 s, GitHub (577 KB)
+in 1.5 s, and the handshake with verification takes about 0.3–0.5 s.
+example.com times out from this Windows host even with Windows' own curl,
+so its occasional failures come from the network path.
+
 ## Regenerating assets
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install pillow fonttools

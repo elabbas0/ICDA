@@ -38,6 +38,10 @@ extern const char userprog_libctest_elf_start[];
 extern const char userprog_libctest_elf_end[];
 extern const char userprog_busybox_start[];
 extern const char userprog_busybox_end[];
+extern const char userprog_fetch_start[];
+extern const char userprog_fetch_end[];
+extern const char userprog_cacert_start[];
+extern const char userprog_cacert_end[];
 extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
 extern const char userprog_audioplay_start[];
@@ -139,6 +143,8 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/argc.elf", 0, 0 },
     { "/bin/libctest.elf", 0, 0 },
     { "/bin/busybox", 0, 0 },
+    { "/bin/fetch", 0, 0 },
+    { "/etc/ssl/certs.pem", 0, 0 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
     { "/apps/terminal.app", 0, 0 },
@@ -191,6 +197,8 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_argc_elf_start, userprog_argc_elf_end);
     initramfs_seed_at(&n, userprog_libctest_elf_start, userprog_libctest_elf_end);
     initramfs_seed_at(&n, userprog_busybox_start, userprog_busybox_end);
+    initramfs_seed_at(&n, userprog_fetch_start, userprog_fetch_end);
+    initramfs_seed_at(&n, userprog_cacert_start, userprog_cacert_end);
     initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
     initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);
     initramfs_seed_at(&n, userprog_terminal_start, userprog_terminal_end);

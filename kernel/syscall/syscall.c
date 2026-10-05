@@ -24,6 +24,7 @@
 #include "../proc/sched.h"
 #include "../proc/user.h"
 #include "../net/net.h"
+#include "../net/sock.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../fs/fd.h"
@@ -43,12 +44,13 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v7: first number moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v7: v4 numbers moved");
-_Static_assert(SYS_DISK_EDIT == 76, "native ABI v7: v5 numbers moved");
-_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v7: v6 numbers moved");
-_Static_assert(SYS_VFS_RENAME == 79, "native ABI v7: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 80, "native ABI v7: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v8: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v8: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v8: v5 numbers moved");
+_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v8: v6 numbers moved");
+_Static_assert(SYS_VFS_RENAME == 79, "native ABI v8: v7 numbers moved");
+_Static_assert(SYS_NET == 80, "native ABI v8: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 81, "native ABI v8: count changed");
 
 
 
@@ -250,6 +252,14 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
     }
     if (size != 0 && !user_range_prepare_cur(buf, size)) {
         return (uint64_t)-U_EFAULT;
+    }
+
+    /* /dev/serial: test output for the host (the serial log) */
+    if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v' && path[4] == '/' &&
+        path[5] == 's' && path[6] == 'e' && path[7] == 'r' && path[8] == 'i' && path[9] == 'a' &&
+        path[10] == 'l' && path[11] == 0) {
+        for (uint64_t i = 0; i < size; i++) serial_write_char(buf[i]);
+        return size;
     }
 
     if (vfs_write(proc->cwd ? proc->cwd : vfs_root(), path, buf ? buf : "", size) != 0) {
@@ -1862,6 +1872,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return sys_vfs_truncate((const char *)(uintptr_t)regs->rdi, regs->rsi);
         case SYS_VFS_RENAME:
             return sys_vfs_rename((const char *)(uintptr_t)regs->rdi, (const char *)(uintptr_t)regs->rsi);
+        case SYS_NET:
+            return (uint64_t)sock_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);
