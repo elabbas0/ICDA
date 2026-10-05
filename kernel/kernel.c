@@ -13,6 +13,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/net/e1000.h"
 #include "drivers/net/virtio_net.h"
+#include "drivers/net/net_drv.h"
 #include "drivers/display/virtio_gpu.h"
 #include "drivers/serial/serial.h"
 #include "drivers/storage/ahci.h"
@@ -307,7 +308,9 @@ void kernel_main(void *multiboot_info) {
 
     bootstage_set(120, "net");
     if (net_init() == 0) {
-        boot_line("network", "intel e1000 online");
+        boot_line("network", net_drv_is_wireless() ?
+                  "wi-fi (intel 8260) found, starting in the background" :
+                  "intel e1000 online");
     } else {
         boot_prefix("network");
         console_write("intel e1000 unavailable err=", CONSOLE_STYLE_WARN);

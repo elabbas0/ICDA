@@ -1164,7 +1164,7 @@ void
 icda_wifi_main(void)
 {
 	struct ifnet *ifp;
-	uint64_t last_sec = 0, last_snap = 0;
+	uint64_t last_sec = 0, last_snap = 0, last_rescan = 0;
 
 	iwm_compat_init();		/* TSC calibration for DELAY() */
 	iwm_compat_set_console(1);	/* bring-up steps on screen too */
@@ -1211,6 +1211,22 @@ icda_wifi_main(void)
 				ifp->if_watchdog(ifp);
 			if (phase == WP_RUNNING)
 				check_wrong_password();
+			/*
+			 * Not connected but networks are saved: look again every
+			 * 30 s (saved networks may appear, or /home may only have
+			 * been loaded after the first scan at boot).
+			 */
+			if (phase == WP_RUNNING && autoconnect && !target_ssid[0] &&
+			    sc->sc_ic.ic_state == IEEE80211_S_SCAN &&
+			    !(sc->sc_flags & IWM_FLAG_SCANNING) &&
+			    now - last_rescan >= 30000000000ULL) {
+				uint64_t size = 0;
+				last_rescan = now;
+				if (vfs_read(vfs_root(), WIFI_SAVED_PATH, &size) &&
+				    size > 0)
+					ieee80211_new_state(&sc->sc_ic,
+					    IEEE80211_S_SCAN, -1);
+			}
 		}
 		if (sc->sc_ic.ic_scan_gen != last_scan_gen) {
 			last_scan_gen = sc->sc_ic.ic_scan_gen;
