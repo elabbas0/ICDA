@@ -188,6 +188,8 @@ int http_status_code(const uint8_t *buf, uint64_t size);
 
 int net_init(void);
 int net_ready(void);
+int net_reconfigure(void);
+void net_link_down(void);
 uint32_t net_last_error(void);
 int net_dns_resolve_ipv4(const char *host, uint32_t *ipv4_out);
 int net_http_get_ipv4(uint32_t ipv4_addr, uint16_t port, const char *host, const char *path, const char *out_path, uint64_t *bytes_out);

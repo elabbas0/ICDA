@@ -216,13 +216,23 @@ static uint64_t sys_vfs_read(const char *path, char *buf, uint64_t cap) {
     {
         const dev_calls_t *node = path[0] == '/' ? devops_lookup(path) : 0;
         if (node && node->node_read) {
-            char snap[64];
-            size = node->node_read(snap, cap < sizeof(snap) ? cap : sizeof(snap));
+            /* Small nodes (rtc) use the stack; larger reports (/dev/wifi)
+             * get a heap snapshot of up to 32 KiB. */
+            char small[64];
+            uint64_t snapcap = cap < 32768 ? cap : 32768;
+            char *snap = snapcap <= sizeof(small) ? small : (char *)kmalloc(snapcap);
+            if (!snap) {
+                return (uint64_t)-1;
+            }
+            size = node->node_read(snap, snapcap);
             if (size >= cap) {
                 size = cap - 1;
             }
             copy_bytes(buf, snap, size);
             buf[size] = '\0';
+            if (snap != small) {
+                kfree(snap);
+            }
             return size;
         }
     }
@@ -260,6 +270,20 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
         path[10] == 'l' && path[11] == 0) {
         for (uint64_t i = 0; i < size; i++) serial_write_char(buf[i]);
         return size;
+    }
+
+    /* Device nodes that take commands (/dev/wifi) */
+    {
+        const dev_calls_t *node = path[0] == '/' ? devops_lookup(path) : 0;
+        if (node && node->node_write) {
+            char cmd[256];
+            uint64_t n = size < sizeof(cmd) ? size : sizeof(cmd);
+            uint64_t rc;
+            copy_bytes(cmd, buf, n);
+            rc = node->node_write(cmd, n);
+            zero_bytes(cmd, sizeof(cmd));
+            return rc == (uint64_t)-1 ? (uint64_t)-1 : size;
+        }
     }
 
     if (vfs_write(proc->cwd ? proc->cwd : vfs_root(), path, buf ? buf : "", size) != 0) {

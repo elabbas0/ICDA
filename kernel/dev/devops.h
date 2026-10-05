@@ -47,6 +47,8 @@ typedef struct dev_calls {
 
 
     uint64_t (*node_read)(char *buf, uint64_t cap);
+    /* writes to a device node (e.g. commands for /dev/wifi) */
+    uint64_t (*node_write)(const char *buf, uint64_t len);
 } dev_calls_t;
 
 

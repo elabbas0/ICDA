@@ -1028,6 +1028,12 @@ int net_init(void) {
         net_error = NET_ERR_NO_NIC;
         return -1;
     }
+    /* Wi-Fi: no link yet; DHCP runs from net_reconfigure() on link-up. */
+    if (net_drv_is_wireless()) {
+        net_state.ready = 0;
+        net_error = 0;
+        return 0;
+    }
     if (net_drv_mac(net_state.mac) != 0) {
         net_error = NET_ERR_NO_NIC;
         return -1;
@@ -1046,6 +1052,30 @@ int net_init(void) {
     }
 
     return 0;
+}
+
+/* Link came up (Wi-Fi associated): learn the MAC and run DHCP again. */
+int net_reconfigure(void) {
+    if (net_drv_mac(net_state.mac) != 0) {
+        net_error = NET_ERR_NO_NIC;
+        return -1;
+    }
+    net_state.ready = 0;
+    net_state.ip = 0;
+    if (net_dhcp_discover() != 0) {
+        return -1;
+    }
+    if (!net_state.dns) {
+        net_state.dns = NET_DNS_IP_ALT1;
+    }
+    net_state.ready = 1;
+    net_error = 0;
+    return 0;
+}
+
+/* Link lost: stop using the old address until DHCP succeeds again. */
+void net_link_down(void) {
+    net_state.ready = 0;
 }
 
 int net_ready(void) {

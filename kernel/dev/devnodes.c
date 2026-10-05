@@ -14,6 +14,7 @@
 #include "../cpu/pat.h"
 #include "../proc/sched.h"
 #include "../syscall/syscall.h"
+#include "../drivers/net/iwm/wifi.h"
 
 
 
@@ -293,6 +294,15 @@ static const dev_calls_t dev_rtc_calls = {
     0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0,
     dev_rtc_read,
+    0,
+};
+
+/* /dev/wifi: Wi-Fi control (commands in, status/scan/log out) */
+static const dev_calls_t dev_wifi_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    wifi_node_read,
+    wifi_node_write,
 };
 
 
@@ -343,6 +353,12 @@ int dev_populate(void) {
         rc = -1;
     }
     if (devops_register("/dev/rtc", &dev_rtc_calls) != 0) {
+        rc = -1;
+    }
+    if (!vfs_resolve(vfs_root(), "/dev/wifi")) {
+        (void)vfs_create(vfs_root(), "/dev/wifi");
+    }
+    if (devops_register("/dev/wifi", &dev_wifi_calls) != 0) {
         rc = -1;
     }
     return rc;

@@ -75,6 +75,43 @@ net_drv.o: kernel/drivers/net/net_drv.c kernel/drivers/net/net_drv.h Makefile \
            kernel/drivers/net/e1000.h kernel/drivers/net/virtio_net.h kernel/drivers/serial/serial.h
 	$(CC) $(CFLAGS) -c kernel/drivers/net/net_drv.c -o net_drv.o
 
+# Wi-Fi: OpenBSD iwm(4) port for the Intel Wireless 8260 (kernel/drivers/net/iwm)
+IWM_DIR = kernel/drivers/net/iwm
+IWM_HEADERS = $(IWM_DIR)/iwm_compat.h $(IWM_DIR)/iwm_port.h $(IWM_DIR)/net80211.h \
+              $(IWM_DIR)/ieee80211.h $(IWM_DIR)/if_iwmreg.h $(IWM_DIR)/if_iwmvar.h \
+              $(IWM_DIR)/wpa_crypto.h $(IWM_DIR)/wpa_eapol.h $(IWM_DIR)/wifi.h
+# Imported BSD code: silence style warnings that are noise for it.
+IWM_CFLAGS = $(CFLAGS) -Wno-sign-compare -Wno-unused-parameter \
+             -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function
+IWM_OBJS = if_iwm.o iwm_compat.o net80211.o wpa_crypto.o wpa_eapol.o wifi.o wifi_fw_assets.o
+
+if_iwm.o: $(IWM_DIR)/if_iwm.c $(IWM_HEADERS) Makefile
+	$(CC) $(IWM_CFLAGS) -c $(IWM_DIR)/if_iwm.c -o if_iwm.o
+
+iwm_compat.o: $(IWM_DIR)/iwm_compat.c $(IWM_HEADERS) Makefile
+	$(CC) $(CFLAGS) -c $(IWM_DIR)/iwm_compat.c -o iwm_compat.o
+
+net80211.o: $(IWM_DIR)/net80211.c $(IWM_HEADERS) Makefile
+	$(CC) $(CFLAGS) -c $(IWM_DIR)/net80211.c -o net80211.o
+
+wpa_crypto.o: $(IWM_DIR)/wpa_crypto.c $(IWM_DIR)/wpa_crypto.h kernel/crypto/sha1.h kernel/crypto/aes.h
+	$(CC) $(CFLAGS) -c $(IWM_DIR)/wpa_crypto.c -o wpa_crypto.o
+
+wpa_eapol.o: $(IWM_DIR)/wpa_eapol.c $(IWM_DIR)/wpa_eapol.h $(IWM_DIR)/wpa_crypto.h
+	$(CC) $(CFLAGS) -c $(IWM_DIR)/wpa_eapol.c -o wpa_eapol.o
+
+wifi.o: $(IWM_DIR)/wifi.c $(IWM_HEADERS) kernel/net/net.h kernel/fs/vfs.h Makefile
+	$(CC) $(IWM_CFLAGS) -c $(IWM_DIR)/wifi.c -o wifi.o
+
+wifi_fw_assets.o: kernel/proc/wifi_fw_assets.asm resources/firmware/iwlwifi-8000C-36.ucode
+	$(ASM) -f elf64 kernel/proc/wifi_fw_assets.asm -o wifi_fw_assets.o
+
+# Host unit test for the WPA2 crypto and handshake (802.11i test vectors)
+wifi-crypto-test:
+	gcc -O2 -Wall -Wextra -Ikernel -o /tmp/icda-wpa-test $(IWM_DIR)/tests/wpa_test.c \
+	    $(IWM_DIR)/wpa_crypto.c $(IWM_DIR)/wpa_eapol.c kernel/crypto/sha1.c kernel/crypto/aes.c
+	/tmp/icda-wpa-test
+
 sock.o: kernel/net/sock.c kernel/net/sock.h kernel/net/net.h kernel/drivers/net/net_drv.h kernel/syscall/uaccess.h
 	$(CC) $(CFLAGS) -c kernel/net/sock.c -o sock.o
 
@@ -728,21 +765,21 @@ user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
+            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS)
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o shell_blob.o gdt_flush.o isr_asm.o \
-	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) -lgcc
 
 kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o
+            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS)
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o persistfs.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
-	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub
@@ -852,7 +889,7 @@ else
 	@echo "usb-sync: installed kernel.iso -> $(VENTOY_ISO)"
 endif
 
-.PHONY: all clean qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync sdk
+.PHONY: all clean wifi-crypto-test qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync sdk
 
 sdk: crt1.o libc.o userspace/user.ld $(LIBC_HEADERS) userspace/libc/sdk/Makefile
 	rm -rf sdk
