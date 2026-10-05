@@ -46,6 +46,7 @@ typedef struct css_style {
     uint8_t  lh_type, z_auto, border_style[4], table_layout_fixed, border_collapse, cursor_pointer;
     uint16_t font_weight;
     float    font_size, line_height, letter_spacing, word_spacing, opacity;
+    float    lh_value;                  /* specified line-height: multiplier or px */
     css_len_t text_indent;
     uint32_t color, bg_color, border_color[4];
     css_len_t width, height, min_w, min_h, max_w, max_h;

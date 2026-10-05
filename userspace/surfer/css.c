@@ -1462,10 +1462,10 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
             float f = (float)strtod(v, &e);
             if (e != v && (*e == 0 || is_ws(*e))) {
                 st->lh_type = LH_MULT;
-                st->line_height = f;
+                st->lh_value = f;
             } else if (parse_len(v, v + vl, st->font_size, c, &l)) {
                 st->lh_type = LH_PX;
-                st->line_height = l.unit == U_PCT ? st->font_size * l.v / 100 : l.v;
+                st->lh_value = l.unit == U_PCT ? st->font_size * l.v / 100 : l.v;
             }
         }
         break;
@@ -1804,7 +1804,7 @@ static const char ua_css[] =
     "legend,dialog,search{display:block}"
     "li{display:list-item}head,script,style,link,meta,title,noscript,template,base,param,datalist,area,map,"
     "[hidden],input[type=hidden],dialog:not([open]){display:none}"
-    "table{display:table;border-spacing:2px}tr{display:table-row}thead{display:table-header-group}"
+    "table{display:table;border-spacing:2px;text-align:left}tr{display:table-row}thead{display:table-header-group}"
     "tbody{display:table-row-group}tfoot{display:table-footer-group}col{display:table-column}"
     "colgroup{display:table-column-group}td,th{display:table-cell;padding:1px;vertical-align:middle}"
     "caption{display:table-caption;text-align:center}"
@@ -1943,7 +1943,7 @@ static void inherit(css_style_t *st, const css_style_t *p) {
         st->font_italic = p->font_italic;
         st->font_family = p->font_family;
         st->lh_type = p->lh_type;
-        st->line_height = p->line_height;
+        st->lh_value = p->lh_value;
         st->letter_spacing = p->letter_spacing;
         st->word_spacing = p->word_spacing;
         st->text_align = p->text_align;
@@ -2047,8 +2047,9 @@ static void fixup(css_style_t *st, dom_node_t *el) {
         else if (st->display == D_INLINE_TABLE) st->display = D_TABLE;
     }
     if (st->position == P_ABSOLUTE || st->position == P_FIXED) st->float_ = F_NONE;
-    if (st->lh_type == LH_NORMAL) st->line_height = st->font_size * 1.2f;
-    else if (st->lh_type == LH_MULT) st->line_height = st->font_size * (st->line_height < 0.5f ? 1.2f : st->line_height);
+    if (st->lh_type == LH_PX) st->line_height = st->lh_value;
+    else if (st->lh_type == LH_MULT) st->line_height = st->font_size * st->lh_value;
+    else st->line_height = st->font_size * 1.2f;
     for (int i = 0; i < 4; i++) {
         if (st->border_style[i] == BS_NONE) st->border_w[i] = 0;
     }
@@ -2107,8 +2108,9 @@ static css_style_t *compute(cascade_t *cs, dom_node_t *el, const css_style_t *pa
     if (!pseudo) fixup(st, el);
     else {
         if (!st->content) return 0;
-        if (st->lh_type == LH_NORMAL) st->line_height = st->font_size * 1.2f;
-        else if (st->lh_type == LH_MULT) st->line_height = st->font_size * st->line_height;
+        if (st->lh_type == LH_PX) st->line_height = st->lh_value;
+        else if (st->lh_type == LH_MULT) st->line_height = st->font_size * st->lh_value;
+        else st->line_height = st->font_size * 1.2f;
     }
     return st;
 }
