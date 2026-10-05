@@ -955,9 +955,12 @@ static void restyle(ic_app_t *app) {
 
 static int h_fetch(void *ctx, const char *url, char **body, size_t *len, char *final_url, size_t cap) {
     http_req_t *r;
+    char saved[sizeof sf.status];
     (void)ctx;
+    snprintf(saved, sizeof saved, "%s", sf.status);
     set_status("Loading scripts...");
     r = http_get(url, final_url, cap);
+    set_status(saved);
     if (!r || r->state != HTTP_DONE || r->status != 200) {
         http_free(r);
         return -1;
@@ -978,6 +981,11 @@ static void h_navigate(void *ctx, const char *url, int replace) {
 
 static void h_set_url(void *ctx, const char *url) {
     (void)ctx;
+    {
+        char line[URL_CAP + 32];
+        snprintf(line, sizeof line, "[surfer] url %s\n", url);
+        icda_write_file("/dev/serial", line, strlen(line));
+    }
     snprintf(sf.url, sizeof sf.url, "%s", url);
     if (!sf.addr_focused) set_address(sf.url);
     if (sf.hist_pos >= 0) snprintf(sf.history[sf.hist_pos], URL_CAP, "%s", sf.url);

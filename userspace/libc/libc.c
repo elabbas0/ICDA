@@ -373,6 +373,116 @@ static void sink_pad(sink_t *s, char c, int n) {
     while (n-- > 0) sink_put(s, c);
 }
 
+/* %f / %e / %g.  Digits come from scaled 64-bit integers, which is exact
+ * enough for the 15-17 significant digits a double carries. */
+static int fmt_fixed(char *out, double v, int prec) {
+    /* v >= 0, v < 1e18 */
+    double scale = 1;
+    unsigned long long ip, fp = 0, pow10 = 1;
+    int n = 0;
+    char tmp[48];
+    if (prec > 17) prec = 17;
+    for (int i = 0; i < prec; i++) { scale *= 10; pow10 *= 10; }
+    ip = (unsigned long long)v;
+    if (prec > 0) {
+        double x = (v - (double)ip) * scale, rem;
+        fp = (unsigned long long)x;
+        rem = x - (double)fp;
+        if (rem > 0.5 || (rem == 0.5 && (fp & 1))) fp++;   /* ties to even, like glibc */
+        if (fp >= pow10) { fp -= pow10; ip++; }
+    } else {
+        double rem = v - (double)ip;
+        if (rem > 0.5 || (rem == 0.5 && (ip & 1))) ip++;
+    }
+    do { tmp[n++] = (char)('0' + ip % 10); ip /= 10; } while (ip);
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    if (prec > 0) {
+        out[n++] = '.';
+        for (int i = prec - 1; i >= 0; i--) { out[n + i] = (char)('0' + fp % 10); fp /= 10; }
+        n += prec;
+    }
+    out[n] = 0;
+    return n;
+}
+
+static int fmt_exp(char *out, double v, int prec, int upper) {
+    /* v > 0 */
+    int e = 0, n;
+    char mant[48];
+    while (v >= 10) { v /= 10; e++; }
+    while (v < 1) { v *= 10; e--; }
+    n = fmt_fixed(mant, v, prec);
+    if (mant[0] == '1' && mant[1] == '0' && (n == 2 || mant[2] == '.')) {
+        /* rounding carried to 10.xxx */
+        v /= 10;
+        e++;
+        n = fmt_fixed(mant, v, prec);
+    }
+    memcpy(out, mant, (size_t)n);
+    out[n++] = upper ? 'E' : 'e';
+    out[n++] = e < 0 ? '-' : '+';
+    if (e < 0) e = -e;
+    if (e >= 100) out[n++] = (char)('0' + e / 100);
+    out[n++] = (char)('0' + e / 10 % 10);
+    out[n++] = (char)('0' + e % 10);
+    out[n] = 0;
+    return n;
+}
+
+static void fmt_double(sink_t *s, double v, char conv, int prec, int width, int left, int zero, int plus, int space, int alt) {
+    char body[96];
+    const char *sign = "";
+    int n, upper = conv == 'F' || conv == 'E' || conv == 'G';
+    if (v != v) {
+        n = 3; memcpy(body, upper ? "NAN" : "nan", 4);
+        zero = 0;
+    } else {
+        if (v < 0 || (v == 0 && 1 / v < 0)) { sign = "-"; v = -v; }
+        else if (plus) sign = "+";
+        else if (space) sign = " ";
+        if (prec < 0) prec = 6;
+        if (v > 1.7976931348623157e308) {
+            n = 3; memcpy(body, upper ? "INF" : "inf", 4);
+            zero = 0;
+        } else if (conv == 'f' || conv == 'F') {
+            n = v < 1e18 ? fmt_fixed(body, v, prec) : fmt_exp(body, v, prec, upper);
+        } else if (conv == 'e' || conv == 'E') {
+            n = v == 0 ? fmt_fixed(body, 0, prec) : fmt_exp(body, v, prec, upper);
+            if (v == 0) { body[n++] = upper ? 'E' : 'e'; memcpy(body + n, "+00", 4); n += 3; }
+        } else {
+            /* %g: precision is significant digits; trailing zeros dropped */
+            int e = 0;
+            double t = v;
+            if (prec == 0) prec = 1;
+            if (t != 0) {
+                while (t >= 10) { t /= 10; e++; }
+                while (t < 1) { t *= 10; e--; }
+            }
+            if (v != 0 && (e < -4 || e >= prec)) n = fmt_exp(body, v, prec - 1, upper);
+            else n = fmt_fixed(body, v, prec - 1 - e > 0 ? prec - 1 - e : 0);
+            if (!alt) {
+                char *dot = memchr(body, '.', (size_t)n), *ex = memchr(body, upper ? 'E' : 'e', (size_t)n);
+                if (dot) {
+                    char *end = ex ? ex : body + n, *z = end;
+                    while (z > dot + 1 && z[-1] == '0') z--;
+                    if (z == dot + 1) z = dot;
+                    if (ex) memmove(z, ex, (size_t)(body + n - ex) + 1);
+                    n -= (int)(end - z);
+                    body[n] = 0;
+                }
+            }
+        }
+    }
+    {
+        int total = (int)strlen(sign) + n, padz = zero && !left && width > total ? width - total : 0;
+        if (!left && !padz) sink_pad(s, ' ', width - total);
+        for (const char *p = sign; *p; p++) sink_put(s, *p);
+        sink_pad(s, '0', padz);
+        for (int i = 0; i < n; i++) sink_put(s, body[i]);
+        if (left) sink_pad(s, ' ', width - total);
+    }
+}
+
 static int fmt_core(sink_t *s, const char *fmt, va_list ap) {
     for (; *fmt; fmt++) {
         char tmp[32];
@@ -452,6 +562,9 @@ static int fmt_core(sink_t *s, const char *fmt, va_list ap) {
             u = (unsigned long long)(uintptr_t)va_arg(ap, void *);
             alt = 1;
             break;
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G':
+            fmt_double(s, va_arg(ap, double), *fmt, prec, width, left, zero, plus, space, alt);
+            continue;
         default:
             sink_put(s, '%');
             if (*fmt) sink_put(s, *fmt);
