@@ -95,6 +95,7 @@ extern char wm_launch_query[WM_LAUNCH_QUERY_CAP];
 int  wm_launch_visible(int *out);
 
 ic_rect_t wm_launcher_rect(int sw, int sh);
+ic_rect_t wm_launcher_item_rect(int sw, int sh, int item);
 
 
 int  wm_launcher_hit(int sw, int sh, int mx, int my);

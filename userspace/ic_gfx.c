@@ -10,6 +10,7 @@
 
 
 #include "ic_gfx.h"
+#include "ic_mem.h"
 
 
 
@@ -912,6 +913,92 @@ void ic_gfx_shadow(ic_canvas_t *c, int x, int y, int w, int h, float radius,
     }
 }
 
+/* Backdrop cache.  Glass surfaces (menus, the taskbar) sit over content that
+ * rarely changes while they are open, but hover feedback repaints them many
+ * times a second.  Each slot keeps the unblurred source and the blurred result
+ * for one rectangle; a repaint compares only the pixels it is about to cover
+ * with the stored source and re-blurs only when something underneath changed. */
+#define IC_BD_SLOTS 4
+
+typedef struct {
+    int       x, y, w, h, blur, valid;
+    uint32_t *src, *out;
+    uint64_t  used;
+} ic_bd_slot_t;
+
+static ic_bd_slot_t ic_bd_slots[IC_BD_SLOTS];
+static uint64_t     ic_bd_clock;
+
+static void ic_bd_composite(ic_canvas_t *c, const ic_rr_t *g, const ic_bd_slot_t *s, int x, int w,
+                            int x0, int y0, int x1, int y1) {
+    for (int py = y0; py < y1; py++) {
+        uint32_t *d = c->px + (int64_t)py * c->w;
+        const uint32_t *row = s->out + (int64_t)(py - s->y) * s->w - s->x;
+        int lz, rz, mid0, mid1;
+        ic_rr_row_zones(g, py, &lz, &rz);
+        mid0 = x + lz;
+        mid1 = x + w - rz;
+        for (int px = x0; px < x1; px++) {
+            if (px < mid0 || px >= mid1) {
+                float cov = ic_rr_cov(g, (float)px + 0.5f, (float)py + 0.5f);
+                uint32_t k = (uint32_t)(cov * 255.0f + 0.5f);
+                if (k) d[px] = k >= 255u ? row[px] : ic_mix_px(d[px], row[px], k);
+            } else {
+                d[px] = row[px];
+            }
+        }
+    }
+}
+
+/* Returns 1 if the clip region (x0..x1, y0..y1) was painted from the cache. */
+static int ic_backdrop_cached(ic_canvas_t *c, const ic_rr_t *g, int x, int y, int w, int h, int blur,
+                              int x0, int y0, int x1, int y1, uint32_t *scratch, int scratch_len) {
+    int fx0 = x < 0 ? 0 : x, fy0 = y < 0 ? 0 : y;
+    int fx1 = x + w > c->w ? c->w : x + w, fy1 = y + h > c->h ? c->h : y + h;
+    int fw = fx1 - fx0, fh = fy1 - fy0, changed = 0;
+    ic_bd_slot_t *s = 0;
+    if (fw <= 0 || fh <= 0 || scratch_len < (fw > fh ? fw : fh)) return 0;
+    for (int i = 0; i < IC_BD_SLOTS; i++) {
+        ic_bd_slot_t *t = &ic_bd_slots[i];
+        if (t->src && t->x == fx0 && t->y == fy0 && t->w == fw && t->h == fh && t->blur == blur) { s = t; break; }
+    }
+    if (!s) {
+        /* a new rectangle can only be cached once it is painted in full */
+        if (x0 > fx0 || y0 > fy0 || x1 < fx1 || y1 < fy1) return 0;
+        s = &ic_bd_slots[0];
+        for (int i = 1; i < IC_BD_SLOTS; i++) {
+            if (!ic_bd_slots[i].src || ic_bd_slots[i].used < s->used) s = &ic_bd_slots[i];
+        }
+        if (s->src) ic_free(s->src);
+        if (s->out) ic_free(s->out);
+        s->src = (uint32_t *)ic_malloc((uint64_t)fw * (uint64_t)fh * 4u);
+        s->out = (uint32_t *)ic_malloc((uint64_t)fw * (uint64_t)fh * 4u);
+        if (!s->src || !s->out) {
+            if (s->src) ic_free(s->src);
+            if (s->out) ic_free(s->out);
+            s->src = s->out = 0;
+            return 0;
+        }
+        s->x = fx0; s->y = fy0; s->w = fw; s->h = fh; s->blur = blur; s->valid = 0;
+    }
+    s->used = ++ic_bd_clock;
+    /* refresh the stored source where this paint covers it */
+    for (int py = y0; py < y1; py++) {
+        const uint32_t *src = c->px + (int64_t)py * c->w;
+        uint32_t *keep = s->src + (int64_t)(py - fy0) * fw - fx0;
+        for (int px = x0; px < x1; px++) {
+            if (keep[px] != src[px]) { keep[px] = src[px]; changed = 1; }
+        }
+    }
+    if (!s->valid || changed) {
+        for (int64_t i = 0; i < (int64_t)fw * fh; i++) s->out[i] = s->src[i];
+        ic_blur_buf(s->out, fw, fh, fw, blur, scratch);
+        s->valid = 1;
+    }
+    ic_bd_composite(c, g, s, x, w, x0, y0, x1, y1);
+    return 1;
+}
+
 void ic_gfx_backdrop(ic_canvas_t *c, int x, int y, int w, int h, float radius,
                      int blur, ic_color_t tint, uint32_t *scratch, int scratch_len) {
     if (c && c->scale > 1) {
@@ -941,7 +1028,9 @@ void ic_gfx_backdrop(ic_canvas_t *c, int x, int y, int w, int h, float radius,
         if (bx1 > c->w) bx1 = c->w;
         if (by1 > c->h) by1 = c->h;
     }
-    if (blur > 0 && scratch && bx1 > bx0 && by1 > by0) {
+    if (blur > 0 && scratch && ic_backdrop_cached(c, &g, x, y, w, h, blur, x0, y0, x1, y1, scratch, scratch_len)) {
+        /* served from the cache */
+    } else if (blur > 0 && scratch && bx1 > bx0 && by1 > by0) {
         int bw = bx1 - bx0, bh = by1 - by0;
         int need = bw * bh + (bw > bh ? bw : bh);
         if (scratch_len >= need) {

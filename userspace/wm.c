@@ -2914,8 +2914,14 @@ static void pointer_moved(void) {
     if (launcher_open) {
         int lh = wm_launcher_hit(scr_w, scr_h, mouse_x, mouse_y);
         if (lh != launcher_hover) {
+            /* only the two highlights change; repaint just those items */
+            if (!ic_tween_running(&launcher_fade)) {
+                mark_dirty_rect(wm_launcher_item_rect(scr_w, scr_h, launcher_hover));
+                mark_dirty_rect(wm_launcher_item_rect(scr_w, scr_h, lh));
+            } else {
+                mark_dirty_launcher();
+            }
             launcher_hover = lh;
-            mark_dirty_launcher();
         }
     }
     if (ctx_open) {
@@ -3133,7 +3139,16 @@ int main(int argc, char **argv) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
                     wm_window_t *win = &windows[slot];
-                    mark_dirty(win->x, win->y, win->w, win->h);
+                    if (msg.damage.w > 0 && msg.damage.h > 0 && !win->maximized && !win->anim_kind) {
+                        int dx = msg.damage.x, dy = msg.damage.y, dw = msg.damage.w, dh = msg.damage.h;
+                        if (dx < 0) { dw += dx; dx = 0; }
+                        if (dy < 0) { dh += dy; dy = 0; }
+                        if (dx + dw > win->w) dw = win->w - dx;
+                        if (dy + dh > win->h) dh = win->h - dy;
+                        if (dw > 0 && dh > 0) mark_dirty(win->x + dx, win->y + dy, dw, dh);
+                    } else {
+                        mark_dirty(win->x, win->y, win->w, win->h);
+                    }
                 }
             }
         }

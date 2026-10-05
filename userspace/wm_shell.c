@@ -503,3 +503,19 @@ void wm_boot_overlay_draw(ic_canvas_t *c, int sw, int sh, float t) {
         ic_gfx_rrect(c, bx, by, BOOT_BAR_W, BOOT_BAR_H, BOOT_BAR_H * 0.5f, ic_color_fade(IC_RGB(0xF2F2F5), ink));
     }
 }
+
+/* Screen rectangle a hover highlight occupies for item (an app index or a
+ * power button), so hover changes can repaint just that item. */
+ic_rect_t wm_launcher_item_rect(int sw, int sh, int item) {
+    ic_rect_t panel = wm_launcher_rect(sw, sh);
+    if (item == WM_LAUNCH_RESTART) return wm_launch_power_button(panel, 1);
+    if (item == WM_LAUNCH_SHUTDOWN) return wm_launch_power_button(panel, 0);
+    if (item >= 0) {
+        int vis[WM_LAUNCH_MAX_APPS];
+        int n = wm_launch_visible(vis);
+        for (int k = 0; k < n; k++) {
+            if (vis[k] == item) return wm_launch_tile(panel, k);
+        }
+    }
+    return ic_rect_make(0, 0, 0, 0);
+}

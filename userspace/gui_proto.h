@@ -73,6 +73,12 @@ typedef struct {
             uint8_t  _pad[39];
         } cursor;
 
+        /* GUI_MSG_FLUSH: changed area in window coordinates; w == 0 means everything */
+        struct {
+            int32_t  x, y, w, h;
+            uint8_t  _pad[24];
+        } damage;
+
         
         struct {
             uint64_t shm_handle;  

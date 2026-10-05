@@ -147,16 +147,50 @@ uint64_t gui_font_shm(void) { return win_font_shm; }
 
 void gui_flush(void) {
     gui_msg_t msg;
+    int dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0, damaged = 1;
     if (!win_reply_queue) return;
     if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
-        
-
-        gui_copy_pixels(win_shm_pixels, win_pixels,
-                        (uint64_t)win_w * (uint64_t)win_h * (uint64_t)(win_scale * win_scale));
+        /* Publish only what changed since the last flush and tell the WM
+         * where, so a hover tweak or caret blink doesn't recomposite the
+         * whole window.  Nothing changed: nothing to send. */
+        int pw = win_w * win_scale, ph = win_h * win_scale;
+        dx0 = pw; dy0 = ph; dx1 = -1; dy1 = -1;
+        for (int y = 0; y < ph; y++) {
+            uint32_t *dst = win_shm_pixels + (uint64_t)y * (uint64_t)pw;
+            const uint32_t *src = win_pixels + (uint64_t)y * (uint64_t)pw;
+            int first = -1, last = -1;
+            for (int x = 0; x < pw; x++) {
+                if (dst[x] != src[x]) {
+                    if (first < 0) first = x;
+                    last = x;
+                    dst[x] = src[x];
+                }
+            }
+            if (first >= 0) {
+                if (first < dx0) dx0 = first;
+                if (last > dx1) dx1 = last;
+                if (y < dy0) dy0 = y;
+                dy1 = y;
+            }
+        }
+        if (dx1 < 0) return;
+        /* device pixels -> window coordinates, rounded outward */
+        dx0 /= win_scale;
+        dy0 /= win_scale;
+        dx1 = dx1 / win_scale + 1;
+        dy1 = dy1 / win_scale + 1;
+    } else {
+        damaged = 0;
     }
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_FLUSH;
     msg.window_id = win_id;
+    if (damaged) {
+        msg.damage.x = dx0;
+        msg.damage.y = dy0;
+        msg.damage.w = dx1 - dx0;
+        msg.damage.h = dy1 - dy0;
+    }
     icda_msg_send(win_reply_queue, &msg);
 }
 
