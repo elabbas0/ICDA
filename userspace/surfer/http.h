@@ -38,6 +38,7 @@ struct http_req {
     char     location[URL_CAP];
     int64_t  content_length;
     int      chunked;
+    char    *raw_headers;     /* response header block (after the status line), malloc'd */
     /* raw bytes not yet parsed (headers or chunk framing) */
     uint8_t *in;
     size_t   in_len, in_cap;
@@ -58,6 +59,10 @@ void        http_free(http_req_t *r);
 
 /* Blocking fetch that follows up to 8 redirects; final_url gets the last URL. */
 http_req_t *http_get(const char *url, char *final_url, size_t final_cap);
+/* Cookies visible to scripts (not HttpOnly) and setting one from a script. */
+size_t http_cookie_get(const char *url, char *out, size_t cap);
+void   http_cookie_set(const char *url, const char *cookie);
+
 /* Blocking request with redirects; POST bodies use content_type. */
 http_req_t *http_request(const char *method, const char *url, const char *content_type,
                          const void *body, size_t body_len, char *final_url, size_t final_cap);

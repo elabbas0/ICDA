@@ -845,13 +845,16 @@ static int nth_ok(int a, int b, int index) {
 
 static int match_compound(const compound_t *c, dom_node_t *el);
 
+/* Class hashes on elements are only current while a cascade runs. */
+static int in_cascade;
+
 static int match_simple(const simple_t *x, dom_node_t *el) {
     switch (x->type) {
     case S_UNIVERSAL: return 1;
     case S_TAG: return x->tag ? el->tag == x->tag : (el->name && strcmp(el->name, x->name) == 0);
     case S_ID: return el->id && strcmp(el->id, x->name) == 0;
     case S_CLASS:
-        if (el->chash) {
+        if (in_cascade && el->chash) {
             for (int i = 0; i < el->nchash; i++) {
                 if (el->chash[i] == x->hash) return dom_has_class(el, x->name);
             }
@@ -2144,14 +2147,27 @@ static void bloom_element(dom_node_t *el, int d) {
     for (int i = 0; i < el->nchash; i++) bloom_add(el->chash[i], d);
 }
 
+static void clear_styles(dom_node_t *n) {
+    for (dom_node_t *c = n->first; c; c = c->next) {
+        c->style = 0;
+        clear_styles(c);
+    }
+}
+
 static void walk(cascade_t *cs, dom_node_t *n, const css_style_t *parent) {
     for (dom_node_t *c = n->first; c; c = c->next) {
         if (c->type != N_ELEMENT) continue;
         hash_classes(cs, c);
         c->style = compute(cs, c, parent, 0);
-        if (!c->style) continue;
+        if (!c->style) {
+            clear_styles(c);
+            continue;
+        }
         if (c->tag == T_HTML) cs->root_font = c->style->font_size;
-        if (c->style->display == D_NONE) continue;
+        if (c->style->display == D_NONE) {
+            clear_styles(c);   /* hidden subtree: no styles, none left dangling */
+            continue;
+        }
         c->style->before = compute(cs, c, c->style, 1);
         c->style->after = compute(cs, c, c->style, 2);
         bloom_element(c, 1);
@@ -2172,8 +2188,12 @@ void css_cascade(dom_doc_t *doc, css_sheet_t **sheets, int n, int viewport_w, in
     cs.vw = (float)viewport_w;
     cs.vh = (float)viewport_h;
     cs.root_font = 16;
-    cs.arena = &doc->arena;
+    /* styles from the previous cascade (if any) are dropped wholesale */
+    arena_free(&doc->style_arena);
+    cs.arena = &doc->style_arena;
+    in_cascade = 1;
     walk(&cs, doc->root, 0);
+    in_cascade = 0;
     free(cs.hits.h);
 }
 
@@ -2181,4 +2201,67 @@ void css_sheet_stats(css_sheet_t *sh, int *rules, int *universal) {
     build_index(sh);
     *rules = sh->nrules;
     *universal = sh->idx[0].nuniversal + sh->idx[1].nuniversal;
+}
+
+/* ---- selector API (querySelector / matches) ----------------------------- */
+
+struct css_selector_list {
+    css_sheet_t *owner;          /* arena for the compiled selectors */
+    selector_t  *sels;
+    int          n;
+};
+
+css_selector_list_t *css_selector_parse(const char *text) {
+    css_selector_list_t *l;
+    const char *s = text, *end;
+    int cap = 8;
+    if (!text) return 0;
+    end = text + strlen(text);
+    l = (css_selector_list_t *)calloc(1, sizeof(*l));
+    if (!l) return 0;
+    l->owner = css_sheet_new();
+    l->sels = (selector_t *)malloc(sizeof(selector_t) * (size_t)cap);
+    if (!l->owner || !l->sels) { css_selector_free(l); return 0; }
+    while (s < end) {
+        /* split at top-level commas (not inside :is(...), :not(...), [..]) */
+        const char *e = s;
+        int depth = 0;
+        char quote = 0;
+        while (e < end) {
+            if (quote) { if (*e == quote) quote = 0; }
+            else if (*e == '"' || *e == '\'') quote = *e;
+            else if (*e == '(' || *e == '[') depth++;
+            else if (*e == ')' || *e == ']') depth--;
+            else if (*e == ',' && depth == 0) break;
+            e++;
+        }
+        if (l->n == cap) {
+            selector_t *ns = (selector_t *)realloc(l->sels, sizeof(selector_t) * (size_t)(cap *= 2));
+            if (!ns) { css_selector_free(l); return 0; }
+            l->sels = ns;
+        }
+        if (parse_selector(l->owner, s, e, &l->sels[l->n]) != 0 || l->sels[l->n].pseudo_el) {
+            css_selector_free(l);   /* invalid selector: the DOM API throws */
+            return 0;
+        }
+        l->n++;
+        s = e < end ? e + 1 : end;
+    }
+    if (!l->n) { css_selector_free(l); return 0; }
+    return l;
+}
+
+int css_selector_matches(const css_selector_list_t *l, dom_node_t *el) {
+    if (!l || !el || el->type != N_ELEMENT) return 0;
+    for (int i = 0; i < l->n; i++) {
+        if (match_from(&l->sels[i], l->sels[i].n - 1, el)) return 1;
+    }
+    return 0;
+}
+
+void css_selector_free(css_selector_list_t *l) {
+    if (!l) return;
+    if (l->owner) css_sheet_free(l->owner);
+    free(l->sels);
+    free(l);
 }

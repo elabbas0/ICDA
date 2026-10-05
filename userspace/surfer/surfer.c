@@ -16,6 +16,7 @@
 #include "paint.h"
 #include "image.h"
 #include "form.h"
+#include "js.h"
 
 #define WIN_W        1024
 #define WIN_H        720
@@ -55,6 +56,13 @@ static struct {
     size_t      nav_body_len;
 
     dom_node_t *focus;                  /* focused form control on the page */
+    char       *focus_value;            /* value when it gained focus, for "change" */
+    js_page_t  *js;
+    ic_app_t   *app;
+    int         js_dirty;               /* JS_DIRTY_* waiting for a restyle */
+    uint32_t    last_restyle_ms;
+    struct { char *url; char *text; size_t len; } css_cache[SHEETS_CAP];
+    int         ncss_cache;
     dom_node_t *popup;                  /* <select> whose option list is open */
     int         popup_hover;
 
@@ -254,6 +262,18 @@ static int images_busy(void) {
 /* ---- page loading ------------------------------------------------------- */
 
 static void page_clear(void) {
+    if (sf.js) {
+        js_page_free(sf.js);
+        sf.js = 0;
+    }
+    sf.js_dirty = 0;
+    free(sf.focus_value);
+    sf.focus_value = 0;
+    for (int i = 0; i < sf.ncss_cache; i++) {
+        free(sf.css_cache[i].url);
+        free(sf.css_cache[i].text);
+    }
+    sf.ncss_cache = 0;
     images_clear();
     if (sf.L) layout_free(sf.L);
     sf.L = 0;
@@ -271,6 +291,44 @@ static void page_clear(void) {
     sf.page_src = 0;
 }
 
+/* Stylesheet text by URL, kept for the page's lifetime so restyles after a
+ * script changes the DOM do not refetch. */
+static int css_fetch(const char *url, const char **text, size_t *len, char *fin, size_t fin_cap) {
+    http_req_t *r;
+    for (int i = 0; i < sf.ncss_cache; i++) {
+        if (strcmp(sf.css_cache[i].url, url) == 0) {
+            if (!sf.css_cache[i].text) return -1;
+            *text = sf.css_cache[i].text;
+            *len = sf.css_cache[i].len;
+            snprintf(fin, fin_cap, "%s", url);
+            return 0;
+        }
+    }
+    set_status("Loading styles...");
+    r = http_get(url, fin, fin_cap);
+    if (sf.ncss_cache < SHEETS_CAP) {
+        int i = sf.ncss_cache++;
+        sf.css_cache[i].url = strdup(url);
+        sf.css_cache[i].text = 0;
+        sf.css_cache[i].len = 0;
+        if (r && r->state == HTTP_DONE && r->status == 200 && r->body) {
+            sf.css_cache[i].text = (char *)malloc(r->body_len + 1);
+            if (sf.css_cache[i].text) {
+                memcpy(sf.css_cache[i].text, r->body, r->body_len);
+                sf.css_cache[i].text[r->body_len] = 0;
+                sf.css_cache[i].len = r->body_len;
+            }
+        }
+        http_free(r);
+        if (!sf.css_cache[i].text) return -1;
+        *text = sf.css_cache[i].text;
+        *len = sf.css_cache[i].len;
+        return 0;
+    }
+    http_free(r);
+    return -1;
+}
+
 static void add_sheet(const char *text, size_t len, const char *base, int vw, int depth) {
     css_sheet_t *s;
     const char **imp;
@@ -282,11 +340,10 @@ static void add_sheet(const char *text, size_t len, const char *base, int vw, in
     n = css_imports(s, &imp);
     for (int i = 0; i < n && depth < 3; i++) {
         char url[URL_CAP], fin[URL_CAP];
-        http_req_t *r;
+        const char *t;
+        size_t tl;
         if (url_resolve(base, imp[i], url, sizeof url) != 0) continue;
-        r = http_get(url, fin, sizeof fin);
-        if (r && r->state == HTTP_DONE && r->status == 200 && r->body) add_sheet((const char *)r->body, r->body_len, fin, vw, depth + 1);
-        http_free(r);
+        if (css_fetch(url, &t, &tl, fin, sizeof fin) == 0) add_sheet(t, tl, fin, vw, depth + 1);
     }
     if (sf.nsheets < SHEETS_CAP) sf.sheets[sf.nsheets++] = s;
     else css_sheet_free(s);
@@ -295,18 +352,33 @@ static void add_sheet(const char *text, size_t len, const char *base, int vw, in
 static void gather_sheets(dom_node_t *n, int vw) {
     for (dom_node_t *c = n->first; c; c = c->next) {
         if (c->type != N_ELEMENT) continue;
-        if (c->tag == T_STYLE && c->first) {
-            add_sheet(c->first->text, c->first->text_len, sf.doc->base_url, vw, 0);
+        if (c->tag == T_STYLE) {
+            /* scripts may build a <style> from several text nodes */
+            size_t len = 0;
+            for (dom_node_t *t = c->first; t; t = t->next) if (t->type == N_TEXT) len += t->text_len;
+            if (len) {
+                char *css = (char *)malloc(len + 1);
+                if (css) {
+                    size_t o = 0;
+                    for (dom_node_t *t = c->first; t; t = t->next) {
+                        if (t->type != N_TEXT) continue;
+                        memcpy(css + o, t->text, t->text_len);
+                        o += t->text_len;
+                    }
+                    css[o] = 0;
+                    add_sheet(css, o, sf.doc->base_url, vw, 0);
+                    free(css);
+                }
+            }
+            continue;
         } else if (c->tag == T_LINK) {
             const char *rel = dom_attr(c, "rel"), *href = dom_attr(c, "href"), *media = dom_attr(c, "media");
             if (rel && strstr(rel, "stylesheet") && !strstr(rel, "alternate") && href && !(media && strstr(media, "print"))) {
                 char url[URL_CAP], fin[URL_CAP];
-                http_req_t *r;
-                set_status("Loading styles...");
+                const char *t;
+                size_t tl;
                 if (url_resolve(sf.doc->base_url, href, url, sizeof url) != 0) continue;
-                r = http_get(url, fin, sizeof fin);
-                if (r && r->state == HTTP_DONE && r->status == 200 && r->body) add_sheet((const char *)r->body, r->body_len, fin, vw, 0);
-                http_free(r);
+                if (css_fetch(url, &t, &tl, fin, sizeof fin) == 0) add_sheet(t, tl, fin, vw, 0);
             }
         }
         gather_sheets(c, vw);
@@ -400,6 +472,8 @@ static void scroll_to_fragment(const char *url) {
     }
 }
 
+static void js_start(ic_app_t *app);
+
 static void do_navigate(ic_app_t *app) {
     char final_url[URL_CAP];
     ic_rect_t p = page_rect(app);
@@ -472,6 +546,7 @@ static void do_navigate(ic_app_t *app) {
     css_cascade(sf.doc, sf.sheets, sf.nsheets, p.w, p.h);
     relayout(app);
     scroll_to_fragment(sf.url);
+    js_start(app);
     {
         char msg[96];
         char line[URL_CAP + 128];
@@ -517,6 +592,8 @@ static void open_link(const char *href) {
 
 /* ---- forms -------------------------------------------------------------- */
 
+static int fire(dom_node_t *target, const char *type, int x, int y, int button, int mods, uint32_t key);
+
 static void submit_form(dom_node_t *form, dom_node_t *submitter) {
     char url[URL_CAP];
     char *body = 0;
@@ -549,9 +626,16 @@ static dom_node_t *first_submit(dom_node_t *root, dom_node_t *n, dom_node_t *for
     return 0;
 }
 
+/* A user-initiated submit: scripts see a cancelable "submit" event first. */
+static void request_submit(dom_node_t *form, dom_node_t *submitter) {
+    if (!form) return;
+    if (fire(form, "submit", 0, 0, 0, 0, 0)) return;
+    submit_form(form, submitter);
+}
+
 static void implicit_submit(dom_node_t *field) {
     dom_node_t *form = form_owner(sf.doc->root, field);
-    if (form) submit_form(form, first_submit(sf.doc->root, sf.doc->root, form));
+    if (form) request_submit(form, first_submit(sf.doc->root, sf.doc->root, form));
 }
 
 static int control_box(dom_node_t *n, ic_rect_t *out, ic_app_t *app) {
@@ -587,10 +671,14 @@ static void place_cursor(ic_app_t *app, dom_node_t *n, int click_x) {
     c->cursor = c->anchor = i;
 }
 
+static void focus_changed(dom_node_t *old, dom_node_t *now);
+
 static void set_focus(dom_node_t *n) {
+    dom_node_t *old = sf.focus;
     sf.focus = n;
     sf.popup = 0;
     if (n) form_ctl(n);
+    focus_changed(old, n);
 }
 
 /* Keeps the focused control on screen (Tab can move far away). */
@@ -641,6 +729,8 @@ static void activate(ic_app_t *app, dom_node_t *n, int click_x) {
     case FK_CHECKBOX: case FK_RADIO:
         set_focus(n);
         form_toggle(sf.doc->root, n);
+        fire(n, "input", 0, 0, 0, 0, 0);
+        fire(n, "change", 0, 0, 0, 0, 0);
         break;
     case FK_SELECT:
         set_focus(n);
@@ -649,7 +739,7 @@ static void activate(ic_app_t *app, dom_node_t *n, int click_x) {
         break;
     case FK_SUBMIT: case FK_IMAGE:
         set_focus(n);
-        submit_form(form_owner(sf.doc->root, n), n);
+        request_submit(form_owner(sf.doc->root, n), n);
         break;
     case FK_RESET:
         form_reset(sf.doc->root, form_owner(sf.doc->root, n));
@@ -763,15 +853,20 @@ static int page_key(ic_app_t *app, const ic_event_t *ev) {
         case IC_KEY_UP: if (sf.popup_hover > 0) sf.popup_hover--; return 1;
         case IC_KEY_DOWN: if (sf.popup_hover + 1 < count) sf.popup_hover++; return 1;
         case IC_KEY_ENTER: case ' ':
-            form_choose(sf.popup, sf.popup_hover);
-            sf.popup = 0;
+            {
+                dom_node_t *sel = sf.popup;
+                form_choose(sel, sf.popup_hover);
+                sf.popup = 0;
+                fire(sel, "input", 0, 0, 0, 0, 0);
+                fire(sel, "change", 0, 0, 0, 0, 0);
+            }
             return 1;
         case IC_KEY_ESCAPE: sf.popup = 0; return 1;
         default: return 1;
         }
     }
     if (ev->key == IC_KEY_TAB) { focus_step(app, shift ? -1 : 1); return 1; }
-    if (ev->key == IC_KEY_ESCAPE) { sf.focus = 0; return 1; }
+    if (ev->key == IC_KEY_ESCAPE) { set_focus(0); return 1; }
     if (kind == FK_TEXT || kind == FK_PASSWORD || kind == FK_TEXTAREA) {
         ic_app_caret_reset(app);
         if (ctrl) {
@@ -813,7 +908,12 @@ static int page_key(ic_app_t *app, const ic_event_t *ev) {
     }
     switch (kind) {
     case FK_CHECKBOX: case FK_RADIO:
-        if (ev->key == ' ') { form_toggle(sf.doc->root, n); return 1; }
+        if (ev->key == ' ') {
+            form_toggle(sf.doc->root, n);
+            fire(n, "input", 0, 0, 0, 0, 0);
+            fire(n, "change", 0, 0, 0, 0, 0);
+            return 1;
+        }
         if (ev->key == IC_KEY_ENTER) { implicit_submit(n); return 1; }
         return 0;
     case FK_SELECT:
@@ -821,6 +921,8 @@ static int page_key(ic_app_t *app, const ic_event_t *ev) {
             form_ctl_t *c = form_ctl(n);
             int next = c->selected + (ev->key == IC_KEY_UP ? -1 : 1);
             form_choose(n, next);
+            fire(n, "input", 0, 0, 0, 0, 0);
+            fire(n, "change", 0, 0, 0, 0, 0);
             return 1;
         }
         if (ev->key == ' ' || ev->key == IC_KEY_ENTER) { activate(app, n, 0); return 1; }
@@ -828,6 +930,195 @@ static int page_key(ic_app_t *app, const ic_event_t *ev) {
     default:
         if (ev->key == IC_KEY_ENTER || (ev->key == ' ' && n->tag != T_A)) { activate(app, n, 0); return 1; }
         return 0;
+    }
+}
+
+/* ---- scripting ---------------------------------------------------------- */
+
+/* Brings styles and layout up to date after scripts changed the page. */
+static void restyle(ic_app_t *app) {
+    ic_rect_t p = page_rect(app);
+    int d = sf.js_dirty | js_take_dirty(sf.js);
+    sf.js_dirty = 0;
+    if (!sf.doc || !d) return;
+    if (d & JS_DIRTY_STYLE) {
+        for (int i = 0; i < sf.nsheets; i++) css_sheet_free(sf.sheets[i]);
+        sf.nsheets = 0;
+        gather_sheets(sf.doc->root, p.w);
+    }
+    css_cascade(sf.doc, sf.sheets, sf.nsheets, p.w, p.h);
+    relayout(app);
+    sf.last_restyle_ms = now_ms();
+    if (sf.focus && !sf.focus->style) sf.focus = 0;   /* hidden or removed */
+    ic_app_invalidate(app);
+}
+
+static int h_fetch(void *ctx, const char *url, char **body, size_t *len, char *final_url, size_t cap) {
+    http_req_t *r;
+    (void)ctx;
+    set_status("Loading scripts...");
+    r = http_get(url, final_url, cap);
+    if (!r || r->state != HTTP_DONE || r->status != 200) {
+        http_free(r);
+        return -1;
+    }
+    *body = (char *)malloc(r->body_len + 1);
+    if (!*body) { http_free(r); return -1; }
+    memcpy(*body, r->body ? (const char *)r->body : "", r->body_len);
+    (*body)[r->body_len] = 0;
+    *len = r->body_len;
+    http_free(r);
+    return 0;
+}
+
+static void h_navigate(void *ctx, const char *url, int replace) {
+    (void)ctx;
+    navigate(url, !replace);
+}
+
+static void h_set_url(void *ctx, const char *url) {
+    (void)ctx;
+    snprintf(sf.url, sizeof sf.url, "%s", url);
+    if (!sf.addr_focused) set_address(sf.url);
+    if (sf.hist_pos >= 0) snprintf(sf.history[sf.hist_pos], URL_CAP, "%s", sf.url);
+}
+
+static void h_history_go(void *ctx, int delta) {
+    (void)ctx;
+    if (delta < 0) go_back();
+    else if (delta > 0) go_forward();
+    else navigate(sf.url, 0);
+}
+
+static void focus_changed(dom_node_t *old, dom_node_t *now);
+
+static void h_focus(void *ctx, dom_node_t *n) {
+    dom_node_t *old = sf.focus;
+    (void)ctx;
+    if (n && !form_is_focusable(n) && n->tag != T_A && !dom_attr(n, "tabindex")) n = 0;
+    sf.focus = n;
+    if (n) form_ctl(n);
+    focus_changed(old, n);
+}
+
+static dom_node_t *h_active(void *ctx) {
+    (void)ctx;
+    return sf.focus;
+}
+
+static void scroll_by(ic_app_t *app, float dy);
+
+static void h_scroll_to(void *ctx, float x, float y) {
+    (void)ctx; (void)x;
+    sf.scroll = y;
+    if (sf.app) scroll_by(sf.app, 0);
+}
+
+static float h_scroll_y(void *ctx) {
+    (void)ctx;
+    return sf.scroll;
+}
+
+static void h_viewport(void *ctx, int *w, int *h) {
+    ic_rect_t p;
+    (void)ctx;
+    if (!sf.app) return;
+    p = page_rect(sf.app);
+    *w = p.w;
+    *h = p.h;
+}
+
+static void h_status(void *ctx, const char *msg) {
+    (void)ctx;
+    set_status(msg);
+}
+
+static int h_box(void *ctx, dom_node_t *n, float *x, float *y, float *w, float *h) {
+    (void)ctx;
+    /* scripts measuring the page see the effect of their own changes */
+    if (sf.app && sf.js) {
+        sf.js_dirty |= js_take_dirty(sf.js);
+        if (sf.js_dirty) restyle(sf.app);
+    }
+    *x = *y = *w = *h = 0;
+    return sf.L ? layout_box_rect(sf.L, n, x, y, w, h) : 0;
+}
+
+static void h_log(void *ctx, const char *line) {
+    char buf[1100];
+    size_t n;
+    (void)ctx;
+    n = (size_t)snprintf(buf, sizeof buf, "%s\n", line);
+    if (n > sizeof buf - 1) n = sizeof buf - 1;
+    icda_write_file("/dev/serial", buf, n);
+}
+
+static void h_submit(void *ctx, dom_node_t *form, dom_node_t *submitter) {
+    (void)ctx;
+    submit_form(form, submitter);
+}
+
+static void js_start(ic_app_t *app) {
+    js_host_t host;
+    uint32_t t0 = now_ms();
+    if (!sf.doc) return;
+    memset(&host, 0, sizeof host);
+    host.fetch = h_fetch;
+    host.navigate = h_navigate;
+    host.set_url = h_set_url;
+    host.history_go = h_history_go;
+    host.focus = h_focus;
+    host.active = h_active;
+    host.scroll_to = h_scroll_to;
+    host.scroll_y = h_scroll_y;
+    host.viewport = h_viewport;
+    host.status = h_status;
+    host.box = h_box;
+    host.log = h_log;
+    host.submit = h_submit;
+    sf.app = app;
+    set_status("Running scripts...");
+    sf.js = js_page_new(sf.doc, sf.url, &host);
+    if (!sf.js) return;
+    js_run_scripts(sf.js);
+    restyle(app);
+    {
+        char line[160];
+        snprintf(line, sizeof line, "[surfer] scripts %u ms height=%d\n", (unsigned)(now_ms() - t0), sf.L ? (int)sf.L->height : -1);
+        icda_write_file("/dev/serial", line, strlen(line));
+    }
+}
+
+/* Fires a DOM event; returns 1 if a script cancelled the default action. */
+static int fire(dom_node_t *target, const char *type, int x, int y, int button, int mods, uint32_t key) {
+    js_event_t ev;
+    int prevented;
+    if (!sf.js || !target) return 0;
+    ev.x = x;
+    ev.y = y;
+    ev.client_x = x;
+    ev.client_y = (int)((float)y - sf.scroll);
+    ev.button = button;
+    ev.mods = mods;
+    ev.key = key;
+    prevented = js_dispatch(sf.js, target, type, &ev);
+    sf.js_dirty |= js_take_dirty(sf.js);
+    return prevented;
+}
+
+static void focus_changed(dom_node_t *old, dom_node_t *now) {
+    if (old == now) return;
+    if (old) {
+        /* a text field whose value changed while focused fires "change" */
+        if (form_is_text(old) && sf.focus_value && strcmp(sf.focus_value, form_value(old)) != 0) fire(old, "change", 0, 0, 0, 0, 0);
+        fire(old, "blur", 0, 0, 0, 0, 0);
+        fire(old, "focusout", 0, 0, 0, 0, 0);
+    }
+    free(sf.focus_value);
+    sf.focus_value = now && form_is_text(now) ? strdup(form_value(now)) : 0;
+    if (now) {
+        fire(now, "focus", 0, 0, 0, 0, 0);
+        fire(now, "focusin", 0, 0, 0, 0, 0);
     }
 }
 
@@ -897,7 +1188,10 @@ static void draw_status(ic_app_t *app, ic_canvas_t *c) {
 
 static void draw(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t p = page_rect(app);
-    if (sf.L && (int)sf.L->viewport_w != p.w) relayout(app);
+    if (sf.L && (int)sf.L->viewport_w != p.w) {
+        relayout(app);
+        if (sf.js && sf.doc) fire(sf.doc->root, "resize", 0, 0, 0, 0, 0);
+    }
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
     draw_toolbar(app, c);
     draw_page(app, c);
@@ -922,16 +1216,24 @@ static void tick(ic_app_t *app) {
         ic_app_invalidate(app);
     }
     if (images_busy()) ic_app_animate(app);
+    if (sf.js) {
+        int r = js_tick(sf.js);
+        sf.js_dirty |= js_take_dirty(sf.js);
+        (void)r;
+        /* batch script changes: at most one restyle per 30 ms */
+        if (sf.js_dirty && now_ms() - sf.last_restyle_ms >= 30) restyle(app);
+    }
 }
 
 /* ---- input -------------------------------------------------------------- */
 
 static void scroll_by(ic_app_t *app, float dy) {
     ic_rect_t p = page_rect(app);
-    float max = sf.L ? sf.L->height - (float)p.h : 0;
+    float max = sf.L ? sf.L->height - (float)p.h : 0, old = sf.scroll;
     sf.scroll += dy;
     if (sf.scroll > max) sf.scroll = max;
     if (sf.scroll < 0) sf.scroll = 0;
+    if (sf.scroll != old && sf.js && sf.doc) fire(sf.doc->root, "scroll", 0, 0, 0, 0, 0);
 }
 
 static void addr_delete_selection(void) {
@@ -1075,15 +1377,31 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         sf.addr_focused = 0;
         if (sf.popup) {
             int i = popup_hit(app, ev->x, ev->y);
-            if (i >= 0 && !dom_attr(form_option(sf.popup, i), "disabled")) form_choose(sf.popup, i);
+            if (i >= 0 && !dom_attr(form_option(sf.popup, i), "disabled")) {
+                dom_node_t *sel = sf.popup;
+                form_choose(sel, i);
+                fire(sel, "input", 0, 0, 0, 0, 0);
+                fire(sel, "change", 0, 0, 0, 0, 0);
+            }
             if (i != -2 || !ic_ui_hit(p, ev->x, ev->y)) { sf.popup = 0; break; }
             sf.popup = 0;
         }
         if (ic_ui_hit(p, ev->x, ev->y) && sf.L) {
-            dom_node_t *el = layout_hit_element(sf.L, (float)(ev->x - p.x), (float)(ev->y - p.y) + sf.scroll);
+            int px = ev->x - p.x, py = ev->y - p.y + (int)sf.scroll;
+            dom_node_t *el = layout_hit_element(sf.L, (float)px, (float)py);
             dom_node_t *target = el ? click_target(el) : 0;
+            if (el) {
+                /* scripts see the click first and may cancel the default action */
+                int prevented = fire(el, "mousedown", px, py, 0, (int)ev->mods, 0);
+                fire(el, "mouseup", px, py, 0, (int)ev->mods, 0);
+                prevented |= fire(el, "click", px, py, 0, (int)ev->mods, 0);
+                if (prevented) {
+                    if (target && form_is_text(target)) activate(app, target, ev->x);
+                    break;
+                }
+            }
             if (target) activate(app, target, ev->x);
-            else sf.focus = 0;
+            else set_focus(0);
         }
         break;
     case IC_EV_SCROLL:
@@ -1104,7 +1422,21 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if (sf.addr_focused) { addr_key(app, ev); break; }
-        if (sf.focus && page_key(app, ev)) break;
+        if (sf.js && !sf.popup) {
+            /* keydown can be cancelled; typing reports "input" when the value changed */
+            dom_node_t *t = sf.focus ? sf.focus : sf.doc ? sf.doc->body : 0;
+            char *before = sf.focus && form_is_text(sf.focus) ? strdup(form_value(sf.focus)) : 0;
+            int prevented = fire(t, "keydown", 0, 0, 0, (int)ev->mods, ev->key);
+            int used = 0;
+            if (!prevented && ev->key >= 32 && ev->key < 127) prevented = fire(t, "keypress", 0, 0, 0, (int)ev->mods, ev->key);
+            if (!prevented && sf.focus) used = page_key(app, ev);
+            if (before && sf.focus && strcmp(before, form_value(sf.focus)) != 0) fire(sf.focus, "input", 0, 0, 0, 0, 0);
+            free(before);
+            fire(sf.focus ? sf.focus : t, "keyup", 0, 0, 0, (int)ev->mods, ev->key);
+            if (prevented || used) break;
+        } else if (sf.focus && page_key(app, ev)) {
+            break;
+        }
         if (ev->key == IC_KEY_TAB) { focus_step(app, (ev->mods & IC_MOD_SHIFT) ? -1 : 1); break; }
         switch (ev->key) {
         case IC_KEY_DOWN: scroll_by(app, 40); break;

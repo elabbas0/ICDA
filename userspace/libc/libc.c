@@ -789,3 +789,109 @@ extern int main(int argc, char **argv);
 int __libc_start(int argc, char **argv) {
     exit(main(argc, argv));
 }
+
+/* ---- time ----------------------------------------------------------------
+ * Wall-clock time comes from the RTC once (whole seconds) and advances with
+ * the 100 Hz system tick, so it is monotonic within a process. */
+
+#include <time.h>
+#include <sys/time.h>
+
+#define LIBC_TICK_NS 10000000LL
+
+static int64_t libc_epoch_at_tick0 = -1;
+
+static int64_t libc_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    int64_t era, yoe, doy, doe;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static int64_t libc_rtc_epoch(void) {
+    char b[32];
+    long n = (long)icda_read_file("/dev/rtc", b, sizeof(b) - 1);
+    int v[7], k = 0;
+    if (n < 19) return 0;
+    /* "CCYY-MM-DD HH:MM:SS" */
+    for (int i = 0; i < 19 && k < 7; i += (i == 0 ? 2 : 3), k++) v[k] = (b[i] - '0') * 10 + (b[i + 1] - '0');
+    return libc_days_from_civil(v[0] * 100 + v[1], v[2], v[3]) * 86400 + v[4] * 3600 + v[5] * 60 + v[6];
+}
+
+int clock_gettime(clockid_t id, struct timespec *ts) {
+    int64_t ns = (int64_t)icda_ticks() * LIBC_TICK_NS;
+    if (!ts) return -1;
+    if (id == CLOCK_REALTIME) {
+        if (libc_epoch_at_tick0 < 0) libc_epoch_at_tick0 = libc_rtc_epoch() - ns / 1000000000LL;
+        ns += libc_epoch_at_tick0 * 1000000000LL;
+    }
+    ts->tv_sec = (time_t)(ns / 1000000000LL);
+    ts->tv_nsec = (long)(ns % 1000000000LL);
+    return 0;
+}
+
+int gettimeofday(struct timeval *tv, void *tz) {
+    struct timespec ts;
+    (void)tz;
+    if (!tv) return 0;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    tv->tv_sec = ts.tv_sec;
+    tv->tv_usec = ts.tv_nsec / 1000;
+    return 0;
+}
+
+time_t time(time_t *out) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    if (out) *out = ts.tv_sec;
+    return ts.tv_sec;
+}
+
+/* ICDA keeps the RTC in UTC and has no time zones yet. */
+struct tm *gmtime_r(const time_t *t, struct tm *tm) {
+    int64_t s = (int64_t)*t, days = s / 86400, rem = s % 86400, z, era, doe, yoe, y, doy, mp, d, m;
+    if (rem < 0) { rem += 86400; days--; }
+    tm->tm_hour = (int)(rem / 3600);
+    tm->tm_min = (int)(rem / 60 % 60);
+    tm->tm_sec = (int)(rem % 60);
+    tm->tm_wday = (int)((days + 4) % 7 < 0 ? (days + 4) % 7 + 7 : (days + 4) % 7);
+    z = days + 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    y += m <= 2;
+    tm->tm_year = (int)(y - 1900);
+    tm->tm_mon = (int)(m - 1);
+    tm->tm_mday = (int)d;
+    tm->tm_yday = (int)(days - libc_days_from_civil(y, 1, 1));
+    tm->tm_isdst = 0;
+#ifdef __USE_MISC
+    tm->tm_gmtoff = 0;
+    tm->tm_zone = "UTC";
+#endif
+    return tm;
+}
+
+struct tm *localtime_r(const time_t *t, struct tm *tm) {
+    return gmtime_r(t, tm);
+}
+
+/* ---- odds and ends needed by larger ports (QuickJS) ---------------------- */
+
+size_t malloc_usable_size(void *ptr) {
+    return ptr ? (size_t)ic_mem_usable(ptr) : 0;
+}
+
+void __assert_fail(const char *expr, const char *file, unsigned int line, const char *func) {
+    fprintf(stderr, "assertion failed: %s (%s:%u %s)\n", expr, file, line, func ? func : "");
+    icda_write_file("/dev/serial", "assertion failed\n", 17);
+    exit(134);
+}

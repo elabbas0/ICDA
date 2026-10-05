@@ -33,7 +33,7 @@ enum {
     T_COUNT
 };
 
-enum { N_DOCUMENT = 0, N_ELEMENT, N_TEXT, N_COMMENT };
+enum { N_DOCUMENT = 0, N_ELEMENT, N_TEXT, N_COMMENT, N_FRAGMENT };
 
 typedef struct dom_attr {
     const char      *name;    /* lower case */
@@ -63,6 +63,7 @@ typedef struct dom_node {
 
 typedef struct {
     arena_t     arena;
+    arena_t     style_arena;   /* computed styles; reset by every cascade */
     dom_node_t *root;          /* the document node */
     dom_node_t *html, *head, *body;
     char        title[256];
@@ -70,6 +71,12 @@ typedef struct {
 } dom_doc_t;
 
 dom_doc_t  *html_parse(const char *src, size_t len, const char *url);
+/* Parses markup as the children of a new DocumentFragment-like node allocated
+ * in doc (innerHTML, insertAdjacentHTML, createContextualFragment). */
+dom_node_t *html_parse_fragment(dom_doc_t *doc, const char *src, size_t len);
+/* A node allocated in doc (createElement and friends); name is lower-cased. */
+dom_node_t *dom_new_element(dom_doc_t *doc, const char *name);
+dom_node_t *dom_new_text(dom_doc_t *doc, int type, const char *text, size_t len);
 void        dom_free(dom_doc_t *doc);
 
 int         tag_lookup(const char *name, size_t len);

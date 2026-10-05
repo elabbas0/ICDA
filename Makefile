@@ -483,7 +483,28 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h $(IC_HEADER
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/browser.c -o /tmp/icda-browser.o
 	cp -f /tmp/icda-browser.o browser.o
 
-SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o
+SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o \
+                     surfer_js.o surfer_prelude.o $(QJS_OBJS) $(LIBM_OBJS)
+
+# QuickJS (third_party/quickjs, MIT).  -D__ICDA__ drops Atomics (no OS threads).
+QJS_OBJS = qjs_quickjs.o qjs_libregexp.o qjs_libunicode.o qjs_cutils.o qjs_dtoa.o
+QJS_CFLAGS = $(SURFER_CFLAGS) -D__ICDA__ -DCONFIG_VERSION=\"2025-04-26\" -Dalloca=__builtin_alloca -w
+qjs_%.o: userspace/surfer/third_party/quickjs/%.c $(wildcard userspace/surfer/third_party/quickjs/*.h) $(LIBC_HEADERS)
+	$(CC) $(QJS_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+# libm: double-precision math from musl (userspace/libc/math, MIT).
+LIBM_SRCS = $(wildcard userspace/libc/math/*.c)
+LIBM_OBJS = $(patsubst userspace/libc/math/%.c,libm_%.o,$(LIBM_SRCS))
+libm_%.o: userspace/libc/math/%.c userspace/libc/math/libm.h userspace/libc/include/math.h
+	$(CC) $(USR_CFLAGS) -Iuserspace/libc/include -Iuserspace/libc/math -include userspace/libc/math/musl_compat.h -w -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+# The DOM prelude is JavaScript, embedded as a NUL-terminated byte array.
+surfer_prelude.o: userspace/surfer/prelude.js
+	perl -e 'local $$/; my $$d = <>; print "const char surfer_prelude_js[] = {", join(",", map { my $$c = ord; $$c > 127 ? $$c - 256 : $$c } split //, $$d), ",0};\nconst unsigned surfer_prelude_js_len = ", length($$d), ";\n";' $< > /tmp/icda-prelude_js.c
+	$(CC) $(SURFER_CFLAGS) -c /tmp/icda-prelude_js.c -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
 
 surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
 	$(CC) $(SURFER_CFLAGS) -Iuserspace -c $< -o /tmp/icda-$@
@@ -491,7 +512,7 @@ surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
 
 # /apps/browser.app is Surfer.
 userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
 	cp -f /tmp/icda-browser.app userspace/browser.app
 
 settings.o: userspace/settings.c userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \

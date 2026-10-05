@@ -79,4 +79,11 @@ void         css_cascade(dom_doc_t *doc, css_sheet_t **sheets, int n, int viewpo
 
 uint32_t     css_parse_color(const char *s, size_t n, int *ok);
 
+/* Compiled selector lists for querySelector() and matches().  Parsing returns
+ * 0 for an invalid selector. */
+typedef struct css_selector_list css_selector_list_t;
+css_selector_list_t *css_selector_parse(const char *text);
+int                  css_selector_matches(const css_selector_list_t *l, dom_node_t *el);
+void                 css_selector_free(css_selector_list_t *l);
+
 #endif

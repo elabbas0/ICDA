@@ -250,6 +250,7 @@ typedef struct {
     dom_node_t *stack[STACK_MAX];
     int         depth;
     int         in_body;
+    int         fragment;      /* innerHTML: no html/head/body handling */
 } builder_t;
 
 static dom_node_t *new_node(builder_t *b, int type) {
@@ -332,6 +333,7 @@ static void insert_text(builder_t *b, const char *s, size_t n, int raw) {
 
 static void start_tag(builder_t *b, dom_node_t *el, int self_closing) {
     int t = el->tag;
+    if (b->fragment && (t == T_HTML || t == T_BODY || t == T_HEAD)) return;
     if (t == T_HTML) {
         /* merge attributes onto the existing root */
         if (!b->doc->html->attrs) b->doc->html->attrs = el->attrs;
@@ -476,37 +478,9 @@ static const char *parse_start_tag(builder_t *b, const char *s, const char *end,
     return s;
 }
 
-dom_doc_t *html_parse(const char *src, size_t len, const char *url) {
-    dom_doc_t *doc = (dom_doc_t *)calloc(1, sizeof(dom_doc_t));
-    builder_t *b = (builder_t *)calloc(1, sizeof(builder_t));
-    const char *s = src, *end = src + len, *text = src;
-    if (!doc || !b) {
-        free(doc);
-        free(b);
-        return 0;
-    }
-    snprintf(doc->base_url, sizeof(doc->base_url), "%s", url ? url : "");
-    b->doc = doc;
-    doc->root = new_node(b, N_DOCUMENT);
-    doc->html = new_node(b, N_ELEMENT);
-    doc->head = new_node(b, N_ELEMENT);
-    doc->body = new_node(b, N_ELEMENT);
-    doc->html->tag = T_HTML;
-    doc->html->name = "html";
-    doc->head->tag = T_HEAD;
-    doc->head->name = "head";
-    doc->body->tag = T_BODY;
-    doc->body->name = "body";
-    append(doc->root, doc->html);
-    append(doc->html, doc->head);
-    append(doc->html, doc->body);
-    push(b, doc->html);
-    push(b, doc->head);
-    /* skip a UTF-8 byte order mark */
-    if (len >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) {
-        s += 3;
-        text = s;
-    }
+/* Runs the tokenizer over [s, end) feeding the tree builder. */
+static void tokenize(builder_t *b, const char *s, const char *end) {
+    const char *text = s;
     while (s < end) {
         if (*s != '<') {
             s++;
@@ -577,6 +551,39 @@ dom_doc_t *html_parse(const char *src, size_t len, const char *url) {
         }
     }
     insert_text(b, text, (size_t)(end - text), 0);
+}
+
+dom_doc_t *html_parse(const char *src, size_t len, const char *url) {
+    dom_doc_t *doc = (dom_doc_t *)calloc(1, sizeof(dom_doc_t));
+    builder_t *b = (builder_t *)calloc(1, sizeof(builder_t));
+    const char *s = src, *end = src + len;
+    if (!doc || !b) {
+        free(doc);
+        free(b);
+        return 0;
+    }
+    snprintf(doc->base_url, sizeof(doc->base_url), "%s", url ? url : "");
+    b->doc = doc;
+    doc->root = new_node(b, N_DOCUMENT);
+    doc->html = new_node(b, N_ELEMENT);
+    doc->head = new_node(b, N_ELEMENT);
+    doc->body = new_node(b, N_ELEMENT);
+    doc->html->tag = T_HTML;
+    doc->html->name = "html";
+    doc->head->tag = T_HEAD;
+    doc->head->name = "head";
+    doc->body->tag = T_BODY;
+    doc->body->name = "body";
+    append(doc->root, doc->html);
+    append(doc->html, doc->head);
+    append(doc->html, doc->body);
+    push(b, doc->html);
+    push(b, doc->head);
+    /* skip a UTF-8 byte order mark */
+    if (len >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) {
+        s += 3;
+    }
+    tokenize(b, s, end);
     {
         dom_node_t *t = dom_find(doc->head, T_TITLE);
         if (t) dom_text(t, doc->title, sizeof(doc->title));
@@ -593,6 +600,7 @@ dom_doc_t *html_parse(const char *src, size_t len, const char *url) {
 void dom_free(dom_doc_t *doc) {
     if (!doc) return;
     arena_free(&doc->arena);
+    arena_free(&doc->style_arena);
     free(doc);
 }
 
@@ -653,4 +661,48 @@ size_t dom_text(const dom_node_t *n, char *out, size_t cap) {
     while (len && out[len - 1] == ' ') len--;
     out[len] = 0;
     return len;
+}
+
+dom_node_t *html_parse_fragment(dom_doc_t *doc, const char *src, size_t len) {
+    builder_t *b = (builder_t *)calloc(1, sizeof(builder_t));
+    dom_node_t *frag;
+    if (!b) return 0;
+    b->doc = doc;
+    b->in_body = 1;
+    b->fragment = 1;
+    frag = new_node(b, N_FRAGMENT);
+    if (!frag) { free(b); return 0; }
+    frag->name = "#document-fragment";
+    /* the builder never pops below depth 2: keep html as a stop and the
+       fragment as the insertion root */
+    push(b, doc->html);
+    push(b, frag);
+    tokenize(b, src, src + len);
+    free(b);
+    return frag;
+}
+
+dom_node_t *dom_new_element(dom_doc_t *doc, const char *name) {
+    builder_t b;
+    dom_node_t *n;
+    size_t nl = strlen(name);
+    memset(&b, 0, sizeof(b));
+    b.doc = doc;
+    n = new_node(&b, N_ELEMENT);
+    if (!n) return 0;
+    n->name = lower_dup(&doc->arena, name, nl);
+    n->tag = (uint16_t)tag_lookup(n->name, nl);
+    return n;
+}
+
+dom_node_t *dom_new_text(dom_doc_t *doc, int type, const char *text, size_t len) {
+    builder_t b;
+    dom_node_t *n;
+    memset(&b, 0, sizeof(b));
+    b.doc = doc;
+    n = new_node(&b, type);
+    if (!n) return 0;
+    n->text = arena_strndup(&doc->arena, text, len);
+    n->text_len = len;
+    return n;
 }

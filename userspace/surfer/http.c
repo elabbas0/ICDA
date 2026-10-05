@@ -207,7 +207,7 @@ static long conn_recv(http_req_t *r, uint8_t *buf, size_t cap, int timeout_ms) {
 
 typedef struct {
     char *name, *value, *domain, *path;
-    int   secure, host_only;
+    int   secure, host_only, http_only;
 } cookie_t;
 
 static cookie_t jar[COOKIE_CAP];
@@ -238,11 +238,17 @@ static void cookie_drop(int i) {
     jar[i] = jar[--njar];
 }
 
+static void cookie_store_ex(const url_t *u, const char *v, size_t vlen, int from_script);
+
 static void cookie_store(const url_t *u, const char *v, size_t vlen) {
+    cookie_store_ex(u, v, vlen, 0);
+}
+
+static void cookie_store_ex(const url_t *u, const char *v, size_t vlen, int from_script) {
     const char *end = v + vlen, *semi = memchr(v, ';', vlen), *eq;
     const char *nv_end = semi ? semi : end;
     char domain[HOST_CAP], path[URL_CAP];
-    int secure = 0, host_only = 1, remove = 0;
+    int secure = 0, host_only = 1, remove = 0, http_only = 0;
     eq = memchr(v, '=', (size_t)(nv_end - v));
     if (!eq || eq == v) return;
     snprintf(domain, sizeof domain, "%s", u->host);
@@ -280,6 +286,8 @@ static void cookie_store(const url_t *u, const char *v, size_t vlen) {
             snprintf(path, sizeof path, "%.*s", (int)vl, av);
         } else if (kl == 6 && ieq_n(ak, "secure", 6)) {
             secure = 1;
+        } else if (kl == 8 && ieq_n(ak, "httponly", 8)) {
+            http_only = 1;
         } else if (kl == 7 && ieq_n(ak, "max-age", 7) && vl) {
             if (atol(av) <= 0) remove = 1;
         } else if (kl == 7 && ieq_n(ak, "expires", 7) && vl >= 4) {
@@ -296,6 +304,7 @@ static void cookie_store(const url_t *u, const char *v, size_t vlen) {
     for (int i = 0; i < njar; i++) {
         if (strlen(jar[i].name) == (size_t)(eq - v) && memcmp(jar[i].name, v, (size_t)(eq - v)) == 0 &&
             strcmp(jar[i].domain, domain) == 0 && strcmp(jar[i].path, path) == 0) {
+            if (from_script && jar[i].http_only) return;   /* scripts cannot replace HttpOnly */
             cookie_drop(i);
             break;
         }
@@ -308,6 +317,7 @@ static void cookie_store(const url_t *u, const char *v, size_t vlen) {
     jar[njar].path = dupn(path, strlen(path));
     jar[njar].secure = secure;
     jar[njar].host_only = host_only;
+    jar[njar].http_only = http_only && !from_script;
     if (!jar[njar].name || !jar[njar].value || !jar[njar].domain || !jar[njar].path) return;
     njar++;
 }
@@ -409,6 +419,12 @@ static void parse_headers(http_req_t *r, const char *head, size_t len) {
     const char *p = head, *end = head + len;
     const char *line_end = memchr(p, '\n', len);
     if (!line_end) return;
+    free(r->raw_headers);
+    r->raw_headers = (char *)malloc((size_t)(end - line_end));
+    if (r->raw_headers) {
+        memcpy(r->raw_headers, line_end + 1, (size_t)(end - line_end - 1));
+        r->raw_headers[end - line_end - 1] = 0;
+    }
     {
         const char *sp = memchr(p, ' ', (size_t)(line_end - p));
         if (sp) r->status = atoi(sp + 1);
@@ -551,6 +567,7 @@ void http_free(http_req_t *r) {
     if (!r) return;
     if (r->tls) tls_close((tls_conn_t *)r->tls);
     else if (r->sock > 0) net_close(r->sock);
+    free(r->raw_headers);
     free(r->in);
     free(r->body);
     free(r);
@@ -598,4 +615,31 @@ http_req_t *http_request(const char *method, const char *url, const char *conten
 
 http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
     return http_request("GET", url, 0, 0, 0, final_url, final_cap);
+}
+
+/* document.cookie: the cookies a page's scripts can see, and setting one. */
+size_t http_cookie_get(const char *url, char *out, size_t cap) {
+    url_t u;
+    size_t len = 0;
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    if (url_parse(url, &u) != 0) return 0;
+    for (int i = 0; i < njar; i++) {
+        cookie_t *c = &jar[i];
+        size_t pl = strlen(c->path);
+        int n;
+        if (c->http_only || (c->secure && !u.tls)) continue;
+        if (c->host_only ? !(strlen(u.host) == strlen(c->domain) && ieq_n(u.host, c->domain, strlen(c->domain)))
+                         : !domain_match(u.host, c->domain)) continue;
+        if (strncmp(u.path, c->path, pl) != 0) continue;
+        n = snprintf(out + len, cap - len, "%s%s=%s", len ? "; " : "", c->name, c->value);
+        if (n < 0 || (size_t)n >= cap - len) break;
+        len += (size_t)n;
+    }
+    return len;
+}
+
+void http_cookie_set(const char *url, const char *cookie) {
+    url_t u;
+    if (url_parse(url, &u) == 0 && cookie) cookie_store_ex(&u, cookie, strlen(cookie), 1);
 }
