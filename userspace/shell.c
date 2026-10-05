@@ -566,7 +566,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl run exit\n");
+    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi run exit\n");
 }
 
 static void shell_pwd(void) {
@@ -948,6 +948,337 @@ static int shell_try_exec_command(const char *cmd, const char *arg) {
     return 0;
 }
 
+/* ---- wifi: front end for /dev/wifi ------------------------------------ */
+
+#define WIFI_DEV "/dev/wifi"
+static char wifi_buf[16384];
+
+static int wifi_cmd(const char *cmd) {
+    return (long)icda_write_file(WIFI_DEV, cmd, str_len(cmd)) < 0 ? -1 : 0;
+}
+
+static void wifi_read(void) {
+    if ((long)icda_read_file(WIFI_DEV, wifi_buf, sizeof(wifi_buf)) < 0) wifi_buf[0] = 0;
+}
+
+/* Value of "key: value" in wifi_buf (empty if absent). */
+static void wifi_field(const char *key, char *out, uint64_t cap) {
+    uint64_t klen = str_len(key), i = 0;
+    out[0] = 0;
+    while (wifi_buf[i]) {
+        uint64_t s = i, n = 0;
+        while (wifi_buf[i] && wifi_buf[i] != '\n') i++;
+        if (i - s > klen + 1 && wifi_buf[s + klen] == ':') {
+            uint64_t k = 0;
+            while (k < klen && wifi_buf[s + k] == key[k]) k++;
+            if (k == klen) {
+                s += klen + 2;
+                while (s < i && n + 1 < cap) out[n++] = wifi_buf[s++];
+                out[n] = 0;
+                return;
+            }
+        }
+        if (wifi_buf[i]) i++;
+    }
+}
+
+static uint64_t wifi_scan_gen(void) {
+    const char *p = wifi_buf;
+    uint64_t v = 0;
+    while (*p && !str_prefix(p, "--- networks (scan ")) {
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    if (!*p) return 0;
+    p += 19;
+    while (*p >= '0' && *p <= '9') v = v * 10 + (uint64_t)(*p++ - '0');
+    return v;
+}
+
+static void wifi_pad(const char *s, uint64_t width) {
+    uint64_t n = str_len(s);
+    icda_write(s);
+    while (n++ < width) icda_write(" ");
+}
+
+/* Pretty-print the network rows of wifi_buf; returns how many. */
+static int wifi_print_networks(const char *only_ssid, char *sec_out, int *saved_out) {
+    const char *p = wifi_buf;
+    int count = 0;
+    while (*p && !str_prefix(p, "--- networks")) {
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    while (*p && *p != '\n') p++;
+    if (*p) p++;
+    if (!only_ssid) icda_write("  SIGNAL      DBM  CH   SECURITY  SAVED  NETWORK\n");
+    while (*p) {
+        char f[6][40];
+        int fi = 0;
+        uint64_t n = 0;
+        for (int k = 0; k < 6; k++) f[k][0] = 0;
+        while (*p && *p != '\n') {
+            if (*p == '\t' && fi < 5) {
+                f[fi][n] = 0;
+                fi++;
+                n = 0;
+            } else if (n + 1 < sizeof(f[0])) {
+                f[fi][n++] = *p;
+            }
+            p++;
+        }
+        f[fi][n] = 0;
+        if (*p) p++;
+        if (fi < 5) continue;
+        count++;
+        if (only_ssid) {
+            if (str_eq(f[5], only_ssid)) {
+                copy_text(sec_out, f[3], 16);
+                *saved_out = str_eq(f[4], "saved");
+                return 1;
+            }
+            continue;
+        }
+        {
+            uint64_t pct = 0, bars;
+            char meter[12];
+            for (const char *q = f[0]; *q >= '0' && *q <= '9'; q++) pct = pct * 10 + (uint64_t)(*q - '0');
+            bars = (pct + 19) / 20;
+            for (uint64_t b = 0; b < 5; b++) meter[b] = b < bars ? '#' : '.';
+            meter[5] = 0;
+            icda_write("  ");
+            wifi_pad(meter, 7);
+            wifi_pad(f[0], 3);
+            icda_write("% ");
+            wifi_pad(f[1], 5);
+            wifi_pad(f[2], 5);
+            wifi_pad(f[3], 10);
+            wifi_pad(str_eq(f[4], "saved") ? "yes" : "", 7);
+            icda_write(f[5]);
+            icda_write("\n");
+        }
+    }
+    if (!only_ssid && count == 0) icda_write("  (no networks found yet)\n");
+    return only_ssid ? 0 : count;
+}
+
+/* Read a password without echoing it. Returns its length, -1 if cancelled. */
+static long wifi_read_password(char *out, uint64_t cap) {
+    uint64_t n = 0;
+    icda_write("password: ");
+    for (;;) {
+        long ch = shell_wait_key_byte(100);
+        if (ch < 0) continue;
+        if (ch == '\r' || ch == '\n') break;
+        if (ch == 3 || ch == 27) {
+            icda_write("\n");
+            return -1;
+        }
+        if (ch == 8 || ch == 127) {
+            if (n > 0) {
+                n--;
+                icda_backspace();
+            }
+            continue;
+        }
+        if (ch >= 32 && ch < 127 && n + 1 < cap) {
+            out[n++] = (char)ch;
+            icda_write("*");
+        }
+    }
+    out[n] = 0;
+    icda_write("\n");
+    return (long)n;
+}
+
+/* Take one argument, honouring "double quotes". */
+static char *wifi_take_arg(char **pp) {
+    char *p = *pp, *start;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '"') {
+        start = ++p;
+        while (*p && *p != '"') p++;
+    } else {
+        start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    if (*p) *p++ = 0;
+    *pp = p;
+    return start;
+}
+
+static void wifi_follow_connect(const char *ssid) {
+    char state[32], last[32], err[120], ip[32];
+    uint64_t start = icda_ticks();
+    last[0] = 0;
+    while (icda_ticks() - start < 6000) {   /* 60 s */
+        wifi_cmd("status");
+        wifi_read();
+        wifi_field("state", state, sizeof(state));
+        wifi_field("error", err, sizeof(err));
+        if (!str_eq(state, last)) {
+            icda_write("  ");
+            icda_write(state);
+            icda_write("\n");
+            copy_text(last, state, sizeof(last));
+        }
+        if (str_eq(state, "connected")) {
+            wifi_field("ip", ip, sizeof(ip));
+            icda_write("connected to ");
+            icda_write(ssid);
+            icda_write(", address ");
+            icda_write(ip[0] ? ip : "?");
+            icda_write("\n");
+            return;
+        }
+        if (str_eq(state, "no-ip")) {
+            icda_write("associated, but DHCP failed (no IP address)\n");
+            return;
+        }
+        if ((str_eq(state, "idle") || str_eq(state, "scanning") || str_eq(state, "error")) &&
+            icda_ticks() - start > 100) {
+            icda_write("not connected");
+            if (err[0]) {
+                icda_write(": ");
+                icda_write(err);
+            }
+            icda_write("\n");
+            return;
+        }
+        icda_sleep(25);
+    }
+    icda_write("still trying in the background; see 'wifi status' and 'wifi log'\n");
+}
+
+static void shell_wifi(char *arg) {
+    char *p = arg ? arg : (char *)"";
+    char *sub = wifi_take_arg(&p);
+
+    if (str_eq(sub, "scan") || str_eq(sub, "connect")) {
+        char state[32], err[120];
+        wifi_cmd("status");
+        wifi_read();
+        wifi_field("state", state, sizeof(state));
+        if (!state[0] || str_eq(state, "no-adapter") || str_eq(state, "starting") ||
+            str_eq(state, "error") || str_eq(state, "radio-off")) {
+            wifi_field("error", err, sizeof(err));
+            icda_write("wifi: not ready (");
+            icda_write(state[0] ? state : "no driver");
+            icda_write(err[0] ? "): " : ")");
+            icda_write(err);
+            icda_write("\n");
+            return;
+        }
+    }
+
+    if (!*sub || str_eq(sub, "status")) {
+        if (wifi_cmd("status") != 0) {
+            icda_write("wifi: no /dev/wifi (kernel without Wi-Fi support)\n");
+            return;
+        }
+        wifi_read();
+        icda_write(wifi_buf);
+        return;
+    }
+    if (str_eq(sub, "scan")) {
+        uint64_t gen, start = icda_ticks();
+        wifi_cmd("all");
+        wifi_read();
+        gen = wifi_scan_gen();
+        if (wifi_cmd("scan") != 0) {
+            icda_write("wifi: scan failed\n");
+            return;
+        }
+        icda_write("scanning...\n");
+        while (icda_ticks() - start < 1000) {
+            icda_sleep(25);
+            wifi_cmd("all");
+            wifi_read();
+            if (wifi_scan_gen() != gen) break;
+        }
+        wifi_print_networks(0, 0, 0);
+        return;
+    }
+    if (str_eq(sub, "list")) {
+        wifi_cmd("all");
+        wifi_read();
+        wifi_print_networks(0, 0, 0);
+        return;
+    }
+    if (str_eq(sub, "connect")) {
+        char *ssid = wifi_take_arg(&p);
+        char *pass = wifi_take_arg(&p);
+        char sec[16], cmd[128], typed[72];
+        int saved = 0;
+        if (!*ssid) {
+            icda_write("usage: wifi connect <ssid> [password]   (quote SSIDs with spaces)\n");
+            return;
+        }
+        sec[0] = 0;
+        wifi_cmd("all");
+        wifi_read();
+        wifi_print_networks(ssid, sec, &saved);
+        if (!*pass && !saved && sec[0] && !str_eq(sec, "open")) {
+            long n = wifi_read_password(typed, sizeof(typed));
+            if (n < 0) return;
+            pass = typed;
+        }
+        cmd[0] = 0;
+        append_text(cmd, "connect\t", sizeof(cmd));
+        append_text(cmd, ssid, sizeof(cmd));
+        append_text(cmd, "\t", sizeof(cmd));
+        append_text(cmd, pass, sizeof(cmd));
+        if (wifi_cmd(cmd) != 0) {
+            icda_write("wifi: request rejected (SSID up to 32 bytes, password 8-63 characters)\n");
+        } else {
+            icda_write("connecting to ");
+            icda_write(ssid);
+            icda_write("...\n");
+            wifi_follow_connect(ssid);
+        }
+        for (uint64_t i = 0; i < sizeof(cmd); i++) cmd[i] = 0;
+        for (uint64_t i = 0; i < sizeof(typed); i++) typed[i] = 0;
+        return;
+    }
+    if (str_eq(sub, "disconnect") || str_eq(sub, "restart")) {
+        if (wifi_cmd(sub) != 0) icda_write("wifi: request failed\n");
+        return;
+    }
+    if (str_eq(sub, "forget")) {
+        char *ssid = wifi_take_arg(&p);
+        char cmd[64];
+        if (!*ssid) {
+            icda_write("usage: wifi forget <ssid>\n");
+            return;
+        }
+        cmd[0] = 0;
+        append_text(cmd, "forget\t", sizeof(cmd));
+        append_text(cmd, ssid, sizeof(cmd));
+        if (wifi_cmd(cmd) != 0) icda_write("wifi: request failed\n");
+        return;
+    }
+    if (str_eq(sub, "saved")) {
+        wifi_cmd("saved");
+        wifi_read();
+        icda_write(wifi_buf[0] ? wifi_buf : "(no saved networks)\n");
+        return;
+    }
+    if (str_eq(sub, "log")) {
+        char *opt = wifi_take_arg(&p);
+        wifi_cmd(str_eq(opt, "clear") ? "log clear" : "log");
+        wifi_read();
+        icda_write(wifi_buf);
+        return;
+    }
+    if (str_eq(sub, "autoconnect")) {
+        char *opt = wifi_take_arg(&p);
+        wifi_cmd(str_eq(opt, "off") ? "autoconnect off" : "autoconnect on");
+        return;
+    }
+    icda_write("usage: wifi [status|scan|list|connect <ssid> [password]|disconnect|\n"
+               "            forget <ssid>|saved|log [clear]|autoconnect on|off|restart]\n");
+}
+
 static void shell_dispatch(char *line) {
     char *arg = 0;
     while (*line == ' ' || *line == '\t') line++;
@@ -981,6 +1312,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "diskman")) { shell_diskman(); return; }
     if (str_eq(line, "curl")) { shell_curl(arg); return; }
+    if (str_eq(line, "wifi")) { shell_wifi(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line, arg)) {

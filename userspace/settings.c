@@ -13,6 +13,7 @@
 
 #include "libicda.h"
 #include "settings_store.h"
+#include "settings_wifi.h"
 
 #define WIN_W 700
 #define WIN_H 480
@@ -24,13 +25,13 @@
 #define GROUP_GAP     IC_SP_6
 #define ROW_H         IC_H_ROW_TALL
 
-enum { PANE_APPEARANCE = 0, PANE_MOTION, PANE_SOUND, PANE_TIME, PANE_ABOUT, PANE_COUNT };
+enum { PANE_WIFI = 0, PANE_APPEARANCE, PANE_MOTION, PANE_SOUND, PANE_TIME, PANE_ABOUT, PANE_COUNT };
 
 static const char *const pane_titles[PANE_COUNT] = {
-    "Appearance", "Motion & Display", "Sound", "Date & Time", "About"
+    "Wi-Fi", "Appearance", "Motion & Display", "Sound", "Date & Time", "About"
 };
 static const ic_symbol_t pane_symbols[PANE_COUNT] = {
-    IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_GLOBE, IC_SYM_INFO
+    IC_SYM_WIFI, IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_GLOBE, IC_SYM_INFO
 };
 
 
@@ -101,6 +102,10 @@ static int content_x(void) {
 static int content_w(ic_app_t *app) {
     int w = app->width - content_x() - PANE_PAD;
     return w > 560 ? 560 : w;
+}
+
+static ic_rect_t wifi_area(ic_app_t *app) {
+    return ic_rect_make(content_x(), GROUP_Y, content_w(app), app->height - GROUP_Y - IC_SP_6);
 }
 
 static ic_rect_t group_rect(ic_app_t *app, int y, int rows) {
@@ -338,7 +343,8 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
     draw_sidebar(app, c);
     draw_pane_title(c, pane_titles[st.pane]);
-    if (st.pane == PANE_APPEARANCE) draw_appearance(app, c);
+    if (st.pane == PANE_WIFI) wifi_pane_draw(app, c, wifi_area(app));
+    else if (st.pane == PANE_APPEARANCE) draw_appearance(app, c);
     else if (st.pane == PANE_ABOUT) draw_about(app, c);
     else if (st.pane == PANE_TIME) draw_time(app, c);
     else draw_toggles(app, c, st.pane);
@@ -368,7 +374,7 @@ static int current_rows(ic_app_t *app, ic_rect_t *rows) {
         rows[1] = row_rect(g, 1);
         return 2;
     }
-    if (st.pane == PANE_ABOUT || st.pane == PANE_TIME) return 0;
+    if (st.pane == PANE_ABOUT || st.pane == PANE_TIME || st.pane == PANE_WIFI) return 0;
     {
         int ids[TOG_COUNT];
         int n = pane_toggles(st.pane, ids);
@@ -419,6 +425,7 @@ static void select_pane(int pane) {
     if (pane < 0 || pane >= PANE_COUNT || pane == st.pane) return;
     st.pane = pane;
     st.hover_row = -1;
+    if (pane == PANE_WIFI) wifi_pane_enter();
     for (int i = 0; i < 4; i++) ic_tween_set(&st.row_hover[i], 0.0f);
 }
 
@@ -486,6 +493,19 @@ static void click(ic_app_t *app, int x, int y) {
 }
 
 static void event(ic_app_t *app, const ic_event_t *ev) {
+    if (st.pane == PANE_WIFI) {
+        int used;
+        if (wifi_pane_modal()) {
+            (void)wifi_pane_event(app, ev, wifi_area(app));
+            ic_app_invalidate(app);
+            return;
+        }
+        used = wifi_pane_event(app, ev, wifi_area(app));
+        if (used) {
+            ic_app_invalidate(app);
+            return;
+        }
+    }
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
         update_hover(app, ev->x, ev->y);
@@ -514,6 +534,10 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     ic_app_invalidate(app);
 }
 
+static void tick(ic_app_t *app) {
+    if (st.pane == PANE_WIFI) wifi_pane_tick(app);
+}
+
 static void init(ic_app_t *app) {
     (void)app;
     icda_settings_load(&st.s);
@@ -525,7 +549,7 @@ static void init(ic_app_t *app) {
 }
 
 int main(int argc, char **argv) {
-    static const ic_app_desc_t desc = { "Settings", WIN_W, WIN_H, init, draw, event, 0 };
+    static const ic_app_desc_t desc = { "Settings", WIN_W, WIN_H, init, draw, event, tick };
     (void)argc;
     (void)argv;
     if (ic_app_run(&desc, 0) != 0) {

@@ -112,6 +112,15 @@ wifi-crypto-test:
 	    $(IWM_DIR)/wpa_crypto.c $(IWM_DIR)/wpa_eapol.c kernel/crypto/sha1.c kernel/crypto/aes.c
 	/tmp/icda-wpa-test
 
+# Host simulation of the station stack against a simulated WPA2 AP
+IWM_SIM_SRCS = $(IWM_DIR)/tests/net80211_sim.c $(IWM_DIR)/net80211.c $(IWM_DIR)/iwm_compat.c \
+               $(IWM_DIR)/wpa_crypto.c $(IWM_DIR)/wpa_eapol.c kernel/crypto/sha1.c kernel/crypto/aes.c
+wifi-sim-test:
+	gcc -O0 -g -w -c $(IWM_DIR)/tests/host_stubs.c -o /tmp/icda-sim-stubs.o
+	gcc -O0 -g -Wall -Wno-unused-parameter -fno-builtin -I$(IWM_DIR)/tests/host -Ikernel \
+	    -include $(IWM_DIR)/tests/host/rename.h -o /tmp/icda-wifi-sim $(IWM_SIM_SRCS) /tmp/icda-sim-stubs.o
+	/tmp/icda-wifi-sim
+
 sock.o: kernel/net/sock.c kernel/net/sock.h kernel/net/net.h kernel/drivers/net/net_drv.h kernel/syscall/uaccess.h
 	$(CC) $(CFLAGS) -c kernel/net/sock.c -o sock.o
 
@@ -552,13 +561,17 @@ userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
 	cp -f /tmp/icda-browser.app userspace/browser.app
 
-settings.o: userspace/settings.c userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
+settings.o: userspace/settings.c userspace/settings_wifi.h userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
            userspace/font.h userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings.c -o /tmp/icda-settings.o
 	cp -f /tmp/icda-settings.o settings.o
 
-userspace/settings.app: crt0.o settings.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o gui.o libicda.o
+settings_wifi.o: userspace/settings_wifi.c userspace/settings_wifi.h $(IC_HEADERS) userspace/icda_sys.h Makefile
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_wifi.c -o /tmp/icda-settings_wifi.o
+	cp -f /tmp/icda-settings_wifi.o settings_wifi.o
+
+userspace/settings.app: crt0.o settings.o settings_wifi.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o settings_wifi.o gui.o libicda.o
 	cp -f /tmp/icda-settings.app userspace/settings.app
 
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
@@ -889,7 +902,7 @@ else
 	@echo "usb-sync: installed kernel.iso -> $(VENTOY_ISO)"
 endif
 
-.PHONY: all clean wifi-crypto-test qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync sdk
+.PHONY: all clean wifi-crypto-test wifi-sim-test qemu qemu-headless qemu-uefi qemu-uefi-headless qemu-smoke qemu-power qemu-power-reboot docker-image docker-build docker-qemu docker-qemu-headless docker-qemu-uefi docker-qemu-uefi-headless docker-smoke usb-sync sdk
 
 sdk: crt1.o libc.o userspace/user.ld $(LIBC_HEADERS) userspace/libc/sdk/Makefile
 	rm -rf sdk

@@ -1,0 +1,20 @@
+/* Host test: keep the kernel's libc-like symbols apart from the host libc. */
+#define memcpy icda_memcpy
+#define memmove icda_memmove
+#define memset icda_memset
+#define memcmp icda_memcmp
+#define strlen icda_strlen
+#define strlcpy icda_strlcpy
+#define strcmp icda_strcmp
+#define strncmp icda_strncmp
+#define timingsafe_bcmp icda_timingsafe_bcmp
+#define explicit_bzero icda_explicit_bzero
+#define vsnprintf icda_vsnprintf
+#define snprintf icda_snprintf
+#define printf icda_printf
+#define panic icda_panic
+#define arc4random_buf icda_arc4random_buf
+#define arc4random icda_arc4random
+#define malloc icda_malloc
+#define free icda_free
+#define mallocarray icda_mallocarray

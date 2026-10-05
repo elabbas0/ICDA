@@ -400,6 +400,19 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_line(m, 0.07f, -0.08f, 0.06f, 0.24f);
         break;
     }
+    case IC_SYM_WIFI:
+        /* three arcs over a dot, opening upwards */
+        sym_disc(m, 0.0f, 0.28f, 0.06f);
+        sym_arc(m, 0.0f, 0.30f, 0.20f, -PI * 0.75f, -PI * 0.25f);
+        sym_arc(m, 0.0f, 0.30f, 0.38f, -PI * 0.75f, -PI * 0.25f);
+        sym_arc(m, 0.0f, 0.30f, 0.56f, -PI * 0.75f, -PI * 0.25f);
+        break;
+    case IC_SYM_LOCK:
+        sym_rrect(m, -0.24f, -0.02f, 0.24f, 0.34f, 0.05f);
+        sym_arc(m, 0.0f, -0.04f, 0.15f, -PI, 0.0f);
+        sym_line(m, -0.15f, -0.04f, -0.15f, -0.02f);
+        sym_line(m, 0.15f, -0.04f, 0.15f, -0.02f);
+        break;
     case IC_SYM_NONE:
     case IC_SYM_COUNT:
     default:

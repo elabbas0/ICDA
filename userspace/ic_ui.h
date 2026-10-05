@@ -74,6 +74,8 @@ typedef enum {
     IC_SYM_INFO,
     IC_SYM_WARNING,
     IC_SYM_TRASH,
+    IC_SYM_WIFI,
+    IC_SYM_LOCK,
     IC_SYM_COUNT
 } ic_symbol_t;
 

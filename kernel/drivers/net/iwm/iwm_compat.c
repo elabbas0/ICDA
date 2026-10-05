@@ -579,6 +579,12 @@ tsc_init(void)
 	}
 }
 
+void
+iwm_compat_init(void)
+{
+	tsc_init();
+}
+
 uint64_t
 iwm_compat_nsecuptime(void)
 {

@@ -592,6 +592,7 @@ struct ieee80211_stats {
 	u_int32_t	is_rx_eapol_key;
 	u_int32_t	is_rx_eapol_replay;
 	u_int32_t	is_rx_eapol_badmic;
+	u_int32_t	is_handshake_fail;	/* ICDA: deauth or bad MIC mid-handshake */
 	u_int32_t	is_tx_nombuf;
 	u_int32_t	is_tx_nonode;
 	u_int32_t	is_tx_unknownmgt;

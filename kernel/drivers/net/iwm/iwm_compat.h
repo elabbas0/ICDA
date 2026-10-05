@@ -207,6 +207,8 @@ void	 wakeup(const volatile void *);
  * iwm_intr().  Also used by the driver thread's main loop.
  */
 void	 iwm_compat_set_poll(int (*fn)(void *), void *arg);
+/* Calibrates the TSC against the 100 Hz tick (call early on the thread). */
+void	 iwm_compat_init(void);
 
 /* ---- spl, locks, refcounts (no-ops: one thread owns the driver) ------- */
 

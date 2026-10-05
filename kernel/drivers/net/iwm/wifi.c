@@ -384,7 +384,9 @@ node_security(const struct ieee80211_node *ni)
 	if (ni->ni_rsnprotos & IEEE80211_PROTO_RSN) {
 		if (ni->ni_rsnakms & IEEE80211_AKM_PSK)
 			return (ni->ni_rsncaps & IEEE80211_RSNCAP_MFPR) ?
-			    "WPA3" : "WPA2";
+			    "WPA3" :
+			    ni->ni_rsngroupcipher != IEEE80211_CIPHER_CCMP ?
+			    "WPA/WPA2" : "WPA2";
 		if (ni->ni_rsnakms & IEEE80211_AKM_SAE)
 			return "WPA3";
 		if (ni->ni_rsnakms & IEEE80211_AKM_8021X)
@@ -920,7 +922,7 @@ start_connect(void)
 
 	ieee80211_icda_configure(ic, target_ssid, strlen(target_ssid),
 	    target_secure ? target_pmk : NULL);
-	badmic_base = ic->ic_stats.is_rx_eapol_badmic;
+	badmic_base = ic->ic_stats.is_handshake_fail;
 	printf("wifi: connecting to \"%s\" (%s)\n", target_ssid,
 	    target_secure ? "WPA2-PSK" : "open");
 	if (ic->ic_state == IEEE80211_S_SCAN &&
@@ -941,7 +943,13 @@ do_connect(const char *ssid, const char *pass)
 		const char *sec = node_security(ni);
 		if (strcmp(sec, "open") == 0)
 			secure = 0;
-		else if (strcmp(sec, "WPA2") != 0) {
+		else if (strcmp(sec, "WPA/WPA2") == 0) {
+			snprintf(phase_error, sizeof(phase_error),
+			    "\"%s\" is in WPA/WPA2 mixed mode (TKIP group key); "
+			    "set the router to WPA2 (AES) only", ssid);
+			printf("wifi: %s\n", phase_error);
+			return;
+		} else if (strcmp(sec, "WPA2") != 0) {
 			snprintf(phase_error, sizeof(phase_error),
 			    "\"%s\" uses %s, only WPA2-PSK and open networks "
 			    "are supported", ssid, sec);
@@ -1089,21 +1097,37 @@ static void
 check_wrong_password(void)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
+	static uint64_t handshake_since;
+	uint64_t now = iwm_compat_nsecuptime();
+	const char *why = NULL;
 
-	if (!target_ssid[0] || !target_secure || link_up)
+	if (!target_ssid[0] || !target_secure || link_up) {
+		handshake_since = 0;
 		return;
-	if (ic->ic_stats.is_rx_eapol_badmic - badmic_base >= 2) {
-		snprintf(phase_error, sizeof(phase_error),
-		    "wrong password for \"%s\"", target_ssid);
-		printf("wifi: %s, giving up\n", phase_error);
-		if (!target_saved)
-			saved_update(target_ssid, NULL, 0, 0);
-		autoconnect = 0;
-		do_disconnect(0);
-		/* keep phase_error for the UI */
-		snprintf(phase_error, sizeof(phase_error),
-		    "wrong password (handshake MIC check failed)");
 	}
+	/*
+	 * With a wrong password the AP rejects message 2 and deauthenticates
+	 * us; a bad MIC on message 3 is the other symptom.  Either twice, or
+	 * a handshake that never completes, means: stop retrying.
+	 */
+	if (ic->ic_state == IEEE80211_S_RUN) {
+		if (handshake_since == 0)
+			handshake_since = now;
+		else if (now - handshake_since > 20000000000ULL)
+			why = "the WPA2 handshake timed out (wrong password?)";
+	} else
+		handshake_since = 0;
+	if (ic->ic_stats.is_handshake_fail - badmic_base >= 2)
+		why = "wrong password (the access point rejected the handshake)";
+	if (why == NULL)
+		return;
+	handshake_since = 0;
+	printf("wifi: %s, giving up on \"%s\"\n", why, target_ssid);
+	if (!target_saved)
+		saved_update(target_ssid, NULL, 0, 0);	/* stale saved key */
+	autoconnect = 0;
+	do_disconnect(0);
+	snprintf(phase_error, sizeof(phase_error), "%s", why);
 }
 
 /* ---- threads ------------------------------------------------------------- */
@@ -1142,6 +1166,7 @@ icda_wifi_main(void)
 	struct ifnet *ifp;
 	uint64_t last_sec = 0, last_snap = 0;
 
+	iwm_compat_init();		/* TSC calibration for DELAY() */
 	iwm_compat_set_console(1);	/* bring-up steps on screen too */
 	if (wifi_attach() != 0) {
 		phase = WP_ERROR;

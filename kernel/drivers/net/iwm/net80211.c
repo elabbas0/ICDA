@@ -1619,6 +1619,9 @@ ieee80211_recv_deauth(struct ieee80211com *ic, struct mbuf *m)
 	ic->ic_stats.is_rx_deauth++;
 	if (ic->ic_state < IEEE80211_S_AUTH)
 		return;
+	if (ic->ic_state == IEEE80211_S_RUN &&
+	    (ic->ic_flags & IEEE80211_F_RSNON) && !ic->ic_bss->ni_port_valid)
+		ic->ic_stats.is_handshake_fail++;
 	snprintf(msg, sizeof(msg), "deauthenticated by AP (reason %u%s)",
 	    reason, reason == 15 || reason == 2 ? ", wrong password?" : "");
 	set_error(msg);
@@ -2447,8 +2450,10 @@ ieee80211_eapol_key_input(struct ieee80211com *ic, struct mbuf *m,
 	    &res);
 	if (rc != 0) {
 		set_error(res.error ? res.error : "EAPOL frame dropped");
-		if (res.error && strncmp(res.error, "msg3: bad MIC", 13) == 0)
+		if (res.error && strncmp(res.error, "msg3: bad MIC", 13) == 0) {
 			ic->ic_stats.is_rx_eapol_badmic++;
+			ic->ic_stats.is_handshake_fail++;
+		}
 		goto done;
 	}
 	if (res.msg == 1)
