@@ -12,6 +12,7 @@
 #include "../drivers/display/vga.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
+#include "../drivers/serial/serial.h"
 #include "../memory/heap.h"
 #include "../firmware/efi.h"
 
@@ -568,4 +569,67 @@ int system_install_device(uint32_t device_index, uint64_t *files_installed, uint
         return -11;
     }
     return system_install_partitions(efi_partition, root_partition, swap_partition, files_installed, bytes_installed);
+}
+
+/* Build-host support: when a disk's first sector carries the scratch marker,
+ * a live boot packs the installed system exactly as the installer would and
+ * writes ICDAROOT.BIN to that disk (header at LBA 0, image from LBA 1).  The
+ * dual-boot script on the build host uses this so real disks are only ever
+ * written by the host OS's own tools.  No real disk carries this marker. */
+#define ICDA_SCRATCH_MAGIC "ICDA-BUNDLE-SCRATCH-V1"
+
+static void scratch_log(const char *text, uint64_t value) {
+    char line[96];
+    uint64_t out = 0;
+    line[0] = '\0';
+    out = append_text(line, out, sizeof(line), "[mkbundle] ");
+    out = append_text(line, out, sizeof(line), text);
+    out = append_uint(line, out, sizeof(line), value);
+    out = append_text(line, out, sizeof(line), "\n");
+    serial_write(line);
+}
+
+int system_install_export_scratch(void) {
+    static uint8_t sector[512];
+    uint64_t magic_len = str_len(ICDA_SCRATCH_MAGIC);
+
+    for (uint32_t i = 0; i < block_count(); i++) {
+        block_device_t *dev = block_get(i);
+        char *bundle = 0;
+        uint64_t size = 0, entries = 0, files = 0, bytes = 0, out;
+        int match = 1;
+
+        if (!dev || !dev->read || !dev->write || dev->sector_size != 512) continue;
+        if (dev->read(dev->context, 0, 1, sector) != 0) continue;
+        for (uint64_t k = 0; k < magic_len; k++) {
+            if (sector[k] != (uint8_t)ICDA_SCRATCH_MAGIC[k]) { match = 0; break; }
+        }
+        if (!match) continue;
+
+        scratch_log("scratch disk found, device=", i);
+        if (system_install_core(&files, &bytes) != 0) { scratch_log("install core failed ", 0); return -1; }
+        if (persistfs_export_image(&bundle, &size, &entries) != 0) { scratch_log("export failed ", 0); return -1; }
+        if (size / 512 + 1 > dev->sector_count) { kfree(bundle); scratch_log("scratch disk too small, need bytes=", size); return -1; }
+        for (uint64_t done = 0; done < size / 512;) {
+            uint32_t chunk = (uint32_t)((size / 512 - done) > 128 ? 128 : (size / 512 - done));
+            if (dev->write(dev->context, 1 + done, chunk, bundle + done * 512) != 0) {
+                kfree(bundle);
+                scratch_log("write failed at sector ", done);
+                return -1;
+            }
+            done += chunk;
+        }
+        kfree(bundle);
+        for (uint32_t k = 0; k < 512; k++) sector[k] = 0;
+        out = 0;
+        out = append_text((char *)sector, out, 512, ICDA_SCRATCH_MAGIC);
+        out = append_text((char *)sector, out, 512, " DONE bytes=");
+        out = append_uint((char *)sector, out, 512, size);
+        out = append_text((char *)sector, out, 512, "\n");
+        if (dev->write(dev->context, 0, 1, sector) != 0) { scratch_log("header write failed ", 0); return -1; }
+        scratch_log("done bytes=", size);
+        scratch_log("entries=", entries);
+        return 1;
+    }
+    return 0;
 }

@@ -26,6 +26,7 @@
 #include "fs/exfat.h"
 #include "fs/initramfs.h"
 #include "fs/install.h"
+#include "power/power.h"
 #include "fs/ntfs.h"
 #include "fs/persistfs.h"
 #include "fs/vfs.h"
@@ -442,6 +443,10 @@ void kernel_main(void *multiboot_info) {
         } else {
             boot_line("storage", "persistent state unavailable, continuing with ramfs only");
         }
+    }
+
+    if (live_installer && system_install_export_scratch() != 0) {
+        power_shutdown();
     }
 
     bootstage_set(20, "mounts");

@@ -13,9 +13,13 @@
 #define INITRAMFS_INCLUDE_ICON_ASSETS 1
 #endif
 
+#ifndef INITRAMFS_INCLUDE_FONT_ASSETS
+#define INITRAMFS_INCLUDE_FONT_ASSETS 1
+#endif
 
 
-#if INITRAMFS_INCLUDE_ICON_ASSETS
+
+#if INITRAMFS_INCLUDE_FONT_ASSETS
 extern const char font_asset_ui2x_start[];
 extern const char font_asset_ui2x_end[];
 extern const char font_asset_ttf_sans_start[], font_asset_ttf_sans_end[];
@@ -240,6 +244,8 @@ int initramfs_populate(void) {
             return -1;
         }
     }
+#endif
+#if INITRAMFS_INCLUDE_FONT_ASSETS
     if (vfs_seed_readonly("/usr/share/fonts/ui-2x.icf", font_asset_ui2x_start,
                           (uint64_t)(font_asset_ui2x_end - font_asset_ui2x_start)) != 0) {
         return -1;

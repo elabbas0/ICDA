@@ -321,12 +321,24 @@ int persistfs_import_image(const char *buffer_in, uint64_t size, uint64_t *entri
     return 0;
 }
 
+static int persistfs_device_partitioned(const block_device_t *dev) {
+    for (uint32_t i = 0; i < partition_count(); i++) {
+        const partition_info_t *part = partition_get(i);
+        if (part && part->device == dev) return 1;
+    }
+    return 0;
+}
+
 static int persistfs_sync_to_device(block_device_t *dev) {
     char *buffer = 0;
     uint64_t size = 0;
 
     if (!dev) {
         return -101;
+    }
+    /* never raw-write the tail of a partitioned disk (backup GPT, other OSes) */
+    if (persistfs_device_partitioned(dev)) {
+        return -107;
     }
     if (persistfs_start_lba_for_device(dev) == 0) {
         return -106;
@@ -436,6 +448,13 @@ int persistfs_init(void) {
     }
     dev = block_get(0);
     if (!dev) {
+        return -1;
+    }
+    /* The raw-sector backend uses the last sectors of the disk.  That is only
+     * safe on a disk ICDA owns outright: on a partitioned disk those sectors
+     * hold the backup GPT and usually another OS's partitions (a dual-boot
+     * laptop keeps the Windows recovery partition there). */
+    if (persistfs_device_partitioned(dev)) {
         return -1;
     }
     persistfs_available = 1;
