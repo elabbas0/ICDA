@@ -1,6 +1,7 @@
 #include "lx.h"
 #include "../cpu/isr.h"
 #include "../cpu/gdt.h"
+#include "../cpu/smp.h"
 #include "../dev/devops.h"
 #include "../drivers/rtc/rtc.h"
 #include "../drivers/serial/serial.h"
@@ -1886,6 +1887,7 @@ static void lx_fork_child_start(void) {
     pf_set_current_as(p->addr_space);
     tss_set_rsp0(t->user_entry_stack_top ? t->user_entry_stack_top : t->kernel_stack_top);
     cpu_set_fs_base(t->fs_base);
+    bkl_exit();
     lx_resume_user(&frame);
 }
 

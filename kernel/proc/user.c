@@ -3,6 +3,7 @@
 
 #include "sched.h"
 #include "../cpu/gdt.h"
+#include "../cpu/smp.h"
 #include "../drivers/console/console.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
@@ -851,6 +852,7 @@ void user_thread_start(void) {
     vmm_switch_address_space(proc->addr_space);
     pf_set_current_as(proc->addr_space);
     tss_set_rsp0(thread->user_entry_stack_top ? thread->user_entry_stack_top : thread->kernel_stack_top);
+    bkl_exit();
     user_enter(thread->user_rip, thread->user_rsp);
     user_thread_finish();
 }

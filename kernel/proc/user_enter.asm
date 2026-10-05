@@ -4,7 +4,7 @@ bits 64
 %define GDT_USER_DATA 0x20
 
 global user_enter
-extern current_thread_ptr
+extern sched_current_thread
 
 %define THREAD_USER_RETURN_RSP 72
 %define THREAD_USER_RETURN_RBX 80
@@ -14,7 +14,13 @@ extern current_thread_ptr
 %define THREAD_USER_RETURN_R14 112
 %define THREAD_USER_RETURN_R15 120
 user_enter:
-    mov rax, [rel current_thread_ptr]
+    push rdi
+    push rsi
+    sub rsp, 8
+    call sched_current_thread
+    add rsp, 8
+    pop rsi
+    pop rdi
     mov [rax + THREAD_USER_RETURN_RSP], rsp
     mov [rax + THREAD_USER_RETURN_RBX], rbx
     mov [rax + THREAD_USER_RETURN_RBP], rbp

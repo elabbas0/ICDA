@@ -136,3 +136,4 @@ gui-cursor.txt
 # local transfer archives and scratch scripts
 *.tar.gz
 scripts/locate-cursor*.ps1
+ap_trampoline.bin

@@ -141,7 +141,7 @@ int sb16_init(void) {
         return -1;
     }
 
-    phys = (uint64_t)(uintptr_t)sb16_dma_static;
+    phys = (uint64_t)(uintptr_t)sb16_dma_static - KERNEL_VMA;
     if ((phys + SB16_DMA_MAX_CHUNK) > SB16_DMA_LOW_LIMIT) {
         sb16_error = 2;
         return -1;

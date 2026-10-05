@@ -462,9 +462,9 @@ int vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     }
 
     uint64_t kstart = 0x100000ULL;
-    uint64_t ksize  = (uint64_t)kernel_end - kstart;
+    uint64_t ksize  = (uint64_t)kernel_end - KERNEL_VMA - kstart;
     for (uint64_t off = 0; off < ksize + PAGE_SIZE_4K; off += PAGE_SIZE_4K)
-        if (vmm_map_page(&kernel_as, KERNEL_VMA + off, kstart + off, VMM_FLAGS_KERNEL_RW) != 0)
+        if (vmm_map_page(&kernel_as, KERNEL_VMA + kstart + off, kstart + off, VMM_FLAGS_KERNEL_RW) != 0)
             return -1;
 
     

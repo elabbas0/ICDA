@@ -115,6 +115,7 @@ typedef struct thread {
     uint8_t          fpu_state[512] __attribute__((aligned(16)));
     uint64_t         fs_base;
     void            *lx_frame;
+    int              pinned;
 } thread_t;
 
 #endif

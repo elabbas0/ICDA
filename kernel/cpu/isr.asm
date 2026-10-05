@@ -85,6 +85,7 @@ IRQ 12, 44
 IRQ 13, 45    
 IRQ 14, 46    
 IRQ 15, 47    
+IRQ 16, 48
 SYSCALL syscall128, 128
 
 %define GDT_KERNEL_DATA 0x10
@@ -213,7 +214,7 @@ irq_common:
     iretq
 
 extern syscall_handler
-extern current_thread_ptr
+extern sched_current_thread
 extern user_thread_finish
 
 %define THREAD_KERNEL_STACK_TOP 32
@@ -257,8 +258,9 @@ syscall_common:
     
     
     
+    call sched_current_thread
+    mov r11, rax
     mov rax, [rsp + 14*8]
-    mov r11, [rel current_thread_ptr]
     cmp qword [r11 + THREAD_USER_RETURN_PENDING], 0
     je .sysret_user
     mov qword [r11 + THREAD_USER_RETURN_PENDING], 0
@@ -295,19 +297,19 @@ syscall_common:
 
 
 global linux_syscall_entry
-extern syscall_kstack_top
-extern syscall_user_rsp
 
 linux_syscall_entry:
-    mov [rel syscall_user_rsp], rsp
-    mov rsp, [rel syscall_kstack_top]
+    swapgs
+    mov [gs:16], rsp
+    mov rsp, [gs:8]
     push qword 0x23
-    push qword [rel syscall_user_rsp]
+    push qword [gs:16]
     push r11
     push qword 0x1B
     push rcx
     push 0
     push 128
+    swapgs
     jmp syscall_common
 
 global lx_resume_user

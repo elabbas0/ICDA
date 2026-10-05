@@ -9,20 +9,20 @@
 #include "../proc/process.h"
 #include "../fs/fd.h"
 #include "../linux/lx.h"
+#include "../cpu/smp.h"
 #include "../ipc/shm.h"
 #include "../tty/pty.h"
 
 
 
 
-static addr_space_t *current_as = NULL;
-
 void pf_set_current_as(addr_space_t *as) {
-    current_as = as;
+    this_cpu()->active_as = as;
 }
 
 static inline addr_space_t *active_as(void) {
-    return current_as ? current_as : vmm_kernel_address_space();
+    addr_space_t *as = (addr_space_t *)this_cpu()->active_as;
+    return as ? as : vmm_kernel_address_space();
 }
 
 

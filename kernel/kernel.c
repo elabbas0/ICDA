@@ -38,6 +38,7 @@
 
 #include "cpu/gdt.h"
 #include "linux/lx.h"
+#include "cpu/smp.h"
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
@@ -245,6 +246,7 @@ void kernel_main(void *multiboot_info) {
         boot_halt("memory", "virtual memory manager failed to map kernel space");
     }
     bootstage_set(6, "vmm");
+    pmm_use_hhdm();
     pmm_refs_init();
     boot_line("memory", "higher-half mappings active");
 
@@ -271,6 +273,7 @@ void kernel_main(void *multiboot_info) {
     boot_line("cpu", "x87/sse state switching enabled");
 
     sched_init();
+    bkl_enter();
     bootstage_set(10, "sched");
     boot_line("scheduler", "scheduler core online");
 
@@ -470,6 +473,7 @@ void kernel_main(void *multiboot_info) {
                 fb_clear(FB_BLACK);
             }
         }
+        smp_init(multiboot_info);
         bootstage_set(22, "shell");
 #if CI_SELFTEST
         

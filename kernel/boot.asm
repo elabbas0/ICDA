@@ -41,9 +41,10 @@ multiboot_end:
 
 
 
-section .bss
+section .boot_bss nobits alloc write align=4096
 alignb 4096
 pml4_table:     resb 4096
+pdp_high:       resb 4096
 pdp_table:      resb 4096
 
 
@@ -122,7 +123,7 @@ stack_bottom:
 stack_top:
 
 
-section .data
+section .boot_data progbits alloc write
 align 8
 gdt64:
     dq 0
@@ -132,7 +133,7 @@ gdt64:
     dw $ - gdt64 - 1
     dq gdt64
 
-section .text
+section .boot_text progbits alloc exec
 global _start
 global multiboot_info_ptr
 extern kernel_main
@@ -191,6 +192,17 @@ _start:
     mov [pdp_table + 3 * 8], eax
 
     
+    ; higher half: PML4[511] -> pdp_high, 0xFFFFFFFF80000000 -> physical 0..2GB
+    mov eax, pdp_high
+    or eax, 0b11
+    mov [pml4_table + 511 * 8], eax
+    mov eax, pd_table_0
+    or eax, 0b11
+    mov [pdp_high + 510 * 8], eax
+    mov eax, pd_table_1
+    or eax, 0b11
+    mov [pdp_high + 511 * 8], eax
+
     map_pd pd_table_0, 0
     map_pd pd_table_1, 1
     map_pd pd_table_2, 2
@@ -273,7 +285,10 @@ bits 64
     
     xor rdi, rdi
     mov edi, [multiboot_info_ptr]
-    call kernel_main
+    mov rax, stack_top + 0xFFFFFFFF80000000
+    mov rsp, rax
+    mov rax, kernel_main
+    call rax
     hlt
 
 

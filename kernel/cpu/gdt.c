@@ -1,4 +1,5 @@
 #include "gdt.h"
+#include "smp.h"
 
 
 #define GDT_ENTRIES 7
@@ -70,6 +71,8 @@ void gdt_init() {
     tss_high[0] = (uint32_t)(tss_base >> 32);
     tss_high[1] = 0;
 
+    smp_cpus[0].self = (uint64_t)&smp_cpus[0];
+    smp_cpus[0].tss = &tss;
     gdt_flush((uint64_t)&gp);
 
     
@@ -77,13 +80,12 @@ void gdt_init() {
 }
 
 void tss_set_rsp0(uint64_t rsp0) {
-    extern uint64_t syscall_kstack_top;
-    tss.rsp0 = rsp0;
-    syscall_kstack_top = rsp0;
+    cpu_t *c = this_cpu();
+    if (!c->tss) c->tss = &tss;
+    c->tss->rsp0 = rsp0;
+    c->kstack_top = rsp0;
 }
 
-uint64_t syscall_kstack_top = 0;
-uint64_t syscall_user_rsp = 0;
 extern void linux_syscall_entry(void);
 
 static void wrmsr64(uint32_t msr, uint64_t v) {
@@ -101,6 +103,7 @@ void cpu_syscall_init(void) {
     wrmsr64(0xC0000081U, ((uint64_t)GDT_KERNEL_CODE << 32) | ((uint64_t)(GDT_KERNEL_DATA | 3) << 48));
     wrmsr64(0xC0000082U, (uint64_t)(uintptr_t)linux_syscall_entry);
     wrmsr64(0xC0000084U, 0x200U | 0x400U | 0x100U | 0x40000U);
+    wrmsr64(0xC0000102U, (uint64_t)(uintptr_t)this_cpu()); /* KERNEL_GS_BASE */
 }
 
 uint64_t cpu_fs_base(void) {

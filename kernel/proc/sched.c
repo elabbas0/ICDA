@@ -4,6 +4,7 @@
 #include "../memory/vmm.h"
 #include "../memory/pf.h"
 #include "../cpu/gdt.h"
+#include "../cpu/smp.h"
 #include "../cpu/fpu.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
@@ -15,8 +16,9 @@ extern void switch_context(thread_t *prev, thread_t *next);
 extern void user_thread_start(void);
 static void kthread_trampoline(void);
 
-thread_t *current_thread_ptr = NULL;
-static thread_t *idle_thread_ptr = NULL;
+#define current_thread_ptr (this_cpu()->current)
+#define idle_thread_ptr (this_cpu()->idle)
+static process_t *idle_process = NULL;
 static process_t *process_list = NULL;
 static uint64_t next_pid = 0;
 static uint64_t next_tid = 0;
@@ -160,10 +162,17 @@ static void enqueue(thread_t *thread) {
     thread->next = current_thread_ptr;
 }
 
-static void idle_thread_main(void) {
+/* Idle loop for every CPU: drop the kernel lock and sleep until an
+ * interrupt; the interrupt path takes the lock again and may schedule. */
+void sched_idle_loop(void) {
     for (;;) {
-        __asm__ volatile("sti; hlt");
+        bkl_exit();
+        __asm__ volatile("sti; hlt; cli");
     }
+}
+
+static void idle_thread_main(void) {
+    sched_idle_loop();
 }
 
 static void prepare_kernel_thread_stack(thread_t *thread, uint64_t stack_top, void (*entry)(void)) {
@@ -259,6 +268,8 @@ void sched_init(void) {
     idle_thread->owner = idle_proc;
     prepare_kernel_thread_stack(idle_thread, idle_stack_top, idle_thread_main);
     idle_thread_ptr = idle_thread;
+    idle_thread->pinned = 1;
+    idle_process = idle_proc;
 
     bootstrap_thread->next = idle_thread;
     idle_thread->next = bootstrap_thread;
@@ -355,25 +366,33 @@ static void schedule_inner(int force) {
         return;
     }
 
-    if (!force && ++tick_count % SCHED_TICKS != 0) {
+    if (!force && ++this_cpu()->ticks % SCHED_TICKS != 0) {
         return;
     }
+    (void)tick_count;
+    (void)candidate_idle;
 
+    /* Threads running on other CPUs are RUNNING and skipped; idle threads
+     * are pinned to their CPU and only used when nothing else is ready. */
     next = current_thread_ptr->next;
     while (1) {
-        if ((next->state == THREAD_READY || next->state == THREAD_RUNNING) && next != idle_thread_ptr) {
+        if (next->state == THREAD_READY && !next->pinned) {
             break;
         }
-        if ((next->state == THREAD_READY || next->state == THREAD_RUNNING) && next == idle_thread_ptr) {
-            candidate_idle = next;
+        if (next == current_thread_ptr) {
+            if (next->state != THREAD_RUNNING || next->pinned) next = NULL;
+            break;
         }
         next = next->next;
-        if (++laps > 1024) {
-            next = candidate_idle;
+        if (++laps > 4096) {
+            next = NULL;
             break;
         }
     }
 
+    if (!next) {
+        next = idle_thread_ptr;
+    }
     if (!next) {
         return;
     }
@@ -404,9 +423,36 @@ static void schedule_inner(int force) {
     switch_context(prev, next);
 }
 
+/* Called from the PIT interrupt before the kernel lock is taken, so time
+ * keeps moving even while another CPU holds the lock. */
+void sched_tick(void) {
+    __sync_fetch_and_add(&uptime_ticks, 1);
+}
+
+/* Per-CPU LAPIC timer on application processors: preemption only. */
+void sched_ap_tick(void) {
+    if (current_thread_ptr && current_thread_ptr->owner) {
+        current_thread_ptr->owner->cpu_ticks++;
+    }
+    schedule_inner(0);
+}
+
+/* Creates the pinned idle thread for an application processor; its stack is
+ * the AP boot stack, set up when the AP starts. */
+thread_t *sched_create_idle(uint32_t cpu_index) {
+    thread_t *t = alloc_thread();
+    if (!t) return NULL;
+    t->tid = next_tid++;
+    t->state = THREAD_RUNNING;
+    t->owner = idle_process;
+    t->pinned = (int)cpu_index + 1;
+    fpu_state_init(t->fpu_state);
+    enqueue(t);
+    return t;
+}
+
 void schedule(struct registers *regs) {
     (void)regs;
-    uptime_ticks++;
     
 
     if (current_thread_ptr && current_thread_ptr->owner) {

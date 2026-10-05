@@ -19,6 +19,7 @@ uint64_t pmm_free_frames();
 uint64_t pmm_total_frames();
 uint64_t pmm_next_free_frame();
 void     pmm_refs_init(void);
+void     pmm_use_hhdm(void);
 void     pmm_ref(uint64_t addr);
 uint64_t pmm_refcount(uint64_t addr);
 void     pmm_print_stats();

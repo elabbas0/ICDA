@@ -3,6 +3,9 @@
 #include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
 #include "../linux/lx.h"
+#include "smp.h"
+#include "lapic.h"
+#include "../proc/sched.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
@@ -111,10 +114,11 @@ void irq_register(int irq, irq_handler_t handler) {
 
 void isr_handler(struct registers* regs) {
     uint64_t num = regs->int_no;
+    int took = bkl_enter();
 
-    
     if (num < 32 && isr_handlers[num]) {
         isr_handlers[num](regs);
+        if (took) bkl_exit();
         return;
     }
 
@@ -125,8 +129,24 @@ void isr_handler(struct registers* regs) {
 }
 
 
+static void irq_dispatch(struct registers* regs, int irq);
+
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
+    int took;
+
+    if (irq == 0) sched_tick();
+    took = bkl_enter();
+    irq_dispatch(regs, irq);
+    if (took) bkl_exit();
+}
+
+static void irq_dispatch(struct registers* regs, int irq) {
+    if (irq == 16) {
+        lapic_eoi();
+        sched_ap_tick();
+        return;
+    }
 
     
 
@@ -150,6 +170,12 @@ void irq_handler(struct registers* regs) {
 }
 
 void syscall_handler(struct registers* regs) {
+    int took = bkl_enter();
+    thread_t *t;
     regs->rax = syscall_dispatch(regs);
     lx_after_syscall(regs);
+    t = sched_current_thread();
+    /* An exiting thread keeps the lock: user_thread_finish still runs kernel
+     * code and hands the lock to the next thread when it yields. */
+    if (took && !(t && t->user_return_pending)) bkl_exit();
 }

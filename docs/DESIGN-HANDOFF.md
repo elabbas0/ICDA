@@ -669,6 +669,49 @@ identity map is no longer global, so static binaries can load at
 - freeing process and thread structs after reaping (about 28 KB each);
 - asynchronous signal delivery to a process spinning in user mode.
 
+### Higher-half kernel and SMP
+
+**Higher-half kernel.** The kernel is linked at `0xFFFFFFFF80000000 +
+physical`; see `kernel/linker.ld`. Only the multiboot header and the 32-bit
+bootstrap (`.boot*` in `boot.asm`) stay low. The bootstrap maps
+PML4[511], jumps high, and moves onto the high alias of the boot stack.
+
+Kernel C code is built with `-mcmodel=kernel -mno-red-zone`. The pmm
+bitmap moves to the HHDM after `vmm_init` (`pmm_use_hhdm`). The whole
+lower half now belongs to user programs. Before this change, a static
+Linux binary at 0x400000 shadowed the kernel image (which runs to about
+24 MB) whenever its address space was active.
+
+**SMP.** `kernel/cpu/smp.c` starts every enabled MADT LAPIC with
+INIT-SIPI-SIPI through `ap_trampoline.asm`. That code is a flat binary
+copied to 0x8000: it goes from real mode to long mode on the kernel PML4
+and calls `ap_entry`. Each CPU has a `cpu_t` holding:
+- its own GDT and TSS;
+- the current and pinned idle thread;
+- its active address space;
+- the syscall stack, which the `syscall` entry stub reaches through
+  `swapgs` and KERNEL_GS_BASE.
+
+`this_cpu()` maps the LAPIC ID to the CPU index.
+
+**Big kernel lock.** Kernel code still assumes a single CPU, so a big
+kernel lock (a fair ticket lock) serializes it:
+- Every interrupt, exception and syscall entry takes the lock if this CPU
+  does not already hold it.
+- New threads and fork children drop it just before entering user mode.
+- Idle threads drop it before `hlt`.
+
+User code runs in parallel on all CPUs. The PIT tick is counted before the
+lock is taken, so timeouts keep advancing.
+
+**Timers.** APs get a calibrated periodic LAPIC timer on vector 48 for
+preemption. Device IRQs stay on the BSP, which runs the 8259 through
+LINT0 in virtual-wire mode.
+
+**Testing note.** On a 4-thread host, running 4 busy vCPUs starves QEMU,
+and PS/2 keys get dropped. That is an emulator limit; use `-smp 2` or
+fewer busy jobs.
+
 ## Regenerating assets
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install pillow fonttools

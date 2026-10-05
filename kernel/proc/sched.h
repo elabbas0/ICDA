@@ -11,6 +11,10 @@ process_t *proc_create_kernel(void (*entry)(void));
 thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t user_rsp, void (*entry)(void));
 void schedule(struct registers *regs);
 void sched_yield(void);
+void sched_tick(void);
+void sched_ap_tick(void);
+void sched_idle_loop(void);
+thread_t *sched_create_idle(uint32_t cpu_index);
 void sched_wake_thread(thread_t *thread);
 
 thread_t *sched_current_thread(void);

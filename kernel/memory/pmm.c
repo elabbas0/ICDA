@@ -122,7 +122,7 @@ void pmm_init(void *multiboot_info) {
     uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
     uint64_t bitmap_bytes = bitmap_words * 8;
     uint64_t multiboot_end = (uint64_t)multiboot_info + info->total_size;
-    uint64_t bitmap_base = (uint64_t)kernel_end;
+    uint64_t bitmap_base = (uint64_t)kernel_end - 0xFFFFFFFF80000000ULL;
     if (multiboot_end > bitmap_base)
         bitmap_base = multiboot_end;
     bitmap_base = align_up_u64(bitmap_base, 4096);
@@ -162,7 +162,7 @@ void pmm_init(void *multiboot_info) {
     
     frame_set(0);
     mark_used(0x0, 0x100000);
-    mark_used(0x100000, (uint64_t)kernel_end - 0x100000);
+    mark_used(0x100000, (uint64_t)kernel_end - 0xFFFFFFFF80000000ULL - 0x100000);
     mark_used((uint64_t)bitmap, bitmap_bytes);
     mark_used((uint64_t)multiboot_info, info->total_size);
 
@@ -375,4 +375,13 @@ uint64_t pmm_refcount(uint64_t addr) {
     uint64_t frame = ADDR_TO_FRAME(addr);
     if (!frame_refs || frame >= total_frames) return 1;
     return (uint64_t)frame_refs[frame] + 1;
+}
+
+/* Until the kernel address space exists the bitmap is reached through the
+ * boot identity map; afterwards it moves to the HHDM, which every address
+ * space shares (the identity range belongs to user programs). */
+void pmm_use_hhdm(void) {
+    if ((uint64_t)bitmap < 0xFFFF800000000000ULL) {
+        bitmap = (uint64_t *)((uint64_t)bitmap + 0xFFFF800000000000ULL);
+    }
 }

@@ -119,3 +119,53 @@ uint32_t lapic_id(void) {
 uint64_t lapic_physical_base(void) {
     return lapic_phys;
 }
+
+#define LAPIC_REG_ICR_LOW  0x300
+#define LAPIC_REG_ICR_HIGH 0x310
+
+/* Enables this AP's local APIC; the MMIO mapping is shared with the BSP. */
+void lapic_enable_ap(void) {
+    uint64_t apic_base = rdmsr(IA32_APIC_BASE_MSR) | IA32_APIC_BASE_EN;
+    wrmsr(IA32_APIC_BASE_MSR, apic_base);
+    lapic_write(LAPIC_REG_TPR, 0);
+    lapic_write(LAPIC_REG_SVR, 47 | LAPIC_SVR_ENABLE);
+    lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_ERROR, 46);
+    lapic_stop_timer();
+}
+
+void lapic_send_ipi(uint32_t apic_id, uint32_t low) {
+    if (!lapic_base) return;
+    lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
+    lapic_write(LAPIC_REG_ICR_LOW, low);
+    while (lapic_read(LAPIC_REG_ICR_LOW) & (1U << 12)) __asm__ volatile("pause");
+}
+
+void lapic_timer_periodic(uint8_t vector, uint32_t count) {
+    if (!lapic_base || !count) return;
+    lapic_write(LAPIC_REG_DIVIDE, 0x3);
+    lapic_write(LAPIC_REG_LVT_TIMER, vector | LAPIC_TIMER_PERIODIC);
+    lapic_write(LAPIC_REG_INITIAL_CNT, count);
+}
+
+/* Measures LAPIC timer counts (divide by 16) per PIT tick. */
+uint32_t lapic_calibrate(void (*wait_ticks)(uint64_t)) {
+    uint32_t left;
+    if (!lapic_base) return 0;
+    lapic_write(LAPIC_REG_DIVIDE, 0x3);
+    lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED | 32);
+    wait_ticks(1);
+    lapic_write(LAPIC_REG_INITIAL_CNT, 0xFFFFFFFFU);
+    wait_ticks(10);
+    left = lapic_read(LAPIC_REG_CURRENT_CNT);
+    lapic_stop_timer();
+    return (0xFFFFFFFFU - left) / 10;
+}
+
+/* PIC mode: LINT0 delivers the 8259's INTR (ExtINT), LINT1 is NMI. */
+void lapic_virtual_wire(void) {
+    if (!lapic_base) return;
+    lapic_write(LAPIC_REG_LVT_LINT0, 0x700);
+    lapic_write(LAPIC_REG_LVT_LINT1, 0x400);
+}

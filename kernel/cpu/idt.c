@@ -73,7 +73,13 @@ void idt_init() {
     idt_set_entry(45, (uint64_t)irq13, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(46, (uint64_t)irq14, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(47, (uint64_t)irq15, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
+    idt_set_entry(48, (uint64_t)irq16, IDT_PRESENT | IDT_RING0 | IDT_INTERRUPT);
     idt_set_entry(128, (uint64_t)syscall128, IDT_PRESENT | IDT_RING3 | IDT_INTERRUPT);
 
+    idt_flush((uint64_t)&ip);
+}
+
+/* Loads the shared IDT on an application processor. */
+void idt_reload(void) {
     idt_flush((uint64_t)&ip);
 }
