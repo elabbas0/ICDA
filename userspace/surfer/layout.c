@@ -499,6 +499,7 @@ static void finish_line(line_t *ln, int last) {
                     for (box_t *k = q->first; k && sp < 256; k = k->next) stack[sp++] = k;
                 }
             }
+            if (!b->parent) add_child(ln->container, b);
         }
     }
     if (ln->first_line) ln->first_baseline = ln->y + above;

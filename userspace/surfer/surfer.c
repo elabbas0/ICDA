@@ -727,10 +727,6 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         sf.addr_focused = 0;
         if (ic_ui_hit(p, ev->x, ev->y)) {
             dom_node_t *ln = link_at(app, ev->x, ev->y);
-            char line[URL_CAP + 64];
-            snprintf(line, sizeof line, "[surfer] click %d,%d -> %s\n", ev->x - p.x, ev->y - p.y + (int)sf.scroll,
-                     ln && dom_attr(ln, "href") ? dom_attr(ln, "href") : "(none)");
-            icda_write_file("/dev/serial", line, strlen(line));
             if (ln) open_link(dom_attr(ln, "href"));
         }
         break;
