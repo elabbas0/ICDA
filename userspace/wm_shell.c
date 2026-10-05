@@ -11,7 +11,7 @@
 const wm_app_t wm_apps[] = {
     { "Explorer",     "explorer", "/apps/desktop.app" },
     { "Terminal",     "terminal", "/apps/terminal.app" },
-    { "Browser",      "browser",  "/apps/browser.app" },
+    { "Surfer",       "browser",  "/apps/browser.app" },
     { "Editor",       "editor",   "/apps/editor.app" },
     { "Music",        "music",    "/apps/audioplay.app" },
     { "Disk Utility", "disk",     "/apps/diskman.app" },

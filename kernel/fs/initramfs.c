@@ -18,6 +18,9 @@
 #if INITRAMFS_INCLUDE_ICON_ASSETS
 extern const char font_asset_ui2x_start[];
 extern const char font_asset_ui2x_end[];
+extern const char font_asset_ttf_sans_start[], font_asset_ttf_sans_end[];
+extern const char font_asset_ttf_bold_start[], font_asset_ttf_bold_end[];
+extern const char font_asset_ttf_mono_start[], font_asset_ttf_mono_end[];
 #endif
 
 #ifndef CI_IMAGE
@@ -239,6 +242,14 @@ int initramfs_populate(void) {
     }
     if (vfs_seed_readonly("/usr/share/fonts/ui-2x.icf", font_asset_ui2x_start,
                           (uint64_t)(font_asset_ui2x_end - font_asset_ui2x_start)) != 0) {
+        return -1;
+    }
+    if (vfs_seed_readonly("/usr/share/fonts/Inter-Regular.ttf", font_asset_ttf_sans_start,
+                          (uint64_t)(font_asset_ttf_sans_end - font_asset_ttf_sans_start)) != 0 ||
+        vfs_seed_readonly("/usr/share/fonts/Inter-SemiBold.ttf", font_asset_ttf_bold_start,
+                          (uint64_t)(font_asset_ttf_bold_end - font_asset_ttf_bold_start)) != 0 ||
+        vfs_seed_readonly("/usr/share/fonts/JetBrainsMono-Regular.ttf", font_asset_ttf_mono_start,
+                          (uint64_t)(font_asset_ttf_mono_end - font_asset_ttf_mono_start)) != 0) {
         return -1;
     }
 #endif

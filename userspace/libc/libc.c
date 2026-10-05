@@ -286,6 +286,38 @@ long long strtoll(const char *s, char **end, int base) {
 
 long strtol(const char *s, char **end, int base) { return (long)strtoll(s, end, base); }
 unsigned long strtoul(const char *s, char **end, int base) { return (unsigned long)strtoull(s, end, base); }
+
+/* Decimal floating point: [ws][sign]digits[.digits][e[sign]digits]. */
+double strtod(const char *s, char **end) {
+    const char *p = s;
+    double v = 0, scale = 1;
+    int neg = 0, digits = 0;
+    while (*p == ' ' || (*p >= '\t' && *p <= '\r')) p++;
+    if (*p == '+' || *p == '-') neg = *p++ == '-';
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p++ - '0'); digits++; }
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') { scale /= 10; v += (*p++ - '0') * scale; digits++; }
+    }
+    if (!digits) {
+        if (end) *end = (char *)s;
+        return 0;
+    }
+    if (*p == 'e' || *p == 'E') {
+        const char *q = p + 1;
+        int eneg = 0, e = 0;
+        if (*q == '+' || *q == '-') eneg = *q++ == '-';
+        if (*q >= '0' && *q <= '9') {
+            while (*q >= '0' && *q <= '9') { if (e < 400) e = e * 10 + (*q - '0'); q++; }
+            while (e-- > 0) v = eneg ? v / 10 : v * 10;
+            p = q;
+        }
+    }
+    if (end) *end = (char *)p;
+    return neg ? -v : v;
+}
+
+double atof(const char *s) { return strtod(s, 0); }
 int atoi(const char *s) { return (int)strtol(s, 0, 10); }
 long atol(const char *s) { return strtol(s, 0, 10); }
 int abs(int v) { return v < 0 ? -v : v; }

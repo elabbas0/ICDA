@@ -483,8 +483,15 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h $(IC_HEADER
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/browser.c -o /tmp/icda-browser.o
 	cp -f /tmp/icda-browser.o browser.o
 
-userspace/browser.app: crt0.o browser_start.o browser.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app browser_start.o browser.o gui.o libicda.o
+SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o
+
+surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
+	$(CC) $(SURFER_CFLAGS) -Iuserspace -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+# /apps/browser.app is Surfer.
+userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o
 	cp -f /tmp/icda-browser.app userspace/browser.app
 
 settings.o: userspace/settings.c userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
@@ -576,7 +583,7 @@ icon_assets_gen.o: kernel/fs/icon_assets_gen.c kernel/fs/icon_assets_gen.h
 icon_assets.o: kernel/proc/icon_assets.asm kernel/fs/icon_assets_gen.c
 	$(ASM) -f elf64 kernel/proc/icon_assets.asm -o icon_assets.o
 
-font_assets.o: kernel/proc/font_assets.asm resources/fonts/ui-2x.icf
+font_assets.o: kernel/proc/font_assets.asm resources/fonts/ui-2x.icf resources/fonts/Inter-Regular.ttf resources/fonts/Inter-SemiBold.ttf resources/fonts/JetBrainsMono-Regular.ttf
 	$(ASM) -f elf64 kernel/proc/font_assets.asm -o font_assets.o
 
 curl_start.o: userspace/curl_start.asm
