@@ -35,7 +35,20 @@ SUBPIXEL = 2
 KERN_MIN_UNITS = 12     
 
 
-EXTRA_CPS = [0x2026, 0x2022, 0x2014, 0x2013, 0x00B7, 0x00A9, 0x00B0, 0x2019]
+# Non-ASCII glyphs, sorted (ic_font.c binary-searches them): Latin-1, common
+# punctuation and symbols, arrows, and the box-drawing/block characters that
+# terminal programs use.  Glyphs a font lacks render as "?".
+EXTRA_CPS = sorted(set(
+    list(range(0xA0, 0x100))
+    + [0x0152, 0x0153, 0x0160, 0x0161, 0x0178, 0x017D, 0x017E, 0x0192]
+    + [0x2013, 0x2014, 0x2018, 0x2019, 0x201A, 0x201C, 0x201D, 0x201E, 0x2020, 0x2021,
+       0x2022, 0x2026, 0x2030, 0x2039, 0x203A, 0x20AC, 0x2122]
+    + [0x2190, 0x2191, 0x2192, 0x2193, 0x2194, 0x2195]
+    + [0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, 0x252C, 0x2534, 0x253C,
+       0x2550, 0x2551, 0x2554, 0x2557, 0x255A, 0x255D, 0x2560, 0x2563, 0x2566, 0x2569, 0x256C,
+       0x2580, 0x2584, 0x2588, 0x258C, 0x2590, 0x2591, 0x2592, 0x2593,
+       0x25A0, 0x25B2, 0x25B6, 0x25BC, 0x25C0, 0x25CF]
+))
 CODEPOINTS = list(range(32, 127)) + EXTRA_CPS
 
 FILES = {
@@ -181,7 +194,7 @@ def build():
         pairs = gpos_kern_pairs(tt, [n for n in names if n])
         rows = []
         for (l, r), v in sorted(pairs.items(), key=lambda kv: (index[kv[0][0]], index[kv[0][1]])):
-            if abs(v) < KERN_MIN_UNITS:
+            if abs(v) < KERN_MIN_UNITS or index[l] > 255 or index[r] > 255:
                 continue
             rows.append((index[l], index[r], v))
         sym = "ic_kern_%s" % key
@@ -272,7 +285,7 @@ def kern_rows(tt):
     pairs = gpos_kern_pairs(tt, [n for n in names if n])
     rows = []
     for (l, r), v in sorted(pairs.items(), key=lambda kv: (index[kv[0][0]], index[kv[0][1]])):
-        if abs(v) >= KERN_MIN_UNITS:
+        if abs(v) >= KERN_MIN_UNITS and index[l] <= 255 and index[r] <= 255:
             rows.append((index[l], index[r], v))
     return rows
 

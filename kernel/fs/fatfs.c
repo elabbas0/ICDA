@@ -1027,3 +1027,42 @@ int fatfs_truncate(fatfs_t *v, const char *path, uint64_t len) {
     if (fatfs_flush(v) != 0) rc = -1;
     return rc;
 }
+
+/* Renames or moves an entry within the volume: a new directory entry takes
+ * over the same cluster chain and the old slots are released.  A moved
+ * folder gets its ".." entry pointed at the new parent. */
+int fatfs_rename(fatfs_t *v, const char *from, const char *to) {
+    fatfs_entry_t e, parent, existing;
+    const char *leaf;
+    char name[FATFS_NAME_MAX];
+    uint32_t len;
+    uint8_t d[32];
+    if (fatfs_lookup(v, from, &e) != 0 || e.name[0] == '/') return -1;
+    if (split_parent(v, to, &parent, &leaf) != 0) return -1;
+    len = leaf_len(leaf);
+    if (!len || len + 1 > sizeof(name)) return -1;
+    mem_copy(name, leaf, len);
+    name[len] = 0;
+    if (find_in_dir(v, parent.cluster, leaf, len, &existing) == 0) {
+        if ((existing.attr & FATFS_ATTR_DIR) || (e.attr & FATFS_ATTR_DIR)) return -1;
+        if (remove_entry(v, to, 0) != 0) return -1;
+        if (fatfs_lookup(v, from, &e) != 0) return -1;
+    }
+    if (create_entry(v, parent.cluster, name, e.attr, e.cluster, e.size) != 0) {
+        fatfs_flush(v);
+        return -1;
+    }
+    for (uint32_t s = e.first_slot; s <= e.short_slot; s++) {
+        if (slot_read(v, e.dir_cluster, s, d) != 0) return -1;
+        d[0] = SLOT_FREE;
+        if (slot_write(v, e.dir_cluster, s, d) != 0) return -1;
+    }
+    if ((e.attr & FATFS_ATTR_DIR) && e.cluster && e.dir_cluster != parent.cluster &&
+        slot_read(v, e.cluster, 1, d) == 0 && d[0] == '.' && d[1] == '.') {
+        uint32_t up = parent.cluster == v->root_cluster ? 0 : parent.cluster;
+        wr16(d + 20, up >> 16);
+        wr16(d + 26, up & 0xFFFFU);
+        slot_write(v, e.cluster, 1, d);
+    }
+    return fatfs_flush(v);
+}

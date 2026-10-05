@@ -712,6 +712,36 @@ LINT0 in virtual-wire mode.
 and PS/2 keys get dropped. That is an emulator limit; use `-smp 2` or
 fewer busy jobs.
 
+### Small fixes (names, rename, UTF-8, Ctrl+Shift)
+- **Long names.** VFS and volume names can be 255 bytes (the limit was 63).
+  Explorer paths can be 512 bytes, and a folder can list up to 1024 items.
+- **Rename.**
+  - `SYS_VFS_RENAME` = 79 (ABI v7) calls `vfs_rename`, which renames or
+    moves any node and replaces an existing file target.
+  - On volumes it calls `fatfs_rename` (new LFN entry on the same chain,
+    old slots freed, `..` repointed when a folder moves) or `exfat_rename`
+    (new entry set, old set marked unused).
+  - Explorer renames folders and files with it, falling back to copy and
+    delete for files only.
+- **UTF-8.**
+  - Font atlases cover Latin-1, common punctuation, €/™, arrows and box
+    drawing: 259 glyphs, binary-searched in `ic_font.c`. Glyphs a font
+    lacks render as `?`.
+  - Kerning stays within the first 256 glyphs.
+  - Terminal cells hold code points, and the output parser decodes UTF-8.
+- **Ctrl+Shift.**
+  - The keyboard driver sends Ctrl+Shift+letter as `ESC [27;6;<code>~`
+    (xterm modifyOtherKeys), and `ic_app` turns that into a key event with
+    CTRL|SHIFT.
+  - In the Terminal, Ctrl+Shift+V pastes.
+- **Linux `getdents64`/`stat`.** These synthesize an inode number for
+  imported volume nodes, which have inode 0. glibc skips entries with
+  inode 0, so before this fix volumes listed as empty.
+
+Regenerating fonts needs network for pip. Inside Docker, pass
+`--dns 8.8.8.8`:
+`docker run --rm --dns 8.8.8.8 -v "$PWD:/workspace" -w /workspace python:3.12-slim sh -c 'pip install -q pillow fonttools && python scripts/gen_fonts.py && python scripts/gen_fonts.py --blob2x'`
+
 ## Regenerating assets
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install pillow fonttools

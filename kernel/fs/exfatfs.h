@@ -80,6 +80,7 @@ int  exfat_remove(exfat_t *vol, const char *path);
 int  exfat_flush(exfat_t *vol);
 int  exfat_write_at(exfat_t *vol, const char *path, uint64_t off, const void *data, uint64_t len);
 int  exfat_truncate(exfat_t *vol, const char *path, uint64_t len);
+int  exfat_rename(exfat_t *vol, const char *from, const char *to);
 int  exfat_usage(exfat_t *vol, uint32_t *free_clusters);
 
 #endif

@@ -9,7 +9,7 @@
 #define VOL_PATH_CAP  512U
 #define VOL_MAX       16U
 #define VOL_DEPTH_MAX 16U
-#define VOL_NAME_MAX  63U
+#define VOL_NAME_MAX  255U
 
 typedef struct {
     int             used;
@@ -91,10 +91,14 @@ static int rel_path(uint8_t id, const char *path, volume_t **out, const char **r
 
 static int volume_external(int op, uint8_t id, const char *path, const char *data, uint64_t size, uint64_t off) {
     volume_t *m;
-    const char *rel;
+    const char *rel, *dst_rel = 0;
     int rc = -1;
     if (id == 0 || id > VOL_MAX || !volumes[id - 1].used) return 0;
     if (rel_path(id, path, &m, &rel) != 0 || !m->writable) return -1;
+    if (op == VFS_EXT_RENAME) {
+        volume_t *m2;
+        if (rel_path(id, data, &m2, &dst_rel) != 0 || m2 != m) return -1;
+    }
     fat_hint.cluster = 0;
     ex_hint.cluster = 0;
     if (m->fs == VOLUME_FAT32) {
@@ -106,6 +110,7 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
             else if (op == VFS_EXT_REMOVE) rc = fatfs_remove(v, rel);
             else if (op == VFS_EXT_WRITE_AT) rc = fatfs_write_at(v, rel, off, data, size);
             else if (op == VFS_EXT_TRUNCATE) rc = fatfs_truncate(v, rel, size);
+            else if (op == VFS_EXT_RENAME) rc = fatfs_rename(v, rel, dst_rel);
         }
         kfree(v);
     } else {
@@ -118,6 +123,7 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
             else if (op == VFS_EXT_REMOVE) rc = exfat_remove(v, rel);
             else if (op == VFS_EXT_WRITE_AT) rc = exfat_write_at(v, rel, off, data, size);
             else if (op == VFS_EXT_TRUNCATE) rc = exfat_truncate(v, rel, size);
+            else if (op == VFS_EXT_RENAME) rc = exfat_rename(v, rel, dst_rel);
         }
         kfree(v);
     }

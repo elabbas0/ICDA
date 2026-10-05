@@ -1119,3 +1119,42 @@ out:
     if (exfat_flush(v) != 0) rc = -1;
     return rc;
 }
+
+/* Renames or moves an entry within the volume.  exFAT folders have no ".."
+ * entries, so a move only rewrites the entry sets. */
+int exfat_rename(exfat_t *v, const char *from, const char *to) {
+    exfat_entry_t *e = (exfat_entry_t *)kmalloc(sizeof(exfat_entry_t));
+    exfat_entry_t *old = (exfat_entry_t *)kmalloc(sizeof(exfat_entry_t));
+    exfat_dir_t parent;
+    const char *leaf;
+    uint32_t leaf_len;
+    cursor_t *k = 0;
+    int rc = -1;
+    if (!e || !old || !v->writable) goto out;
+    if (exfat_lookup(v, from, e) != 0 || !e->set_count) goto out;
+    if (split_path(v, to, &parent, &leaf, &leaf_len) != 0) goto out;
+    if (find_in_dir(v, &parent, leaf, leaf_len, old) == 0) {
+        if ((old->attr & EXFATFS_ATTR_DIR) || (e->attr & EXFATFS_ATTR_DIR)) goto out;
+        if (remove_path(v, to, 0) != 0 || exfat_lookup(v, from, e) != 0) goto out;
+    }
+    if (create_set(v, &parent, leaf, leaf_len, e->attr, e->cluster, e->nofat, e->size) != 0) goto out;
+    if (exfat_lookup(v, from, e) != 0) goto out;
+    k = (cursor_t *)kmalloc(sizeof(cursor_t));
+    if (!k) goto out;
+    cursor_init(k, &e->dir);
+    rc = 0;
+    for (uint32_t i = 0; i < e->set_count && rc == 0; i++) {
+        uint8_t ent[32];
+        rc = slot_rw(v, k, e->set_slot + i, ent, 0);
+        if (rc == 0) {
+            ent[0] = (uint8_t)(ent[0] & 0x7F);
+            rc = slot_rw(v, k, e->set_slot + i, ent, 1);
+        }
+    }
+out:
+    if (k) kfree(k);
+    if (e) kfree(e);
+    if (old) kfree(old);
+    if (exfat_flush(v) != 0) rc = -1;
+    return rc;
+}

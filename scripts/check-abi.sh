@@ -35,12 +35,12 @@ while IFS= read -r name; do
 done < "$user_list"
 
 count="$(wc -l < "$kernel_list" | tr -d ' ')"
-if [ "$count" != "79" ]; then
-    echo "check-abi: expected 79 native calls, found $count (ABI freeze violated?)"
+if [ "$count" != "80" ]; then
+    echo "check-abi: expected 80 native calls, found $count (ABI freeze violated?)"
     fail=1
 fi
 
 if [ "$fail" != "0" ]; then
     exit 1
 fi
-echo "check-abi: native ABI v6 OK ($count calls, kernel/userspace in sync)"
+echo "check-abi: native ABI v7 OK ($count calls, kernel/userspace in sync)"

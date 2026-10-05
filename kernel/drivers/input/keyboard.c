@@ -279,6 +279,22 @@ static void keyboard_handle_scancode(uint8_t scancode) {
         return;
     }
 
+    /* Ctrl+Shift+letter has no control code of its own; send the xterm
+     * modifyOtherKeys form ESC [ 27 ; 6 ; <code> ~ so apps can tell it
+     * apart from plain Ctrl+letter. */
+    if (ctrl_down && shift_down && scancode < 128 && keymap[scancode] >= 'a' && keymap[scancode] <= 'z') {
+        char seq[16] = { 0x1b, '[', '2', '7', ';', '6', ';', 0 };
+        int code = keymap[scancode], n = 7;
+        seq[n++] = (char)('0' + code / 100);
+        seq[n++] = (char)('0' + (code / 10) % 10);
+        seq[n++] = (char)('0' + code % 10);
+        seq[n++] = '~';
+        seq[n] = 0;
+        queue_push_seq(seq);
+        sched_wake_input_waiters();
+        return;
+    }
+
     c = translate_scancode(scancode);
     if (c) {
         if (alt_down && !ctrl_down) queue_push(0x1b);

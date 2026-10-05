@@ -12,7 +12,7 @@
 enum { ATTR_BOLD = 1, ATTR_INVERSE = 2, ATTR_UNDERLINE = 4 };
 
 typedef struct {
-    char    ch;
+    uint32_t ch;
     uint8_t fg;
     uint8_t bg;
     uint8_t attr;
@@ -129,7 +129,7 @@ static void line_feed(void) {
     else if (term.cy < term.rows - 1) term.cy++;
 }
 
-static void put_char(char ch) {
+static void put_char(uint32_t ch) {
     term_cell_t *c;
     if (term.wrap_pending) {
         term.cx = 0;
@@ -272,6 +272,40 @@ static void csi_dispatch(char f) {
     }
 }
 
+static uint32_t u8_cp;
+static int u8_left;
+
+/* Decodes UTF-8 output a byte at a time; malformed input shows as "?". */
+static void utf8_byte(unsigned char c) {
+    if ((c & 0xC0) == 0x80) {
+        if (u8_left) {
+            u8_cp = (u8_cp << 6) | (c & 0x3F);
+            if (--u8_left == 0) put_char(u8_cp >= 0xA0 ? u8_cp : (uint32_t)'?');
+        }
+        return;
+    }
+    if ((c & 0xE0) == 0xC0) { u8_cp = c & 0x1F; u8_left = 1; }
+    else if ((c & 0xF0) == 0xE0) { u8_cp = c & 0x0F; u8_left = 2; }
+    else if ((c & 0xF8) == 0xF0) { u8_cp = c & 0x07; u8_left = 3; }
+    else { u8_left = 0; put_char('?'); }
+}
+
+static int utf8_put(char *out, uint32_t cp) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) { out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
 static void feed(char ch) {
     unsigned char c = (unsigned char)ch;
     switch (term.state) {
@@ -354,7 +388,12 @@ static void feed(char ch) {
     case 7:
         break;
     default:
-        if (c >= 32 && c != 127) put_char(c < 128 ? (char)c : '?');
+        if (c >= 0x80) {
+            utf8_byte(c);
+            break;
+        }
+        u8_left = 0;
+        if (c >= 32 && c != 127) put_char(c);
         break;
     }
 }
@@ -439,8 +478,8 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             term_cell_t *s = &l->cells[x0];
             int inv = (s->attr & ATTR_INVERSE) != 0;
             int x1 = x0 + 1;
-            char run[TERM_MAX_COLS + 1];
-            int n = 0;
+            char run[TERM_MAX_COLS * 4 + 1];
+            int n = 0, used = 0, cells = 0;
             ic_color_t fc, bc;
             while (x1 < term.cols && l->cells[x1].fg == s->fg && l->cells[x1].bg == s->bg &&
                    l->cells[x1].attr == s->attr) {
@@ -457,11 +496,17 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             if (inv || s->bg != DEFAULT_BG) {
                 ic_gfx_fill(c, r.x + 5 + x0 * cw, y, (x1 - x0) * cw, ch, bc);
             }
-            for (int x = x0; x < x1; x++) run[n++] = l->cells[x].ch;
-            while (n > 0 && run[n - 1] == ' ') n--;
+            for (int x = x0; x < x1; x++) {
+                n += utf8_put(run + n, l->cells[x].ch);
+                if (l->cells[x].ch != ' ') {
+                    used = n;
+                    cells = x - x0 + 1;
+                }
+            }
+            n = used;
             if (n > 0) {
                 ic_text_draw_n(c, f, r.x + 5 + x0 * cw, y + base, run, n, fc);
-                if (s->attr & ATTR_UNDERLINE) ic_gfx_hline(c, r.x + 5 + x0 * cw, y + ch - 2, n * cw, fc);
+                if (s->attr & ATTR_UNDERLINE) ic_gfx_hline(c, r.x + 5 + x0 * cw, y + ch - 2, cells * cw, fc);
             }
             x0 = x1;
         }
@@ -487,9 +532,22 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     }
 }
 
+static void paste_clipboard(void) {
+    char clip[2048];
+    long n = ic_clipboard_get(clip, sizeof(clip));
+    for (long k = 0; k < n; k++) {
+        if (clip[k] == '\n') clip[k] = '\r';
+    }
+    if (n > 0) pty_send(clip, (int)n);
+}
+
 static void send_key(const ic_event_t *ev) {
     uint32_t k = ev->key;
     char b[2];
+    if ((ev->mods & IC_MOD_CTRL) && (ev->mods & IC_MOD_SHIFT) && k == 'v') {
+        paste_clipboard();
+        return;
+    }
     if (ev->mods & IC_MOD_CTRL) {
         if (k >= 'a' && k <= 'z') {
             b[0] = (char)(k - 'a' + 1);
@@ -598,12 +656,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             term.dragging_scroll = 1;
             scrollbar_drag(app, ev->y);
         } else if (ev->button == GUI_BTN_RIGHT) {
-            char clip[2048];
-            long n = ic_clipboard_get(clip, sizeof(clip));
-            for (long k = 0; k < n; k++) {
-                if (clip[k] == '\n') clip[k] = '\r';
-            }
-            if (n > 0) pty_send(clip, (int)n);
+            paste_clipboard();
         }
         break;
     case IC_EV_MOUSE_UP:

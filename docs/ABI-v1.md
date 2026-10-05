@@ -107,6 +107,7 @@ legacy no-op path (backward-compatible with `sys_call0` callers whose
 | 76 | SYS_DISK_EDIT | storage (v5) |
 | 77 | SYS_VFS_WRITE_AT | vfs (v6) |
 | 78 | SYS_VFS_TRUNCATE | vfs (v6) |
+| 79 | SYS_VFS_RENAME | vfs (v7) |
 
 **Post-freeze append-only:** `syscall_gpu_info_t` (kernel) and
 `icda_gpu_info_t` (userspace) gained a `needs_present` uint32_t field

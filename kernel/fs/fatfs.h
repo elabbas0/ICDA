@@ -65,5 +65,6 @@ int64_t fatfs_read_range(fatfs_t *vol, const fatfs_entry_t *entry, uint64_t off,
 int fatfs_flush(fatfs_t *vol);
 int fatfs_write_at(fatfs_t *vol, const char *path, uint64_t off, const void *data, uint64_t len);
 int fatfs_truncate(fatfs_t *vol, const char *path, uint64_t len);
+int fatfs_rename(fatfs_t *vol, const char *from, const char *to);
 
 #endif

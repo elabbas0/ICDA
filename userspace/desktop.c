@@ -17,11 +17,11 @@
 #define WIN_W 780
 #define WIN_H 520
 
-#define PATH_CAP     192
-#define NAME_CAP     64
+#define PATH_CAP     512
+#define NAME_CAP     256
 #define STATUS_CAP   128
-#define LIST_CAP     4096
-#define MAX_ITEMS    96
+#define LIST_CAP     65536
+#define MAX_ITEMS    1024
 #define HISTORY_CAP  16
 #define DIALOG_CAP   PATH_CAP
 #define STATUS_H     24
@@ -543,15 +543,23 @@ static void perform_rename(void) {
         ex_status("That name cannot be used");
         return;
     }
-    if (ex.items[ex.menu_item].is_dir) {
-        ex_status("Folders cannot be renamed yet");
-        return;
-    }
     d_copy(from, ex.items[ex.menu_item].path, sizeof(from));
     path_join(to, sizeof(to), ex.path, ex.dialog_buf);
     if (d_streq(from, to)) return;
     if ((long)icda_stat(to, &st) >= 0) {
         ex_status("The new name is already taken");
+        return;
+    }
+    if (icda_rename(from, to) == 0) {
+        refresh();
+        for (int i = 0; i < ex.count; i++) {
+            if (d_streq(ex.items[i].name, ex.dialog_buf)) ex.selected = i;
+        }
+        ex_status("Renamed");
+        return;
+    }
+    if (ex.items[ex.menu_item].is_dir) {
+        ex_status("That folder could not be renamed");
         return;
     }
     if ((long)icda_stat(from, &st) < 0 || !(data = (char *)ic_malloc(st.size + 1))) {
@@ -968,7 +976,7 @@ static void build_menu(void) {
         ex_item_t *it = &ex.items[ex.menu_item];
         n = menu_add(n, "Open", MA_OPEN, 0);
         if (!it->is_dir) n = menu_add(n, "Open in Editor", MA_EDIT, 0);
-        n = menu_add(n, "Rename", MA_RENAME, it->is_dir);
+        n = menu_add(n, "Rename", MA_RENAME, 0);
         n = menu_add(n, "Delete", MA_DELETE, 0);
         n = menu_add(n, "Get Info", MA_INFO, 0);
         n = menu_add(n, IC_MENU_SEPARATOR, MA_NONE, 0);

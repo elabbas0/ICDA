@@ -674,6 +674,14 @@ static int proc_valid(uint64_t pid, const char *leaf);
 
 /* ---- stat --------------------------------------------------------------- */
 
+/* Imported volume nodes carry inode 0, which glibc treats as a deleted
+ * directory entry; derive a stable number from the node instead. */
+static uint64_t node_ino(vfs_node_t *node) {
+    uint64_t ino = vfs_node_inode(node);
+    return ino ? ino : (((uint64_t)(uintptr_t)node >> 4) & 0xFFFFFFFFFFULL) | (1ULL << 40);
+}
+
+
 typedef struct {
     uint64_t dev, ino, nlink;
     uint32_t mode, uid, gid, pad0;
@@ -707,7 +715,7 @@ static void fill_stat(lx_stat_t *st, int kind, vfs_node_t *node) {
     st->blksize = 4096;
     st->atime = st->mtime = st->ctime = now;
     if (kind == LXF_VFS && node) {
-        st->ino = vfs_node_inode(node);
+        st->ino = node_ino(node);
         if (vfs_node_type(node) == VFS_NODE_DIR) {
             st->mode = 040000 | (vfs_node_readonly(node) ? 0555 : 0755);
             st->nlink = 2;
@@ -1247,7 +1255,7 @@ static uint64_t sys_getdents64(int64_t fd, uint8_t *ubuf, uint64_t count) {
             break;
         }
         kzero(kbuf, reclen);
-        *(uint64_t *)kbuf = child ? vfs_node_inode(child) : (idx + 1);
+        *(uint64_t *)kbuf = child ? node_ino(child) : (idx + 1);
         *(int64_t *)(kbuf + 8) = (int64_t)(idx + 1);
         *(uint16_t *)(kbuf + 16) = (uint16_t)reclen;
         kbuf[18] = (uint8_t)(pdir ? 4 : 8);

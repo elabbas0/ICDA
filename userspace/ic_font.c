@@ -82,8 +82,14 @@ static int ic_next_glyph(const char *s, int n, int *len) {
         cp = (cp << 6) | (u[i] & 0x3F);
     }
     *len = l;
-    for (int i = 0; i < IC_FONT_EXTRA_COUNT; i++) {
-        if (ic_font_extra_cps[i] == cp) return 95 + i;
+    {
+        int lo = 0, hi = IC_FONT_EXTRA_COUNT - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >> 1;
+            if (ic_font_extra_cps[mid] == cp) return 95 + mid;
+            if (ic_font_extra_cps[mid] < cp) lo = mid + 1;
+            else hi = mid - 1;
+        }
     }
     return IC_GLYPH_QUESTION;
 }

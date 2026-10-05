@@ -17,6 +17,7 @@ typedef struct {
     int     state;     
     uint32_t param;
     uint32_t param2;
+    uint32_t param3;
     uint32_t esc_ms;
 } ic_keydec_t;
 
@@ -103,6 +104,7 @@ static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
             d->state = 2;
             d->param = 0;
             d->param2 = 0;
+            d->param3 = 0;
             return;
         }
         d->state = 0;
@@ -114,16 +116,17 @@ static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
         ic_app_feed_key(app, d, c);
         return;
     }
-    if (d->state == 2 || d->state == 3 || d->state == 4) {
+    if (d->state == 2 || d->state == 3 || d->state == 4 || d->state == 5) {
         uint32_t mods;
         if (c >= '0' && c <= '9') {
-            if (d->state == 4) d->param2 = d->param2 * 10 + (c - '0');
+            if (d->state == 5) d->param3 = d->param3 * 10 + (c - '0');
+            else if (d->state == 4) d->param2 = d->param2 * 10 + (c - '0');
             else d->param = d->param * 10 + (c - '0');
             if (d->state == 2) d->state = 3;
             return;
         }
         if (c == ';') {
-            d->state = 4;
+            d->state = d->state == 4 ? 5 : 4;
             return;
         }
         d->state = 0;
@@ -137,7 +140,8 @@ static void ic_app_feed_key(ic_app_t *app, ic_keydec_t *d, uint32_t c) {
         case 'F': ic_app_emit_key_mods(app, IC_KEY_END, mods); return;
         case 'Z': ic_app_emit_key_mods(app, IC_KEY_TAB, mods | IC_MOD_SHIFT); return;
         case '~':
-            if (d->param == 3) ic_app_emit_key_mods(app, IC_KEY_DELETE, mods);
+            if (d->param == 27 && d->param3) ic_app_emit_key_mods(app, d->param3, mods);
+            else if (d->param == 3) ic_app_emit_key_mods(app, IC_KEY_DELETE, mods);
             else if (d->param == 2) ic_app_emit_key_mods(app, IC_KEY_INSERT, mods);
             else if (d->param == 1 || d->param == 7) ic_app_emit_key_mods(app, IC_KEY_HOME, mods);
             else if (d->param == 4 || d->param == 8) ic_app_emit_key_mods(app, IC_KEY_END, mods);
@@ -222,6 +226,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
     keys.state = 0;
     keys.param = 0;
     keys.param2 = 0;
+    keys.param3 = 0;
     keys.esc_ms = 0;
     app.desc = desc;
     app.user = user;

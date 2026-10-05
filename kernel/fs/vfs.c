@@ -27,7 +27,7 @@ struct vfs_node {
 static vfs_node_t *vfs_root_node = 0;
 static uint64_t vfs_next_inode = 1;
 static uint64_t vfs_tick = 1;
-static const uint64_t VFS_NAME_CAP = 63;
+static const uint64_t VFS_NAME_CAP = 255;
 static int (*vfs_sync_hook)(void) = 0;
 static vfs_external_fn vfs_external_hook = 0;
 static vfs_loader_fn vfs_loader_hook = 0;
@@ -189,7 +189,7 @@ static int component_was_truncated(const char *path, uint64_t part_cap) {
 
 static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf, uint64_t leaf_cap, int create_dirs) {
     vfs_node_t *node = (*path == '/') ? vfs_root_node : cwd;
-    char part[64];
+    char part[256];
 
     if (!node || !path || !*path) {
         return 0;
@@ -296,7 +296,7 @@ int vfs_flush(int force) {
 
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path) {
     vfs_node_t *node = (*path == '/') ? vfs_root_node : cwd;
-    char part[64];
+    char part[256];
 
     if (!node || !path || !*path) {
         return 0;
@@ -462,7 +462,7 @@ static int external_op(int op, vfs_node_t *dir, const char *leaf, const char *da
 }
 
 int vfs_mkdir(vfs_node_t *cwd, const char *path) {
-    char leaf[64];
+    char leaf[256];
     vfs_node_t *parent = resolve_parent(cwd, path, leaf, sizeof(leaf), 0);
     vfs_node_t *node;
 
@@ -483,7 +483,7 @@ int vfs_mkdir(vfs_node_t *cwd, const char *path) {
 }
 
 int vfs_create(vfs_node_t *cwd, const char *path) {
-    char leaf[64];
+    char leaf[256];
     vfs_node_t *parent = resolve_parent(cwd, path, leaf, sizeof(leaf), 0);
     vfs_node_t *node;
 
@@ -683,7 +683,7 @@ int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
 }
 
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
-    char leaf[64];
+    char leaf[256];
     vfs_node_t *parent;
     vfs_node_t *node;
 
@@ -732,7 +732,7 @@ int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
 
 int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char *data, uint64_t size,
                     uint64_t inode, uint64_t created, uint64_t modified) {
-    char leaf[64];
+    char leaf[256];
     vfs_node_t *parent;
     vfs_node_t *node;
 
@@ -939,7 +939,7 @@ const char *vfs_node_data(vfs_node_t *node) {
  * is replaced, as with POSIX rename().  Volume-backed nodes go through the
  * external hook so the filesystem driver renames on disk. */
 int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
-    char leaf[64];
+    char leaf[256];
     vfs_node_t *node = vfs_resolve(cwd, from);
     vfs_node_t *dest = resolve_parent(cwd, to, leaf, sizeof(leaf), 0);
     vfs_node_t *existing;

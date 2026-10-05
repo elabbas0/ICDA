@@ -82,7 +82,8 @@ enum {
     SYS_VM_FREE           = 75,
     SYS_DISK_EDIT         = 76,
     SYS_VFS_WRITE_AT      = 77,
-    SYS_VFS_TRUNCATE      = 78
+    SYS_VFS_TRUNCATE      = 78,
+    SYS_VFS_RENAME        = 79
 };
 
 typedef struct {
@@ -296,6 +297,7 @@ static inline long icda_pty_io(long pty, uint64_t op, void *buf, uint64_t len) {
 static inline long icda_remove(const char *path) { return (long)sys_call1(SYS_VFS_REMOVE, (uint64_t)(uintptr_t)path); }
 static inline long icda_write_file_at(const char *path, uint64_t off, const void *buf, uint64_t size) { return (long)sys_call4(SYS_VFS_WRITE_AT, (uint64_t)(uintptr_t)path, off, (uint64_t)(uintptr_t)buf, size); }
 static inline long icda_truncate(const char *path, uint64_t len) { return (long)sys_call2(SYS_VFS_TRUNCATE, (uint64_t)(uintptr_t)path, len); }
+static inline long icda_rename(const char *from, const char *to) { return (long)sys_call2(SYS_VFS_RENAME, (uint64_t)(uintptr_t)from, (uint64_t)(uintptr_t)to); }
 static inline void *icda_vm_alloc(uint64_t size) { uint64_t a = sys_call1(SYS_VM_ALLOC, size); return (int64_t)a < 0 ? (void *)0 : (void *)(uintptr_t)a; }
 static inline long icda_vm_free(void *addr, uint64_t size) { return (long)sys_call2(SYS_VM_FREE, (uint64_t)(uintptr_t)addr, size); }
 

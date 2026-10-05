@@ -43,11 +43,12 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v6: first number moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v6: v4 numbers moved");
-_Static_assert(SYS_DISK_EDIT == 76, "native ABI v6: v5 numbers moved");
-_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v6: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 79, "native ABI v6: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v7: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v7: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v7: v5 numbers moved");
+_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v7: v6 numbers moved");
+_Static_assert(SYS_VFS_RENAME == 79, "native ABI v7: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 80, "native ABI v7: count changed");
 
 
 
@@ -290,6 +291,18 @@ static uint64_t sys_vfs_truncate(const char *path, uint64_t len) {
     }
     node = vfs_resolve(proc->cwd ? proc->cwd : vfs_root(), path);
     return node && vfs_node_truncate(node, len) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_vfs_rename(const char *from, const char *to) {
+    process_t *proc = sched_current_process();
+
+    if (!proc || !from || !to) {
+        return (uint64_t)-1;
+    }
+    if (!gate_path_ok(from) || !gate_path_ok(to)) {
+        return (uint64_t)-U_EFAULT;
+    }
+    return vfs_rename(proc->cwd ? proc->cwd : vfs_root(), from, to) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_exit(uint64_t code) {
@@ -1847,6 +1860,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
                                     (const char *)(uintptr_t)regs->rdx, regs->r10);
         case SYS_VFS_TRUNCATE:
             return sys_vfs_truncate((const char *)(uintptr_t)regs->rdi, regs->rsi);
+        case SYS_VFS_RENAME:
+            return sys_vfs_rename((const char *)(uintptr_t)regs->rdi, (const char *)(uintptr_t)regs->rsi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);
