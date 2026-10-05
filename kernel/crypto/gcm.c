@@ -1,27 +1,74 @@
 #include "gcm.h"
 
 
-static void gcm_gf_mul(uint8_t x[16], const uint8_t y[16]) {
-    uint8_t z[16];
-    uint8_t v[16];
-    for (int i = 0; i < 16; i++) { z[i] = 0; v[i] = y[i]; }
+/* GHASH multiplication with 4-bit tables (Shoup's method): 16 table
+ * entries per key replace 128 shift-and-xor rounds per block. */
+typedef struct {
+    uint64_t hl[16], hh[16];
+} gcm_table_t;
 
-    for (int i = 0; i < 128; i++) {
-        if ((x[i >> 3] >> (7 - (i & 7))) & 1) {
-            for (int j = 0; j < 16; j++) z[j] ^= v[j];
-        }
-        int lsb = v[15] & 1;
-        for (int j = 15; j > 0; j--) v[j] = (uint8_t)((v[j] >> 1) | ((v[j - 1] & 1) << 7));
-        v[0] >>= 1;
-        if (lsb) v[0] ^= 0xE1;
+static uint64_t be64(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
+    return v;
+}
+
+static void gcm_init_table(gcm_table_t *t, const uint8_t h[16]) {
+    uint64_t vh = be64(h), vl = be64(h + 8);
+    t->hl[0] = t->hh[0] = 0;
+    t->hl[8] = vl;
+    t->hh[8] = vh;
+    for (int i = 4; i > 0; i >>= 1) {
+        uint64_t r = (vl & 1) ? 0xE1000000ULL << 32 : 0;
+        vl = (vh << 63) | (vl >> 1);
+        vh = (vh >> 1) ^ r;
+        t->hl[i] = vl;
+        t->hh[i] = vh;
     }
-    for (int i = 0; i < 16; i++) x[i] = z[i];
+    for (int i = 2; i <= 8; i *= 2) {
+        for (int j = 1; j < i; j++) {
+            t->hh[i + j] = t->hh[i] ^ t->hh[j];
+            t->hl[i + j] = t->hl[i] ^ t->hl[j];
+        }
+    }
+}
+
+static const uint64_t gcm_last4[16] = {
+    0x0000, 0x1c20, 0x3840, 0x2460, 0x7080, 0x6ca0, 0x48c0, 0x54e0,
+    0xe100, 0xfd20, 0xd940, 0xc560, 0x9180, 0x8da0, 0xa9c0, 0xb5e0
+};
+
+static void gcm_gf_mul(uint8_t x[16], const gcm_table_t *t) {
+    uint8_t lo = x[15] & 0x0F, hi, rem;
+    uint64_t zh = t->hh[lo], zl = t->hl[lo];
+    for (int i = 15; i >= 0; i--) {
+        lo = x[i] & 0x0F;
+        hi = (x[i] >> 4) & 0x0F;
+        if (i != 15) {
+            rem = (uint8_t)(zl & 0x0F);
+            zl = (zh << 60) | (zl >> 4);
+            zh = (zh >> 4) ^ (gcm_last4[rem] << 48);
+            zh ^= t->hh[lo];
+            zl ^= t->hl[lo];
+        }
+        rem = (uint8_t)(zl & 0x0F);
+        zl = (zh << 60) | (zl >> 4);
+        zh = (zh >> 4) ^ (gcm_last4[rem] << 48);
+        zh ^= t->hh[hi];
+        zl ^= t->hl[hi];
+    }
+    for (int i = 0; i < 8; i++) {
+        x[i] = (uint8_t)(zh >> (56 - i * 8));
+        x[8 + i] = (uint8_t)(zl >> (56 - i * 8));
+    }
 }
 
 static void gcm_ghash(const uint8_t h[16], const uint8_t *aad, uint32_t aad_len,
                       const uint8_t *ct, uint32_t ct_len, uint8_t out[16]) {
     uint8_t x[16];
     uint8_t block[16];
+    gcm_table_t t;
+    gcm_init_table(&t, h);
     for (int i = 0; i < 16; i++) x[i] = 0;
 
     const uint8_t *streams[2] = { aad, ct };
@@ -36,7 +83,7 @@ static void gcm_ghash(const uint8_t h[16], const uint8_t *aad, uint32_t aad_len,
             for (int i = 0; i < 16; i++) block[i] = 0;
             for (uint32_t i = 0; i < n; i++) block[i] = d[off + i];
             for (int i = 0; i < 16; i++) x[i] ^= block[i];
-            gcm_gf_mul(x, h);
+            gcm_gf_mul(x, &t);
             off += n;
         }
     }
@@ -44,7 +91,7 @@ static void gcm_ghash(const uint8_t h[16], const uint8_t *aad, uint32_t aad_len,
     for (int i = 0; i < 8; i++) block[i] = (uint8_t)((uint64_t)aad_len * 8 >> (56 - i * 8));
     for (int i = 0; i < 8; i++) block[8 + i] = (uint8_t)((uint64_t)ct_len * 8 >> (56 - i * 8));
     for (int i = 0; i < 16; i++) x[i] ^= block[i];
-    gcm_gf_mul(x, h);
+    gcm_gf_mul(x, &t);
 
     for (int i = 0; i < 16; i++) out[i] = x[i];
 }

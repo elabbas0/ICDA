@@ -4,7 +4,7 @@
 #include "x509.h"
 #include "sha256.h"
 #include "sha1.h"
-#include "bn.h"
+
 #include "crypto/sha512.h"
 #include "crypto/ecdsa.h"
 #include <stdlib.h>
@@ -229,28 +229,140 @@ static const uint8_t DI_SHA256[] = { 0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0
 static const uint8_t DI_SHA384[] = { 0x30, 0x41, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30 };
 static const uint8_t DI_SHA512[] = { 0x30, 0x51, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40 };
 
-/* em = sig^e mod n, left-padded to the modulus length k */
+/* em = sig^e mod n, left-padded to the modulus length, using Montgomery
+ * multiplication on 64-bit limbs (moduli up to 4096 bits). */
+#define RSA_L 64
+typedef unsigned __int128 u128_t;
+
+static void rsa_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *m, uint64_t minv, int n) {
+    uint64_t t[RSA_L + 2];
+    memset(t, 0, sizeof(uint64_t) * (size_t)(n + 2));
+    for (int i = 0; i < n; i++) {
+        uint64_t carry = 0, u;
+        for (int j = 0; j < n; j++) {
+            u128_t s = (u128_t)a[j] * b[i] + t[j] + carry;
+            t[j] = (uint64_t)s;
+            carry = (uint64_t)(s >> 64);
+        }
+        {
+            u128_t s = (u128_t)t[n] + carry;
+            t[n] = (uint64_t)s;
+            t[n + 1] = (uint64_t)(s >> 64);
+        }
+        u = t[0] * minv;
+        carry = 0;
+        for (int j = 0; j < n; j++) {
+            u128_t s = (u128_t)u * m[j] + t[j] + carry;
+            t[j] = (uint64_t)s;
+            carry = (uint64_t)(s >> 64);
+        }
+        {
+            u128_t s = (u128_t)t[n] + carry;
+            t[n] = (uint64_t)s;
+            t[n + 1] += (uint64_t)(s >> 64);
+        }
+        for (int j = 0; j <= n; j++) t[j] = t[j + 1];
+        t[n + 1] = 0;
+    }
+    {
+        int ge = t[n] != 0;
+        if (!ge) {
+            ge = 1;
+            for (int i = n - 1; i >= 0; i--) {
+                if (t[i] != m[i]) {
+                    ge = t[i] > m[i];
+                    break;
+                }
+            }
+        }
+        if (ge) {
+            uint64_t borrow = 0;
+            for (int i = 0; i < n; i++) {
+                u128_t d = (u128_t)t[i] - m[i] - borrow;
+                t[i] = (uint64_t)d;
+                borrow = (uint64_t)(d >> 64) & 1;
+            }
+        }
+    }
+    memcpy(r, t, sizeof(uint64_t) * (size_t)n);
+}
+
+static void limbs_be(uint64_t *out, const uint8_t *in, size_t len, int n) {
+    memset(out, 0, sizeof(uint64_t) * (size_t)n);
+    for (size_t i = 0; i < len; i++) {
+        size_t bit = (len - 1 - i) * 8;
+        out[bit / 64] |= (uint64_t)in[i] << (bit % 64);
+    }
+}
+
 static int rsa_public(const cert_t *k, const uint8_t *sig, size_t sig_len, uint8_t *em, size_t *em_len) {
-    bn_t *n = (bn_t *)malloc(sizeof(bn_t) * 4);
-    uint8_t tmp[512];
-    int len = 0;
+    uint64_t m[RSA_L], s[RSA_L], acc[RSA_L], base[RSA_L], rr[RSA_L], one[RSA_L];
     size_t klen = k->rsa_n.len;
-    int rc = -1;
-    if (!n) return -1;
-    if (klen > 512 || klen < 128 || sig_len != klen) goto out;
-    if (bn_from_bytes(&n[0], k->rsa_n.p, (int)klen) != 0) goto out;
-    if (bn_from_bytes(&n[1], k->rsa_e.p, (int)k->rsa_e.len) != 0) goto out;
-    if (bn_from_bytes(&n[2], sig, (int)sig_len) != 0 || bn_cmp(&n[2], &n[0]) >= 0) goto out;
-    bn_mod_exp(&n[3], &n[2], &n[1], &n[0]);
-    bn_to_bytes(&n[3], tmp, &len);
-    if ((size_t)len > klen) goto out;
-    memset(em, 0, klen - (size_t)len);
-    memcpy(em + klen - (size_t)len, tmp, (size_t)len);
+    int n = (int)((klen + 7) / 8);
+    uint64_t minv = 1;
+    if (klen > 512 || klen < 128 || sig_len != klen || k->rsa_e.len > 8 || !(k->rsa_n.p[klen - 1] & 1)) return -1;
+    limbs_be(m, k->rsa_n.p, klen, n);
+    limbs_be(s, sig, sig_len, n);
+    for (int i = n - 1; i >= 0; i--) {
+        if (s[i] != m[i]) {
+            if (s[i] > m[i]) return -1;
+            break;
+        }
+    }
+    for (int i = 0; i < 6; i++) minv *= 2 - m[0] * minv;
+    minv = (uint64_t)0 - minv;
+    /* R^2 mod m by doubling 1 */
+    memset(rr, 0, sizeof(rr));
+    rr[0] = 1;
+    for (int i = 0; i < n * 128; i++) {
+        uint64_t carry = 0;
+        int ge;
+        for (int j = 0; j < n; j++) {
+            uint64_t nv = (rr[j] << 1) | carry;
+            carry = rr[j] >> 63;
+            rr[j] = nv;
+        }
+        ge = carry != 0;
+        if (!ge) {
+            ge = 1;
+            for (int j = n - 1; j >= 0; j--) {
+                if (rr[j] != m[j]) {
+                    ge = rr[j] > m[j];
+                    break;
+                }
+            }
+        }
+        if (ge) {
+            uint64_t borrow = 0;
+            for (int j = 0; j < n; j++) {
+                u128_t d = (u128_t)rr[j] - m[j] - borrow;
+                rr[j] = (uint64_t)d;
+                borrow = (uint64_t)(d >> 64) & 1;
+            }
+        }
+    }
+    memset(one, 0, sizeof(one));
+    one[0] = 1;
+    rsa_mul(base, s, rr, m, minv, n);          /* base = s R */
+    rsa_mul(acc, one, rr, m, minv, n);         /* acc = R (1 in Montgomery form) */
+    {
+        uint64_t e = 0;
+        int top = 63;
+        for (size_t i = 0; i < k->rsa_e.len; i++) e = (e << 8) | k->rsa_e.p[i];
+        if (!e) return -1;
+        while (!((e >> top) & 1)) top--;
+        for (int i = top; i >= 0; i--) {
+            rsa_mul(acc, acc, acc, m, minv, n);
+            if ((e >> i) & 1) rsa_mul(acc, acc, base, m, minv, n);
+        }
+    }
+    rsa_mul(acc, acc, one, m, minv, n);        /* leave Montgomery form */
+    for (size_t i = 0; i < klen; i++) {
+        size_t bit = (klen - 1 - i) * 8;
+        em[i] = (uint8_t)(acc[bit / 64] >> (bit % 64));
+    }
     *em_len = klen;
-    rc = 0;
-out:
-    free(n);
-    return rc;
+    return 0;
 }
 
 static int rsa_pkcs1_verify(const cert_t *k, int hash, const uint8_t *digest, size_t dlen,
