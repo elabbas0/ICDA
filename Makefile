@@ -483,7 +483,7 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h $(IC_HEADER
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/browser.c -o /tmp/icda-browser.o
 	cp -f /tmp/icda-browser.o browser.o
 
-SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o
+SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o
 
 surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
 	$(CC) $(SURFER_CFLAGS) -Iuserspace -c $< -o /tmp/icda-$@

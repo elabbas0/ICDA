@@ -312,6 +312,7 @@ typedef struct {
     dom_node_t        *link;
     box_t             *atomic;
     float              space;     /* IT_SPACE_*: inline padding/border/margin */
+    dom_node_t        *node;      /* source node: text node for text, element otherwise */
 } item_t;
 
 typedef struct {
@@ -336,20 +337,21 @@ static box_t *layout_atomic(lctx_t *c, dom_node_t *n, const css_style_t *st, flo
 static void collect_inline(lctx_t *c, items_t *v, dom_node_t *n, const css_style_t *st, const css_style_t *bg,
                            dom_node_t *link, float cb_w) {
     if (n->type == N_TEXT) {
-        item_t it = { IT_TEXT, n->text, n->text_len, st, bg, link, 0, 0 };
+        item_t it = { IT_TEXT, n->text, n->text_len, st, bg, link, 0, 0, n };
+        it.node = n;
         if (n->text_len) push_item(v, it);
         return;
     }
     if (n->type != N_ELEMENT || !n->style || n->style->display == D_NONE) return;
     st = n->style;
     if (n->tag == T_BR) {
-        item_t it = { IT_BR, 0, 0, st, bg, link, 0, 0 };
+        item_t it = { IT_BR, 0, 0, st, bg, link, 0, 0, n };
         push_item(v, it);
         return;
     }
     if (n->tag == T_A && dom_attr(n, "href")) link = n;
     if (st->display != D_INLINE || is_replaced(n)) {
-        item_t it = { IT_ATOMIC, 0, 0, st, bg, link, 0, 0 };
+        item_t it = { IT_ATOMIC, 0, 0, st, bg, link, 0, 0, n };
         it.atomic = layout_atomic(c, n, st, cb_w);
         if (it.atomic) {
             it.atomic->link = link;
@@ -362,20 +364,20 @@ static void collect_inline(lctx_t *c, items_t *v, dom_node_t *n, const css_style
         float open = res(st->margin[3], cb_w, 0) + res(st->padding[3], cb_w, 0) + st->border_w[3];
         float close = res(st->margin[1], cb_w, 0) + res(st->padding[1], cb_w, 0) + st->border_w[1];
         if (open > 0) {
-            item_t it = { IT_SPACE_OPEN, 0, 0, st, bg, link, 0, open };
+            item_t it = { IT_SPACE_OPEN, 0, 0, st, bg, link, 0, open, n };
             push_item(v, it);
         }
         if (st->before && st->before->content && st->before->content[0]) {
-            item_t it = { IT_TEXT, st->before->content, strlen(st->before->content), st->before, bg, link, 0, 0 };
+            item_t it = { IT_TEXT, st->before->content, strlen(st->before->content), st->before, bg, link, 0, 0, n };
             push_item(v, it);
         }
         for (dom_node_t *k = n->first; k; k = k->next) collect_inline(c, v, k, st, bg, link, cb_w);
         if (st->after && st->after->content && st->after->content[0]) {
-            item_t it = { IT_TEXT, st->after->content, strlen(st->after->content), st->after, bg, link, 0, 0 };
+            item_t it = { IT_TEXT, st->after->content, strlen(st->after->content), st->after, bg, link, 0, 0, n };
             push_item(v, it);
         }
         if (close > 0) {
-            item_t it = { IT_SPACE_CLOSE, 0, 0, st, bg, link, 0, close };
+            item_t it = { IT_SPACE_CLOSE, 0, 0, st, bg, link, 0, close, n };
             push_item(v, it);
         }
     }
@@ -517,6 +519,7 @@ static frag_t *new_frag(line_t *ln, item_t *it) {
     for (const css_style_t *p = it->bg; p && !f->decoration; p = 0) f->decoration = p->decoration;
     f->link = it->link;
     f->inline_bg = it->bg;
+    f->node = it->node;
     return f;
 }
 
@@ -1666,4 +1669,52 @@ static dom_node_t *hit(box_t *b, float x, float y, float ox, float oy) {
 
 dom_node_t *layout_hit_link(layout_t *l, float x, float y) {
     return l && l->root ? hit(l->root, x, y, 0, 0) : 0;
+}
+
+static dom_node_t *hit_el(box_t *b, float x, float y, float ox, float oy) {
+    dom_node_t *found = 0;
+    ox += b->rel_x;
+    oy += b->rel_y;
+    /* later siblings paint on top, so the last match wins */
+    for (box_t *k = b->first; k; k = k->next) {
+        dom_node_t *h = hit_el(k, x, y, ox, oy);
+        if (h) found = h;
+    }
+    if (found) return found;
+    for (frag_t *f = b->frags; f; f = f->next) {
+        if (f->node && x >= f->x + ox && x < f->x + ox + f->w && y >= f->y + oy && y < f->y + oy + f->h) {
+            return f->node->type == N_TEXT ? f->node->parent : f->node;
+        }
+    }
+    if (b->node && x >= b->x + ox && x < b->x + ox + b->w && y >= b->y + oy && y < b->y + oy + b->h) return b->node;
+    return 0;
+}
+
+dom_node_t *layout_hit_element(layout_t *l, float x, float y) {
+    return l && l->root ? hit_el(l->root, x, y, 0, 0) : 0;
+}
+
+static box_t *find_box(box_t *b, dom_node_t *n, float ox, float oy, float *rx, float *ry) {
+    ox += b->rel_x;
+    oy += b->rel_y;
+    if (b->node == n) {
+        *rx = b->x + ox;
+        *ry = b->y + oy;
+        return b;
+    }
+    for (box_t *k = b->first; k; k = k->next) {
+        box_t *r = find_box(k, n, ox, oy, rx, ry);
+        if (r) return r;
+    }
+    return 0;
+}
+
+int layout_box_rect(layout_t *l, dom_node_t *n, float *x, float *y, float *w, float *h) {
+    box_t *b;
+    if (!l || !l->root || !n) return 0;
+    b = find_box(l->root, n, 0, 0, x, y);
+    if (!b) return 0;
+    *w = b->w;
+    *h = b->h;
+    return 1;
 }

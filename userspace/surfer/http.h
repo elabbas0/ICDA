@@ -50,11 +50,16 @@ struct http_req {
 };
 
 http_req_t *http_open(const char *url, const char *method, const char *extra_headers);
+http_req_t *http_open_body(const char *url, const char *method, const char *extra_headers,
+                           const void *body, size_t body_len);
 int         http_poll(http_req_t *r, int timeout_ms);
 int         http_socket(http_req_t *r);
 void        http_free(http_req_t *r);
 
 /* Blocking fetch that follows up to 8 redirects; final_url gets the last URL. */
 http_req_t *http_get(const char *url, char *final_url, size_t final_cap);
+/* Blocking request with redirects; POST bodies use content_type. */
+http_req_t *http_request(const char *method, const char *url, const char *content_type,
+                         const void *body, size_t body_len, char *final_url, size_t final_cap);
 
 #endif

@@ -10,6 +10,8 @@ typedef struct {
     int       x, y, w, h;      /* destination rectangle (device px) */
     float     scale;           /* device px per CSS px */
     float     scroll_y;        /* CSS px */
+    struct dom_node *focus;    /* focused form control, drawn with a ring and caret */
+    int       caret_on;        /* caret phase (blinks) */
 } paint_target_t;
 
 /* Images are decoded by the browser; the painter only blits them. */

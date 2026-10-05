@@ -1,6 +1,7 @@
 /* Surfer painting: rasterizes a layout into an ARGB buffer at device
  * resolution, only touching the visible part of the page. */
 #include "paint.h"
+#include "form.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -185,43 +186,188 @@ static void paint_borders(pctx_t *c, box_t *b, float x, float y) {
     if (b->br > 0) fill(c, x + w - b->br, y + b->bt, b->br, h - b->bt - b->bb, s->border_color[1]);
 }
 
+#define CTL_ACCENT  0xFF0B57D0U
+#define CTL_MUTED   0xFF8A8F98U
+#define CTL_SELECT  0x553D7EFFU
+
+/* Narrows the clip to a control's content box for the duration of a paint. */
+static void clip_push(pctx_t *c, float fx, float fy, float fw, float fh, int save[4]) {
+    const paint_target_t *t = c->t;
+    int x0 = t->x + (int)(fx * t->scale), y0 = t->y + (int)((fy - t->scroll_y) * t->scale);
+    int x1 = t->x + (int)((fx + fw) * t->scale + 0.999f), y1 = t->y + (int)((fy + fh - t->scroll_y) * t->scale + 0.999f);
+    save[0] = c->cx0; save[1] = c->cy0; save[2] = c->cx1; save[3] = c->cy1;
+    if (x0 > c->cx0) c->cx0 = x0;
+    if (y0 > c->cy0) c->cy0 = y0;
+    if (x1 < c->cx1) c->cx1 = x1;
+    if (y1 < c->cy1) c->cy1 = y1;
+}
+
+static void clip_pop(pctx_t *c, const int save[4]) {
+    c->cx0 = save[0]; c->cy0 = save[1]; c->cx1 = save[2]; c->cy1 = save[3];
+}
+
+static void focus_ring(pctx_t *c, float x, float y, float w, float h, float r) {
+    uint32_t ring = (CTL_ACCENT & 0x00FFFFFFU) | 0x99000000U;
+    (void)r;
+    fill(c, x - 2, y - 2, w + 4, 2, ring);
+    fill(c, x - 2, y + h, w + 4, 2, ring);
+    fill(c, x - 2, y, 2, h, ring);
+    fill(c, x + w, y, 2, h, ring);
+}
+
+/* Single-line text: value (or placeholder), selection, caret, scrolled so
+ * the caret stays visible. */
+static void paint_text_field(pctx_t *c, box_t *b, float x, float y, const font_t *f, uint32_t color, int focused) {
+    dom_node_t *n = b->node;
+    form_ctl_t *ctl = form_ctl(n);
+    float ix = x + b->bl + b->pl, iy = y + b->bt + b->pt;
+    float iw = b->w - hframe_get(b), ih = b->h - vframe_get(b);
+    float base = iy + ih / 2 + (f->ascent + f->descent) / 2;
+    int password = form_kind(n) == FK_PASSWORD;
+    char masked[512];
+    const char *text = ctl ? ctl->value : "";
+    size_t len = ctl ? ctl->len : 0, cur = ctl ? ctl->cursor : 0, anc = ctl ? ctl->anchor : 0;
+    int save[4];
+    if (ih < f->ascent - f->descent) base = iy + f->ascent;
+    if (password && len) {
+        /* one bullet per character; offsets map through the bullet count */
+        size_t chars = 0, cchars = 0, achars = 0, o = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (((unsigned char)text[i] & 0xC0) != 0x80) {
+                if (i < cur) cchars++;
+                if (i < anc) achars++;
+                chars++;
+            }
+        }
+        for (size_t i = 0; i < chars && o + 3 < sizeof masked; i++) { memcpy(masked + o, "\xE2\x80\xA2", 3); o += 3; }
+        masked[o] = 0;
+        text = masked;
+        len = o;
+        cur = cchars * 3 < o ? cchars * 3 : o;
+        anc = achars * 3 < o ? achars * 3 : o;
+    }
+    clip_push(c, ix, iy - 1, iw, ih + 2, save);
+    if (len == 0) {
+        const char *ph = dom_attr(n, "placeholder");
+        if (ph) draw_text(c, f, ix, base, ph, strlen(ph), CTL_MUTED);
+        if (ctl) ctl->scroll_x = 0;
+    } else {
+        float caret_x = font_text_width(f, text, cur);
+        float sx = ctl ? ctl->scroll_x : 0;
+        if (caret_x - sx > iw - 2) sx = caret_x - iw + 2;
+        if (caret_x - sx < 0) sx = caret_x;
+        if (sx < 0) sx = 0;
+        if (ctl) ctl->scroll_x = sx;
+        if (focused && anc != cur) {
+            size_t a = anc < cur ? anc : cur, e = anc < cur ? cur : anc;
+            float ax = font_text_width(f, text, a), ex = font_text_width(f, text, e);
+            fill(c, ix + ax - sx, base - f->ascent, ex - ax, f->ascent - f->descent, CTL_SELECT);
+        }
+        draw_text(c, f, ix - sx, base, text, len, color);
+    }
+    if (focused && c->t->caret_on) {
+        float cx = (len ? font_text_width(f, text, cur) : 0) - (ctl ? ctl->scroll_x : 0);
+        fill(c, ix + cx, base - f->ascent, 1, f->ascent - f->descent, color | 0xFF000000U);
+    }
+    clip_pop(c, save);
+}
+
+/* Textarea: lines split at newlines and wrapped at the box width. */
+static void paint_text_area(pctx_t *c, box_t *b, float x, float y, const font_t *f, uint32_t color, int focused) {
+    dom_node_t *n = b->node;
+    form_ctl_t *ctl = form_ctl(n);
+    float ix = x + b->bl + b->pl + 2, iy = y + b->bt + b->pt + 2;
+    float iw = b->w - hframe_get(b) - 4, ih = b->h - vframe_get(b) - 4;
+    float lh = f->ascent - f->descent + f->line_gap, pen_y = iy;
+    const char *s = ctl ? ctl->value : "";
+    size_t len = ctl ? ctl->len : 0, i = 0;
+    int save[4];
+    clip_push(c, ix - 2, iy - 2, iw + 4, ih + 4, save);
+    if (len == 0) {
+        const char *ph = dom_attr(n, "placeholder");
+        if (ph) draw_text(c, f, ix, iy + f->ascent, ph, strlen(ph), CTL_MUTED);
+        if (focused && c->t->caret_on) fill(c, ix, iy, 1, f->ascent - f->descent, color | 0xFF000000U);
+        clip_pop(c, save);
+        return;
+    }
+    while (i <= len) {
+        size_t start = i, end = i, brk = 0;
+        float w = 0;
+        while (end < len && s[end] != '\n') {
+            const char *p = s + end;
+            uint32_t cp = utf8_next(&p, s + len);
+            float aw = font_advance(f, cp);
+            if (w + aw > iw && end > start) break;
+            if (s[end] == ' ') brk = end + 1;
+            w += aw;
+            end = (size_t)(p - s);
+        }
+        if (end < len && s[end] != '\n' && brk > start) end = brk;
+        if (pen_y + lh >= iy - lh && pen_y <= iy + ih + lh) {
+            draw_text(c, f, ix, pen_y + f->ascent, s + start, end - start, color);
+            if (focused && c->t->caret_on && ctl->cursor >= start &&
+                (ctl->cursor < end || (ctl->cursor == end && (end == len || s[end] == '\n')))) {
+                float cx = font_text_width(f, s + start, ctl->cursor - start);
+                fill(c, ix + cx, pen_y, 1, f->ascent - f->descent, color | 0xFF000000U);
+            }
+        }
+        pen_y += lh;
+        i = end < len && s[end] == '\n' ? end + 1 : end;
+        if (end >= len) break;
+        if (i == start) i++;
+    }
+    clip_pop(c, save);
+}
+
 static void paint_control(pctx_t *c, box_t *b, float x, float y) {
     dom_node_t *n = b->node;
     const css_style_t *s = b->st;
-    const char *label = 0;
     font_t f = font_pick(s->font_family, s->font_weight, 0, s->font_size);
     uint32_t color = s->color;
-    if (n->tag == T_INPUT) {
-        const char *type = dom_attr(n, "type");
-        if (type && (strcmp(type, "checkbox") == 0 || strcmp(type, "radio") == 0)) {
-            fill_round(c, x, y, b->w, b->h, strcmp(type, "radio") == 0 ? b->w / 2 : 3, 0xFFFFFFFFU);
-            if (dom_attr(n, "checked")) fill_round(c, x + 3, y + 3, b->w - 6, b->h - 6, strcmp(type, "radio") == 0 ? b->w / 2 : 2, 0xFF0B57D0U);
-            return;
+    int kind = form_kind(n), focused = c->t->focus == n;
+    if (kind == FK_CHECKBOX || kind == FK_RADIO) {
+        form_ctl_t *ctl = form_ctl(n);
+        float r = kind == FK_RADIO ? b->w / 2 : 3;
+        if (!(s->bg_color >> 24)) fill_round(c, x, y, b->w, b->h, r, 0xFFFFFFFFU);
+        if (b->bt <= 0) {
+            fill_round(c, x, y, b->w, b->h, r, 0xFF767676U);
+            fill_round(c, x + 1, y + 1, b->w - 2, b->h - 2, r > 1 ? r - 1 : r, 0xFFFFFFFFU);
         }
-        label = dom_attr(n, "value");
-        if (!label || !*label) {
-            label = dom_attr(n, "placeholder");
-            color = 0xFF888888U;
-        }
-        if (type && (strcmp(type, "submit") == 0 || strcmp(type, "button") == 0) && !label) label = "Submit";
-        if (type && strcmp(type, "password") == 0 && label && color != 0xFF888888U) label = "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2";
-    } else if (n->tag == T_SELECT) {
-        for (dom_node_t *o = n->first; o; o = o->next) {
-            if (o->type == N_ELEMENT && o->tag == T_OPTION && o->first && o->first->type == N_TEXT) {
-                label = o->first->text;
-                break;
+        if (ctl && ctl->checked) {
+            if (kind == FK_RADIO) {
+                fill_round(c, x + b->w * 0.25f, y + b->h * 0.25f, b->w * 0.5f, b->h * 0.5f, b->w * 0.25f, CTL_ACCENT);
+            } else {
+                fill_round(c, x, y, b->w, b->h, r, CTL_ACCENT);
+                /* check mark: two strokes approximated with small squares */
+                for (int i = 0; i < 4; i++) fill(c, x + b->w * 0.22f + i * b->w * 0.06f, y + b->h * 0.48f + i * b->h * 0.06f, b->w * 0.1f, b->h * 0.1f, 0xFFFFFFFFU);
+                for (int i = 0; i < 6; i++) fill(c, x + b->w * 0.44f + i * b->w * 0.07f, y + b->h * 0.66f - i * b->h * 0.08f, b->w * 0.1f, b->h * 0.1f, 0xFFFFFFFFU);
             }
         }
-    } else if (n->tag == T_TEXTAREA) {
-        label = n->first && n->first->type == N_TEXT ? n->first->text : dom_attr(n, "placeholder");
+        if (focused) focus_ring(c, x, y, b->w, b->h, r);
+        return;
     }
-    if (label) {
-        size_t len = strlen(label);
-        const char *nl = memchr(label, '\n', len);
-        if (nl) len = (size_t)(nl - label);
-        if (len > 200) len = 200;
-        draw_text(c, &f, x + b->bl + 4, y + b->h / 2 + (f.ascent + f.descent) / 2, label, len, color);
+    if (kind == FK_TEXT || kind == FK_PASSWORD) {
+        paint_text_field(c, b, x, y, &f, color, focused);
+    } else if (kind == FK_TEXTAREA) {
+        paint_text_area(c, b, x, y, &f, color, focused);
+    } else if (kind == FK_SELECT) {
+        char label[256];
+        dom_node_t *o = form_option(n, form_ctl(n) ? form_ctl(n)->selected : -1);
+        float base = y + b->h / 2 + (f.ascent + f.descent) / 2;
+        int save[4];
+        label[0] = 0;
+        if (o) form_option_label(o, label, sizeof label);
+        clip_push(c, x + b->bl, y, b->w - b->bl - b->br - 14, b->h, save);
+        draw_text(c, &f, x + b->bl + 4, base, label, strlen(label), color);
+        clip_pop(c, save);
+        draw_text(c, &f, x + b->w - b->br - 13, base, "\xE2\x96\xBE", 3, color);
+    } else if (kind == FK_SUBMIT || kind == FK_RESET || kind == FK_BUTTON || kind == FK_IMAGE || kind == FK_FILE) {
+        const char *label = dom_attr(n, "value");
+        if (!label) label = kind == FK_RESET ? "Reset" : kind == FK_FILE ? "Choose file" : kind == FK_BUTTON ? "" : "Submit";
+        draw_text(c, &f, x + (b->w - font_text_width(&f, label, strlen(label))) / 2,
+                  y + b->h / 2 + (f.ascent + f.descent) / 2, label, strlen(label), color);
     }
+    if (focused) focus_ring(c, x, y, b->w, b->h, s->radius);
 }
 
 static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred);
@@ -277,6 +423,8 @@ static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred) 
         if (b->kind == BX_REPLACED && b->node && (b->node->tag == T_INPUT || b->node->tag == T_SELECT ||
                                                   b->node->tag == T_TEXTAREA)) {
             paint_control(c, b, x, y);
+        } else if (b->node && b->node == c->t->focus) {
+            focus_ring(c, x, y, b->w, b->h, s->radius);
         }
     }
     memcpy(saved, &c->cx0, sizeof(saved));

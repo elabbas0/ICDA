@@ -198,10 +198,152 @@ static long conn_recv(http_req_t *r, uint8_t *buf, size_t cap, int timeout_ms) {
     }
 }
 
+/* ---- cookies -------------------------------------------------------------
+ * A small in-memory jar (RFC 6265 subset): host-only and domain cookies,
+ * path scoping, Secure, and removal through Max-Age<=0 or an empty value
+ * with an expiry.  Session-lifetime only. */
+
+#define COOKIE_CAP 384
+
+typedef struct {
+    char *name, *value, *domain, *path;
+    int   secure, host_only;
+} cookie_t;
+
+static cookie_t jar[COOKIE_CAP];
+static int      njar;
+
+
+static int ieq_n(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) if (lower((unsigned char)a[i]) != lower((unsigned char)b[i])) return 0;
+    return 1;
+}
+
+static char *dupn(const char *s, size_t n) {
+    char *d = (char *)malloc(n + 1);
+    if (!d) return 0;
+    memcpy(d, s, n);
+    d[n] = 0;
+    return d;
+}
+
+static int domain_match(const char *host, const char *domain) {
+    size_t hl = strlen(host), dl = strlen(domain);
+    if (hl == dl) return ieq_n(host, domain, hl);
+    return hl > dl && host[hl - dl - 1] == '.' && ieq_n(host + hl - dl, domain, dl);
+}
+
+static void cookie_drop(int i) {
+    free(jar[i].name); free(jar[i].value); free(jar[i].domain); free(jar[i].path);
+    jar[i] = jar[--njar];
+}
+
+static void cookie_store(const url_t *u, const char *v, size_t vlen) {
+    const char *end = v + vlen, *semi = memchr(v, ';', vlen), *eq;
+    const char *nv_end = semi ? semi : end;
+    char domain[HOST_CAP], path[URL_CAP];
+    int secure = 0, host_only = 1, remove = 0;
+    eq = memchr(v, '=', (size_t)(nv_end - v));
+    if (!eq || eq == v) return;
+    snprintf(domain, sizeof domain, "%s", u->host);
+    {
+        /* default path: the request path up to its last slash */
+        const char *q = strchr(u->path, '?');
+        size_t pl = q ? (size_t)(q - u->path) : strlen(u->path);
+        while (pl > 1 && u->path[pl - 1] != '/') pl--;
+        if (pl > 1) pl--;
+        snprintf(path, sizeof path, "%.*s", (int)(pl ? pl : 1), pl ? u->path : "/");
+    }
+    for (const char *a = semi; a && a < end;) {
+        const char *ae, *ak, *av;
+        size_t kl, vl;
+        a++;
+        while (a < end && *a == ' ') a++;
+        ae = memchr(a, ';', (size_t)(end - a));
+        if (!ae) ae = end;
+        ak = a;
+        av = memchr(a, '=', (size_t)(ae - a));
+        kl = (size_t)((av ? av : ae) - ak);
+        while (kl && ak[kl - 1] == ' ') kl--;
+        if (av) { av++; while (av < ae && *av == ' ') av++; }
+        vl = av ? (size_t)(ae - av) : 0;
+        while (vl && av[vl - 1] == ' ') vl--;
+        if (kl == 6 && ieq_n(ak, "domain", 6) && vl) {
+            const char *d = av;
+            if (*d == '.') { d++; vl--; }
+            if (vl < sizeof domain) {
+                snprintf(domain, sizeof domain, "%.*s", (int)vl, d);
+                if (!domain_match(u->host, domain)) return;   /* not ours to set */
+                host_only = 0;
+            }
+        } else if (kl == 4 && ieq_n(ak, "path", 4) && vl && av[0] == '/') {
+            snprintf(path, sizeof path, "%.*s", (int)vl, av);
+        } else if (kl == 6 && ieq_n(ak, "secure", 6)) {
+            secure = 1;
+        } else if (kl == 7 && ieq_n(ak, "max-age", 7) && vl) {
+            if (atol(av) <= 0) remove = 1;
+        } else if (kl == 7 && ieq_n(ak, "expires", 7) && vl >= 4) {
+            /* "Thu, 01 Jan 1970 ..." and other past years: treat as delete */
+            const char *y = av;
+            for (size_t i = 0; i + 4 <= vl; i++) {
+                if (av[i] >= '0' && av[i] <= '9' && av[i + 1] >= '0' && av[i + 1] <= '9' &&
+                    av[i + 2] >= '0' && av[i + 2] <= '9' && av[i + 3] >= '0' && av[i + 3] <= '9') { y = av + i; break; }
+            }
+            if (y != av && atoi(y) < 2000) remove = 1;
+        }
+        a = ae;
+    }
+    for (int i = 0; i < njar; i++) {
+        if (strlen(jar[i].name) == (size_t)(eq - v) && memcmp(jar[i].name, v, (size_t)(eq - v)) == 0 &&
+            strcmp(jar[i].domain, domain) == 0 && strcmp(jar[i].path, path) == 0) {
+            cookie_drop(i);
+            break;
+        }
+    }
+    if (remove) return;
+    if (njar >= COOKIE_CAP) cookie_drop(0);
+    jar[njar].name = dupn(v, (size_t)(eq - v));
+    jar[njar].value = dupn(eq + 1, (size_t)(nv_end - eq - 1));
+    jar[njar].domain = dupn(domain, strlen(domain));
+    jar[njar].path = dupn(path, strlen(path));
+    jar[njar].secure = secure;
+    jar[njar].host_only = host_only;
+    if (!jar[njar].name || !jar[njar].value || !jar[njar].domain || !jar[njar].path) return;
+    njar++;
+}
+
+/* "Cookie: a=b; c=d\r\n" for url, or "" (malloc'd). */
+static char *cookie_header(const url_t *u) {
+    size_t cap = 16, len = 0;
+    char *out;
+    for (int i = 0; i < njar; i++) cap += strlen(jar[i].name) + strlen(jar[i].value) + 3;
+    out = (char *)malloc(cap + 16);
+    if (!out) return 0;
+    out[0] = 0;
+    for (int i = 0; i < njar; i++) {
+        cookie_t *c = &jar[i];
+        size_t pl = strlen(c->path);
+        if (c->secure && !u->tls) continue;
+        if (c->host_only ? !(strlen(u->host) == strlen(c->domain) && ieq_n(u->host, c->domain, strlen(c->domain)))
+                         : !domain_match(u->host, c->domain)) continue;
+        if (strncmp(u->path, c->path, pl) != 0) continue;
+        if (pl > 1 && c->path[pl - 1] != '/' && u->path[pl] && u->path[pl] != '/' && u->path[pl] != '?') continue;
+        len += (size_t)sprintf(out + len, "%s%s=%s", len ? "; " : "Cookie: ", c->name, c->value);
+    }
+    if (len) sprintf(out + len, "\r\n");
+    return out;
+}
+
 http_req_t *http_open(const char *url, const char *method, const char *extra_headers) {
+    return http_open_body(url, method, extra_headers, 0, 0);
+}
+
+http_req_t *http_open_body(const char *url, const char *method, const char *extra_headers,
+                           const void *body, size_t body_len) {
     http_req_t *r = (http_req_t *)calloc(1, sizeof(http_req_t));
     uint32_t ip;
-    char *req;
+    char *req, *cookies;
+    size_t req_cap;
     int n;
     if (!r) return 0;
     r->content_length = -1;
@@ -236,17 +378,28 @@ http_req_t *http_open(const char *url, const char *method, const char *extra_hea
             return r;
         }
     }
-    req = (char *)malloc(URL_CAP + 1024);
+    cookies = cookie_header(&r->url);
+    req_cap = URL_CAP + 1024 + (cookies ? strlen(cookies) : 0) + (extra_headers ? strlen(extra_headers) : 0) + body_len;
+    req = (char *)malloc(req_cap);
     if (!req) {
+        free(cookies);
         fail(r, "Out of memory");
         return r;
     }
-    n = snprintf(req, URL_CAP + 1024,
+    n = snprintf(req, req_cap,
                  "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\n"
                  "Accept: text/html,application/xhtml+xml,*/*;q=0.8\r\n"
                  "Accept-Language: en-US,en;q=0.8\r\nAccept-Encoding: identity\r\n"
-                 "Connection: close\r\n%s\r\n",
-                 method ? method : "GET", r->url.path, r->url.host, extra_headers ? extra_headers : "");
+                 "Connection: close\r\n%s%s",
+                 method ? method : "GET", r->url.path, r->url.host, cookies ? cookies : "",
+                 extra_headers ? extra_headers : "");
+    free(cookies);
+    if (body) n += snprintf(req + n, req_cap - (size_t)n, "Content-Length: %u\r\n", (unsigned)body_len);
+    n += snprintf(req + n, req_cap - (size_t)n, "\r\n");
+    if (body && body_len && (size_t)n + body_len < req_cap) {
+        memcpy(req + n, body, body_len);
+        n += (int)body_len;
+    }
     if (conn_send(r, req, (size_t)n) != 0) fail(r, "The request could not be sent");
     free(req);
     return r;
@@ -276,6 +429,7 @@ static void parse_headers(http_req_t *r, const char *head, size_t len) {
             else if (ieq_prefix(p, "transfer-encoding:") && vlen >= 7 && ieq_prefix(v + vlen - 7, "chunked")) r->chunked = 1;
             else if (ieq_prefix(p, "content-type:")) copy_cap(r->content_type, v, vlen, sizeof(r->content_type));
             else if (ieq_prefix(p, "location:")) copy_cap(r->location, v, vlen, sizeof(r->location));
+            else if (ieq_prefix(p, "set-cookie:")) cookie_store(&r->url, v, vlen);
         }
         p = line_end + 1;
     }
@@ -402,16 +556,21 @@ void http_free(http_req_t *r) {
     free(r);
 }
 
-http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
-    char current[URL_CAP];
+http_req_t *http_request(const char *method, const char *url, const char *content_type,
+                         const void *body, size_t body_len, char *final_url, size_t final_cap) {
+    char current[URL_CAP], headers[160];
+    int post = method && strcmp(method, "GET") != 0;
+    headers[0] = 0;
+    if (post && content_type) snprintf(headers, sizeof headers, "Content-Type: %s\r\n", content_type);
     snprintf(current, sizeof(current), "%s", url);
     for (int hop = 0, retried = 0; hop < 8; hop++) {
-        http_req_t *r = http_open(current, "GET", 0);
+        http_req_t *r = post ? http_open_body(current, method, headers, body ? body : "", body_len)
+                             : http_open(current, "GET", 0);
         uint64_t deadline = icda_ticks() + 3000;
         if (!r) return 0;
         while (r->state == HTTP_PENDING && icda_ticks() < deadline) http_poll(r, 200);
         if (r->state == HTTP_PENDING) fail(r, "The page took too long to load");
-        if (r->state == HTTP_ERROR && !r->headers_done && !retried) {
+        if (r->state == HTTP_ERROR && !r->headers_done && !retried && !post) {
             /* one retry: flaky paths often succeed on a fresh connection */
             retried = 1;
             hop--;
@@ -421,6 +580,8 @@ http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
         if (r->state == HTTP_DONE && r->status >= 300 && r->status < 400 && r->location[0]) {
             char next[URL_CAP];
             if (url_resolve(current, r->location, next, sizeof(next)) == 0) {
+                /* 301/302/303 turn a POST into a GET; 307/308 repeat it */
+                if (r->status != 307 && r->status != 308) post = 0;
                 http_free(r);
                 snprintf(current, sizeof(current), "%s", next);
                 continue;
@@ -433,4 +594,8 @@ http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
         return r;
     }
     return 0;
+}
+
+http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
+    return http_request("GET", url, 0, 0, 0, final_url, final_cap);
 }

@@ -15,6 +15,7 @@
 #include "layout.h"
 #include "paint.h"
 #include "image.h"
+#include "form.h"
 
 #define WIN_W        1024
 #define WIN_H        720
@@ -50,6 +51,12 @@ static struct {
     /* pending navigation, carried out by tick() after a "Loading" frame */
     char        nav_url[URL_CAP];
     int         nav_pending, nav_push, nav_drawn;
+    char       *nav_body;               /* form POST body, 0 for GET */
+    size_t      nav_body_len;
+
+    dom_node_t *focus;                  /* focused form control on the page */
+    dom_node_t *popup;                  /* <select> whose option list is open */
+    int         popup_hover;
 
     http_req_t *page_req;
     char       *page_src;               /* generated pages (home, errors) */
@@ -250,9 +257,13 @@ static void page_clear(void) {
     images_clear();
     if (sf.L) layout_free(sf.L);
     sf.L = 0;
+    sf.focus = sf.popup = 0;
     for (int i = 0; i < sf.nsheets; i++) css_sheet_free(sf.sheets[i]);
     sf.nsheets = 0;
-    if (sf.doc) dom_free(sf.doc);
+    if (sf.doc) {
+        form_release(sf.doc->root);
+        dom_free(sf.doc);
+    }
     sf.doc = 0;
     if (sf.page_req) http_free(sf.page_req);
     sf.page_req = 0;
@@ -401,7 +412,12 @@ static void do_navigate(ic_app_t *app) {
     if (strcmp(sf.nav_url, HOME_URL) == 0 || strcmp(sf.nav_url, "about:blank") == 0) {
         load_generated(sf.nav_url, home_html, sizeof home_html - 1);
     } else {
-        http_req_t *r = http_get(sf.nav_url, final_url, sizeof final_url);
+        http_req_t *r = sf.nav_body
+            ? http_request("POST", sf.nav_url, "application/x-www-form-urlencoded", sf.nav_body, sf.nav_body_len,
+                           final_url, sizeof final_url)
+            : http_get(sf.nav_url, final_url, sizeof final_url);
+        free(sf.nav_body);
+        sf.nav_body = 0;
         if (!r || r->state != HTTP_DONE) {
             load_error(sf.nav_url, r && r->error[0] ? r->error : "The server did not respond.");
             http_free(r);
@@ -470,6 +486,8 @@ static void do_navigate(ic_app_t *app) {
 
 static void navigate(const char *url, int push) {
     if (!url || !url[0]) return;
+    free(sf.nav_body);
+    sf.nav_body = 0;
     snprintf(sf.nav_url, sizeof sf.nav_url, "%s", url);
     sf.nav_pending = 1;
     sf.nav_push = push;
@@ -495,6 +513,322 @@ static void open_link(const char *href) {
         return;
     }
     navigate(url, 1);
+}
+
+/* ---- forms -------------------------------------------------------------- */
+
+static void submit_form(dom_node_t *form, dom_node_t *submitter) {
+    char url[URL_CAP];
+    char *body = 0;
+    size_t body_len = 0;
+    int post = 0;
+    if (!sf.doc || !form) return;
+    if (form_submission(sf.doc, form, submitter, url, sizeof url, &post, &body, &body_len) != 0) {
+        set_status("Could not submit the form");
+        return;
+    }
+    navigate(url, 1);
+    if (post) {
+        sf.nav_body = body;
+        sf.nav_body_len = body_len;
+    }
+}
+
+/* Enter in a field: submit through the form's first submit button, or
+ * directly when the form has a single text field (HTML implicit submission). */
+static dom_node_t *first_submit(dom_node_t *root, dom_node_t *n, dom_node_t *form) {
+    for (dom_node_t *k = n->first; k; k = k->next) {
+        dom_node_t *r;
+        int kind;
+        if (k->type != N_ELEMENT) continue;
+        kind = form_kind(k);
+        if ((kind == FK_SUBMIT || kind == FK_IMAGE) && !form_disabled(k) && form_owner(root, k) == form) return k;
+        r = first_submit(root, k, form);
+        if (r) return r;
+    }
+    return 0;
+}
+
+static void implicit_submit(dom_node_t *field) {
+    dom_node_t *form = form_owner(sf.doc->root, field);
+    if (form) submit_form(form, first_submit(sf.doc->root, sf.doc->root, form));
+}
+
+static int control_box(dom_node_t *n, ic_rect_t *out, ic_app_t *app) {
+    ic_rect_t p = page_rect(app);
+    float x, y, w, h;
+    if (!layout_box_rect(sf.L, n, &x, &y, &w, &h)) return 0;
+    *out = ic_rect_make(p.x + (int)x, p.y + (int)(y - sf.scroll), (int)w, (int)h);
+    return 1;
+}
+
+/* Caret position for a click at window x inside a single-line field. */
+static void place_cursor(ic_app_t *app, dom_node_t *n, int click_x) {
+    form_ctl_t *c = form_ctl(n);
+    const css_style_t *st = n->style;
+    ic_rect_t r;
+    font_t f;
+    float x;
+    size_t i = 0;
+    if (!c || !st || form_kind(n) == FK_TEXTAREA || !control_box(n, &r, app)) {
+        if (c) c->cursor = c->anchor = c->len;
+        return;
+    }
+    f = font_pick(st->font_family, st->font_weight, 0, st->font_size);
+    x = (float)r.x + st->border_w[3] + (st->padding[3].unit == U_PX ? st->padding[3].v : 0) - c->scroll_x;
+    while (i < c->len) {
+        const char *p = c->value + i;
+        uint32_t cp = utf8_next(&p, c->value + c->len);
+        float w = form_kind(n) == FK_PASSWORD ? font_advance(&f, 0x2022) : font_advance(&f, cp);
+        if ((float)click_x < x + w / 2) break;
+        x += w;
+        i = (size_t)(p - c->value);
+    }
+    c->cursor = c->anchor = i;
+}
+
+static void set_focus(dom_node_t *n) {
+    sf.focus = n;
+    sf.popup = 0;
+    if (n) form_ctl(n);
+}
+
+/* Keeps the focused control on screen (Tab can move far away). */
+static void reveal(ic_app_t *app, dom_node_t *n) {
+    ic_rect_t p = page_rect(app);
+    float x, y, w, h;
+    if (!sf.L || !layout_box_rect(sf.L, n, &x, &y, &w, &h)) return;
+    if (y < sf.scroll + 8) sf.scroll = y - 8;
+    else if (y + h > sf.scroll + (float)p.h - 8) sf.scroll = y + h - (float)p.h + 8;
+    if (sf.scroll < 0) sf.scroll = 0;
+}
+
+static void collect_focusable(dom_node_t *n, dom_node_t **out, int *count, int cap) {
+    for (dom_node_t *k = n->first; k && *count < cap; k = k->next) {
+        if (k->type != N_ELEMENT || !k->style || k->style->display == D_NONE) continue;
+        if (form_is_focusable(k) || (k->tag == T_A && dom_attr(k, "href"))) out[(*count)++] = k;
+        if (k->tag != T_SELECT) collect_focusable(k, out, count, cap);
+    }
+}
+
+static void focus_step(ic_app_t *app, int dir) {
+    static dom_node_t *list[2048];
+    int count = 0, at = -1;
+    if (!sf.doc) return;
+    collect_focusable(sf.doc->root, list, &count, 2048);
+    if (!count) return;
+    for (int i = 0; i < count; i++) if (list[i] == sf.focus) at = i;
+    at = at < 0 ? (dir > 0 ? 0 : count - 1) : (at + dir + count) % count;
+    set_focus(list[at]);
+    if (form_is_text(list[at])) form_select_all(list[at]);
+    reveal(app, list[at]);
+}
+
+/* Activates a control or link the way a click or Enter/Space would. */
+static void activate(ic_app_t *app, dom_node_t *n, int click_x) {
+    int kind = form_kind(n);
+    if (n->tag == T_A) {
+        open_link(dom_attr(n, "href"));
+        return;
+    }
+    if (form_disabled(n)) return;
+    switch (kind) {
+    case FK_TEXT: case FK_PASSWORD: case FK_TEXTAREA:
+        set_focus(n);
+        place_cursor(app, n, click_x);
+        ic_app_caret_reset(app);
+        break;
+    case FK_CHECKBOX: case FK_RADIO:
+        set_focus(n);
+        form_toggle(sf.doc->root, n);
+        break;
+    case FK_SELECT:
+        set_focus(n);
+        sf.popup = n;
+        sf.popup_hover = form_ctl(n)->selected;
+        break;
+    case FK_SUBMIT: case FK_IMAGE:
+        set_focus(n);
+        submit_form(form_owner(sf.doc->root, n), n);
+        break;
+    case FK_RESET:
+        form_reset(sf.doc->root, form_owner(sf.doc->root, n));
+        break;
+    case FK_FILE:
+        set_status("File uploads are not supported yet");
+        break;
+    default:
+        set_focus(n);
+        break;
+    }
+}
+
+/* What a click at page element el means: the control itself, a control a
+ * <label> points at, or the enclosing link. */
+static dom_node_t *click_target(dom_node_t *el) {
+    for (dom_node_t *p = el; p && p->type == N_ELEMENT; p = p->parent) {
+        if (form_kind(p) != FK_NONE) return p;
+        if (p->tag == T_LABEL) {
+            const char *for_id = dom_attr(p, "for");
+            if (for_id) {
+                static dom_node_t *list[2048];
+                int count = 0;
+                collect_focusable(sf.doc->root, list, &count, 2048);
+                for (int i = 0; i < count; i++) if (list[i]->id && strcmp(list[i]->id, for_id) == 0) return list[i];
+            } else {
+                static dom_node_t *list[64];
+                int count = 0;
+                collect_focusable(p, list, &count, 64);
+                if (count) return list[0];
+            }
+        }
+        if (p->tag == T_A && dom_attr(p, "href")) return p;
+    }
+    return 0;
+}
+
+/* <select> option list geometry, in window coordinates. */
+#define POPUP_ROW 24
+static int popup_rect(ic_app_t *app, ic_rect_t *out) {
+    ic_rect_t r, p = page_rect(app);
+    int n, h;
+    if (!sf.popup || !control_box(sf.popup, &r, app)) return 0;
+    n = form_option_count(sf.popup);
+    h = n * POPUP_ROW + 8;
+    if (h > p.h - 16) h = p.h - 16;
+    out->w = r.w > 180 ? r.w : 180;
+    out->h = h;
+    out->x = r.x;
+    out->y = r.y + r.h + h <= p.y + p.h ? r.y + r.h : r.y - h;
+    if (out->y < p.y) out->y = p.y;
+    if (out->x + out->w > p.x + p.w) out->x = p.x + p.w - out->w;
+    return 1;
+}
+
+static int popup_hit(ic_app_t *app, int x, int y) {
+    ic_rect_t r;
+    if (!popup_rect(app, &r) || !ic_ui_hit(r, x, y)) return -2;
+    {
+        int first = form_ctl(sf.popup)->selected - (r.h - 8) / POPUP_ROW + 1;
+        int i;
+        if (first < 0) first = 0;
+        i = first + (y - r.y - 4) / POPUP_ROW;
+        return i < form_option_count(sf.popup) ? i : -1;
+    }
+}
+
+static void draw_popup(ic_app_t *app, ic_canvas_t *c) {
+    const ic_palette_t *pal = ic_palette();
+    const ic_face_t *face = ic_font(IC_FONT_BODY);
+    ic_rect_t r;
+    int count, rows, first;
+    if (!popup_rect(app, &r)) return;
+    count = form_option_count(sf.popup);
+    rows = (r.h - 8) / POPUP_ROW;
+    first = form_ctl(sf.popup)->selected - rows + 1;
+    if (first < 0) first = 0;
+    ic_gfx_shadow(c, r.x, r.y, r.w, r.h, 8, 16, 4, 60);
+    ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 8, pal->content);
+    for (int i = first; i < count && i < first + rows; i++) {
+        char label[256];
+        ic_rect_t row = ic_rect_make(r.x + 4, r.y + 4 + (i - first) * POPUP_ROW, r.w - 8, POPUP_ROW);
+        dom_node_t *o = form_option(sf.popup, i);
+        int disabled = dom_attr(o, "disabled") != 0;
+        if (i == sf.popup_hover && !disabled) ic_gfx_rrect(c, row.x, row.y, row.w, row.h, 5, pal->accent);
+        form_option_label(o, label, sizeof label);
+        ic_text_draw_in(c, face, ic_rect_make(row.x + 8, row.y, row.w - 16, row.h), label,
+                        disabled ? pal->label_tertiary : i == sf.popup_hover ? 0xFFFFFFFFu : pal->label, IC_ALIGN_LEFT);
+    }
+}
+
+static void copy_selection(dom_node_t *n, int cut) {
+    char buf[8192];
+    size_t len = form_selection(n, buf, sizeof buf);
+    if (form_kind(n) == FK_PASSWORD) return;
+    if (len) ic_clipboard_set(buf, len);
+    if (cut) {
+        form_ctl_t *c = form_ctl(n);
+        if (c->anchor != c->cursor) form_backspace(n);
+    }
+}
+
+/* Keys for the focused page control.  Returns 1 if the key was used. */
+static int page_key(ic_app_t *app, const ic_event_t *ev) {
+    dom_node_t *n = sf.focus;
+    int kind = form_kind(n), shift = (ev->mods & IC_MOD_SHIFT) != 0, ctrl = (ev->mods & IC_MOD_CTRL) != 0;
+    if (!n) return 0;
+    if (sf.popup) {
+        int count = form_option_count(sf.popup);
+        switch (ev->key) {
+        case IC_KEY_UP: if (sf.popup_hover > 0) sf.popup_hover--; return 1;
+        case IC_KEY_DOWN: if (sf.popup_hover + 1 < count) sf.popup_hover++; return 1;
+        case IC_KEY_ENTER: case ' ':
+            form_choose(sf.popup, sf.popup_hover);
+            sf.popup = 0;
+            return 1;
+        case IC_KEY_ESCAPE: sf.popup = 0; return 1;
+        default: return 1;
+        }
+    }
+    if (ev->key == IC_KEY_TAB) { focus_step(app, shift ? -1 : 1); return 1; }
+    if (ev->key == IC_KEY_ESCAPE) { sf.focus = 0; return 1; }
+    if (kind == FK_TEXT || kind == FK_PASSWORD || kind == FK_TEXTAREA) {
+        ic_app_caret_reset(app);
+        if (ctrl) {
+            switch (ev->key) {
+            case 'a': case 'A': form_select_all(n); return 1;
+            case 'c': case 'C': copy_selection(n, 0); return 1;
+            case 'x': case 'X': copy_selection(n, 1); return 1;
+            case 'v': case 'V': {
+                char clip[8192];
+                long len = ic_clipboard_get(clip, sizeof clip);
+                if (len > 0) form_insert(n, clip, (size_t)len);
+                return 1;
+            }
+            default: return 0;
+            }
+        }
+        switch (ev->key) {
+        case IC_KEY_ENTER:
+            if (kind == FK_TEXTAREA) form_insert(n, "\n", 1);
+            else implicit_submit(n);
+            return 1;
+        case IC_KEY_BACKSPACE: form_backspace(n); return 1;
+        case IC_KEY_DELETE: form_delete(n); return 1;
+        case IC_KEY_LEFT: form_move(n, -1, shift); return 1;
+        case IC_KEY_RIGHT: form_move(n, 1, shift); return 1;
+        case IC_KEY_HOME: form_home_end(n, 0, shift); return 1;
+        case IC_KEY_END: form_home_end(n, 1, shift); return 1;
+        case IC_KEY_UP: case IC_KEY_DOWN:
+            if (kind == FK_TEXTAREA) return 1;
+            return 0;
+        default:
+            if (ev->key >= 32 && ev->key < 127 && !(ev->mods & IC_MOD_ALT)) {
+                char ch = (char)ev->key;
+                form_insert(n, &ch, 1);
+                return 1;
+            }
+            return 0;
+        }
+    }
+    switch (kind) {
+    case FK_CHECKBOX: case FK_RADIO:
+        if (ev->key == ' ') { form_toggle(sf.doc->root, n); return 1; }
+        if (ev->key == IC_KEY_ENTER) { implicit_submit(n); return 1; }
+        return 0;
+    case FK_SELECT:
+        if (ev->key == IC_KEY_UP || ev->key == IC_KEY_DOWN) {
+            form_ctl_t *c = form_ctl(n);
+            int next = c->selected + (ev->key == IC_KEY_UP ? -1 : 1);
+            form_choose(n, next);
+            return 1;
+        }
+        if (ev->key == ' ' || ev->key == IC_KEY_ENTER) { activate(app, n, 0); return 1; }
+        return 0;
+    default:
+        if (ev->key == IC_KEY_ENTER || (ev->key == ' ' && n->tag != T_A)) { activate(app, n, 0); return 1; }
+        return 0;
+    }
 }
 
 /* ---- drawing ------------------------------------------------------------ */
@@ -542,10 +876,13 @@ static void draw_page(ic_app_t *app, ic_canvas_t *c) {
         t.h = p.h * s;
         t.scale = (float)s;
         t.scroll_y = sf.scroll;
+        t.focus = sf.focus;
+        t.caret_on = sf.focus && form_is_text(sf.focus) && !sf.addr_focused ? ic_app_caret_visible(app) : 0;
         paint_layout(sf.L, sf.doc, &t);
     }
     ic_canvas_pop_clip(c, &saved);
     if (sf.L->height > (float)p.h) ic_ui_scrollbar(c, p, (int)sf.scroll, (int)sf.L->height, 1.0f);
+    if (sf.popup) draw_popup(app, c);
 }
 
 static void draw_status(ic_app_t *app, ic_canvas_t *c) {
@@ -691,7 +1028,18 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         sf.hover_back = ic_ui_hit(back_rect(app), ev->x, ev->y);
         sf.hover_fwd = ic_ui_hit(fwd_rect(app), ev->x, ev->y);
         sf.hover_reload = ic_ui_hit(reload_rect(app), ev->x, ev->y);
-        ic_app_set_cursor(app, ic_ui_hit(a, ev->x, ev->y) ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
+        if (sf.popup) {
+            int h = popup_hit(app, ev->x, ev->y);
+            if (h >= 0 && h != sf.popup_hover) { sf.popup_hover = h; ic_app_invalidate(app); }
+        }
+        {
+            int text = ic_ui_hit(a, ev->x, ev->y);
+            if (!text && sf.L && ic_ui_hit(p, ev->x, ev->y)) {
+                dom_node_t *el = layout_hit_element(sf.L, (float)(ev->x - p.x), (float)(ev->y - p.y) + sf.scroll);
+                text = el && form_is_text(el);
+            }
+            ic_app_set_cursor(app, text ? IC_CURSOR_TEXT : IC_CURSOR_ARROW);
+        }
         if (href && sf.doc && url_resolve(sf.doc->base_url, href, url, sizeof url) == 0) {
             if (strcmp(url, sf.hover_url) == 0) return;
             snprintf(sf.hover_url, sizeof sf.hover_url, "%s", url);
@@ -725,9 +1073,17 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         sf.addr_focused = 0;
-        if (ic_ui_hit(p, ev->x, ev->y)) {
-            dom_node_t *ln = link_at(app, ev->x, ev->y);
-            if (ln) open_link(dom_attr(ln, "href"));
+        if (sf.popup) {
+            int i = popup_hit(app, ev->x, ev->y);
+            if (i >= 0 && !dom_attr(form_option(sf.popup, i), "disabled")) form_choose(sf.popup, i);
+            if (i != -2 || !ic_ui_hit(p, ev->x, ev->y)) { sf.popup = 0; break; }
+            sf.popup = 0;
+        }
+        if (ic_ui_hit(p, ev->x, ev->y) && sf.L) {
+            dom_node_t *el = layout_hit_element(sf.L, (float)(ev->x - p.x), (float)(ev->y - p.y) + sf.scroll);
+            dom_node_t *target = el ? click_target(el) : 0;
+            if (target) activate(app, target, ev->x);
+            else sf.focus = 0;
         }
         break;
     case IC_EV_SCROLL:
@@ -748,6 +1104,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if (sf.addr_focused) { addr_key(app, ev); break; }
+        if (sf.focus && page_key(app, ev)) break;
+        if (ev->key == IC_KEY_TAB) { focus_step(app, (ev->mods & IC_MOD_SHIFT) ? -1 : 1); break; }
         switch (ev->key) {
         case IC_KEY_DOWN: scroll_by(app, 40); break;
         case IC_KEY_UP: scroll_by(app, -40); break;

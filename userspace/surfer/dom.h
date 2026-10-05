@@ -57,6 +57,8 @@ typedef struct dom_node {
     uint32_t        *chash;    /* class name hashes, filled by the cascade */
     uint16_t         nchash;
     void            *layout;   /* layout box, owned by the layout pass */
+    struct form_ctl *ctl;      /* live form-control state (value, checked), see form.h */
+    void            *js;       /* script wrapper object, owned by the script engine */
 } dom_node_t;
 
 typedef struct {

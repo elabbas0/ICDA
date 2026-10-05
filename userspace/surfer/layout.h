@@ -21,6 +21,7 @@ typedef struct frag {
     uint8_t      decoration;
     uint8_t      kind;              /* 0 text, 1 marker */
     dom_node_t  *link;              /* enclosing <a href>, for clicks */
+    dom_node_t  *node;              /* text node (or element for generated content) */
     const css_style_t *inline_bg;   /* innermost inline ancestor with a background */
     struct frag *next;
 } frag_t;
@@ -58,5 +59,10 @@ layout_t *layout_document(dom_doc_t *doc, float viewport_w, float viewport_h, im
 void      layout_free(layout_t *l);
 /* The innermost link at document point (x, y), or 0. */
 dom_node_t *layout_hit_link(layout_t *l, float x, float y);
+/* The innermost element at document point (x, y): a box's element or the
+ * parent element of the text under the point.  0 if nothing is there. */
+dom_node_t *layout_hit_element(layout_t *l, float x, float y);
+/* Border box of an element's (first) box in document coordinates; 0 if none. */
+int         layout_box_rect(layout_t *l, dom_node_t *n, float *x, float *y, float *w, float *h);
 
 #endif
