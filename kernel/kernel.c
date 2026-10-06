@@ -43,6 +43,7 @@
 #include "linux/lx.h"
 #include "net/sock.h"
 #include "cpu/smp.h"
+#include "cpu/tsc.h"
 #include "cpu/idt.h"
 #include "cpu/irq_controller.h"
 #include "cpu/isr.h"
@@ -105,7 +106,7 @@ static void timer_handler(struct registers *regs) {
 
     vt_tick();
     audio_playback_tick();
-    schedule(regs);
+    if (!sched_boot_hold) schedule(regs);
 }
 
 static void boot_prefix(const char *topic) {
@@ -286,6 +287,9 @@ void kernel_main(void *multiboot_info) {
     bootstage_set(10, "sched");
     boot_line("scheduler", "scheduler core online");
 
+    tsc_init();
+    boot_line_dec("timer", "tsc clock MHz ", tsc_hz() / 1000000ULL, "");
+    boot_line("timer", tsc_source());
     irq_register(0, timer_handler);
     boot_line("timer", "irq0 handler registered");
     pit_set_frequency(100);

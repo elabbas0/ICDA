@@ -8,6 +8,8 @@
 #include "../memory/vmm.h"
 #include "../proc/sched.h"
 #include "../fs/bootlog.h"
+#include "tsc.h"
+#include "irq_controller.h"
 
 #define AP_TRAMPOLINE 0x8000ULL
 #define AP_STACK_PAGES 4
@@ -69,33 +71,10 @@ static void log_num(const char *what, uint64_t v) {
     serial_write("\n");
 }
 
-static inline uint64_t rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-/* Upper bound for one PIT tick (10 ms) in TSC cycles: generous for any CPU
- * up to ~10 GHz, so a timer that never fires cannot hang the boot. */
-#define TICK_TSC_LIMIT 100000000ULL
-
-static int timer_dead;
-
-/* Waits for n PIT ticks with interrupts enabled (boot only).  Spins instead
- * of hlt so a missing timer interrupt ends in a timeout, not a hang. */
+/* SMP start runs with interrupts off: the PIT tick counter stands still, so
+ * every wait here is measured on the TSC. */
 static void wait_ticks(uint64_t n) {
-    uint64_t end = sched_ticks() + n;
-    uint64_t start = rdtsc();
-    if (timer_dead) return;
-    __asm__ volatile("sti");
-    while (sched_ticks() < end) {
-        if (rdtsc() - start > (n + 2) * TICK_TSC_LIMIT) {
-            timer_dead = 1;
-            break;
-        }
-        __asm__ volatile("pause");
-    }
-    __asm__ volatile("cli");
+    udelay(n * 10000ULL);              /* one PIT tick = 10 ms */
 }
 
 static inline void outb_p(uint16_t port, uint8_t v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
@@ -113,21 +92,46 @@ static uint16_t pit_count(void) {
 static void smp_log_timer_state(void) {
     uint32_t lo, hi;
     uint16_t a, b;
-    uint64_t t0, t1;
     __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1BU));
     log_num("[smp] apic base: ", ((uint64_t)hi << 32 | lo) & 0xFFFFF000ULL);
     log_num("[smp]   apic enabled: ", (lo >> 11) & 1);
     log_num("[smp]   x2apic mode: ", (lo >> 10) & 1);
+    serial_write("[smp] tsc clock from ");
+    serial_write(tsc_source());
+    log_num(", MHz: ", tsc_hz() / 1000000ULL);
     a = pit_count();
-    t0 = rdtsc();
-    while (rdtsc() - t0 < 2000000ULL) __asm__ volatile("pause");
+    udelay(1000);
     b = pit_count();
     log_num("[smp] pit counter moving: ", a != b);
+    bootlog_flush("SMP timer state logged");
+}
+
+volatile int sched_boot_hold;
+volatile int smp_bsp_lapic_tick;
+
+/* The scheduler's clock is PIT IRQ0.  Some firmware gates the 8254 or its
+ * interrupt never reaches the CPU; then the BSP's local APIC timer takes
+ * over the tick.  Checked with scheduling held so no thread runs. */
+static void smp_check_tick_source(void) {
+    uint64_t t0;
+    sched_boot_hold = 1;
     t0 = sched_ticks();
-    wait_ticks(5);
-    t1 = sched_ticks();
-    log_num("[smp] timer ticks seen in check: ", t1 - t0);
-    bootlog_flush("SMP timer check done");
+    __asm__ volatile("sti");
+    udelay(100000);
+    __asm__ volatile("cli");
+    log_num("[smp] pit ticks in 100 ms: ", sched_ticks() - t0);
+    if (sched_ticks() - t0 < 3 && lapic_ticks_per_tick) {
+        irq_controller_mask(0);
+        smp_bsp_lapic_tick = 1;
+        lapic_timer_periodic(SMP_TIMER_VECTOR, lapic_ticks_per_tick);
+        t0 = sched_ticks();
+        __asm__ volatile("sti");
+        udelay(100000);
+        __asm__ volatile("cli");
+        log_num("[smp] pit silent, local apic timer ticks in 100 ms: ", sched_ticks() - t0);
+    }
+    sched_boot_hold = 0;
+    bootlog_flush("tick source checked");
 }
 
 static void gdt_setup_cpu(cpu_t *c) {
@@ -204,12 +208,12 @@ static int start_ap(cpu_t *c) {
 
 void smp_init(void *multiboot_info) {
     const struct acpi_madt *madt;
+    uint32_t bsp_apic;
+    const uint8_t *p, *end;
+
+    bootlog_flush("SMP: reading ACPI tables");
     if (!acpi_madt()) (void)acpi_init(multiboot_info);
     madt = acpi_madt();
-    uint32_t bsp_apic = lapic_id();
-    const uint8_t *p, *end;
-    uint32_t found = 0;
-
     if (!madt) {
         serial_write("[smp] no MADT, single CPU\n");
         return;
@@ -217,6 +221,7 @@ void smp_init(void *multiboot_info) {
     /* With the 8259 PIC in charge the LAPIC was never set up: enable it and
      * keep LINT0 as the PIC's virtual wire so legacy IRQs still arrive. */
     if (!lapic_physical_base()) {
+        bootlog_flush("SMP: enabling local APIC");
         if (lapic_init(madt->lapic_address) != 0) return;
         lapic_virtual_wire();
     }
@@ -227,14 +232,18 @@ void smp_init(void *multiboot_info) {
     apic_to_cpu[bsp_apic & 0xFF] = 0;
 
     smp_log_timer_state();
-    if (timer_dead) {
-        serial_write("[smp] timer interrupts are not arriving, staying on one CPU\n");
-        bootlog_flush("SMP skipped: no timer");
-        return;
-    }
     lapic_ticks_per_tick = lapic_calibrate(wait_ticks);
     log_num("[smp] lapic counts per tick: ", lapic_ticks_per_tick);
-    if (!lapic_ticks_per_tick || timer_dead) return;
+    if (!lapic_ticks_per_tick) {
+        smp_check_tick_source();
+        return;
+    }
+    /* the trampoline loads CR3 in 32-bit mode */
+    if (vmm_kernel_address_space()->pml4_phys >> 32) {
+        serial_write("[smp] kernel page tables above 4 GB, single CPU\n");
+        smp_check_tick_source();
+        return;
+    }
     {
         uint64_t size = (uint64_t)(ap_trampoline_end - ap_trampoline_start);
         uint8_t *dst = (uint8_t *)PHYS_TO_VIRT(AP_TRAMPOLINE);
@@ -247,24 +256,26 @@ void smp_init(void *multiboot_info) {
         if (p[0] == 0 && p[1] >= 8) {
             uint8_t apic = p[3];
             uint32_t flags = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
-            if ((flags & 3) && apic != bsp_apic && cpu_count < SMP_MAX_CPUS) {
+            /* bit 0: enabled.  Bit 1 alone ("online capable") marks a CPU
+             * that is not present now; firmware often lists such slots. */
+            if ((flags & 1) && apic != bsp_apic && cpu_count < SMP_MAX_CPUS) {
                 cpu_t *c = &smp_cpus[cpu_count];
                 c->self = (uint64_t)c;
                 c->index = cpu_count;
                 c->apic_id = apic;
                 apic_to_cpu[apic] = (uint8_t)cpu_count;
-                found++;
                 cpu_count++;
                 log_num("[smp] starting cpu with apic id ", apic);
                 bootlog_flush(0);
                 if (start_ap(c) != 0) {
                     cpu_count--;
-                    serial_write("[smp] AP failed to start\n");
+                    serial_write("[smp] AP failed to start, not starting more\n");
+                    break;
                 }
             }
         }
         p += p[1];
     }
     log_num("[smp] cpus online: ", cpu_count);
-    (void)found;
+    smp_check_tick_source();
 }

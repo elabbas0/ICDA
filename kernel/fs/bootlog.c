@@ -88,3 +88,26 @@ static void bootlog_thread(void) {
 void bootlog_start_thread(void) {
     (void)proc_create_kernel(bootlog_thread);
 }
+
+static void put_hex(uint64_t v) {
+    bootlog_puts("0x");
+    for (int s = 60; s >= 0; s -= 4) bootlog_putc("0123456789abcdef"[(v >> s) & 0xF]);
+}
+
+/* Called from the CPU exception paths just before the kernel halts. */
+void bootlog_crash(const char *what, uint64_t vector, uint64_t rip, uint64_t addr) {
+    static int crashing;
+    if (crashing) return;               /* crashed while saving the crash */
+    crashing = 1;
+    log_writing = 0;                    /* the crash may have hit mid-write */
+    bootlog_puts("[crash] ");
+    bootlog_puts(what);
+    bootlog_puts(" vector ");
+    put_dec(vector);
+    bootlog_puts(" rip ");
+    put_hex(rip);
+    bootlog_puts(" addr ");
+    put_hex(addr);
+    bootlog_putc('\n');
+    (void)bootlog_flush("crash");
+}

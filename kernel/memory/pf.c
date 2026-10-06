@@ -4,6 +4,7 @@
 #include "../cpu/isr.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
+#include "../fs/bootlog.h"
 #include "../drivers/serial/serial.h"
 #include "../proc/sched.h"
 #include "../proc/process.h"
@@ -155,6 +156,7 @@ static void pf_panic(struct registers *regs, uint64_t cr2) {
     if (e & PF_RESERVED) fb_print("[RSVD] ",   FB_WHITE, FB_RED);
     if (e & PF_IFETCH)   fb_print("[IFETCH] ", FB_WHITE, FB_RED);
     fb_print("\n", FB_WHITE, FB_RED);
+    bootlog_crash("kernel page fault", 14, regs->rip, cr2);
 
     __asm__ volatile("cli; hlt");
 }

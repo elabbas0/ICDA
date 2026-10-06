@@ -9,6 +9,7 @@
 #include "../drivers/audio/speaker.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
+#include "../fs/bootlog.h"
 
 const char *exception_names[32] = {
     "division by zero",       "debug",
@@ -124,6 +125,7 @@ void isr_handler(struct registers* regs) {
 
     speaker_stop();
     print_exception_frame(regs, num);
+    bootlog_crash("cpu exception", num, regs->rip, 0);
 
     __asm__ volatile ("cli; hlt");
 }
@@ -131,11 +133,16 @@ void isr_handler(struct registers* regs) {
 
 static void irq_dispatch(struct registers* regs, int irq);
 
+/* The BSP's local APIC timer stands in for a silent PIT (see smp.c). */
+static int bsp_lapic_tick(int irq) {
+    return irq == 16 && smp_bsp_lapic_tick && this_cpu()->index == 0;
+}
+
 void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
     int took;
 
-    if (irq == 0) sched_tick();
+    if (irq == 0 || bsp_lapic_tick(irq)) sched_tick();
     took = bkl_enter();
     irq_dispatch(regs, irq);
     if (took) bkl_exit();
@@ -144,6 +151,10 @@ void irq_handler(struct registers* regs) {
 static void irq_dispatch(struct registers* regs, int irq) {
     if (irq == 16) {
         lapic_eoi();
+        if (bsp_lapic_tick(irq)) {
+            if (irq_handlers[0]) irq_handlers[0](regs);
+            return;
+        }
         sched_ap_tick();
         return;
     }

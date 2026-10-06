@@ -36,6 +36,12 @@ cpu_t   *this_cpu(void);
 uint32_t smp_cpu_count(void);
 void     smp_init(void *multiboot_info);
 
+/* While set, the timer interrupt does not switch threads (boot checks). */
+extern volatile int sched_boot_hold;
+/* Set when PIT IRQ0 never arrives: the BSP local APIC timer (vector 48)
+ * drives the scheduler tick instead. */
+extern volatile int smp_bsp_lapic_tick;
+
 /* Big kernel lock: held by whichever CPU is executing kernel code.  Kernel
  * entry takes it if this CPU does not hold it yet (returns 1 if it did). */
 int      bkl_enter(void);

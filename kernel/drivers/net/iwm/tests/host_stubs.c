@@ -41,6 +41,7 @@ uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt) { (void)as; return vi
 
 static uint64_t ticks;
 uint64_t sched_ticks(void) { return ticks++; }
+uint64_t tsc_hz(void) { return 2000000000ULL; }
 void sched_sleep(uint64_t t) { ticks += t; }
 void sched_yield(void) { }
 

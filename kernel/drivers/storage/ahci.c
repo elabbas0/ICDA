@@ -4,6 +4,7 @@
 #include "../../memory/pmm.h"
 #include "../../memory/vmm.h"
 #include "../../proc/sched.h"
+#include "../../cpu/tsc.h"
 #include "../serial/serial.h"
 
 #include <stdint.h>
@@ -166,19 +167,17 @@ static int ahci_port_ready(hba_port_t *port) {
     return det == 3 && ipm == 1;
 }
 
-#define AHCI_TIMEOUT_TICKS 3000ULL
-/* used only while the timer is not ticking yet (early boot): each spin is an
- * uncached register read, about a microsecond on real hardware */
-#define AHCI_SPIN_FALLBACK 20000000U
+/* Command timeout, measured on the TSC: the PIT tick counter stands still
+ * during boot and in kernel threads that run with interrupts off. */
+#define AHCI_TIMEOUT_US 5000000ULL
 
 static int ahci_timed_out(uint64_t start, uint32_t spins) {
-    uint64_t now = sched_ticks();
-    if (now != start) return now - start > AHCI_TIMEOUT_TICKS;
-    return spins > AHCI_SPIN_FALLBACK;
+    (void)spins;
+    return tsc_us() - start > AHCI_TIMEOUT_US;
 }
 
 static int ahci_wait_idle(hba_port_t *port) {
-    uint64_t start = sched_ticks();
+    uint64_t start = tsc_us();
     for (uint32_t i = 0; !ahci_timed_out(start, i); i++) {
         uint32_t tfd = port->tfd;
         if ((tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) == 0) return 0;
@@ -230,7 +229,7 @@ static int ahci_issue(ahci_device_t *dev, uint8_t command, uint64_t lba, uint16_
     dev->port->ci = 1U;
 
     {
-        uint64_t start = sched_ticks();
+        uint64_t start = tsc_us();
         for (uint32_t i = 0; !ahci_timed_out(start, i); i++) {
             if ((dev->port->ci & 1U) == 0) break;
         }

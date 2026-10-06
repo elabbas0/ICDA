@@ -23,6 +23,7 @@
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "proc/sched.h"
+#include "cpu/tsc.h"
 #include "drivers/serial/serial.h"
 #include "drivers/console/console.h"
 
@@ -544,25 +545,10 @@ static uint64_t tsc_per_us = 2000;	/* refined by calibration */
 static void
 tsc_calibrate(void)
 {
-	uint64_t t0, t1, k0, k1, start;
-
 	tsc_base = rdtsc();
-	/* Align to a 100 Hz tick edge, then count TSC over 10 ticks. */
-	k0 = sched_ticks();
-	start = rdtsc();
-	while (sched_ticks() == k0) {
-		if (rdtsc() - start > 20000000000ULL)
-			return;		/* timer not running; keep default */
-		__asm__ volatile("pause");
-	}
-	k0 = sched_ticks();
-	t0 = rdtsc();
-	while ((k1 = sched_ticks()) < k0 + 10)
-		__asm__ volatile("pause");
-	t1 = rdtsc();
-	/* 10 ticks = 100 ms */
-	if (t1 > t0)
-		tsc_per_us = (t1 - t0) / ((k1 - k0) * 10000ULL);
+	/* From the kernel's interrupt-free TSC clock: this thread runs with
+	 * interrupts off, where the PIT tick counter does not advance. */
+	tsc_per_us = tsc_hz() / 1000000ULL;
 	if (tsc_per_us == 0)
 		tsc_per_us = 1;
 }
@@ -570,7 +556,7 @@ tsc_calibrate(void)
 static int tsc_ready;
 
 static void
-tsc_init(void)
+iwm_tsc_init(void)
 {
 	if (!tsc_ready) {
 		tsc_ready = 1;
@@ -582,7 +568,7 @@ tsc_init(void)
 void
 iwm_compat_init(void)
 {
-	tsc_init();
+	iwm_tsc_init();
 }
 
 uint64_t
@@ -631,7 +617,7 @@ static int		 polling;
 void
 iwm_compat_set_poll(int (*fn)(void *), void *arg)
 {
-	tsc_init();
+	iwm_tsc_init();
 	poll_fn = fn;
 	poll_arg = arg;
 }
