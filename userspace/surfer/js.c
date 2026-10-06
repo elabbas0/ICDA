@@ -67,9 +67,18 @@ struct js_page {
     int         nloads, caploads;
     int         dirty;
     int         loading;       /* still running parser-inserted scripts */
+    /* js_run_step state */
+    dom_node_t **step_list;
+    int         step_count, step_cap, step_i, step_phase;
+    int         abort;         /* Stop pressed */
+    double      deadline_ms;   /* watchdog for the script running now */
 };
 
 static JSClassID node_class;
+
+/* a script (or timer, or event handler) that runs longer than this is stopped */
+#define SCRIPT_BUDGET_MS 20000
+static int interrupt_cb(JSRuntime *rt, void *opaque);
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -1497,6 +1506,8 @@ static void run_script(js_page_t *p, dom_node_t *el) {
     JSContext *ctx = p->ctx;
     char url[URL_CAP];
     size_t len = 0;
+    if (p->abort) return;
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;
     int kind = script_kind(el);
     char *src;
     JSValue r, g;
@@ -1714,6 +1725,7 @@ js_page_t *js_page_new(dom_doc_t *doc, const char *url, const js_host_t *host) {
     if (!p->rt) { free(p); return 0; }
     JS_SetMemoryLimit(p->rt, 512u * 1024 * 1024);
     JS_SetMaxStackSize(p->rt, 768 * 1024);
+    JS_SetInterruptHandler(p->rt, interrupt_cb, p);
     p->ctx = ctx = JS_NewContext(p->rt);
     if (!ctx) { JS_FreeRuntime(p->rt); free(p); return 0; }
     JS_SetContextOpaque(ctx, p);
@@ -1805,6 +1817,7 @@ void js_page_free(js_page_t *p) {
     free(p->ran);
     free(p->queued);
     free(p->loads);
+    free(p->step_list);
     free(p);
 }
 
@@ -1822,24 +1835,19 @@ static void set_ready_state(js_page_t *p, const char *state) {
     JS_FreeValue(p->ctx, g);
 }
 
-void js_run_scripts(js_page_t *p) {
-    dom_node_t **list = 0;
-    int count = 0, cap = 0;
-    if (!p) return;
-    p->loading = 1;
-    collect_scripts(p->doc->root, &list, &count, &cap);
-    /* parser-blocking classic scripts first, then deferred ones and modules */
-    for (int i = 0; i < count; i++) {
-        if (script_kind(list[i]) == 1 && !(dom_attr(list[i], "defer") && dom_attr(list[i], "src")) && !dom_attr(list[i], "async")) {
-            run_script(p, list[i]);
-        }
-    }
-    for (int i = 0; i < count; i++) {
-        if (script_kind(list[i]) && !ptr_in(p->ran, p->nran, list[i])) run_script(p, list[i]);
-        else if (!script_kind(list[i])) ptr_push(&p->ran, &p->nran, &p->capran, list[i]);
-    }
-    free(list);
-    p->nqueued = 0;      /* scripts found by the scan above already ran */
+/* Scripts run one per js_run_step() call so the browser can draw, scroll and
+ * take a Stop click between them: parser-blocking classic scripts first,
+ * then deferred ones and modules, then DOMContentLoaded and load. */
+/* runs one script and logs it when it is slow */
+static void run_script_timed(js_page_t *p, dom_node_t *el) {
+    double t0 = now_ms();
+    const char *src = dom_attr(el, "src");
+    run_script(p, el);
+    if (now_ms() - t0 > 100) logf_(p, "[js] %s %d ms", src ? src : "(inline script)", (int)(now_ms() - t0));
+}
+
+static void finish_loading(js_page_t *p) {
+    p->nqueued = 0;      /* scripts found by the scan already ran */
     p->loading = 0;
     set_ready_state(p, "interactive");
     fire_simple(p, p->doc->root, "DOMContentLoaded");
@@ -1859,11 +1867,97 @@ void js_run_scripts(js_page_t *p) {
     run_jobs(p);
 }
 
+int js_run_step(js_page_t *p) {
+    if (!p || p->step_phase == 3) return 0;
+    if (p->step_phase == 0) {
+        p->loading = 1;
+        collect_scripts(p->doc->root, &p->step_list, &p->step_count, &p->step_cap);
+        p->step_phase = 1;
+        p->step_i = 0;
+    }
+    while (p->step_phase == 1 && p->step_i < p->step_count) {
+        dom_node_t *el = p->step_list[p->step_i++];
+        if (script_kind(el) == 1 && !(dom_attr(el, "defer") && dom_attr(el, "src")) && !dom_attr(el, "async")) {
+            run_script_timed(p, el);
+            return 1;
+        }
+    }
+    if (p->step_phase == 1) {
+        p->step_phase = 2;
+        p->step_i = 0;
+    }
+    while (p->step_phase == 2 && p->step_i < p->step_count) {
+        dom_node_t *el = p->step_list[p->step_i++];
+        if (script_kind(el) && !ptr_in(p->ran, p->nran, el)) {
+            run_script_timed(p, el);
+            return 1;
+        }
+        if (!script_kind(el)) ptr_push(&p->ran, &p->nran, &p->capran, el);
+    }
+    free(p->step_list);
+    p->step_list = 0;
+    p->step_count = p->step_cap = 0;
+    p->step_phase = 3;
+    finish_loading(p);
+    return 0;
+}
+
+/* The script js_run_step() will run next, so the browser can wait for just
+ * that file instead of every script on the page. */
+dom_node_t *js_next_script(js_page_t *p) {
+    if (!p || p->step_phase == 3) return 0;
+    if (p->step_phase == 0) {
+        p->loading = 1;
+        collect_scripts(p->doc->root, &p->step_list, &p->step_count, &p->step_cap);
+        p->step_phase = 1;
+        p->step_i = 0;
+    }
+    if (p->step_phase == 1) {
+        for (int i = p->step_i; i < p->step_count; i++) {
+            dom_node_t *el = p->step_list[i];
+            if (script_kind(el) == 1 && !(dom_attr(el, "defer") && dom_attr(el, "src")) && !dom_attr(el, "async"))
+                return el;
+        }
+        for (int i = 0; i < p->step_count; i++) {
+            dom_node_t *el = p->step_list[i];
+            if (script_kind(el) && !ptr_in(p->ran, p->nran, el)) return el;
+        }
+        return 0;
+    }
+    for (int i = p->step_i; i < p->step_count; i++) {
+        dom_node_t *el = p->step_list[i];
+        if (script_kind(el) && !ptr_in(p->ran, p->nran, el)) return el;
+    }
+    return 0;
+}
+
+void js_run_scripts(js_page_t *p) {
+    while (js_run_step(p)) {}
+}
+
+/* Stop: the next interrupt check ends whatever script is running. */
+void js_abort(js_page_t *p) {
+    if (p) p->abort = 1;
+}
+
+/* QuickJS polls this every few thousand operations. */
+static int interrupt_cb(JSRuntime *rt, void *opaque) {
+    js_page_t *p = (js_page_t *)opaque;
+    (void)rt;
+    if (p->abort) return 1;
+    if (p->deadline_ms > 0 && now_ms() > p->deadline_ms) {
+        logf_(p, "script stopped after %d s without finishing", SCRIPT_BUDGET_MS / 1000);
+        return 1;
+    }
+    return 0;
+}
+
 int js_dispatch(js_page_t *p, dom_node_t *target, const char *type, const js_event_t *ev) {
     JSContext *ctx;
     JSValue g, fn, args[9], r;
     int prevented = 0;
-    if (!p || !target) return 0;
+    if (!p || !target || p->abort) return 0;
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;
     ctx = p->ctx;
     g = JS_GetGlobalObject(ctx);
     fn = JS_GetPropertyStr(ctx, g, "__dispatchFromHost");
@@ -1892,7 +1986,8 @@ int js_dispatch(js_page_t *p, dom_node_t *target, const char *type, const js_eve
 int js_tick(js_page_t *p) {
     double t;
     int ran = 0, busy;
-    if (!p) return 0;
+    if (!p || p->abort) return 0;
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;
     t = now_ms();
 #ifdef TLS_HOST
     { static int last = -1; if (getenv("JSTRACE") && p->ntimers != last) { logf_(p, "[trace] tick start ntimers=%d t=%.0f", p->ntimers, t); last = p->ntimers; } }

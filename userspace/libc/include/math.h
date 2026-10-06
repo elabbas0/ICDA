@@ -65,6 +65,9 @@ double sin(double);   double sinh(double);  double sqrt(double);  double tan(dou
 double tanh(double);  double trunc(double);
 
 float  fabsf(float);  float sqrtf(float);   float floorf(float);  float ceilf(float);
+float  sinf(float);   float cosf(float);    float tanf(float);    float acosf(float);
+float  asinf(float);  float atanf(float);   float atan2f(float, float); float fmodf(float, float);
+float  roundf(float); float powf(float, float); float expf(float); float logf(float);
 
 /* long double variants musl's internals declare; ICDA does not provide them */
 long double fabsl(long double);

@@ -26,7 +26,8 @@ enum {
     PR_TEXT_DECORATION_LINE, PR_OPACITY, PR_Z_INDEX, PR_FLEX, PR_FLEX_DIRECTION, PR_FLEX_WRAP, PR_FLEX_FLOW,
     PR_FLEX_GROW, PR_FLEX_SHRINK, PR_FLEX_BASIS, PR_JUSTIFY_CONTENT, PR_ALIGN_ITEMS, PR_ALIGN_SELF,
     PR_ALIGN_CONTENT, PR_ORDER, PR_GAP, PR_ROW_GAP, PR_COLUMN_GAP, PR_GRID_TEMPLATE_COLUMNS, PR_CONTENT,
-    PR_TABLE_LAYOUT, PR_BORDER_COLLAPSE, PR_CURSOR, PR_COUNT
+    PR_TABLE_LAYOUT, PR_BORDER_COLLAPSE, PR_CURSOR, PR_BACKGROUND_SIZE, PR_BACKGROUND_REPEAT,
+    PR_BACKGROUND_POSITION, PR_COUNT
 };
 
 static const char *const prop_names[PR_COUNT] = {
@@ -47,7 +48,8 @@ static const char *const prop_names[PR_COUNT] = {
     "text-decoration-line", "opacity", "z-index", "flex", "flex-direction", "flex-wrap", "flex-flow",
     "flex-grow", "flex-shrink", "flex-basis", "justify-content", "align-items", "align-self",
     "align-content", "order", "gap", "row-gap", "column-gap", "grid-template-columns", "content",
-    "table-layout", "border-collapse", "cursor"
+    "table-layout", "border-collapse", "cursor", "background-size", "background-repeat",
+    "background-position"
 };
 
 #define PR_CUSTOM 0xFFFF
@@ -1340,6 +1342,80 @@ static const char *font_family_value(arena_t *a, const char *v) {
 }
 
 /* Applies one declaration (after var() substitution) to st. */
+/* ---- backgrounds ---------------------------------------------------------- */
+
+static int bg_repeat(css_style_t *st, const char *v, size_t vl) {
+    if (ieq(v, vl, "no-repeat")) st->bg_repeat = 1;
+    else if (ieq(v, vl, "repeat-x")) st->bg_repeat = 2;
+    else if (ieq(v, vl, "repeat-y")) st->bg_repeat = 3;
+    else if (ieq(v, vl, "repeat") || ieq(v, vl, "space") || ieq(v, vl, "round")) st->bg_repeat = 0;
+    else return 0;
+    return 1;
+}
+
+/* a position keyword as a percentage; axis: 0 x, 1 y, -1 either */
+static int bg_keyword(const char *v, size_t vl, int *axis, float *pct) {
+    if (ieq(v, vl, "left")) { *axis = 0; *pct = 0; }
+    else if (ieq(v, vl, "right")) { *axis = 0; *pct = 100; }
+    else if (ieq(v, vl, "top")) { *axis = 1; *pct = 0; }
+    else if (ieq(v, vl, "bottom")) { *axis = 1; *pct = 100; }
+    else if (ieq(v, vl, "center")) { *axis = -1; *pct = 50; }
+    else return 0;
+    return 1;
+}
+
+static void bg_position_tokens(css_style_t *st, const char **tok, size_t *len, int n, const ctx_t *c) {
+    css_len_t pos[2];
+    int set[2] = { 0, 0 }, k = 0;
+    pos[0].unit = pos[1].unit = U_PCT;
+    pos[0].v = pos[1].v = 50;
+    for (int i = 0; i < n && k < 2; i++) {
+        int axis;
+        float pct;
+        css_len_t l;
+        if (bg_keyword(tok[i], len[i], &axis, &pct)) {
+            int slot = axis >= 0 ? axis : (set[0] ? 1 : 0);
+            pos[slot].unit = U_PCT;
+            pos[slot].v = pct;
+            set[slot] = 1;
+            k++;
+        } else if (parse_len(tok[i], tok[i] + len[i], 16, c, &l)) {
+            int slot = set[0] ? 1 : 0;
+            pos[slot] = l;
+            set[slot] = 1;
+            k++;
+        }
+    }
+    if (k) {
+        st->bg_pos[0] = pos[0];
+        st->bg_pos[1] = pos[1];
+    }
+}
+
+static void bg_position(css_style_t *st, const char *v, size_t vl, const ctx_t *c) {
+    const char *tok[6];
+    size_t len[6];
+    int n;
+    (void)vl;
+    n = tokens(v, tok, len, 6);
+    bg_position_tokens(st, tok, len, n, c);
+}
+
+static void bg_size(css_style_t *st, const char *v, size_t vl, const ctx_t *c) {
+    const char *tok[4];
+    size_t len[4];
+    int n;
+    if (ieq(v, vl, "cover")) { st->bg_size_mode = 1; return; }
+    if (ieq(v, vl, "contain")) { st->bg_size_mode = 2; return; }
+    n = tokens(v, tok, len, 4);
+    st->bg_size[0].unit = st->bg_size[1].unit = U_AUTO;
+    for (int i = 0; i < n && i < 2; i++) {
+        css_len_t l;
+        if (!ieq(tok[i], len[i], "auto") && parse_len(tok[i], tok[i] + len[i], 16, c, &l)) st->bg_size[i] = l;
+    }
+    st->bg_size_mode = st->bg_size[0].unit == U_AUTO && st->bg_size[1].unit == U_AUTO ? 0 : 3;
+}
+
 static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, arena_t *a) {
     css_len_t l;
     int ok;
@@ -1490,21 +1566,39 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
         const char *tok[12];
         size_t len[12];
         int n = tokens(v, tok, len, 12);
+        const char *ptok[4];
+        size_t plen[4];
+        int np = 0;
         if (prop == PR_BACKGROUND) {
             st->bg_color = 0;
             st->bg_image = 0;
+            st->bg_repeat = 0;
+            st->bg_size_mode = 0;
+            st->bg_pos[0].unit = st->bg_pos[1].unit = U_PCT;
+            st->bg_pos[0].v = st->bg_pos[1].v = 0;
         }
         for (int i = 0; i < n; i++) {
+            int axis;
+            float pct;
             if (len[i] > 4 && ieq(tok[i], 4, "url(")) {
                 const char *u = tok[i] + 4, *ue = tok[i] + len[i] - 1;
                 if (*u == '"' || *u == '\'') u++;
                 if (ue > u && (ue[-1] == '"' || ue[-1] == '\'')) ue--;
                 st->bg_image = arena_strndup(a, u, (size_t)(ue - u));
             } else if (prop == PR_BACKGROUND) {
+                /* shorthand: colour, repeat, position [/ size] */
                 uint32_t col = css_parse_color(tok[i], len[i], &ok);
                 if (ok) st->bg_color = col;
+                else if (bg_repeat(st, tok[i], len[i])) {}
+                else if (ieq(tok[i], len[i], "cover")) st->bg_size_mode = 1;
+                else if (ieq(tok[i], len[i], "contain")) st->bg_size_mode = 2;
+                else if ((bg_keyword(tok[i], len[i], &axis, &pct) || (tok[i][0] >= '0' && tok[i][0] <= '9')) && np < 4) {
+                    ptok[np] = tok[i];
+                    plen[np++] = len[i];
+                }
             }
         }
+        if (np) bg_position_tokens(st, ptok, plen, np, c);
         break;
     }
     case PR_WIDTH: if (parse_len(v, v + vl, st->font_size, c, &l)) st->width = l; break;
@@ -1741,6 +1835,9 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
     case PR_TABLE_LAYOUT: st->table_layout_fixed = ieq(v, vl, "fixed"); break;
     case PR_BORDER_COLLAPSE: st->border_collapse = ieq(v, vl, "collapse"); break;
     case PR_CURSOR: st->cursor_pointer = ieq(v, vl, "pointer"); break;
+    case PR_BACKGROUND_SIZE: bg_size(st, v, vl, c); break;
+    case PR_BACKGROUND_REPEAT: (void)bg_repeat(st, v, vl); break;
+    case PR_BACKGROUND_POSITION: bg_position(st, v, vl, c); break;
     }
 }
 

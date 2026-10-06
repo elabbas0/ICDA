@@ -372,6 +372,59 @@ static void paint_control(pctx_t *c, box_t *b, float x, float y) {
 
 static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred);
 
+static float bg_len(css_len_t l, float ref, float fallback) {
+    if (l.unit == U_PX) return l.v;
+    if (l.unit == U_PCT) return ref * l.v / 100.0f;
+    return fallback;
+}
+
+/* background-image over the padding box: size (auto / cover / contain /
+ * lengths), position and repeat. */
+static void paint_background(pctx_t *c, box_t *b, float x, float y) {
+    const css_style_t *s = b->st;
+    const image_t *img = (const image_t *)b->bg;
+    float px = x + b->bl, py = y + b->bt;
+    float pw = b->w - b->bl - b->br, ph = b->h - b->bt - b->bb;
+    float iw = b->bg_w > 0 ? b->bg_w : (float)img->w, ih = b->bg_h > 0 ? b->bg_h : (float)img->h;
+    float dw = iw, dh = ih, ox, oy;
+    int save[4];
+    if (pw <= 0 || ph <= 0 || iw <= 0 || ih <= 0) return;
+    if (s->bg_size_mode == 1 || s->bg_size_mode == 2) {
+        float k = s->bg_size_mode == 1 ? (pw / iw > ph / ih ? pw / iw : ph / ih) : (pw / iw < ph / ih ? pw / iw : ph / ih);
+        dw = iw * k;
+        dh = ih * k;
+    } else if (s->bg_size_mode == 3) {
+        dw = bg_len(s->bg_size[0], pw, -1);
+        dh = bg_len(s->bg_size[1], ph, -1);
+        if (dw < 0 && dh < 0) { dw = iw; dh = ih; }
+        else if (dw < 0) dw = iw * dh / ih;
+        else if (dh < 0) dh = ih * dw / iw;
+    }
+    if (dw < 1 || dh < 1) return;
+    /* percentages place the image's point on the box's point */
+    ox = s->bg_pos[0].unit == U_PCT ? (pw - dw) * s->bg_pos[0].v / 100.0f : bg_len(s->bg_pos[0], pw, 0);
+    oy = s->bg_pos[1].unit == U_PCT ? (ph - dh) * s->bg_pos[1].v / 100.0f : bg_len(s->bg_pos[1], ph, 0);
+    clip_push(c, px, py, pw, ph, save);
+    {
+        int rx = s->bg_repeat == 0 || s->bg_repeat == 2, ry = s->bg_repeat == 0 || s->bg_repeat == 3;
+        float x0 = px + ox, y0 = py + oy;
+        float view_top = c->view_top, view_bottom = c->view_bottom;
+        int tiles = 0;
+        if (rx) while (x0 > px) x0 -= dw;
+        if (ry) while (y0 > py) y0 -= dh;
+        for (float ty = y0; ty < py + ph && tiles < 4096; ty += dh) {
+            if (ty + dh >= view_top && ty <= view_bottom)
+                for (float tx = x0; tx < px + pw && tiles < 4096; tx += dw) {
+                    draw_image(c, img, tx, ty, dw, dh);
+                    tiles++;
+                    if (!rx) break;
+                }
+            if (!ry) break;
+        }
+    }
+    clip_pop(c, save);
+}
+
 static void paint_children(pctx_t *c, box_t *b, float ox, float oy) {
     for (box_t *k = b->first; k; k = k->next) paint_box(c, k, ox, oy, 0);
     for (frag_t *f = b->frags; f; f = f->next) {
@@ -416,6 +469,7 @@ static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred) 
         if ((s->bg_color >> 24) && b->node && b->node->tag != T_HTML && b->node->tag != T_BODY) {
             fill_round(c, x, y, b->w, b->h, s->radius >= 0 ? s->radius : b->w * -s->radius / 100, s->bg_color);
         }
+        if (b->bg) paint_background(c, b, x, y);
         if (b->image && b->kind == BX_REPLACED) {
             draw_image(c, (const image_t *)b->image, x + b->bl + b->pl, y + b->bt + b->pt, b->w - hframe_get(b), b->h - vframe_get(b));
         }

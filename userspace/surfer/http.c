@@ -348,22 +348,83 @@ http_req_t *http_open(const char *url, const char *method, const char *extra_hea
     return http_open_body(url, method, extra_headers, 0, 0);
 }
 
-http_req_t *http_open_body(const char *url, const char *method, const char *extra_headers,
-                           const void *body, size_t body_len) {
-    http_req_t *r = (http_req_t *)calloc(1, sizeof(http_req_t));
-    uint32_t ip;
-    char *req, *cookies;
-    size_t req_cap;
-    int n;
-    if (!r) return 0;
-    r->content_length = -1;
-    if (url_parse(url, &r->url) != 0) {
-        fail(r, "That address is not a valid URL");
-        return r;
+/* ---- keep-alive pool ------------------------------------------------------ */
+
+/* Finished connections wait here for the next request to the same server, so
+ * a page's stylesheets, scripts and images skip the TCP and TLS handshakes. */
+#define POOL_CAP     8
+#define POOL_IDLE_MS 30000
+
+typedef struct {
+    char     host[HOST_CAP];
+    uint16_t port;
+    int      tls;
+    void    *conn;            /* tls_conn_t, or 0 for plain TCP */
+    int      sock;
+    uint64_t since;
+} pooled_t;
+
+static pooled_t pool[POOL_CAP];
+
+static uint64_t pool_now_ms(void) {
+    return icda_ticks() * 10;
+}
+
+static void pool_close(pooled_t *e) {
+    if (e->conn) tls_close((tls_conn_t *)e->conn);
+    else if (e->sock > 0) net_close(e->sock);
+    memset(e, 0, sizeof *e);
+}
+
+static int pool_take(const url_t *u, http_req_t *r) {
+    uint64_t now = pool_now_ms();
+    for (int i = 0; i < POOL_CAP; i++) {
+        pooled_t *e = &pool[i];
+        if (!e->host[0]) continue;
+        if (now - e->since > POOL_IDLE_MS) {
+            pool_close(e);
+            continue;
+        }
+        if (e->port == u->port && e->tls == u->tls && strcmp(e->host, u->host) == 0) {
+            r->tls = e->conn;
+            r->sock = e->sock;
+            memset(e, 0, sizeof *e);
+            return 1;
+        }
     }
+    return 0;
+}
+
+static void pool_put(http_req_t *r) {
+    int slot = -1;
+    uint64_t oldest = ~0ULL;
+    for (int i = 0; i < POOL_CAP; i++) {
+        if (!pool[i].host[0]) {
+            slot = i;
+            break;
+        }
+        if (pool[i].since < oldest) {
+            oldest = pool[i].since;
+            slot = i;
+        }
+    }
+    if (pool[slot].host[0]) pool_close(&pool[slot]);
+    snprintf(pool[slot].host, sizeof pool[slot].host, "%s", r->url.host);
+    pool[slot].port = r->url.port;
+    pool[slot].tls = r->url.tls;
+    pool[slot].conn = r->tls;
+    pool[slot].sock = r->sock;
+    pool[slot].since = pool_now_ms();
+    r->tls = 0;
+    r->sock = 0;
+}
+
+/* Opens a fresh connection for r (r->url set); 0 on success. */
+static int conn_open(http_req_t *r) {
+    uint32_t ip;
     if (net_resolve(r->url.host, &ip) != 0) {
         fail(r, "The host name did not resolve");
-        return r;
+        return -1;
     }
     if (r->url.tls) {
         tls_conn_t *t = 0;
@@ -377,7 +438,7 @@ http_req_t *http_open_body(const char *url, const char *method, const char *extr
                 else snprintf(r->error, sizeof(r->error), "The secure connection failed (%d)", rc);
                 r->state = HTTP_ERROR;
             }
-            return r;
+            return -1;
         }
         r->tls = t;
         r->sock = tls_socket(t);
@@ -385,9 +446,50 @@ http_req_t *http_open_body(const char *url, const char *method, const char *extr
         r->sock = net_connect(ip, r->url.port, 1000);
         if (r->sock < 0) {
             fail(r, r->sock == -111 ? "The connection was refused" : "The connection timed out");
-            return r;
+            return -1;
         }
     }
+    return 0;
+}
+
+static void conn_drop(http_req_t *r) {
+    if (r->tls) tls_close((tls_conn_t *)r->tls);
+    else if (r->sock > 0) net_close(r->sock);
+    r->tls = 0;
+    r->sock = 0;
+}
+
+/* A pooled connection the server had already closed: reconnect, resend. */
+static int conn_retry_fresh(http_req_t *r) {
+    conn_drop(r);
+    r->reused = 0;
+    r->in_len = 0;
+    if (conn_open(r) != 0) return -1;
+    if (conn_send(r, r->req_buf, r->req_len) != 0) {
+        fail(r, "The request could not be sent");
+        return -1;
+    }
+    return 0;
+}
+
+http_req_t *http_open_body(const char *url, const char *method, const char *extra_headers,
+                           const void *body, size_t body_len) {
+    http_req_t *r = (http_req_t *)calloc(1, sizeof(http_req_t));
+    char *req, *cookies;
+    size_t req_cap;
+    int n;
+    if (!r) return 0;
+    r->content_length = -1;
+    if (url_parse(url, &r->url) != 0) {
+        fail(r, "That address is not a valid URL");
+        return r;
+    }
+    if (pool_take(&r->url, r)) {
+        r->reused = 1;
+        goto connected;
+    }
+    if (conn_open(r) != 0) return r;
+connected:
     cookies = cookie_header(&r->url);
     req_cap = URL_CAP + 1024 + (cookies ? strlen(cookies) : 0) + (extra_headers ? strlen(extra_headers) : 0) + body_len;
     req = (char *)malloc(req_cap);
@@ -400,7 +502,7 @@ http_req_t *http_open_body(const char *url, const char *method, const char *extr
                  "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\n"
                  "Accept: text/html,application/xhtml+xml,*/*;q=0.8\r\n"
                  "Accept-Language: en-US,en;q=0.8\r\nAccept-Encoding: identity\r\n"
-                 "Connection: close\r\n%s%s",
+                 "Connection: keep-alive\r\n%s%s",
                  method ? method : "GET", r->url.path, r->url.host, cookies ? cookies : "",
                  extra_headers ? extra_headers : "");
     free(cookies);
@@ -410,8 +512,13 @@ http_req_t *http_open_body(const char *url, const char *method, const char *extr
         memcpy(req + n, body, body_len);
         n += (int)body_len;
     }
-    if (conn_send(r, req, (size_t)n) != 0) fail(r, "The request could not be sent");
-    free(req);
+    r->req_buf = req;
+    r->req_len = (size_t)n;
+    if (conn_send(r, req, (size_t)n) != 0) {
+        if (!r->reused || conn_retry_fresh(r) != 0) {
+            if (r->state != HTTP_ERROR) fail(r, "The request could not be sent");
+        }
+    }
     return r;
 }
 
@@ -445,6 +552,7 @@ static void parse_headers(http_req_t *r, const char *head, size_t len) {
             else if (ieq_prefix(p, "transfer-encoding:") && vlen >= 7 && ieq_prefix(v + vlen - 7, "chunked")) r->chunked = 1;
             else if (ieq_prefix(p, "content-type:")) copy_cap(r->content_type, v, vlen, sizeof(r->content_type));
             else if (ieq_prefix(p, "location:")) copy_cap(r->location, v, vlen, sizeof(r->location));
+            else if (ieq_prefix(p, "connection:") && vlen >= 5 && ieq_prefix(v, "close")) r->conn_close = 1;
             else if (ieq_prefix(p, "set-cookie:")) cookie_store(&r->url, v, vlen);
         }
         p = line_end + 1;
@@ -506,6 +614,11 @@ int http_poll(http_req_t *r, int timeout_ms) {
     for (int round = 0; round < 64; round++) {
         long n = conn_recv(r, buf, sizeof(buf), round == 0 ? timeout_ms : 0);
         if (n == NET_EAGAIN || n == TLS_WOULD_BLOCK) return HTTP_PENDING;
+        if (n <= 0 && r->reused && !r->headers_done && r->in_len == 0) {
+            /* the pooled connection had been closed by the server */
+            if (conn_retry_fresh(r) != 0) return HTTP_ERROR;
+            return HTTP_PENDING;
+        }
         if (n < 0) {
             if (r->headers_done && r->content_length < 0 && !r->chunked) {
                 r->state = HTTP_DONE;
@@ -565,8 +678,13 @@ int http_socket(http_req_t *r) {
 
 void http_free(http_req_t *r) {
     if (!r) return;
-    if (r->tls) tls_close((tls_conn_t *)r->tls);
-    else if (r->sock > 0) net_close(r->sock);
+    /* a complete, length-delimited response leaves the connection reusable */
+    if (r->state == HTTP_DONE && r->headers_done && !r->conn_close && r->in_len == 0 &&
+        (r->content_length >= 0 || r->chunked) && (r->tls || r->sock > 0)) {
+        pool_put(r);
+    }
+    conn_drop(r);
+    free(r->req_buf);
     free(r->raw_headers);
     free(r->in);
     free(r->body);

@@ -41,7 +41,9 @@ struct box {
     box_t       *parent, *first, *last, *next;
     frag_t      *frags, *frags_tail;
     dom_node_t  *link;
-    void        *image;             /* decoded image for <img> / background */
+    void        *image;             /* decoded image for <img> / <svg> */
+    void        *bg;                /* decoded background-image */
+    float        bg_w, bg_h;        /* its size in CSS px */
 };
 
 typedef struct {
@@ -51,8 +53,9 @@ typedef struct {
     float     viewport_w, viewport_h;
 } layout_t;
 
-/* Callback the layout uses to ask for an image's intrinsic size (0 if not
- * loaded yet); images are fetched by the browser. */
+/* Callback the layout uses to ask for an image and its size in CSS px (0 if
+ * not loaded yet; images are fetched by the browser): for <img> and <svg>
+ * their own image, for any other element its background-image. */
 typedef int (*image_size_fn)(dom_node_t *img, void *ctx, int *w, int *h, void **image);
 
 layout_t *layout_document(dom_doc_t *doc, float viewport_w, float viewport_h, image_size_fn img, void *img_ctx);

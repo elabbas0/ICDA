@@ -59,6 +59,14 @@ static box_t *new_box(lctx_t *c, dom_node_t *n, const css_style_t *st, int kind)
     b->kind = (uint8_t)kind;
     b->node = n;
     b->st = st;
+    if (st && st->bg_image && c->img && n && n->tag != T_IMG && n->tag != T_SVG) {
+        /* for any other element the image callback answers with its background */
+        int w = 0, h = 0;
+        if (c->img(n, c->img_ctx, &w, &h, &b->bg)) {
+            b->bg_w = (float)w;
+            b->bg_h = (float)h;
+        }
+    }
     return b;
 }
 
@@ -193,7 +201,7 @@ static void replaced_size(lctx_t *c, dom_node_t *n, const css_style_t *st, float
     int iw = 0, ih = 0;
     void *image = 0;
     float cw = res(st->width, cb_w, -1), ch = res(st->height, -1, -1);
-    if (n->tag == T_IMG && c->img) c->img(n, c->img_ctx, &iw, &ih, &image);
+    if ((n->tag == T_IMG || n->tag == T_SVG) && c->img) c->img(n, c->img_ctx, &iw, &ih, &image);
     if (n->tag == T_INPUT) {
         const char *type = dom_attr(n, "type");
         if (type && (strcmp(type, "checkbox") == 0 || strcmp(type, "radio") == 0)) { iw = 13; ih = 13; }
@@ -216,7 +224,7 @@ static void replaced_size(lctx_t *c, dom_node_t *n, const css_style_t *st, float
     } else if (n->tag == T_IFRAME || n->tag == T_VIDEO || n->tag == T_CANVAS || n->tag == T_EMBED || n->tag == T_OBJECT) {
         iw = 300;
         ih = 150;
-    } else if (n->tag == T_SVG) {
+    } else if (n->tag == T_SVG && !image) {
         iw = 24;
         ih = 24;
     } else if (n->tag == T_HR) {
@@ -943,7 +951,7 @@ static box_t *layout_atomic(lctx_t *c, dom_node_t *n, const css_style_t *st, flo
         if (!b) return 0;
         edges(b, cb_w);
         replaced_size(c, n, st, cb_w, &w, &h);
-        if (n->tag == T_IMG && c->img) {
+        if ((n->tag == T_IMG || n->tag == T_SVG) && c->img) {
             int iw, ih;
             c->img(n, c->img_ctx, &iw, &ih, &b->image);
         }
@@ -984,7 +992,7 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
         replaced_size(c, n, st, cb_w, &rw, &rh);
         cw = rw;
         b->kind = BX_REPLACED;
-        if (n->tag == T_IMG && c->img) {
+        if ((n->tag == T_IMG || n->tag == T_SVG) && c->img) {
             int iw, ih;
             c->img(n, c->img_ctx, &iw, &ih, &b->image);
         }

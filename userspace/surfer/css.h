@@ -58,6 +58,9 @@ typedef struct css_style {
     int      grid_cols;                 /* repeat count for simple grid-template-columns */
     const char *font_family;
     const char *bg_image;               /* url, unresolved */
+    uint8_t  bg_repeat;                 /* 0 repeat, 1 no-repeat, 2 repeat-x, 3 repeat-y */
+    uint8_t  bg_size_mode;              /* 0 auto, 1 cover, 2 contain, 3 bg_size */
+    css_len_t bg_size[2], bg_pos[2];    /* x, y; positions as % or px */
     const char *content;                /* ::before / ::after text */
     css_var_t  *vars;
     struct css_style *before, *after;   /* pseudo-element styles */

@@ -52,6 +52,13 @@ void       js_page_free(js_page_t *p);
 
 /* Runs the document's scripts in order, then DOMContentLoaded and load. */
 void       js_run_scripts(js_page_t *p);
+/* Runs the next script (or, after the last, the load events); 0 when done.
+ * The browser calls it once per tick so the page stays usable. */
+int        js_run_step(js_page_t *p);
+/* The script element js_run_step() runs next (0 at the end). */
+dom_node_t *js_next_script(js_page_t *p);
+/* Stop button: ends the running script and keeps further scripts from running. */
+void       js_abort(js_page_t *p);
 
 /* Dispatches a DOM event at target (bubbling).  Returns 1 if a listener
  * called preventDefault(). */

@@ -48,6 +48,11 @@ struct http_req {
     /* decoded body */
     uint8_t *body;
     size_t   body_len, body_cap;
+    /* keep-alive: the connection goes back to a pool when the response is complete */
+    int      reused;          /* connection came from the pool */
+    int      conn_close;      /* server said Connection: close */
+    char    *req_buf;         /* request bytes, resent once if a pooled connection was stale */
+    size_t   req_len;
 };
 
 http_req_t *http_open(const char *url, const char *method, const char *extra_headers);

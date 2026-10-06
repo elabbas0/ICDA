@@ -1,9 +1,10 @@
 /* Surfer: ICDA's native web browser.
  *
- * Pipeline: http_get -> html_parse -> stylesheets (+@import) -> css_cascade
- * -> layout_document -> paint_layout into the page area of an ic_app window.
+ * Pipeline, advanced from the app's tick so the window never blocks:
+ * document request -> html_parse -> stylesheets and scripts in parallel ->
+ * css_cascade -> layout_document -> page shown -> scripts, one per tick.
  * Images stream in afterwards, a few requests at a time, and the page is
- * laid out again as they arrive. */
+ * laid out again as they arrive.  Stop keeps whatever has arrived. */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -37,7 +38,32 @@ typedef struct {
     int         redirects;
     http_req_t *req;
     image_t     img;
+    int         iw, ih;         /* size in CSS px (SVGs are rendered at 2x) */
 } img_ent_t;
+
+/* Stylesheets and scripts are fetched together, a few at a time, while the
+ * window stays responsive; css_fetch()/h_fetch() then find them here. */
+#define RES_CAP      160
+#define RES_PARALLEL 6
+enum { RES_CSS = 1, RES_SCRIPT = 2 };
+
+typedef struct {
+    char       *url;
+    int         kind;
+    uint32_t    t0;             /* download start, for the log */
+    int         state;          /* 0 queued, 1 loading, 2 ready, -1 failed */
+    int         redirects;
+    http_req_t *req;
+    char       *text;
+    size_t      len;
+    char        final[URL_CAP];
+} res_t;
+
+/* NAV_DOC fetches the document; NAV_SUB waits (briefly) for stylesheets and
+ * scripts; NAV_SCRIPTS runs one script per tick after the page is shown. */
+enum { NAV_IDLE = 0, NAV_DOC, NAV_SUB, NAV_SCRIPTS };
+#define CSS_WAIT_MS     4000
+#define SCRIPT_WAIT_MS  20000
 
 static struct {
     char        url[URL_CAP];           /* page being shown */
@@ -49,11 +75,18 @@ static struct {
     char        history[HISTORY_CAP][URL_CAP];
     int         hist_count, hist_pos;
 
-    /* pending navigation, carried out by tick() after a "Loading" frame */
+    /* navigation, advanced a step at a time by tick() (see NAV_*) */
     char        nav_url[URL_CAP];
-    int         nav_pending, nav_push, nav_drawn;
+    int         nav_pending, nav_push;
     char       *nav_body;               /* form POST body, 0 for GET */
     size_t      nav_body_len;
+    int         nav_state;
+    http_req_t *nav_req;
+    int         nav_redirects;
+    uint32_t    nav_t0, nav_stage_t0;
+    int         nav_stopped;            /* Stop pressed: render what is there */
+    int         css_late;               /* drawn before every stylesheet arrived */
+    uint32_t    t_doc, t_shown, t_render_ms, t_js_ms;   /* stage timings for the log */
 
     dom_node_t *focus;                  /* focused form control on the page */
     char       *focus_value;            /* value when it gained focus, for "change" */
@@ -61,8 +94,8 @@ static struct {
     ic_app_t   *app;
     int         js_dirty;               /* JS_DIRTY_* waiting for a restyle */
     uint32_t    last_restyle_ms;
-    struct { char *url; char *text; size_t len; } css_cache[SHEETS_CAP];
-    int         ncss_cache;
+    res_t       res[RES_CAP];           /* stylesheets and scripts of this page */
+    int         nres;
     dom_node_t *popup;                  /* <select> whose option list is open */
     int         popup_hover;
 
@@ -186,6 +219,180 @@ static img_ent_t *image_lookup(const char *url, int add) {
 }
 
 /* Layout callback: intrinsic size of an <img> if it has been decoded. */
+/* SVG bitmaps are rendered at 2x for sharpness; layout uses half that. */
+static void image_css_size(img_ent_t *e, const uint8_t *data, size_t len) {
+    int svg = image_is_svg(data, len);
+    e->iw = svg ? (e->img.w + 1) / 2 : e->img.w;
+    e->ih = svg ? (e->img.h + 1) / 2 : e->img.h;
+}
+
+static int b64_val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+static int hex_val(int c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* data:[type][;base64],payload -> bytes (malloc'd) */
+static uint8_t *data_url_decode(const char *url, size_t *len_out) {
+    const char *comma = strchr(url, ',');
+    int b64;
+    size_t n, o = 0;
+    uint8_t *out;
+    if (!comma) return 0;
+    b64 = (size_t)(comma - url) >= 7 && strncmp(comma - 7, ";base64", 7) == 0;
+    n = strlen(comma + 1);
+    out = (uint8_t *)malloc(n + 1);
+    if (!out) return 0;
+    if (b64) {
+        uint32_t acc = 0;
+        int bits = 0;
+        for (const char *p = comma + 1; *p; p++) {
+            int v = b64_val((unsigned char)*p);
+            if (v < 0) continue;
+            acc = (acc << 6) | (uint32_t)v;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out[o++] = (uint8_t)(acc >> bits);
+            }
+        }
+    } else {
+        for (const char *p = comma + 1; *p; p++) {
+            if (*p == '%' && hex_val(p[1]) >= 0 && hex_val(p[2]) >= 0) {
+                out[o++] = (uint8_t)(hex_val(p[1]) * 16 + hex_val(p[2]));
+                p += 2;
+            } else {
+                out[o++] = (uint8_t)*p;
+            }
+        }
+    }
+    out[o] = 0;
+    *len_out = o;
+    return out;
+}
+
+/* An <img> or background whose source is a data: URL, decoded right away. */
+static img_ent_t *image_from_data_url(const char *url) {
+    img_ent_t *e = image_lookup(url, 1);
+    uint8_t *data;
+    size_t len = 0;
+    if (!e || e->state != 0) return e;
+    e->state = -1;
+    data = data_url_decode(url, &len);
+    if (data && image_decode(data, len, &e->img) == 0) {
+        e->state = 2;
+        image_css_size(e, data, len);
+    }
+    free(data);
+    return e;
+}
+
+/* ---- inline <svg> ----------------------------------------------------------- */
+
+typedef struct {
+    char  *p;
+    size_t len, cap;
+} sbuf_t;
+
+static void sb_add(sbuf_t *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = (b->cap ? b->cap * 2 : 1024) + n;
+        char *p = (char *)realloc(b->p, cap);
+        if (!p) return;
+        b->p = p;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+static void sb_str(sbuf_t *b, const char *s) {
+    sb_add(b, s, strlen(s));
+}
+
+static int ci_eq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        int x = *a >= 'A' && *a <= 'Z' ? *a + 32 : *a, y = *b >= 'A' && *b <= 'Z' ? *b + 32 : *b;
+        if (x != y) return 0;
+    }
+    return *a == *b;
+}
+
+/* The HTML parser lower-cases names; SVG needs a few in camelCase. */
+static const char *svg_name(const char *n) {
+    static const char *const fix[] = {
+        "viewBox", "preserveAspectRatio", "linearGradient", "radialGradient", "gradientUnits",
+        "gradientTransform", "spreadMethod", "clipPath", "clipPathUnits", "patternUnits",
+        "patternTransform", "stdDeviation", "textLength", "pathLength", "markerWidth", "markerHeight",
+    };
+    for (size_t i = 0; i < sizeof fix / sizeof fix[0]; i++)
+        if (ci_eq(n, fix[i])) return fix[i];
+    return n;
+}
+
+static void svg_serialize(const dom_node_t *n, sbuf_t *b, int depth) {
+    if (depth > 64) return;
+    if (n->type == N_TEXT) {
+        for (size_t i = 0; i < n->text_len; i++) {
+            char c = n->text[i];
+            if (c == '<') sb_str(b, "&lt;");
+            else if (c == '&') sb_str(b, "&amp;");
+            else sb_add(b, &c, 1);
+        }
+        return;
+    }
+    if (n->type != N_ELEMENT) return;
+    sb_str(b, "<");
+    sb_str(b, svg_name(n->name));
+    for (const dom_attr_t *a = n->attrs; a; a = a->next) {
+        const char *v = a->value ? a->value : "";
+        sb_str(b, " ");
+        sb_str(b, svg_name(a->name));
+        sb_str(b, "=\"");
+        for (; *v; v++) {
+            if (*v == '"') sb_str(b, "&quot;");
+            else if (*v == '&') sb_str(b, "&amp;");
+            else sb_add(b, v, 1);
+        }
+        sb_str(b, "\"");
+    }
+    sb_str(b, ">");
+    for (const dom_node_t *k = n->first; k; k = k->next) svg_serialize(k, b, depth + 1);
+    sb_str(b, "</");
+    sb_str(b, svg_name(n->name));
+    sb_str(b, ">");
+}
+
+/* Inline <svg>: rendered from its markup in the text colour, once per element. */
+static img_ent_t *image_inline_svg(dom_node_t *n) {
+    char key[64];
+    uint32_t color = n->style ? n->style->color & 0xFFFFFF : 0;
+    img_ent_t *e;
+    snprintf(key, sizeof key, "svg:%p:%06x", (void *)n, (unsigned)color);
+    e = image_lookup(key, 1);
+    if (!e || e->state != 0) return e;
+    e->state = -1;
+    {
+        sbuf_t b = { 0, 0, 0 };
+        svg_serialize(n, &b, 0);
+        if (b.p && image_decode_svg(b.p, b.len, 2.0f, color, &e->img) == 0) {
+            e->state = 2;
+            e->iw = (e->img.w + 1) / 2;
+            e->ih = (e->img.h + 1) / 2;
+        }
+        free(b.p);
+    }
+    return e;
+}
+
 static int image_size(dom_node_t *n, void *ctx, int *w, int *h, void **image) {
     const char *src = dom_attr(n, "src");
     const char *lazy = dom_attr(n, "data-src");
@@ -194,14 +401,33 @@ static int image_size(dom_node_t *n, void *ctx, int *w, int *h, void **image) {
     (void)ctx;
     *w = *h = 0;
     *image = 0;
-    if ((!src || starts_with(src, "data:")) && lazy) src = lazy;
-    if (!src || !src[0] || starts_with(src, "data:")) return 0;
-    if (url_resolve(sf.doc->base_url, src, url, sizeof url) != 0) return 0;
-    if (!starts_with(url, "http://") && !starts_with(url, "https://")) return 0;
-    e = image_lookup(url, 1);
+    if (n->tag == T_SVG) {
+        e = image_inline_svg(n);
+    } else if (n->tag != T_IMG) {
+        /* background-image (url() resolved against the document) */
+        const char *bg = n->style ? n->style->bg_image : 0;
+        if (!bg || !bg[0]) return 0;
+        if (starts_with(bg, "data:")) {
+            e = image_from_data_url(bg);
+        } else {
+            if (url_resolve(sf.doc->base_url, bg, url, sizeof url) != 0) return 0;
+            if (!starts_with(url, "http://") && !starts_with(url, "https://")) return 0;
+            e = image_lookup(url, 1);
+        }
+    } else {
+        if ((!src || starts_with(src, "data:")) && lazy && !starts_with(lazy, "data:")) src = lazy;
+        if (!src || !src[0]) return 0;
+        if (starts_with(src, "data:")) {
+            e = image_from_data_url(src);
+        } else {
+            if (url_resolve(sf.doc->base_url, src, url, sizeof url) != 0) return 0;
+            if (!starts_with(url, "http://") && !starts_with(url, "https://")) return 0;
+            e = image_lookup(url, 1);
+        }
+    }
     if (!e || e->state != 2) return 0;
-    *w = e->img.w;
-    *h = e->img.h;
+    *w = e->iw;
+    *h = e->ih;
     *image = &e->img;
     return 1;
 }
@@ -215,7 +441,10 @@ static void images_clear(void) {
     sf.nimgs = 0;
 }
 
+static int url_blocked(const char *url);
+
 static int image_start(img_ent_t *e, const char *url) {
+    if (url_blocked(url)) { e->state = -1; return -1; }
     e->req = http_open(url, "GET", "Accept: image/png,image/jpeg,image/gif,image/*;q=0.8\r\n");
     if (!e->req) { e->state = -1; return -1; }
     e->state = 1;
@@ -241,6 +470,7 @@ static int images_pump(void) {
             }
         }
         e->state = (r->state == HTTP_DONE && r->status == 200 && image_decode(r->body, r->body_len, &e->img) == 0) ? 2 : -1;
+        if (e->state == 2) image_css_size(e, r->body, r->body_len);
         if (e->req) http_free(e->req);
         e->req = 0;
         active--;
@@ -269,11 +499,12 @@ static void page_clear(void) {
     sf.js_dirty = 0;
     free(sf.focus_value);
     sf.focus_value = 0;
-    for (int i = 0; i < sf.ncss_cache; i++) {
-        free(sf.css_cache[i].url);
-        free(sf.css_cache[i].text);
+    for (int i = 0; i < sf.nres; i++) {
+        free(sf.res[i].url);
+        free(sf.res[i].text);
+        if (sf.res[i].req) http_free(sf.res[i].req);
     }
-    sf.ncss_cache = 0;
+    sf.nres = 0;
     images_clear();
     if (sf.L) layout_free(sf.L);
     sf.L = 0;
@@ -291,42 +522,166 @@ static void page_clear(void) {
     sf.page_src = 0;
 }
 
-/* Stylesheet text by URL, kept for the page's lifetime so restyles after a
- * script changes the DOM do not refetch. */
-static int css_fetch(const char *url, const char **text, size_t *len, char *fin, size_t fin_cap) {
-    http_req_t *r;
-    for (int i = 0; i < sf.ncss_cache; i++) {
-        if (strcmp(sf.css_cache[i].url, url) == 0) {
-            if (!sf.css_cache[i].text) return -1;
-            *text = sf.css_cache[i].text;
-            *len = sf.css_cache[i].len;
-            snprintf(fin, fin_cap, "%s", url);
-            return 0;
+/* ---- stylesheets and scripts ---------------------------------------------- */
+
+static res_t *res_find(const char *url) {
+    for (int i = 0; i < sf.nres; i++)
+        if (strcmp(sf.res[i].url, url) == 0) return &sf.res[i];
+    return 0;
+}
+
+/* Analytics and ad networks: never fetched.  They are the slowest scripts on
+ * many pages (Google Tag Manager alone is ~480 KB) and change nothing visible. */
+static const char *const blocked_hosts[] = {
+    "googletagmanager.com", "google-analytics.com", "analytics.google.com", "doubleclick.net",
+    "googlesyndication.com", "googleadservices.com", "adservice.google.com", "connect.facebook.net",
+    "hotjar.com", "segment.com", "segment.io", "mixpanel.com", "scorecardresearch.com",
+    "quantserve.com", "criteo.com", "criteo.net", "taboola.com", "outbrain.com", "amazon-adsystem.com",
+    "adnxs.com", "bat.bing.com", "clarity.ms", "nr-data.net", "js-agent.newrelic.com", "chartbeat.com",
+    "parsely.com", "moatads.com", "pubmatic.com", "rubiconproject.com", "openx.net", "adsrvr.org",
+};
+
+static int url_blocked(const char *url) {
+    url_t u;
+    if (url_parse(url, &u) != 0) return 0;
+    for (size_t i = 0; i < sizeof blocked_hosts / sizeof blocked_hosts[0]; i++) {
+        size_t hl = strlen(u.host), bl = strlen(blocked_hosts[i]);
+        if (hl >= bl && strcmp(u.host + hl - bl, blocked_hosts[i]) == 0 &&
+            (hl == bl || u.host[hl - bl - 1] == '.'))
+            return 1;
+    }
+    return 0;
+}
+
+static res_t *res_add(const char *url, int kind) {
+    res_t *e = res_find(url);
+    if (e || sf.nres >= RES_CAP) return e;
+    e = &sf.res[sf.nres++];
+    memset(e, 0, sizeof *e);
+    e->url = strdup(url);
+    e->kind = kind;
+    snprintf(e->final, sizeof e->final, "%s", url);
+    if (url_blocked(url)) e->state = -1;
+    return e;
+}
+
+static void res_start(res_t *e, const char *url) {
+    if (!e->t0) e->t0 = now_ms();
+    e->req = http_open(url, "GET", e->kind == RES_CSS ? "Accept: text/css,*/*;q=0.1\r\n" : "Accept: */*\r\n");
+    e->state = e->req ? 1 : -1;
+    snprintf(e->final, sizeof e->final, "%s", url);
+}
+
+/* Advances one download; returns 1 once it has finished (either way). */
+static int res_step(res_t *e, int timeout_ms) {
+    http_req_t *r = e->req;
+    if (e->state != 1 || !r) return e->state != 0;
+    if (http_poll(r, timeout_ms) == HTTP_PENDING) return 0;
+    if (r->state == HTTP_DONE && r->status >= 300 && r->status < 400 && r->location[0] && e->redirects < 8) {
+        char next[URL_CAP];
+        e->redirects++;
+        if (url_resolve(e->final, r->location, next, sizeof next) == 0) {
+            http_free(r);
+            e->req = 0;
+            res_start(e, next);
+            return e->state != 1;
         }
     }
-    set_status("Loading styles...");
-    r = http_get(url, fin, fin_cap);
-    if (sf.ncss_cache < SHEETS_CAP) {
-        int i = sf.ncss_cache++;
-        sf.css_cache[i].url = strdup(url);
-        sf.css_cache[i].text = 0;
-        sf.css_cache[i].len = 0;
-        if (r && r->state == HTTP_DONE && r->status == 200 && r->body) {
-            sf.css_cache[i].text = (char *)malloc(r->body_len + 1);
-            if (sf.css_cache[i].text) {
-                memcpy(sf.css_cache[i].text, r->body, r->body_len);
-                sf.css_cache[i].text[r->body_len] = 0;
-                sf.css_cache[i].len = r->body_len;
-            }
+    e->state = -1;
+    if (r->state == HTTP_DONE && r->status == 200) {
+        e->text = (char *)malloc(r->body_len + 1);
+        if (e->text) {
+            memcpy(e->text, r->body ? (const char *)r->body : "", r->body_len);
+            e->text[r->body_len] = 0;
+            e->len = r->body_len;
+            e->state = 2;
         }
-        http_free(r);
-        if (!sf.css_cache[i].text) return -1;
-        *text = sf.css_cache[i].text;
-        *len = sf.css_cache[i].len;
-        return 0;
+    }
+    {
+        char line[URL_CAP + 64];
+        snprintf(line, sizeof line, "[res] %s %lu bytes %u ms\n", e->final, (unsigned long)e->len,
+                 (unsigned)(now_ms() - e->t0));
+        icda_write_file("/dev/serial", line, strlen(line));
     }
     http_free(r);
-    return -1;
+    e->req = 0;
+    return 1;
+}
+
+/* Keeps up to RES_PARALLEL downloads going; returns how many of kind (0 =
+ * any) are still unfinished. */
+static int res_pump(int kind) {
+    int active = 0, left = 0;
+    for (int i = 0; i < sf.nres; i++) {
+        res_t *e = &sf.res[i];
+        if (e->state == 1 && !res_step(e, 0)) active++;
+    }
+    for (int i = 0; i < sf.nres && active < RES_PARALLEL; i++) {
+        if (sf.res[i].state == 0) {
+            res_start(&sf.res[i], sf.res[i].url);
+            if (sf.res[i].state == 1) active++;
+        }
+    }
+    for (int i = 0; i < sf.nres; i++)
+        if ((sf.res[i].state == 0 || sf.res[i].state == 1) && (!kind || sf.res[i].kind == kind)) left++;
+    return left;
+}
+
+/* Blocking wait, for resources found only while scripts run (or @import). */
+static res_t *res_get(const char *url, int kind) {
+    res_t *e = res_add(url, kind);
+    if (!e) return 0;
+    if (e->state == 0) res_start(e, url);
+    while (e->state == 1) {
+        if (sf.nav_stopped) {
+            if (e->req) http_free(e->req);
+            e->req = 0;
+            e->state = -1;
+            break;
+        }
+        (void)res_step(e, 50);
+    }
+    return e;
+}
+
+/* The <link rel=stylesheet>, <script src> and module preloads of the page. */
+static void res_collect(dom_node_t *n) {
+    for (dom_node_t *c = n->first; c; c = c->next) {
+        char url[URL_CAP];
+        if (c->type != N_ELEMENT) continue;
+        if (c->tag == T_LINK) {
+            const char *rel = dom_attr(c, "rel"), *href = dom_attr(c, "href"), *as = dom_attr(c, "as");
+            const char *media = dom_attr(c, "media");
+            if (rel && href && url_resolve(sf.doc->base_url, href, url, sizeof url) == 0) {
+                if (strstr(rel, "stylesheet") && !strstr(rel, "alternate") && !(media && strstr(media, "print")))
+                    res_add(url, RES_CSS);
+                else if (strstr(rel, "modulepreload") || (strstr(rel, "preload") && as && !strcmp(as, "script")))
+                    res_add(url, RES_SCRIPT);
+            }
+        } else if (c->tag == T_SCRIPT) {
+            const char *src = dom_attr(c, "src");
+            if (src && !dom_attr(c, "nomodule") && url_resolve(sf.doc->base_url, src, url, sizeof url) == 0)
+                res_add(url, RES_SCRIPT);
+        }
+        if (c->tag != T_TEMPLATE) res_collect(c);
+    }
+}
+
+static int css_fetch(const char *url, const char **text, size_t *len, char *fin, size_t fin_cap) {
+    res_t *e = res_find(url);
+    if (!e || e->state == 0 || e->state == 1) {
+        /* still downloading: the restyle after it arrives (css_late) uses it */
+        if (e) {
+            sf.css_late = 1;
+            return -1;
+        }
+        e = res_get(url, RES_CSS);
+    }
+    if (!e || e->state != 2) return -1;
+    *text = e->text;
+    *len = e->len;
+    snprintf(fin, fin_cap, "%s", e->final);
+    return 0;
 }
 
 static void add_sheet(const char *text, size_t len, const char *base, int vw, int depth) {
@@ -472,61 +827,47 @@ static void scroll_to_fragment(const char *url) {
     }
 }
 
-static void js_start(ic_app_t *app);
+static void js_create(ic_app_t *app);
+static void restyle(ic_app_t *app);
 
-static void do_navigate(ic_app_t *app) {
-    char final_url[URL_CAP];
+/* Stylesheets, cascade and layout: the page becomes visible here. */
+static void render_document(ic_app_t *app) {
     ic_rect_t p = page_rect(app);
-    uint32_t t0 = now_ms();
+    if (!sf.doc) return;
+    for (int i = 0; i < sf.nsheets; i++) css_sheet_free(sf.sheets[i]);
+    sf.nsheets = 0;
+    sf.css_late = 0;
+    gather_sheets(sf.doc->root, p.w);
+    css_cascade(sf.doc, sf.sheets, sf.nsheets, p.w, p.h);
+    relayout(app);
+    scroll_to_fragment(sf.url);
+    sf.last_restyle_ms = now_ms();
+    ic_app_invalidate(app);
+}
 
-    page_clear();
-    sf.scroll = 0;
-    snprintf(final_url, sizeof final_url, "%s", sf.nav_url);
+static void nav_finish(const char *what) {
+    char msg[96];
+    char line[URL_CAP + 128];
+    unsigned ms = (unsigned)(now_ms() - sf.nav_t0);
+    if (what) snprintf(msg, sizeof msg, "%s", what);
+    else snprintf(msg, sizeof msg, "Done in %u ms", ms);
+    set_status(msg);
+    snprintf(line, sizeof line, "[surfer] %s %u ms sheets=%d height=%d%s doc=%u shown=%u render=%u js=%u res=%d\n",
+             sf.url, ms, sf.nsheets, sf.L ? (int)sf.L->height : -1, what ? " (stopped)" : "",
+             (unsigned)(sf.t_doc - sf.nav_t0), (unsigned)(sf.t_shown - sf.nav_t0), (unsigned)sf.t_render_ms,
+             (unsigned)sf.t_js_ms, sf.nres);
+    icda_write_file("/dev/serial", line, strlen(line));
+    sf.nav_state = NAV_IDLE;
+}
 
-    if (strcmp(sf.nav_url, HOME_URL) == 0 || strcmp(sf.nav_url, "about:blank") == 0) {
-        load_generated(sf.nav_url, home_html, sizeof home_html - 1);
-    } else {
-        http_req_t *r = sf.nav_body
-            ? http_request("POST", sf.nav_url, "application/x-www-form-urlencoded", sf.nav_body, sf.nav_body_len,
-                           final_url, sizeof final_url)
-            : http_get(sf.nav_url, final_url, sizeof final_url);
-        free(sf.nav_body);
-        sf.nav_body = 0;
-        if (!r || r->state != HTTP_DONE) {
-            load_error(sf.nav_url, r && r->error[0] ? r->error : "The server did not respond.");
-            http_free(r);
-        } else if (starts_with(r->content_type, "image/")) {
-            char html[URL_CAP + 128];
-            int n = snprintf(html, sizeof html, "<html><body style='margin:0;background:#202124;text-align:center'><img src=\"%s\"></body></html>", final_url);
-            http_free(r);
-            load_generated(final_url, html, (size_t)n);
-        } else if (r->content_type[0] && !strstr(r->content_type, "html") && !strstr(r->content_type, "xml")) {
-            /* plain text and anything else readable: show it preformatted */
-            size_t cap = r->body_len * 6 + 128, o = 0;
-            char *buf = malloc(cap);
-            if (buf) {
-                o = (size_t)snprintf(buf, cap, "<html><body><pre style='white-space:pre-wrap'>");
-                for (size_t i = 0; i < r->body_len && o + 8 < cap; i++) {
-                    char ch = (char)r->body[i];
-                    if (ch == '<') { memcpy(buf + o, "&lt;", 4); o += 4; }
-                    else if (ch == '&') { memcpy(buf + o, "&amp;", 5); o += 5; }
-                    else buf[o++] = ch;
-                }
-                o += (size_t)snprintf(buf + o, cap - o, "</pre></body></html>");
-                load_generated(final_url, buf, o);
-                free(buf);
-            }
-            http_free(r);
-        } else {
-            sf.page_req = r;
-            sf.doc = html_parse((const char *)r->body, r->body_len, final_url);
-        }
-    }
+/* The new document is in sf.doc: address bar, history, then subresources. */
+static void commit_document(ic_app_t *app, const char *final_url) {
+    (void)app;
     if (!sf.doc) {
         set_status("Out of memory");
+        sf.nav_state = NAV_IDLE;
         return;
     }
-
     snprintf(sf.url, sizeof sf.url, "%s", final_url);
     if (!sf.addr_focused) set_address(sf.url);
     if (sf.nav_push) {
@@ -540,23 +881,178 @@ static void do_navigate(ic_app_t *app) {
     } else if (sf.hist_pos >= 0) {
         snprintf(sf.history[sf.hist_pos], URL_CAP, "%s", sf.url);
     }
+    sf.t_doc = now_ms();
+    sf.t_render_ms = sf.t_js_ms = 0;
+    res_collect(sf.doc->root);
+    sf.nav_state = NAV_SUB;
+    sf.nav_stage_t0 = now_ms();
+    set_status(sf.nres ? "Loading styles and scripts..." : "Laying out...");
+}
 
-    gather_sheets(sf.doc->root, p.w);
-    set_status("Laying out...");
-    css_cascade(sf.doc, sf.sheets, sf.nsheets, p.w, p.h);
-    relayout(app);
-    scroll_to_fragment(sf.url);
-    js_start(app);
-    {
-        char msg[96];
-        char line[URL_CAP + 128];
-        unsigned ms = (unsigned)(now_ms() - t0);
-        snprintf(msg, sizeof msg, "Done in %u ms", ms);
-        set_status(msg);
-        snprintf(line, sizeof line, "[surfer] %s %u ms sheets=%d height=%d\n", sf.url, ms, sf.nsheets,
-                 sf.L ? (int)sf.L->height : -1);
-        icda_write_file("/dev/serial", line, strlen(line));
+static void begin_navigate(ic_app_t *app) {
+    if (sf.nav_req) http_free(sf.nav_req);
+    sf.nav_req = 0;
+    sf.nav_stopped = 0;
+    sf.nav_redirects = 0;
+    sf.nav_t0 = now_ms();
+    if (strcmp(sf.nav_url, HOME_URL) == 0 || strcmp(sf.nav_url, "about:blank") == 0) {
+        page_clear();
+        sf.scroll = 0;
+        load_generated(sf.nav_url, home_html, sizeof home_html - 1);
+        commit_document(app, sf.nav_url);
+        return;
     }
+    sf.nav_req = sf.nav_body
+        ? http_open_body(sf.nav_url, "POST", "Content-Type: application/x-www-form-urlencoded\r\n",
+                         sf.nav_body, sf.nav_body_len)
+        : http_open(sf.nav_url, "GET", 0);
+    free(sf.nav_body);
+    sf.nav_body = 0;
+    if (!sf.nav_req) {
+        page_clear();
+        load_error(sf.nav_url, "The address could not be opened.");
+        commit_document(app, sf.nav_url);
+        return;
+    }
+    sf.nav_state = NAV_DOC;
+    set_status("Connecting...");
+}
+
+/* NAV_DOC: the main document, without blocking the window. */
+static void doc_step(ic_app_t *app) {
+    http_req_t *r = sf.nav_req;
+    char final_url[URL_CAP];
+    if (http_poll(r, 0) == HTTP_PENDING) {
+        if (r->headers_done) {
+            char msg[64];
+            snprintf(msg, sizeof msg, "Loading... %lu KB", (unsigned long)(r->body_len / 1024));
+            set_status(msg);
+        }
+        return;
+    }
+    if (r->state == HTTP_DONE && r->status >= 300 && r->status < 400 && r->location[0] && sf.nav_redirects < 8) {
+        char next[URL_CAP];
+        if (url_resolve(sf.nav_url, r->location, next, sizeof next) == 0) {
+            sf.nav_redirects++;
+            http_free(r);
+            snprintf(sf.nav_url, sizeof sf.nav_url, "%s", next);
+            sf.nav_req = http_open(next, "GET", 0);   /* redirects turn POST into GET */
+            if (sf.nav_req) return;
+            r = 0;
+        }
+    }
+    sf.nav_req = 0;
+    snprintf(final_url, sizeof final_url, "%s", sf.nav_url);
+    page_clear();
+    sf.scroll = 0;
+    if (!r || r->state != HTTP_DONE) {
+        load_error(sf.nav_url, r && r->error[0] ? r->error : "The server did not respond.");
+        http_free(r);
+    } else if (starts_with(r->content_type, "image/")) {
+        char html[URL_CAP + 128];
+        int n = snprintf(html, sizeof html, "<html><body style='margin:0;background:#202124;text-align:center'><img src=\"%s\"></body></html>", final_url);
+        http_free(r);
+        load_generated(final_url, html, (size_t)n);
+    } else if (r->content_type[0] && !strstr(r->content_type, "html") && !strstr(r->content_type, "xml")) {
+        /* plain text and anything else readable: show it preformatted */
+        size_t cap = r->body_len * 6 + 128, o = 0;
+        char *buf = malloc(cap);
+        if (buf) {
+            o = (size_t)snprintf(buf, cap, "<html><body><pre style='white-space:pre-wrap'>");
+            for (size_t i = 0; i < r->body_len && o + 8 < cap; i++) {
+                char ch = (char)r->body[i];
+                if (ch == '<') { memcpy(buf + o, "&lt;", 4); o += 4; }
+                else if (ch == '&') { memcpy(buf + o, "&amp;", 5); o += 5; }
+                else buf[o++] = ch;
+            }
+            o += (size_t)snprintf(buf + o, cap - o, "</pre></body></html>");
+            load_generated(final_url, buf, o);
+            free(buf);
+        }
+        http_free(r);
+    } else {
+        sf.page_req = r;
+        sf.doc = html_parse((const char *)r->body, r->body_len, final_url);
+    }
+    commit_document(app, final_url);
+}
+
+/* Stop: keep and show what has arrived, run no more scripts. */
+static void stop_loading(ic_app_t *app) {
+    if (sf.nav_state == NAV_IDLE) return;
+    for (int i = 0; i < sf.nres; i++) {
+        res_t *e = &sf.res[i];
+        if (e->state == 0 || e->state == 1) {
+            if (e->req) http_free(e->req);
+            e->req = 0;
+            e->state = -1;
+        }
+    }
+    sf.nav_stopped = 1;
+    if (sf.nav_state == NAV_DOC) {
+        http_free(sf.nav_req);
+        sf.nav_req = 0;
+        nav_finish("Stopped");
+    } else if (sf.nav_state == NAV_SUB) {
+        render_document(app);
+        nav_finish("Stopped");
+    } else if (sf.nav_state == NAV_SCRIPTS) {
+        if (sf.js) js_abort(sf.js);
+        sf.js_dirty |= JS_DIRTY_DOM;
+        restyle(app);
+        nav_finish("Stopped");
+    }
+    ic_app_invalidate(app);
+}
+
+/* Advances the navigation; called from every tick. */
+static void nav_step(ic_app_t *app) {
+    uint32_t now = now_ms();
+    if (sf.nav_state == NAV_DOC) {
+        doc_step(app);
+    } else if (sf.nav_state == NAV_SUB) {
+        /* wait a moment for stylesheets so the page does not flash unstyled */
+        if (res_pump(RES_CSS) && now - sf.nav_stage_t0 < CSS_WAIT_MS) return;
+        set_status("Laying out...");
+        {
+            uint32_t r0 = now_ms();
+            render_document(app);
+            sf.t_render_ms += now_ms() - r0;
+            sf.t_shown = now_ms();
+        }
+        js_create(app);
+        sf.nav_state = NAV_SCRIPTS;
+        sf.nav_stage_t0 = now_ms();
+        set_status("Running scripts...");
+    } else if (sf.nav_state == NAV_SCRIPTS) {
+        /* run each script as soon as its own file is here, in page order */
+        res_pump(0);
+        if (sf.js && now - sf.nav_stage_t0 < SCRIPT_WAIT_MS) {
+            dom_node_t *next = js_next_script(sf.js);
+            const char *src = next ? dom_attr(next, "src") : 0;
+            char url[URL_CAP];
+            if (src && url_resolve(sf.doc->base_url, src, url, sizeof url) == 0) {
+                res_t *e = res_find(url);
+                if (e && (e->state == 0 || e->state == 1)) return;
+            }
+        }
+        uint32_t j0 = now_ms();
+        int more = sf.js ? js_run_step(sf.js) : 0;
+        sf.t_js_ms += now_ms() - j0;
+        if (!more) {
+            sf.js_dirty |= sf.js ? js_take_dirty(sf.js) | JS_DIRTY_DOM : JS_DIRTY_DOM;
+            restyle(app);
+            nav_finish(0);
+            return;
+        }
+        /* show script changes as they happen, without restyling after each */
+        sf.js_dirty |= js_take_dirty(sf.js);
+        if (sf.js_dirty && now_ms() - sf.last_restyle_ms >= 250) restyle(app);
+    }
+}
+
+static int nav_busy(void) {
+    return sf.nav_state != NAV_IDLE || sf.nav_pending;
 }
 
 static void navigate(const char *url, int push) {
@@ -566,7 +1062,6 @@ static void navigate(const char *url, int push) {
     snprintf(sf.nav_url, sizeof sf.nav_url, "%s", url);
     sf.nav_pending = 1;
     sf.nav_push = push;
-    sf.nav_drawn = 0;
     set_status("Loading...");
 }
 
@@ -941,6 +1436,7 @@ static void restyle(ic_app_t *app) {
     int d = sf.js_dirty | js_take_dirty(sf.js);
     sf.js_dirty = 0;
     if (!sf.doc || !d) return;
+    uint32_t r0 = now_ms();
     if (d & JS_DIRTY_STYLE) {
         for (int i = 0; i < sf.nsheets; i++) css_sheet_free(sf.sheets[i]);
         sf.nsheets = 0;
@@ -949,28 +1445,22 @@ static void restyle(ic_app_t *app) {
     css_cascade(sf.doc, sf.sheets, sf.nsheets, p.w, p.h);
     relayout(app);
     sf.last_restyle_ms = now_ms();
+    sf.t_render_ms += now_ms() - r0;
     if (sf.focus && !sf.focus->style) sf.focus = 0;   /* hidden or removed */
     ic_app_invalidate(app);
 }
 
+/* Scripts and modules: usually already downloaded during NAV_SUB. */
 static int h_fetch(void *ctx, const char *url, char **body, size_t *len, char *final_url, size_t cap) {
-    http_req_t *r;
-    char saved[sizeof sf.status];
+    res_t *e;
     (void)ctx;
-    snprintf(saved, sizeof saved, "%s", sf.status);
-    set_status("Loading scripts...");
-    r = http_get(url, final_url, cap);
-    set_status(saved);
-    if (!r || r->state != HTTP_DONE || r->status != 200) {
-        http_free(r);
-        return -1;
-    }
-    *body = (char *)malloc(r->body_len + 1);
-    if (!*body) { http_free(r); return -1; }
-    memcpy(*body, r->body ? (const char *)r->body : "", r->body_len);
-    (*body)[r->body_len] = 0;
-    *len = r->body_len;
-    http_free(r);
+    e = res_get(url, RES_SCRIPT);
+    if (!e || e->state != 2) return -1;
+    *body = (char *)malloc(e->len + 1);
+    if (!*body) return -1;
+    memcpy(*body, e->text, e->len + 1);
+    *len = e->len;
+    snprintf(final_url, cap, "%s", e->final);
     return 0;
 }
 
@@ -1066,9 +1556,8 @@ static void h_submit(void *ctx, dom_node_t *form, dom_node_t *submitter) {
     submit_form(form, submitter);
 }
 
-static void js_start(ic_app_t *app) {
+static void js_create(ic_app_t *app) {
     js_host_t host;
-    uint32_t t0 = now_ms();
     if (!sf.doc) return;
     memset(&host, 0, sizeof host);
     host.fetch = h_fetch;
@@ -1085,16 +1574,8 @@ static void js_start(ic_app_t *app) {
     host.log = h_log;
     host.submit = h_submit;
     sf.app = app;
-    set_status("Running scripts...");
+    /* the scripts themselves run one per tick (nav_step) */
     sf.js = js_page_new(sf.doc, sf.url, &host);
-    if (!sf.js) return;
-    js_run_scripts(sf.js);
-    restyle(app);
-    {
-        char line[160];
-        snprintf(line, sizeof line, "[surfer] scripts %u ms height=%d\n", (unsigned)(now_ms() - t0), sf.L ? (int)sf.L->height : -1);
-        icda_write_file("/dev/serial", line, strlen(line));
-    }
 }
 
 /* Fires a DOM event; returns 1 if a script cancelled the default action. */
@@ -1140,8 +1621,9 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
                       !can_back ? IC_STATE_DISABLED : sf.hover_back ? IC_STATE_HOVER : IC_STATE_NORMAL);
     ic_ui_icon_button(c, fwd_rect(app), IC_SYM_CHEVRON_RIGHT,
                       !can_fwd ? IC_STATE_DISABLED : sf.hover_fwd ? IC_STATE_HOVER : IC_STATE_NORMAL);
-    ic_ui_icon_button(c, reload_rect(app), IC_SYM_RELOAD,
-                      sf.nav_pending ? IC_STATE_PRESSED : sf.hover_reload ? IC_STATE_HOVER : IC_STATE_NORMAL);
+    /* Reload turns into Stop while a page loads */
+    ic_ui_icon_button(c, reload_rect(app), nav_busy() ? IC_SYM_CLOSE : IC_SYM_RELOAD,
+                      sf.hover_reload ? IC_STATE_HOVER : IC_STATE_NORMAL);
     tf.text = sf.addr_buf;
     tf.focused = sf.addr_focused;
     tf.caret_on = ic_app_caret_visible(app);
@@ -1158,7 +1640,7 @@ static void draw_page(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_empty_state(c, p, IC_SYM_WARNING, "Fonts missing", "Surfer needs /usr/share/fonts/Inter-Regular.ttf");
         return;
     }
-    if (sf.nav_pending && !sf.L) {
+    if (nav_busy() && !sf.L) {
         ic_ui_empty_state(c, p, IC_SYM_RELOAD, "Loading", sf.nav_url);
         return;
     }
@@ -1204,19 +1686,25 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_toolbar(app, c);
     draw_page(app, c);
     draw_status(app, c);
-    if (sf.nav_pending) {
-        sf.nav_drawn = 1;
-        ic_app_animate(app);
-    }
-    if (sf.addr_focused || images_busy()) ic_app_animate(app);
+    if (sf.addr_focused || images_busy() || nav_busy() || sf.css_late) ic_app_animate(app);
 }
 
 static void tick(ic_app_t *app) {
-    if (sf.nav_pending && sf.nav_drawn) {
+    if (sf.nav_pending) {
         sf.nav_pending = 0;
-        do_navigate(app);
+        begin_navigate(app);
         ic_app_invalidate(app);
-        return;
+    }
+    if (sf.nav_state != NAV_IDLE) {
+        int before = sf.nav_state;
+        nav_step(app);
+        if (sf.nav_state != before) ic_app_invalidate(app);
+        ic_app_animate(app);
+    } else if (sf.css_late && res_pump(RES_CSS) == 0) {
+        /* stylesheets that arrived after the page was first drawn */
+        sf.css_late = 0;
+        sf.js_dirty |= JS_DIRTY_STYLE;
+        restyle(app);
     }
     if (sf.nimgs && images_pump()) sf.need_layout = 1;
     if (sf.need_layout && (!images_busy() || now_ms() - sf.last_layout_ms > 400)) {
@@ -1224,7 +1712,7 @@ static void tick(ic_app_t *app) {
         ic_app_invalidate(app);
     }
     if (images_busy()) ic_app_animate(app);
-    if (sf.js) {
+    if (sf.js && sf.nav_state != NAV_SCRIPTS) {
         int r = js_tick(sf.js);
         sf.js_dirty |= js_take_dirty(sf.js);
         (void)r;
@@ -1367,7 +1855,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         if (ev->button != GUI_BTN_LEFT) return;
         if (sf.hover_back) { go_back(); break; }
         if (sf.hover_fwd) { go_forward(); break; }
-        if (sf.hover_reload) { if (sf.url[0]) navigate(sf.url, 0); break; }
+        if (sf.hover_reload) {
+            if (nav_busy()) stop_loading(app);
+            else if (sf.url[0]) navigate(sf.url, 0);
+            break;
+        }
         if (ic_ui_hit(a, ev->x, ev->y)) {
             if (!sf.addr_focused) {
                 /* first click selects the whole address, like other browsers */
@@ -1423,6 +1915,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if ((ev->mods & IC_MOD_CTRL) && (ev->key == 'r' || ev->key == 'R')) { navigate(sf.url, 0); break; }
+        if (ev->key == IC_KEY_ESCAPE && nav_busy() && !sf.popup) { stop_loading(app); break; }
         if (ev->mods & IC_MOD_ALT) {
             if (ev->key == IC_KEY_LEFT) go_back();
             else if (ev->key == IC_KEY_RIGHT) go_forward();
