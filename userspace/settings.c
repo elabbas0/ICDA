@@ -145,6 +145,29 @@ static ic_rect_t swatch_rect(ic_app_t *app, int i) {
 }
 
 
+/* Motion & Display > Display size (applied by the window manager at start) */
+static const int zoom_values[5] = { 100, 125, 150, 175, 200 };
+static const char *const zoom_labels[5] = { "100%", "125%", "150%", "175%", "200%" };
+static int zoom_at_start;
+static int hover_zoom = -1;
+
+static int zoom_index(int z) {
+    for (int i = 0; i < 5; i++)
+        if (zoom_values[i] == z) return i;
+    return 0;
+}
+
+static ic_rect_t zoom_group(ic_app_t *app) {
+    /* below the three motion switches and a section header */
+    return group_rect(app, GROUP_Y + 3 * ROW_H + GROUP_GAP + 26, 2);
+}
+
+static ic_rect_t zoom_seg_rect(ic_app_t *app) {
+    /* the second row of the group, full width */
+    ic_rect_t r = row_rect(zoom_group(app), 1);
+    return ic_rect_make(r.x + IC_SP_3, r.y + (r.h - IC_H_CONTROL_SM) / 2, r.w - 2 * IC_SP_3, IC_H_CONTROL_SM);
+}
+
 static int pane_toggles(int pane, int *out) {
     int n = 0;
     for (int t = 0; t < TOG_COUNT; t++) {
@@ -225,6 +248,22 @@ static void draw_appearance(ic_app_t *app, ic_canvas_t *c) {
         ic_ui_slider(c, ic_rect_make(b2.x + b2.w + IC_SP_6, pv.y, pv.x + pv.w - IC_SP_4 - IC_TOGGLE_W -
                                      IC_SP_6 - (b2.x + b2.w + IC_SP_6), pv.h), 0.62f, IC_STATE_NORMAL);
     }
+}
+
+static void draw_zoom(ic_app_t *app, ic_canvas_t *c) {
+    ic_rect_t g = zoom_group(app), r = row_rect(g, 0), seg = zoom_seg_rect(app);
+    char sub[64];
+    ic_ui_section_header(c, g.x, g.y - 22, "Display");
+    ic_ui_group(c, g);
+    if (st.s.zoom != zoom_at_start) {
+        ic_strcpy(sub, "Restart ICDA to use ", sizeof sub);
+        ic_strlcat(sub, zoom_labels[zoom_index(st.s.zoom)], sizeof sub);
+    } else {
+        ic_strcpy(sub, "Size of text, windows and the taskbar", sizeof sub);
+    }
+    ic_ui_row_text(c, r, IC_SYM_MAXIMIZE, IC_RGB(IC_TINT_TEAL),
+                   "Display size", sub);
+    ic_ui_segmented(c, seg, zoom_labels, 5, (float)zoom_index(st.s.zoom), hover_zoom);
 }
 
 static void draw_toggles(ic_app_t *app, ic_canvas_t *c, int pane) {
@@ -355,6 +394,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     else if (st.pane == PANE_ABOUT) draw_about(app, c);
     else if (st.pane == PANE_TIME) draw_time(app, c);
     else draw_toggles(app, c, st.pane);
+    if (st.pane == PANE_MOTION) draw_zoom(app, c);
 
     if (st.save_failed) {
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
@@ -416,6 +456,7 @@ static void update_hover(ic_app_t *app, int x, int y) {
     st.hover_swatch = -1;
     st.hover_segment = -1;
     st.hover_tz = -1;
+    hover_zoom = st.pane == PANE_MOTION ? ic_ui_segmented_hit(zoom_seg_rect(app), 5, x, y) : -1;
     if (st.pane == PANE_TIME) {
         if (ic_ui_hit(tz_button_rect(app, 0), x, y)) st.hover_tz = 0;
         else if (ic_ui_hit(tz_button_rect(app, 1), x, y)) st.hover_tz = 1;
@@ -473,6 +514,17 @@ static void click(ic_app_t *app, int x, int y) {
     for (int i = 0; i < PANE_COUNT; i++) {
         if (ic_ui_hit(sidebar_item_rect(i), x, y)) {
             select_pane(i);
+            return;
+        }
+    }
+    if (st.pane == PANE_MOTION) {
+        int z = ic_ui_segmented_hit(zoom_seg_rect(app), 5, x, y);
+        if (z >= 0) {
+            if (zoom_values[z] != st.s.zoom) {
+                st.s.zoom = zoom_values[z];
+                save();
+                ic_sound("toggle_on");
+            }
             return;
         }
     }
@@ -571,6 +623,7 @@ static int start_pane = PANE_APPEARANCE;
 static void init(ic_app_t *app) {
     (void)app;
     icda_settings_load(&st.s);
+    zoom_at_start = st.s.zoom;
     st.pane = start_pane;
     if (st.pane == PANE_WIFI) wifi_pane_enter();
     if (st.pane == PANE_UPDATES) updates_pane_enter();

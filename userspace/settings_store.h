@@ -43,6 +43,7 @@ typedef struct {
     int tz_minutes;
     int scale;
     int effects;            /* interface sounds (start menu, switches, ...) */
+    int zoom;               /* display size in percent: 100, 125, 150, 175, 200 */
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -58,6 +59,7 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->tz_minutes = 0;
     s->scale = 0;
     s->effects = 1;
+    s->zoom = 100;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -91,6 +93,13 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         return;
     }
     if (key_len + 2 > len) {
+        return;
+    }
+    if (icda_settings_key_is(line + i, key_len, "zoom")) {
+        uint64_t j = i + key_len + 1;
+        int v = 0;
+        while (j < len && line[j] >= '0' && line[j] <= '9' && v < 1000) v = v * 10 + (line[j++] - '0');
+        if (v == 100 || v == 125 || v == 150 || v == 175 || v == 200) s->zoom = v;
         return;
     }
     if (icda_settings_key_is(line + i, key_len, "tz")) {
@@ -206,6 +215,10 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     icda_settings_put(buf, sizeof(buf), &pos, s->audio ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "effects=");
     icda_settings_put(buf, sizeof(buf), &pos, s->effects ? "1\n" : "0\n");
+    icda_settings_put(buf, sizeof(buf), &pos, "zoom=");
+    icda_settings_put(buf, sizeof(buf), &pos,
+                      s->zoom == 125 ? "125\n" : s->zoom == 150 ? "150\n" : s->zoom == 175 ? "175\n" :
+                      s->zoom == 200 ? "200\n" : "100\n");
     icda_settings_put(buf, sizeof(buf), &pos, "appearance=");
     icda_settings_put(buf, sizeof(buf), &pos, s->appearance ? "1\n" : "0\n");
     {

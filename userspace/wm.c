@@ -2243,8 +2243,104 @@ static uint32_t fb_pitch_pixels(void) {
 
 
 
+/* ---- fractional display size (125 / 150 / 175 %) ---------------------------- */
+
+/* The desktop is laid out at fb / zoom and each changed region is scaled up
+ * to the panel with a bilinear filter.  Column sources and weights are
+ * computed once; weights are 8-bit fixed point. */
+static int       zoom_frac;                     /* 1 when scaling up at present */
+static uint16_t *zoom_x0;                       /* source column per panel column */
+static uint8_t  *zoom_xf;                       /* its weight towards the next column */
+static uint32_t  zoom_inv_fp;                   /* source px per panel px, 16.16 */
+
+static void zoom_setup(void) {
+    int fw = (int)fb_info.width;
+    zoom_x0 = (uint16_t *)icda_vm_alloc((uint64_t)fw * 2);
+    zoom_xf = (uint8_t *)icda_vm_alloc((uint64_t)fw);
+    if (!zoom_x0 || !zoom_xf) {
+        zoom_frac = 0;
+        return;
+    }
+    zoom_inv_fp = (uint32_t)(((uint64_t)scr_w << 16) / (uint64_t)fw);
+    for (int x = 0; x < fw; x++) {
+        int64_t s = (int64_t)(((uint64_t)x * 2 + 1) * zoom_inv_fp / 2) - 32768;   /* pixel centres */
+        int x0;
+        if (s < 0) s = 0;
+        x0 = (int)(s >> 16);
+        if (x0 >= scr_w - 1) {
+            zoom_x0[x] = (uint16_t)(scr_w - 1);
+            zoom_xf[x] = 0;
+        } else {
+            zoom_x0[x] = (uint16_t)x0;
+            zoom_xf[x] = (uint8_t)((s >> 8) & 0xFF);
+        }
+    }
+}
+
+/* a*(256-f) + b*f per channel; red+blue share one multiply (fits 32 bits) */
+static inline uint32_t lerp_px(uint32_t a, uint32_t b, uint32_t f) {
+    uint32_t nf = 256 - f;
+    uint32_t rb = (((a & 0xFF00FF) * nf + (b & 0xFF00FF) * f) >> 8) & 0xFF00FF;
+    uint32_t g = (((a & 0x00FF00) * nf + (b & 0x00FF00) * f) >> 8) & 0x00FF00;
+    return rb | g;
+}
+
+static void blit_region_zoom(int x, int y, int rw, int rh) {
+    uint32_t pitch = fb_pitch_pixels();
+    int fw = (int)fb_info.width, fh = (int)fb_info.height;
+    /* panel rect covering the logical rect, one pixel wider for the filter */
+    int dx0 = (int)(((int64_t)x << 16) / zoom_inv_fp) - 1;
+    int dy0 = (int)(((int64_t)y << 16) / zoom_inv_fp) - 1;
+    int dx1 = (int)(((int64_t)(x + rw) << 16) / zoom_inv_fp) + 2;
+    int dy1 = (int)(((int64_t)(y + rh) << 16) / zoom_inv_fp) + 2;
+    if (dx0 < 0) dx0 = 0;
+    if (dy0 < 0) dy0 = 0;
+    if (dx1 > fw) dx1 = fw;
+    if (dy1 > fh) dy1 = fh;
+    for (int dy = dy0; dy < dy1; dy++) {
+        int64_t s = (int64_t)(((uint64_t)dy * 2 + 1) * zoom_inv_fp / 2) - 32768;
+        int sy;
+        uint32_t fy;
+        const uint32_t *r0, *r1;
+        uint32_t *out = real_fb + (uint64_t)dy * pitch;
+        uint8_t *out24 = (uint8_t *)real_fb + (uint64_t)dy * fb_info.pitch;
+        if (s < 0) s = 0;
+        sy = (int)(s >> 16);
+        fy = (uint32_t)((s >> 8) & 0xFF);
+        if (sy >= scr_h - 1) {
+            sy = scr_h - 1;
+            fy = 0;
+        }
+        r0 = back_buffer + (uint64_t)sy * scr_w;
+        r1 = fy ? r0 + scr_w : r0;
+        for (int dx = dx0; dx < dx1; dx++) {
+            int sx = zoom_x0[dx];
+            uint32_t fx = zoom_xf[dx];
+            uint32_t top = fx ? lerp_px(r0[sx], r0[sx + 1], fx) : r0[sx];
+            uint32_t bot = fx ? lerp_px(r1[sx], r1[sx + 1], fx) : r1[sx];
+            uint32_t px = fy ? lerp_px(top, bot, fy) : top;
+            if (fb_info.bpp == 24) {
+                uint8_t *o = out24 + (uint64_t)dx * 3;
+                o[0] = (uint8_t)px;
+                o[1] = (uint8_t)(px >> 8);
+                o[2] = (uint8_t)(px >> 16);
+            } else {
+                out[dx] = px | 0xFF000000u;
+            }
+        }
+    }
+}
+
 static void blit_region(int x, int y, int rw, int rh) {
     uint32_t pitch = fb_pitch_pixels();
+    if (zoom_frac) {
+        if (x < 0) { rw += x; x = 0; }
+        if (y < 0) { rh += y; y = 0; }
+        if (x + rw > scr_w) rw = scr_w - x;
+        if (y + rh > scr_h) rh = scr_h - y;
+        if (rw > 0 && rh > 0) blit_region_zoom(x, y, rw, rh);
+        return;
+    }
     if (x < 0) { rw += x; x = 0; }
     if (y < 0) { rh += y; y = 0; }
     if (x + rw > scr_w) rw = scr_w - x;
@@ -3322,11 +3418,41 @@ int main(int argc, char **argv) {
     icda_settings_load(&wm_settings);
     wm_scale = wm_settings.scale == 1 || wm_settings.scale == 2 ? wm_settings.scale
              : (fb_info.width >= 2560 ? 2 : 1);
+    /* Display size: 200% is the sharp 2x path; 125-175% lay the desktop out
+     * smaller and scale it up when presenting (blit_region_zoom). */
+    if (wm_settings.zoom == 200) wm_scale = 2;
+    else if (wm_settings.zoom == 100 && wm_settings.scale == 0) wm_scale = fb_info.width >= 2560 ? 2 : 1;
     scr_w = fb_info.width / wm_scale;
     scr_h = fb_info.height / wm_scale;
+    if (wm_settings.zoom > 100 && wm_settings.zoom < 200 && (fb_info.bpp == 32 || fb_info.bpp == 24)) {
+        wm_scale = 1;
+        scr_w = (int)(fb_info.width * 100 / (uint32_t)wm_settings.zoom);
+        scr_h = (int)(fb_info.height * 100 / (uint32_t)wm_settings.zoom);
+        zoom_frac = 1;
+    }
     if (scr_w * wm_scale > BACK_BUFFER_WIDTH) scr_w = BACK_BUFFER_WIDTH / wm_scale;
     if (scr_h * wm_scale > BACK_BUFFER_HEIGHT) scr_h = BACK_BUFFER_HEIGHT / wm_scale;
     if (scr_w < 320 || scr_h < 240) return -1;
+    if (zoom_frac) zoom_setup();
+    {
+        char line[96], n1[12], n2[12], n3[12];
+        ic_uint_to_str((uint64_t)wm_settings.zoom, n1, sizeof n1);
+        ic_uint_to_str((uint64_t)scr_w, n2, sizeof n2);
+        ic_uint_to_str((uint64_t)scr_h, n3, sizeof n3);
+        line[0] = 0;
+        ic_strlcat(line, "wm: display size ", sizeof line);
+        ic_strlcat(line, n1, sizeof line);
+        ic_strlcat(line, "%, desktop ", sizeof line);
+        ic_strlcat(line, n2, sizeof line);
+        ic_strlcat(line, "x", sizeof line);
+        ic_strlcat(line, n3, sizeof line);
+        ic_strlcat(line, zoom_frac ? " (scaled)" : "", sizeof line);
+        ic_uint_to_str((uint64_t)fb_info.bpp, n1, sizeof n1);
+        ic_strlcat(line, " bpp ", sizeof line);
+        ic_strlcat(line, n1, sizeof line);
+        ic_strlcat(line, "\n", sizeof line);
+        icda_write_file("/dev/serial", line, ic_strlen(line));
+    }
     scene = wm_canvas(back_buffer);
     if (wm_scale > 1) load_hidpi_font();
 
