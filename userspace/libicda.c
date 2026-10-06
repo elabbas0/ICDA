@@ -1,4 +1,5 @@
 ﻿#include "libicda.h"
+#include "settings_store.h"
 #include "icon_data.h"
 
 
@@ -1293,4 +1294,50 @@ const char *ic_version_label(void) {
         }
     }
     return label;
+}
+
+/* ---- interface sounds ------------------------------------------------------- */
+
+#define IC_SOUND_DIR    "/usr/share/sounds/"
+#define IC_SOUND_VOLUME 200
+
+static void ic_sound_play(const char *name) {
+    char path[96];
+    path[0] = 0;
+    ic_strlcat(path, IC_SOUND_DIR, sizeof(path));
+    ic_strlcat(path, name, sizeof(path));
+    ic_strlcat(path, ".wav", sizeof(path));
+    (void)icda_audio_effect(path, IC_SOUND_VOLUME);
+}
+
+static int ic_sound_enabled(int need_effects) {
+    icda_settings_t s;
+    icda_settings_load(&s);
+    return s.audio && (!need_effects || s.effects);
+}
+
+void ic_sound(const char *name) {
+    if (name && ic_sound_enabled(1)) ic_sound_play(name);
+}
+
+void ic_sound_always(const char *name) {
+    if (name) ic_sound_play(name);
+}
+
+void ic_sound_any(const char *name, int variants) {
+    static uint32_t seed;
+    static int last = -1;
+    char full[64], num[8];
+    int pick;
+    if (!name || variants < 1 || !ic_sound_enabled(1)) return;
+    seed = seed * 1664525u + 1013904223u + (uint32_t)icda_ticks();
+    pick = (int)((seed >> 16) % (uint32_t)variants);
+    if (variants > 1 && pick == last) pick = (pick + 1) % variants;   /* never twice in a row */
+    last = pick;
+    full[0] = 0;
+    ic_strlcat(full, name, sizeof(full));
+    ic_strlcat(full, "_", sizeof(full));
+    ic_uint_to_str((uint64_t)(pick + 1), num, sizeof(num));
+    ic_strlcat(full, num, sizeof(full));
+    ic_sound_play(full);
 }

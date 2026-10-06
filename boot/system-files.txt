@@ -23,3 +23,21 @@ bin/fetch             userspace/fetch.elf
 sbin/init.app         userspace/init.app
 sbin/updated          userspace/updated.elf
 etc/ssl/certs.pem     resources/ssl/cacert.pem
+# interface sounds (tools/soundgen renders them)
+usr/share/sounds/ai_end.wav             resources/audio/ai_end.wav
+usr/share/sounds/ai_listen.wav          resources/audio/ai_listen.wav
+usr/share/sounds/ai_thinking.wav        resources/audio/ai_thinking.wav
+usr/share/sounds/flyout_close_1.wav     resources/audio/flyout_close_1.wav
+usr/share/sounds/flyout_close_2.wav     resources/audio/flyout_close_2.wav
+usr/share/sounds/flyout_close_3.wav     resources/audio/flyout_close_3.wav
+usr/share/sounds/flyout_close_4.wav     resources/audio/flyout_close_4.wav
+usr/share/sounds/flyout_open_1.wav      resources/audio/flyout_open_1.wav
+usr/share/sounds/flyout_open_2.wav      resources/audio/flyout_open_2.wav
+usr/share/sounds/flyout_open_3.wav      resources/audio/flyout_open_3.wav
+usr/share/sounds/flyout_open_4.wav      resources/audio/flyout_open_4.wav
+usr/share/sounds/sound_mute.wav         resources/audio/sound_mute.wav
+usr/share/sounds/sound_on.wav           resources/audio/sound_on.wav
+usr/share/sounds/start_close.wav        resources/audio/start_close.wav
+usr/share/sounds/start_open.wav         resources/audio/start_open.wav
+usr/share/sounds/toggle_off.wav         resources/audio/toggle_off.wav
+usr/share/sounds/toggle_on.wav          resources/audio/toggle_on.wav

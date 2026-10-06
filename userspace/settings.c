@@ -44,7 +44,7 @@ typedef struct {
     uint32_t    tint;
 } toggle_row_t;
 
-enum { TOG_ANIMATIONS = 0, TOG_BOOT_ANIM, TOG_VSYNC, TOG_AUDIO, TOG_COUNT };
+enum { TOG_ANIMATIONS = 0, TOG_BOOT_ANIM, TOG_VSYNC, TOG_AUDIO, TOG_EFFECTS, TOG_COUNT };
 
 static const toggle_row_t toggles[TOG_COUNT] = {
     { PANE_MOTION, "Window animations", "Open, close, minimize and zoom with motion",
@@ -55,6 +55,8 @@ static const toggle_row_t toggles[TOG_COUNT] = {
       IC_SYM_RELOAD, IC_TINT_TEAL },
     { PANE_SOUND, "Sound", "Allow apps to play audio",
       IC_SYM_SPEAKER, IC_TINT_PINK },
+    { PANE_SOUND, "Sound effects", "Sounds for menus, switches and notifications",
+      IC_SYM_SPEAKER, IC_TINT_INDIGO },
 };
 
 typedef struct {
@@ -78,6 +80,7 @@ static int *toggle_value(int t) {
     case TOG_ANIMATIONS: return &st.s.animations;
     case TOG_BOOT_ANIM:  return &st.s.boot_anim;
     case TOG_VSYNC:      return &st.s.vsync;
+    case TOG_EFFECTS:    return &st.s.effects;
     default:             return &st.s.audio;
     }
 }
@@ -453,6 +456,13 @@ static void flip_toggle(int t) {
     ic_tween_to(&st.toggle_pos[t], *v ? 1.0f : 0.0f, IC_DUR_BASE, IC_EASE_MOVE);
     if (t == TOG_AUDIO && !*v) icda_stop_audio();
     save();
+    /* the sound switches answer in their own voice even when effects are
+     * off; every other switch clicks only while effects are on */
+    if (t == TOG_EFFECTS || t == TOG_AUDIO) {
+        ic_sound_always(*v ? "sound_on" : "sound_mute");
+    } else {
+        ic_sound(*v ? "toggle_on" : "toggle_off");
+    }
 }
 
 static void click(ic_app_t *app, int x, int y) {

@@ -400,6 +400,14 @@ int ic_layout_col(ic_rect_t parent, int pad, int gap,
                   ic_rect_t *out, int out_cap);
 
 
+/* Interface sounds from /usr/share/sounds (mixed over any other audio).
+ * ic_sound plays NAME.wav when sound and sound effects are on; ic_sound_any
+ * picks NAME_1..NAME_n at random; ic_sound_always ignores the effects switch
+ * (used by the switches that turn sound itself on and off). */
+void ic_sound(const char *name);
+void ic_sound_any(const char *name, int variants);
+void ic_sound_always(const char *name);
+
 /* "Version 1.6.1": the installed release (/etc/icda-release.txt, written by
  * OTA patches), or the version this program was built as. */
 const char *ic_version_label(void);

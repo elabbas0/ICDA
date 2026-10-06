@@ -42,6 +42,7 @@ typedef struct {
     int accent;
     int tz_minutes;
     int scale;
+    int effects;            /* interface sounds (start menu, switches, ...) */
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -56,6 +57,7 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->accent = 0;
     s->tz_minutes = 0;
     s->scale = 0;
+    s->effects = 1;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -135,6 +137,8 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         s->boot_anim = value;
     } else if (icda_settings_key_is(line, key_len, "audio")) {
         s->audio = value;
+    } else if (icda_settings_key_is(line, key_len, "effects")) {
+        s->effects = value;
     } else if (icda_settings_key_is(line, key_len, "appearance")) {
         s->appearance = value;
     }
@@ -200,6 +204,8 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     icda_settings_put(buf, sizeof(buf), &pos, s->boot_anim ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "audio=");
     icda_settings_put(buf, sizeof(buf), &pos, s->audio ? "1\n" : "0\n");
+    icda_settings_put(buf, sizeof(buf), &pos, "effects=");
+    icda_settings_put(buf, sizeof(buf), &pos, s->effects ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "appearance=");
     icda_settings_put(buf, sizeof(buf), &pos, s->appearance ? "1\n" : "0\n");
     {

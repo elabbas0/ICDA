@@ -109,8 +109,20 @@ typedef enum {
     SYS_VFS_WRITE_AT      = 77,
     SYS_VFS_TRUNCATE      = 78,
     SYS_VFS_RENAME        = 79,
-    SYS_NET               = 80
+    SYS_NET               = 80,
+    SYS_AUDIO_MIX         = 81
 } syscall_number_t;
+
+/* SYS_AUDIO_MIX operations (rdi) */
+enum {
+    MIX_EFFECT = 1,        /* path, volume 0..256 */
+    MIX_STREAM_OPEN,       /* rate, channels -> id */
+    MIX_STREAM_WRITE,      /* id, pcm, bytes -> bytes taken */
+    MIX_STREAM_POSITION,   /* id -> frames played */
+    MIX_STREAM_QUEUED,     /* id -> frames waiting */
+    MIX_STREAM_CONTROL,    /* id, paused, volume */
+    MIX_STREAM_CLOSE       /* id */
+};
 
 typedef struct {
     uint64_t pid;

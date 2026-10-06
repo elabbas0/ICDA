@@ -45,13 +45,14 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v8: first number moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v8: v4 numbers moved");
-_Static_assert(SYS_DISK_EDIT == 76, "native ABI v8: v5 numbers moved");
-_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v8: v6 numbers moved");
-_Static_assert(SYS_VFS_RENAME == 79, "native ABI v8: v7 numbers moved");
-_Static_assert(SYS_NET == 80, "native ABI v8: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 81, "native ABI v8: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v9: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v9: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v9: v5 numbers moved");
+_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v9: v6 numbers moved");
+_Static_assert(SYS_VFS_RENAME == 79, "native ABI v9: v7 numbers moved");
+_Static_assert(SYS_NET == 80, "native ABI v9: v8 numbers moved");
+_Static_assert(SYS_AUDIO_MIX == 81, "native ABI v9: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 82, "native ABI v9: count changed");
 
 
 
@@ -1564,6 +1565,34 @@ static uint64_t sys_audio_finish(uint64_t token) {
     return 0;
 }
 
+/* The mixer (drivers/audio/playback.c): effects and app PCM streams. */
+static uint64_t sys_audio_mix(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
+    switch (op) {
+    case MIX_EFFECT: {
+        const char *path = (const char *)(uintptr_t)a;
+        if (!path || !gate_path_ok(path)) return (uint64_t)-U_EFAULT;
+        return audio_effect_play(path, (uint32_t)b) == 0 ? 0 : (uint64_t)-1;
+    }
+    case MIX_STREAM_OPEN:
+        return (uint64_t)(int64_t)audio_stream_open((uint32_t)a, (uint32_t)b);
+    case MIX_STREAM_WRITE:
+        if (!b || c == 0 || c > (16ULL << 20)) return (uint64_t)-1;
+        if (!user_range_prepare_cur((const void *)(uintptr_t)b, c)) return (uint64_t)-U_EFAULT;
+        return (uint64_t)audio_stream_write((int)a, (const int16_t *)(uintptr_t)b, c);
+    case MIX_STREAM_POSITION:
+        return (uint64_t)audio_stream_position((int)a);
+    case MIX_STREAM_QUEUED:
+        return (uint64_t)audio_stream_queued((int)a);
+    case MIX_STREAM_CONTROL:
+        return audio_stream_control((int)a, (int)b, (uint32_t)c) == 0 ? 0 : (uint64_t)-1;
+    case MIX_STREAM_CLOSE:
+        audio_stream_close((int)a);
+        return 0;
+    default:
+        return (uint64_t)-1;
+    }
+}
+
 
 
 
@@ -1909,6 +1938,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return sys_vfs_rename((const char *)(uintptr_t)regs->rdi, (const char *)(uintptr_t)regs->rsi);
         case SYS_NET:
             return (uint64_t)sock_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+        case SYS_AUDIO_MIX:
+            return sys_audio_mix(regs->rdi, regs->rsi, regs->rdx, regs->r10);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

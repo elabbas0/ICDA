@@ -1,50 +1,93 @@
+/* Audio mixer: every sound in ICDA plays through here, together.
+ *
+ * One 48 kHz stereo 16-bit HDA stream runs while anything is audible.  A
+ * kernel thread keeps the ring filled about 60 ms ahead of the controller's
+ * position (LPIB) and mixes, per output frame, every active voice:
+ *
+ *   music    one track started by the music player (SYS_AUDIO_PLAY_FILE);
+ *            starting another replaces only this voice
+ *   effects  short UI sounds (SYS_AUDIO_MIX / MIX_EFFECT); any number play
+ *            at once and never stop anything else
+ *   streams  PCM pushed by apps such as the media player (MIX_STREAM_*)
+ *
+ * Voices read their WAV data in place (the VFS keeps it) with linear
+ * resampling, so starting a sound costs nothing.  Mixing is integer math,
+ * one multiply-add per voice per sample, followed by a soft limiter so many
+ * sounds together do not clip harshly.  With nothing to play for a moment
+ * the stream stops and the thread only checks for work. */
 #include "playback.h"
 
 #include "hda.h"
 #include "../console/console.h"
 #include "../serial/serial.h"
 #include "../../proc/sched.h"
+#include "../../memory/heap.h"
+#include "../../cpu/tsc.h"
 
-#define AUDIO_OUTPUT_CHANNELS 2U
-#define AUDIO_OUTPUT_BITS     16U
-#define AUDIO_OUTPUT_BYTES    4U
-#define AUDIO_OUTPUT_RATE     48000U
+#define MIX_RATE        48000U
+#define FRAME_BYTES     4U                      /* stereo s16 */
+#define RING_BYTES      65536U                  /* 341 ms; matches the HDA buffer descriptor list */
+#define LEAD_BYTES      11520U                  /* 60 ms written ahead */
+#define CHUNK_FRAMES    512U
+#define MAX_VOICES      32
+#define MAX_STREAMS     4
+#define STREAM_SECONDS  2U
+#define IDLE_STOP_TICKS 150U                    /* stop the stream after 1.5 s of silence */
 
+#define AUDIO_MIN_RATE_HZ   8000U
+#define AUDIO_MAX_RATE_HZ   96000U
+#define AUDIO_MAX_WAV_BYTES (64U * 1024U * 1024U)
 
-
-
-
-#define AUDIO_MIN_RATE_HZ     8000U
-#define AUDIO_MAX_RATE_HZ     96000U
-#define AUDIO_MAX_WAV_BYTES   (8U * 1024U * 1024U)
-#define AUDIO_MAX_SRC_SECONDS 10U
+enum { V_FREE = 0, V_MUSIC, V_EFFECT };
 
 typedef struct {
-    const uint8_t *source_pcm;
-    uint32_t source_frames;
-    uint16_t source_channels;
-    uint16_t source_bits;
-    uint32_t source_rate;
-    uint32_t pcm_len;
-    uint32_t played_len;
-    uint32_t sample_rate;
-    uint32_t total_seconds;
-    uint32_t active;
-    uint32_t hud_seconds_last;
-    uint64_t start_tick;
-    uint64_t filled_len;
-    uint32_t dma_buffer_len;
-    uint32_t request_pending;
-    char name[64];
-    char pending_path[128];
-} audio_playback_state_t;
+    int            kind;
+    const uint8_t *pcm;
+    uint32_t       frames;
+    uint16_t       channels, bits;
+    uint32_t       rate;
+    uint64_t       pos;         /* source frame, 16.16 fixed point */
+    uint32_t       step;        /* source frames per output frame, 16.16 */
+    int32_t        vol;         /* 0..256 */
+} voice_t;
 
-static audio_playback_state_t audio_state;
-static uint8_t audio_fill_buf[4096];
+typedef struct {
+    int       used;
+    int16_t  *ring;             /* interleaved frames at the stream's rate */
+    uint32_t  cap;              /* frames */
+    uint64_t  rd, wr;           /* frames consumed / written (monotonic) */
+    uint64_t  frac;             /* 16.16 position past rd */
+    uint32_t  step;
+    uint16_t  channels;
+    uint32_t  rate;
+    int       paused;
+    int32_t   vol;
+} stream_t;
+
+static voice_t  voices[MAX_VOICES];
+static stream_t streams[MAX_STREAMS];
+static int32_t  mix_acc[CHUNK_FRAMES * 2];
+static int16_t  mix_out[CHUNK_FRAMES * 2];
+static uint8_t  silence[4096];
+
+static int      out_running;
+static uint64_t write_abs, play_abs;            /* bytes written / played since start */
+static uint64_t silence_abs;                    /* ring cleared up to here */
+static uint32_t last_lpib;
+/* playback position: the controller's LPIB when it advances (real HDA),
+ * otherwise elapsed TSC time since the stream started (QEMU reads LPIB 0) */
+static int      pos_from_lpib, lpib_changes, lpib_bad;
+static uint64_t lpib_change_us;
+static uint64_t run_us;
+static uint64_t idle_since;
+
+static char     music_name[64];
+static uint64_t music_frames_total;
 static process_t *audio_worker_proc = 0;
 
 static void audio_update_hud(int force_clear);
-static int audio_start_pending_request(void);
+
+/* ---- small helpers ------------------------------------------------------- */
 
 static uint64_t str_len(const char *s) {
     uint64_t n = 0;
@@ -65,9 +108,7 @@ static void copy_text(char *dst, const char *src, uint64_t cap) {
 static void append_text(char *dst, const char *src, uint64_t cap) {
     uint64_t out = str_len(dst);
     uint64_t i = 0;
-    while (src && src[i] && out + 1 < cap) {
-        dst[out++] = src[i++];
-    }
+    while (src && src[i] && out + 1 < cap) dst[out++] = src[i++];
     dst[out] = 0;
 }
 
@@ -76,73 +117,49 @@ static uint16_t read_le16(const uint8_t *p) {
 }
 
 static uint32_t read_le32(const uint8_t *p) {
-    return (uint32_t)p[0] |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static int parse_wav(const uint8_t *buf, uint64_t size,
-                      uint16_t *channels_out, uint32_t *rate_out,
-                      uint16_t *bits_out, const uint8_t **data_out,
-                      uint32_t *data_size_out) {
+static int parse_wav(const uint8_t *buf, uint64_t size, uint16_t *channels_out, uint32_t *rate_out,
+                     uint16_t *bits_out, const uint8_t **data_out, uint32_t *data_size_out) {
     uint64_t off = 12;
-    uint16_t fmt_tag = 0;
-    uint16_t channels = 0;
-    uint32_t rate = 0;
-    uint16_t bits = 0;
-    uint16_t block_align = 0;
-    uint32_t byte_rate = 0;
+    uint16_t fmt_tag = 0, channels = 0, bits = 0, block_align = 0;
+    uint32_t rate = 0, data_size = 0, frame_bytes;
     const uint8_t *data = 0;
-    uint32_t data_size = 0;
     int have_fmt = 0;
-    uint32_t frame_bytes;
-    uint64_t total_frames;
 
     if (!buf || size < 44) return -1;
     if (!(buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F')) return -1;
     if (!(buf[8] == 'W' && buf[9] == 'A' && buf[10] == 'V' && buf[11] == 'E')) return -1;
-
     while (off + 8 <= size) {
         const uint8_t *chunk = &buf[off];
         uint32_t chunk_size = read_le32(chunk + 4);
         uint64_t next = off + 8ULL + chunk_size + (chunk_size & 1U);
-        if (next > size) break;
-
         if (chunk[0] == 'f' && chunk[1] == 'm' && chunk[2] == 't' && chunk[3] == ' ') {
-            if (chunk_size < 16) return -1;
+            if (chunk_size < 16 || off + 24 > size) return -1;
             fmt_tag = read_le16(chunk + 8);
             channels = read_le16(chunk + 10);
             rate = read_le32(chunk + 12);
-            byte_rate = read_le32(chunk + 16);
             block_align = read_le16(chunk + 20);
             bits = read_le16(chunk + 22);
             have_fmt = 1;
         } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
             data = chunk + 8;
             data_size = chunk_size;
+            if ((uint64_t)(data - buf) + data_size > size) data_size = (uint32_t)(size - (uint64_t)(data - buf));
+            break;
         }
+        if (next > size) break;
         off = next;
     }
-
-    
-
-    if (!have_fmt || !data || fmt_tag != 1) return -1;
-    if (channels < 1 || channels > 2) return -1;
-    if (!(bits == 8 || bits == 16)) return -1;
+    if (!have_fmt || !data || (fmt_tag != 1 && fmt_tag != 0xFFFE)) return -1;
+    if (channels < 1 || channels > 2 || !(bits == 8 || bits == 16)) return -1;
     if (rate < AUDIO_MIN_RATE_HZ || rate > AUDIO_MAX_RATE_HZ) return -1;
     frame_bytes = (uint32_t)channels * (bits / 8U);
     if (block_align != frame_bytes) return -1;
-    if (byte_rate != rate * frame_bytes) return -1;
-
-    
-
-    if ((uint64_t)(data - buf) + data_size > size) return -1;
     if (data_size == 0 || data_size > AUDIO_MAX_WAV_BYTES) return -1;
-    if (data_size % frame_bytes != 0) return -1;
-    total_frames = data_size / frame_bytes;
-    if (total_frames == 0 || total_frames > (uint64_t)rate * AUDIO_MAX_SRC_SECONDS) return -1;
-
+    data_size -= data_size % frame_bytes;
+    if (!data_size) return -1;
     *channels_out = channels;
     *rate_out = rate;
     *bits_out = bits;
@@ -151,211 +168,264 @@ static int parse_wav(const uint8_t *buf, uint64_t size,
     return 0;
 }
 
-static int16_t sample_at(const uint8_t *data, uint32_t frame_index, uint16_t channels, uint16_t bits) {
-    uint32_t sample_index = frame_index * channels;
+/* ---- voices ---------------------------------------------------------------- */
 
-    if (bits == 8) {
-        int32_t sum = 0;
-        for (uint16_t ch = 0; ch < channels; ch++) {
-            sum += ((int32_t)data[sample_index + ch] - 128) << 8;
-        }
-        return (int16_t)(sum / (int32_t)channels);
-    }
-
-    {
-        int32_t sum = 0;
-        const uint8_t *p = data + (sample_index * 2U);
-        for (uint16_t ch = 0; ch < channels; ch++) {
-            int16_t s = (int16_t)read_le16(p + (ch * 2U));
-            sum += s;
-        }
-        return (int16_t)(sum / (int32_t)channels);
-    }
+static int32_t voice_sample(const voice_t *v, uint32_t frame, int ch) {
+    uint32_t c = v->channels == 2 ? (uint32_t)ch : 0;
+    if (v->bits == 16) return (int16_t)read_le16(v->pcm + ((size_t)frame * v->channels + c) * 2U);
+    return ((int32_t)v->pcm[(size_t)frame * v->channels + c] - 128) << 8;
 }
 
-static void basename_from_path(const char *path, char *out, uint64_t cap) {
-    const char *base = path;
-    uint64_t i;
-
-    if (!path || !out || cap == 0) return;
-    for (i = 0; path[i]; i++) {
-        if (path[i] == '/') base = &path[i + 1];
-    }
-    copy_text(out, base, cap);
-}
-
-static void audio_clear_state(void) {
-    audio_state.source_pcm = 0;
-    audio_state.source_frames = 0;
-    audio_state.source_channels = 0;
-    audio_state.source_bits = 0;
-    audio_state.source_rate = 0;
-    audio_state.pcm_len = 0;
-    audio_state.played_len = 0;
-    audio_state.sample_rate = 0;
-    audio_state.total_seconds = 0;
-    audio_state.active = 0;
-    audio_state.start_tick = 0;
-    audio_state.filled_len = 0;
-    audio_state.dma_buffer_len = 0;
-    audio_state.name[0] = 0;
-}
-
-static void audio_generate_range(uint64_t start_byte, uint8_t *dst, uint32_t length) {
-    uint32_t frames = length / AUDIO_OUTPUT_BYTES;
-    int16_t *samples = (int16_t *)dst;
-
-    for (uint32_t i = 0; i < frames; i++) {
-        uint64_t out_frame = (start_byte / AUDIO_OUTPUT_BYTES) + i;
-        uint32_t src_frame = (uint32_t)((out_frame * (uint64_t)audio_state.source_rate) / (uint64_t)audio_state.sample_rate);
-        int16_t sample;
-
-        if (src_frame >= audio_state.source_frames) {
-            src_frame = audio_state.source_frames - 1U;
-        }
-        sample = sample_at(audio_state.source_pcm, src_frame, audio_state.source_channels, audio_state.source_bits);
-        samples[i * 2U] = sample;
-        samples[i * 2U + 1U] = sample;
-    }
-}
-
-static int audio_fill_available(void) {
-    uint64_t elapsed_ticks;
-    uint64_t consumed_target;
-    uint64_t fill_target;
-    uint64_t bytes_per_second;
-
-    if (!audio_state.active || !audio_state.source_pcm || !audio_state.sample_rate || !audio_state.dma_buffer_len) {
-        return -1;
-    }
-
-    bytes_per_second = (uint64_t)audio_state.sample_rate * AUDIO_OUTPUT_BYTES;
-    elapsed_ticks = sched_ticks() - audio_state.start_tick;
-    consumed_target = (elapsed_ticks * bytes_per_second) / 100ULL;
-    if (consumed_target > audio_state.pcm_len) {
-        consumed_target = audio_state.pcm_len;
-    }
-    audio_state.played_len = (uint32_t)consumed_target;
-
-    fill_target = consumed_target + audio_state.dma_buffer_len;
-    if (fill_target > (uint64_t)audio_state.pcm_len + audio_state.dma_buffer_len) {
-        fill_target = (uint64_t)audio_state.pcm_len + audio_state.dma_buffer_len;
-    }
-
-    while (audio_state.filled_len < fill_target) {
-        uint32_t offset = (uint32_t)(audio_state.filled_len % audio_state.dma_buffer_len);
-        uint32_t span = audio_state.dma_buffer_len - offset;
-        uint64_t remaining_fill = fill_target - audio_state.filled_len;
-        uint32_t chunk = remaining_fill < span ? (uint32_t)remaining_fill : span;
-        uint64_t audio_remaining = (audio_state.filled_len < audio_state.pcm_len)
-            ? ((uint64_t)audio_state.pcm_len - audio_state.filled_len)
-            : 0;
-
-        chunk &= ~(AUDIO_OUTPUT_BYTES - 1U);
-        if (chunk == 0) {
-            break;
-        }
-        if (chunk > (uint32_t)sizeof(audio_fill_buf)) {
-            chunk = (uint32_t)sizeof(audio_fill_buf);
-        }
-        chunk &= ~(AUDIO_OUTPUT_BYTES - 1U);
-        if (chunk == 0) {
-            return -1;
-        }
-
-        if (audio_remaining > 0) {
-            uint32_t audio_chunk = audio_remaining < chunk ? (uint32_t)audio_remaining : chunk;
-            audio_chunk &= ~(AUDIO_OUTPUT_BYTES - 1U);
-            if (audio_chunk > 0) {
-                audio_generate_range(audio_state.filled_len, audio_fill_buf, audio_chunk);
-            }
-            for (uint32_t i = audio_chunk; i + 1U < chunk; i += 2U) {
-                audio_fill_buf[i] = 0;
-                audio_fill_buf[i + 1U] = 0;
-            }
-        } else {
-            for (uint32_t i = 0; i + 1U < chunk; i += 2U) {
-                audio_fill_buf[i] = 0;
-                audio_fill_buf[i + 1U] = 0;
-            }
-        }
-
-        if (hda_stream_write(offset, audio_fill_buf, chunk) != 0) {
-            return -1;
-        }
-        audio_state.filled_len += chunk;
-    }
-
+static int voice_load(voice_t *v, const char *path, int kind, int32_t vol) {
+    uint64_t size = 0;
+    const uint8_t *file = (const uint8_t *)vfs_read(vfs_root(), path, &size);
+    uint16_t ch = 0, bits = 0;
+    uint32_t rate = 0, bytes = 0;
+    const uint8_t *pcm = 0;
+    if (!file || !size || parse_wav(file, size, &ch, &rate, &bits, &pcm, &bytes) != 0) return -1;
+    v->pcm = pcm;
+    v->channels = ch;
+    v->bits = bits;
+    v->rate = rate;
+    v->frames = bytes / ((uint32_t)ch * (bits / 8U));
+    v->pos = 0;
+    v->step = (uint32_t)(((uint64_t)rate << 16) / MIX_RATE);
+    v->vol = vol;
+    v->kind = kind;
     return 0;
+}
+
+/* a free voice, or the effect closest to its end */
+static voice_t *voice_slot(void) {
+    voice_t *best = 0;
+    uint64_t best_left = ~0ULL;
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].kind == V_FREE) return &voices[i];
+    for (int i = 0; i < MAX_VOICES; i++) {
+        uint64_t left;
+        if (voices[i].kind != V_EFFECT) continue;
+        left = ((uint64_t)voices[i].frames << 16) - voices[i].pos;
+        if (left < best_left) {
+            best_left = left;
+            best = &voices[i];
+        }
+    }
+    return best;
+}
+
+/* ---- mixing ------------------------------------------------------------------ */
+
+static int anything_audible(void) {
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].kind != V_FREE) return 1;
+    for (int i = 0; i < MAX_STREAMS; i++)
+        if (streams[i].used && !streams[i].paused && streams[i].wr > streams[i].rd) return 1;
+    return 0;
+}
+
+static void mix_voices(uint32_t frames) {
+    for (int i = 0; i < MAX_VOICES; i++) {
+        voice_t *v = &voices[i];
+        uint64_t end;
+        if (v->kind == V_FREE) continue;
+        end = (uint64_t)v->frames << 16;
+        for (uint32_t f = 0; f < frames; f++) {
+            uint32_t idx, nxt;
+            int32_t frac, l0, r0, l1, r1;
+            if (v->pos >= end) {
+                v->kind = V_FREE;
+                break;
+            }
+            idx = (uint32_t)(v->pos >> 16);
+            nxt = idx + 1 < v->frames ? idx + 1 : idx;
+            frac = (int32_t)(v->pos & 0xFFFF) >> 1;      /* 15 bits keeps the products in range */
+            l0 = voice_sample(v, idx, 0);
+            r0 = voice_sample(v, idx, 1);
+            l1 = voice_sample(v, nxt, 0);
+            r1 = voice_sample(v, nxt, 1);
+            mix_acc[f * 2] += ((l0 + (((l1 - l0) * frac) >> 15)) * v->vol) >> 8;
+            mix_acc[f * 2 + 1] += ((r0 + (((r1 - r0) * frac) >> 15)) * v->vol) >> 8;
+            v->pos += v->step;
+        }
+    }
+}
+
+static void mix_streams(uint32_t frames) {
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        stream_t *s = &streams[i];
+        if (!s->used || s->paused) continue;
+        for (uint32_t f = 0; f < frames; f++) {
+            uint32_t a, b;
+            int32_t frac, l0, r0, l1, r1;
+            if (s->rd + 1 >= s->wr) break;              /* need two frames to interpolate */
+            a = (uint32_t)(s->rd % s->cap);
+            b = (uint32_t)((s->rd + 1) % s->cap);
+            frac = (int32_t)(s->frac & 0xFFFF) >> 1;
+            l0 = s->ring[a * s->channels];
+            r0 = s->ring[a * s->channels + (s->channels - 1)];
+            l1 = s->ring[b * s->channels];
+            r1 = s->ring[b * s->channels + (s->channels - 1)];
+            mix_acc[f * 2] += ((l0 + (((l1 - l0) * frac) >> 15)) * s->vol) >> 8;
+            mix_acc[f * 2 + 1] += ((r0 + (((r1 - r0) * frac) >> 15)) * s->vol) >> 8;
+            s->frac += s->step;
+            s->rd += s->frac >> 16;
+            s->frac &= 0xFFFF;
+        }
+    }
+}
+
+/* soft knee above -6 dBFS instead of hard clipping */
+static int16_t limit(int32_t x) {
+    const int32_t knee = 16384;
+    int32_t a = x < 0 ? -x : x;
+    if (a > knee) {
+        a = knee + (a - knee) / 3;
+        if (a > 32767) a = 32767;
+    }
+    return (int16_t)(x < 0 ? -a : a);
+}
+
+static void mix_into_ring(uint64_t at, uint32_t bytes) {
+    uint32_t frames = bytes / FRAME_BYTES;
+    for (uint32_t i = 0; i < frames * 2; i++) mix_acc[i] = 0;
+    mix_voices(frames);
+    mix_streams(frames);
+    for (uint32_t i = 0; i < frames * 2; i++) mix_out[i] = limit(mix_acc[i]);
+    (void)hda_stream_write((uint32_t)(at % RING_BYTES), (const uint8_t *)mix_out, bytes);
+}
+
+static int output_start(void) {
+    if (out_running) return 0;
+    if (!hda_available()) return -1;
+    if (hda_stream_start_s16_stereo((uint16_t)MIX_RATE, RING_BYTES) != 0) return -1;
+    write_abs = play_abs = 0;
+    silence_abs = 0;
+    last_lpib = 0;
+    pos_from_lpib = 0;
+    lpib_changes = 0;
+    out_running = 1;
+    idle_since = sched_ticks();
+    return 0;
+}
+
+/* Keeps the ring LEAD_BYTES ahead of the controller and silence beyond, so
+ * a late wake-up plays a gap rather than stale audio. */
+static void output_service(void) {
+    uint32_t lpib, delta;
+    uint64_t target;
+    int was_empty;
+    if (!out_running) return;
+    lpib = hda_diag_lpi_b() % RING_BYTES;
+    if (lpib != last_lpib && write_abs) {
+        lpib_changes++;
+        lpib_change_us = tsc_us();
+    }
+    if (!pos_from_lpib && !lpib_bad && lpib_changes >= 5 && tsc_us() - run_us < 300000) pos_from_lpib = 1;
+    if (pos_from_lpib && tsc_us() - lpib_change_us > 50000) {
+        /* LPIB stopped moving while audio plays: continue on the TSC from here */
+        pos_from_lpib = 0;
+        lpib_bad = 1;
+        run_us = tsc_us() - play_abs / FRAME_BYTES * 1000000ULL / MIX_RATE;
+    }
+    if (pos_from_lpib) {
+        delta = (lpib + RING_BYTES - last_lpib) % RING_BYTES;
+        play_abs += delta;
+    } else if (write_abs) {
+        uint64_t frames = (tsc_us() - run_us) * MIX_RATE / 1000000ULL;
+        play_abs = frames * FRAME_BYTES;
+    }
+    last_lpib = lpib;
+    if (write_abs < play_abs) write_abs = play_abs;  /* underrun: skip ahead */
+    target = play_abs + LEAD_BYTES;
+    was_empty = write_abs == 0;
+    while (write_abs < target) {
+        uint32_t off = (uint32_t)(write_abs % RING_BYTES);
+        uint32_t span = RING_BYTES - off;
+        uint32_t chunk = (uint32_t)(target - write_abs);
+        if (chunk > span) chunk = span;
+        if (chunk > CHUNK_FRAMES * FRAME_BYTES) chunk = CHUNK_FRAMES * FRAME_BYTES;
+        mix_into_ring(write_abs, chunk);
+        write_abs += chunk;
+    }
+    {
+        /* silence over the part of the ring the controller reaches next;
+         * only the newly exposed part each time, so this costs one write
+         * per byte of audio */
+        uint64_t at = silence_abs > write_abs ? silence_abs : write_abs;
+        uint64_t end = play_abs + RING_BYTES - 4096;
+        while (at < end) {
+            uint32_t off = (uint32_t)(at % RING_BYTES);
+            uint32_t n = RING_BYTES - off;
+            if (n > sizeof(silence)) n = sizeof(silence);
+            if (at + n > end) n = (uint32_t)(end - at);
+            (void)hda_stream_write(off, silence, n);
+            at += n;
+        }
+        silence_abs = at;
+    }
+    if (was_empty) {
+        (void)hda_stream_run();
+        run_us = tsc_us();
+    }
+    if (anything_audible()) {
+        idle_since = sched_ticks();
+    } else if (sched_ticks() - idle_since > IDLE_STOP_TICKS) {
+        hda_stop_playback();
+        out_running = 0;
+    }
 }
 
 static void audio_playback_worker(void) {
     for (;;) {
-        if (audio_state.request_pending) {
-            if (audio_start_pending_request() != 0) {
-                audio_playback_stop();
-            }
+        if (out_running) {
+            output_service();
+            audio_update_hud(0);
             sched_sleep(1);
-            continue;
-        }
-
-        if (audio_state.active) {
-            if (audio_fill_available() != 0 || audio_state.played_len >= audio_state.pcm_len) {
-                audio_playback_stop();
-            } else {
-                audio_update_hud(0);
+        } else {
+            if (anything_audible() && output_start() == 0) {
+                output_service();
+                continue;
             }
-            sched_sleep(4);
-            continue;
+            sched_sleep(5);
         }
-
-        sched_sleep(10);
     }
 }
 
+/* Called right after a sound is queued so it starts within one mix period. */
+static void kick(void) {
+    if (!out_running && output_start() == 0) output_service();
+}
+
+/* ---- music (one track) ------------------------------------------------------ */
+
+static voice_t *music_voice(void) {
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].kind == V_MUSIC) return &voices[i];
+    return 0;
+}
+
 static void audio_update_hud(int force_clear) {
+    static uint64_t last = ~0ULL;
+    voice_t *m = music_voice();
     char text[96];
-    uint64_t seconds_left;
-
-    if (force_clear || !audio_state.active || !audio_state.sample_rate || !audio_state.pcm_len) {
-        console_clear_overlay_top_right();
-        audio_state.hud_seconds_last = 0xFFFFFFFFU;
+    uint64_t left;
+    if (force_clear || !m) {
+        if (last != ~0ULL) console_clear_overlay_top_right();
+        last = ~0ULL;
         return;
     }
-
-    seconds_left = (audio_state.pcm_len > audio_state.played_len)
-        ? (uint64_t)(audio_state.pcm_len - audio_state.played_len)
-        : 0;
-    seconds_left = (seconds_left + ((uint64_t)audio_state.sample_rate * AUDIO_OUTPUT_BYTES) - 1U) /
-                   ((uint64_t)audio_state.sample_rate * AUDIO_OUTPUT_BYTES);
-    if (seconds_left == audio_state.hud_seconds_last) {
-        return;
-    }
-    audio_state.hud_seconds_last = (uint32_t)seconds_left;
-
+    left = (m->frames - (m->pos >> 16)) / (m->rate ? m->rate : 1);
+    if (left == last) return;
+    last = left;
     text[0] = 0;
     append_text(text, "playing ", sizeof(text));
-    append_text(text, audio_state.name, sizeof(text));
+    append_text(text, music_name, sizeof(text));
     append_text(text, " ", sizeof(text));
     {
         char num[24];
-        uint64_t value = seconds_left;
         uint64_t pos = sizeof(num) - 1;
-        uint64_t digits;
         num[pos] = 0;
-        if (value == 0) {
-            num[--pos] = '0';
-        } else {
-            while (value && pos > 0) {
-                num[--pos] = (char)('0' + (value % 10U));
-                value /= 10U;
-            }
-        }
-        digits = str_len(&num[pos]);
-        while (digits < 3) {
-            append_text(text, " ", sizeof(text));
-            digits++;
-        }
+        do { num[--pos] = (char)('0' + left % 10U); left /= 10U; } while (left && pos > 0);
         append_text(text, &num[pos], sizeof(text));
     }
     append_text(text, "s left", sizeof(text));
@@ -363,128 +433,38 @@ static void audio_update_hud(int force_clear) {
 }
 
 int audio_playback_init(void) {
-    audio_clear_state();
-    audio_state.hud_seconds_last = 0xFFFFFFFFU;
+    for (int i = 0; i < MAX_VOICES; i++) voices[i].kind = V_FREE;
     if (!audio_worker_proc) {
         audio_worker_proc = proc_create_kernel(audio_playback_worker);
-        if (!audio_worker_proc) {
-            return -1;
-        }
+        if (!audio_worker_proc) return -1;
     }
-    return 0;
-}
-
-void audio_playback_stop(void) {
-    hda_stop_playback();
-    audio_state.request_pending = 0;
-    audio_state.pending_path[0] = 0;
-    audio_clear_state();
-    audio_update_hud(1);
-}
-
-static int audio_start_pending_request(void) {
-    uint64_t size = 0;
-    const uint8_t *file_data;
-    uint16_t channels = 0;
-    uint16_t bits = 0;
-    uint32_t sample_rate = 0;
-    const uint8_t *pcm = 0;
-    uint32_t pcm_size = 0;
-    uint32_t total_frames;
-    uint32_t out_frames;
-    const char *path = audio_state.pending_path;
-
-    if (!path || !*path || !hda_available()) {
-        return -1;
-    }
-
-    file_data = (const uint8_t *)vfs_read(vfs_root(), path, &size);
-    if (!file_data || size == 0) {
-        serial_write("audio: wav unreadable, refusing\n");
-        return -1;
-    }
-    if (parse_wav(file_data, size, &channels, &sample_rate, &bits, &pcm, &pcm_size) != 0) {
-        serial_write("audio: wav header invalid, refusing\n");
-        return -1;
-    }
-
-    total_frames = pcm_size / (channels * (bits / 8U));
-    if (total_frames == 0 || total_frames > (uint64_t)sample_rate * AUDIO_MAX_SRC_SECONDS) {
-        serial_write("audio: wav length out of bounds, refusing\n");
-        return -1;
-    }
-    out_frames = (uint32_t)(((uint64_t)total_frames * AUDIO_OUTPUT_RATE + sample_rate - 1U) / sample_rate);
-    if (out_frames == 0 || out_frames > (0xFFFFFFFFU / AUDIO_OUTPUT_BYTES)) {
-        serial_write("audio: wav resample size out of bounds, refusing\n");
-        return -1;
-    }
-
-    audio_state.source_pcm = pcm;
-    audio_state.source_frames = total_frames;
-    audio_state.source_channels = channels;
-    audio_state.source_bits = bits;
-    audio_state.source_rate = sample_rate;
-    audio_state.pcm_len = out_frames * AUDIO_OUTPUT_BYTES;
-    audio_state.played_len = 0;
-    audio_state.sample_rate = AUDIO_OUTPUT_RATE;
-    audio_state.total_seconds = (audio_state.pcm_len + ((AUDIO_OUTPUT_RATE * AUDIO_OUTPUT_BYTES) - 1U)) /
-                                (AUDIO_OUTPUT_RATE * AUDIO_OUTPUT_BYTES);
-    audio_state.active = 1;
-    audio_state.request_pending = 0;
-    audio_state.filled_len = 0;
-    audio_state.dma_buffer_len = 65536U;
-    if (audio_state.dma_buffer_len > audio_state.pcm_len && audio_state.pcm_len != 0) {
-        audio_state.dma_buffer_len = audio_state.pcm_len;
-    }
-    if (audio_state.dma_buffer_len < 4096U) {
-        audio_state.dma_buffer_len = 4096U;
-    }
-    audio_state.dma_buffer_len &= ~(AUDIO_OUTPUT_BYTES - 1U);
-    basename_from_path(path, audio_state.name, sizeof(audio_state.name));
-    audio_state.hud_seconds_last = 0xFFFFFFFFU;
-
-    if (hda_stream_start_s16_stereo((uint16_t)audio_state.sample_rate, audio_state.dma_buffer_len) != 0) {
-        serial_write("audio: hda stream start failed, playback disabled\n");
-        audio_playback_stop();
-        return -1;
-    }
-    audio_state.start_tick = sched_ticks();
-    if (audio_fill_available() != 0) {
-        serial_write("audio: initial fill failed, playback disabled\n");
-        audio_playback_stop();
-        return -1;
-    }
-    if (hda_stream_run() != 0) {
-        serial_write("audio: hda stream run failed, playback disabled\n");
-        audio_playback_stop();
-        return -1;
-    }
-    audio_update_hud(0);
     return 0;
 }
 
 int audio_playback_play_wav(vfs_node_t *cwd, const char *path) {
-    uint64_t i = 0;
-
+    voice_t *v;
+    const char *base = path;
     (void)cwd;
-
-    if (!path || !*path || !hda_available()) {
-        return -1;
-    }
-
+    if (!path || !*path || !hda_available()) return -1;
     audio_playback_stop();
-
-    while (path[i] && i + 1 < sizeof(audio_state.pending_path)) {
-        audio_state.pending_path[i] = path[i];
-        i++;
-    }
-    if (i == 0 || path[i] != 0) {
-        audio_state.pending_path[0] = 0;
+    v = voice_slot();
+    if (!v || voice_load(v, path, V_MUSIC, 256) != 0) {
+        serial_write("audio: wav unreadable or unsupported, refusing\n");
+        if (v) v->kind = V_FREE;
         return -1;
     }
-    audio_state.pending_path[i] = 0;
-    audio_state.request_pending = 0;
-    return audio_start_pending_request() == 0 ? 0 : -1;
+    for (const char *p = path; *p; p++)
+        if (*p == '/') base = p + 1;
+    copy_text(music_name, base, sizeof(music_name));
+    music_frames_total = v->frames;
+    kick();
+    return 0;
+}
+
+void audio_playback_stop(void) {
+    voice_t *m = music_voice();
+    if (m) m->kind = V_FREE;
+    audio_update_hud(1);
 }
 
 int audio_playback_claim(uint64_t pid, uint64_t *token_out, uint32_t *sample_rate_out) {
@@ -506,24 +486,102 @@ void audio_playback_finish(uint64_t token) {
 }
 
 void audio_playback_tick(void) {
-    if (audio_state.active) {
-        audio_update_hud(0);
-    }
 }
 
 int audio_playback_status(audio_playback_status_t *out) {
-    uint64_t remaining = 0;
-
+    voice_t *m = music_voice();
     if (!out) return -1;
-    out->active = audio_state.active ? 1 : 0;
-    out->total_seconds = audio_state.total_seconds;
-    if (audio_state.active && audio_state.sample_rate && audio_state.pcm_len > audio_state.played_len) {
-        remaining = (uint64_t)(audio_state.pcm_len - audio_state.played_len);
-        out->seconds_left = (remaining + ((uint64_t)audio_state.sample_rate * AUDIO_OUTPUT_BYTES) - 1U) /
-                            ((uint64_t)audio_state.sample_rate * AUDIO_OUTPUT_BYTES);
-    } else {
-        out->seconds_left = 0;
-    }
-    copy_text(out->name, audio_state.name, sizeof(out->name));
+    out->active = m ? 1 : 0;
+    out->total_seconds = m && m->rate ? (music_frames_total + m->rate - 1) / m->rate : 0;
+    out->seconds_left = m && m->rate ? (m->frames - (m->pos >> 16) + m->rate - 1) / m->rate : 0;
+    copy_text(out->name, m ? music_name : "", sizeof(out->name));
     return 0;
+}
+
+/* ---- effects ------------------------------------------------------------------ */
+
+int audio_effect_play(const char *path, uint32_t volume) {
+    voice_t *v;
+    if (!path || !*path || !hda_available()) return -1;
+    v = voice_slot();
+    if (!v) return -1;
+    if (voice_load(v, path, V_EFFECT, (int32_t)(volume > 256 ? 256 : volume)) != 0) {
+        v->kind = V_FREE;
+        return -1;
+    }
+    kick();
+    return 0;
+}
+
+/* ---- streams ------------------------------------------------------------------ */
+
+int audio_stream_open(uint32_t rate, uint32_t channels) {
+    if (rate < AUDIO_MIN_RATE_HZ || rate > AUDIO_MAX_RATE_HZ || channels < 1 || channels > 2) return -1;
+    if (!hda_available()) return -1;
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        stream_t *s = &streams[i];
+        if (s->used) continue;
+        s->cap = rate * STREAM_SECONDS;
+        s->ring = (int16_t *)kmalloc((size_t)s->cap * channels * sizeof(int16_t));
+        if (!s->ring) return -1;
+        s->used = 1;
+        s->rd = s->wr = s->frac = 0;
+        s->rate = rate;
+        s->channels = (uint16_t)channels;
+        s->step = (uint32_t)(((uint64_t)rate << 16) / MIX_RATE);
+        s->paused = 0;
+        s->vol = 256;
+        return i + 1;
+    }
+    return -1;
+}
+
+static stream_t *stream_get(int id) {
+    if (id < 1 || id > MAX_STREAMS || !streams[id - 1].used) return 0;
+    return &streams[id - 1];
+}
+
+/* copies whole frames of interleaved s16; returns bytes taken */
+int64_t audio_stream_write(int id, const int16_t *pcm, uint64_t bytes) {
+    stream_t *s = stream_get(id);
+    uint64_t frames, space, n;
+    if (!s || !pcm) return -1;
+    frames = bytes / (s->channels * sizeof(int16_t));
+    space = s->cap - (s->wr - s->rd) - 1;
+    n = frames < space ? frames : space;
+    for (uint64_t f = 0; f < n; f++) {
+        uint32_t at = (uint32_t)((s->wr + f) % s->cap);
+        for (uint16_t c = 0; c < s->channels; c++) s->ring[at * s->channels + c] = pcm[f * s->channels + c];
+    }
+    s->wr += n;
+    if (n) kick();
+    return (int64_t)(n * s->channels * sizeof(int16_t));
+}
+
+/* frames played so far (for A/V sync) */
+int64_t audio_stream_position(int id) {
+    stream_t *s = stream_get(id);
+    return s ? (int64_t)s->rd : -1;
+}
+
+int64_t audio_stream_queued(int id) {
+    stream_t *s = stream_get(id);
+    return s ? (int64_t)(s->wr - s->rd) : -1;
+}
+
+int audio_stream_control(int id, int paused, uint32_t volume) {
+    stream_t *s = stream_get(id);
+    if (!s) return -1;
+    s->paused = paused;
+    s->vol = (int32_t)(volume > 256 ? 256 : volume);
+    if (!paused) kick();
+    return 0;
+}
+
+void audio_stream_close(int id) {
+    stream_t *s = stream_get(id);
+    if (!s) return;
+    kfree(s->ring);
+    s->ring = 0;
+    s->used = 0;
 }

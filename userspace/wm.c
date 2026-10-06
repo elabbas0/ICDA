@@ -1260,6 +1260,7 @@ static void mark_dirty_launcher(void) {
 static void launcher_set(int open) {
     if (launcher_open == open) return;
     launcher_open = open;
+    ic_sound(open ? "start_open" : "start_close");
     wm_launch_query[0] = 0;
     launcher_hover = WM_LAUNCH_NONE;
     ic_tween_to(&launcher_fade, open ? 1.0f : 0.0f,
@@ -1281,6 +1282,7 @@ static void mark_dirty_wifi(void) {
 static void wifi_set(int open) {
     if (wifi_open == open) return;
     wifi_open = open;
+    ic_sound_any(open ? "flyout_open" : "flyout_close", 4);
     if (open) wm_wifi_open();
     ic_tween_to(&wifi_fade, open ? 1.0f : 0.0f,
                 (uint32_t)anim_ms(open ? IC_DUR_FAST : IC_DUR_INSTANT),
