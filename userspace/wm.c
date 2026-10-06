@@ -18,6 +18,7 @@
 #include "settings_store.h"
 #include "wm_frame.h"
 #include "wm_shell.h"
+#include "wm_wifi.h"
 
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
@@ -1265,6 +1266,25 @@ static void launcher_set(int open) {
     mark_dirty_bar();
 }
 
+
+/* Taskbar Wi-Fi flyout (wm_wifi.c) */
+static int wifi_open = 0;
+static ic_tween_t wifi_fade;
+
+static void mark_dirty_wifi(void) {
+    mark_dirty_rect(reach_of(wm_wifi_reach(scr_w, scr_h)));
+}
+
+static void wifi_set(int open) {
+    if (wifi_open == open) return;
+    wifi_open = open;
+    if (open) wm_wifi_open();
+    ic_tween_to(&wifi_fade, open ? 1.0f : 0.0f,
+                (uint32_t)anim_ms(open ? IC_DUR_FAST : IC_DUR_INSTANT),
+                open ? IC_EASE_ENTER : IC_EASE_EXIT);
+    mark_dirty_wifi();
+    mark_dirty_bar();
+}
 static void clock_refresh(void) {
     ic_datetime_t t;
     if (ic_wallclock(&t) != 0) {
@@ -1304,6 +1324,8 @@ static int bar_build(wm_bar_t *b, icda_audio_info_t *audio) {
     b->time_text = clock_time[0] ? clock_time : 0;
     b->date_text = clock_date[0] ? clock_date : 0;
     b->audio_text = 0;
+    b->wifi_state = wm_wifi_bar_state();
+    b->wifi_open = wifi_open;
     if (audio && (long)icda_audio_info(audio) >= 0 && audio->active) b->audio_text = audio->name;
     return n;
 }
@@ -1360,6 +1382,9 @@ static void extend_to_materials(dirty_rect_t *r) {
     extend_one(r, wm_bar_rect(scr_w, scr_h));
     if (launcher_open || ic_tween_value(&launcher_fade) > 0.0f) {
         extend_one(r, reach_of(wm_launcher_rect(scr_w, scr_h)));
+    }
+    if (wifi_open || ic_tween_value(&wifi_fade) > 0.0f) {
+        extend_one(r, reach_of(wm_wifi_reach(scr_w, scr_h)));
     }
     if (ctx_open || ic_tween_value(&ctx_fade) > 0.0f) {
         extend_one(r, reach_of(ctx_rect()));
@@ -1818,14 +1843,17 @@ static int animations_tick(void) {
         mark_dirty_win(win);
     }
     {
-        static int launcher_was, ctx_was, props_was;
+        static int launcher_was, ctx_was, props_was, wifi_was;
         int l = ic_tween_running(&launcher_fade);
         int x = ic_tween_running(&ctx_fade);
         int p = ic_tween_running(&props_fade);
+        int wf = ic_tween_running(&wifi_fade);
         if (l || launcher_was) mark_dirty_launcher();
         if (x || ctx_was) mark_dirty_rect(reach_of(ctx_rect()));
         if (p || props_was) mark_dirty_rect(reach_of(props_rect()));
-        if (l || x || p) running = 1;
+        if (wf || wifi_was) mark_dirty_wifi();
+        if (l || x || p || wf) running = 1;
+        wifi_was = wf;
         launcher_was = l;
         ctx_was = x;
         props_was = p;
@@ -2054,6 +2082,10 @@ static void draw_launcher_layer(ic_canvas_t *c) {
     wm_launcher_draw(c, scr_w, scr_h, launcher_hover, blur_scratch, BLUR_SCRATCH_PX);
 }
 
+static void draw_wifi_layer(ic_canvas_t *c) {
+    wm_wifi_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+}
+
 static void draw_ctx_layer(ic_canvas_t *c) {
     ctx_model.hover = ctx_hover;
     ic_ui_menu(c, &ctx_model, ctx_x, ctx_y, blur_scratch, BLUR_SCRATCH_PX);
@@ -2098,6 +2130,10 @@ static void draw_overlays(void) {
     if (ic_tween_value(&launcher_fade) > 0.0f) {
         composite_faded(reach_of(wm_launcher_rect(scr_w, scr_h)), ic_tween_value(&launcher_fade),
                         draw_launcher_layer);
+    }
+    if (ic_tween_value(&wifi_fade) > 0.0f) {
+        composite_faded(reach_of(wm_wifi_reach(scr_w, scr_h)), ic_tween_value(&wifi_fade),
+                        draw_wifi_layer);
     }
     if (ctx_model.count > 0 && ic_tween_value(&ctx_fade) > 0.0f) {
         composite_faded(reach_of(ctx_rect()), ic_tween_value(&ctx_fade), draw_ctx_layer);
@@ -2563,10 +2599,16 @@ static void overview_click(int mx, int my) {
 
 static void handle_bar_click(int hit) {
     if (hit == WM_BAR_LAUNCHER) {
+        wifi_set(0);
         launcher_set(!launcher_open);
         return;
     }
     launcher_set(0);
+    if (hit == WM_BAR_WIFI) {
+        wifi_set(!wifi_open);
+        return;
+    }
+    wifi_set(0);
     if (hit >= 0) {
         int idx = bar_task_slot(hit);
         if (idx < 0) return;
@@ -2684,6 +2726,19 @@ static void left_press(void) {
         else if (which >= 0) desk_activate(which);
         else ctx_close();
         return;
+    }
+    if (wifi_open) {
+        if (ic_ui_hit(wm_wifi_rect(scr_w, scr_h), mouse_x, mouse_y)) {
+            int r = wm_wifi_click(scr_w, scr_h, mouse_x, mouse_y);
+            if (r == WM_WIFI_CLOSE) wifi_set(0);
+            else if (r == WM_WIFI_REDRAW) { mark_dirty_wifi(); mark_dirty_bar(); }
+            return;
+        }
+        if (wm_bar_hit(scr_w, scr_h, 0, mouse_x, mouse_y) == WM_BAR_WIFI) {
+            wifi_set(0);
+            return;
+        }
+        wifi_set(0);
     }
     if (launcher_open) {
         int lh = wm_launcher_hit(scr_w, scr_h, mouse_x, mouse_y);
@@ -2809,10 +2864,11 @@ static void right_edge(uint8_t prev_buttons) {
         if (pressed) overview_set(0);
         return;
     }
-    if (pressed && (ctx_open || props_open || launcher_open)) {
+    if (pressed && (ctx_open || props_open || launcher_open || wifi_open)) {
         ctx_close();
         props_close();
         launcher_set(0);
+        wifi_set(0);
         return;
     }
     idx = window_at(mouse_x, mouse_y, &hit);
@@ -2911,6 +2967,9 @@ static void pointer_moved(void) {
             mark_dirty_bar();
         }
     }
+    if (wifi_open && wm_wifi_hover(scr_w, scr_h, mouse_x, mouse_y) == WM_WIFI_REDRAW) {
+        mark_dirty_rect(wm_wifi_rect(scr_w, scr_h));
+    }
     if (launcher_open) {
         int lh = wm_launcher_hit(scr_w, scr_h, mouse_x, mouse_y);
         if (lh != launcher_hover) {
@@ -3002,11 +3061,16 @@ static void handle_key(long key) {
         mark_dirty(0, 0, 340, 140);
         return;
     }
-    if (key == 27 && (ctx_open || props_open || launcher_open)) {
+    if (key == 27 && (ctx_open || props_open || launcher_open || wifi_open)) {
         ctx_close();
         props_close();
         launcher_set(0);
+        wifi_set(0);
         esc_swallow = 1;
+        return;
+    }
+    if (wifi_open) {
+        if (wm_wifi_key(key) == WM_WIFI_REDRAW) mark_dirty_wifi();
         return;
     }
     if (props_open && key == 13) {
@@ -3093,6 +3157,7 @@ int main(int argc, char **argv) {
     ic_palette_reload();
     settings_last_reload = icda_ticks();
     ic_tween_set(&launcher_fade, 0.0f);
+    ic_tween_set(&wifi_fade, 0.0f);
     ic_tween_set(&ctx_fade, 0.0f);
     ic_tween_set(&props_fade, 0.0f);
 
@@ -3109,9 +3174,15 @@ int main(int argc, char **argv) {
         uint64_t now = icda_ticks();
 
         if (now - settings_last_reload >= 100) {
+            int wch;
             settings_last_reload = now;
             settings_reload();
             clock_refresh();
+            /* Wi-Fi status: every 3 s for the taskbar icon, every second
+             * while the flyout is open */
+            wch = wm_wifi_poll(wifi_open ? 900 : 2900);
+            if (wch & 1) mark_dirty_bar();
+            if ((wch & 2) && wifi_open) mark_dirty_wifi();
         }
 
         while (icda_msg_poll(wm_queue) > 0) {

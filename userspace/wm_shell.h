@@ -63,6 +63,7 @@ typedef struct {
 #define WM_BAR_NONE      (-1)
 #define WM_BAR_LAUNCHER  (-2)
 #define WM_BAR_STATUS    (-3)
+#define WM_BAR_WIFI      (-4)
 
 typedef struct {
     const wm_task_t *tasks;
@@ -73,11 +74,14 @@ typedef struct {
     const char      *time_text;    
     const char      *date_text;    
     const char      *audio_text;   
+    int              wifi_state;   /* WM_WIFI_* from wm_wifi.h */
+    int              wifi_open;
 } wm_bar_t;
 
 ic_rect_t wm_bar_rect(int sw, int sh);
 ic_rect_t wm_bar_launcher_rect(int sw, int sh);
 ic_rect_t wm_bar_task_rect(int sw, int sh, int count, int index);
+ic_rect_t wm_bar_wifi_rect(int sw, int sh);
 int       wm_bar_hit(int sw, int sh, const wm_bar_t *b, int mx, int my);
 void      wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
                       uint32_t *scratch, int scratch_len);

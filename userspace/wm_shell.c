@@ -3,6 +3,7 @@
 
 
 #include "wm_shell.h"
+#include "wm_wifi.h"
 #include "kernel/diag/boot_logo.h"
 #include "kernel/diag/boot_layout.h"
 
@@ -187,7 +188,8 @@ ic_rect_t wm_bar_launcher_rect(int sw, int sh) {
 }
 
 static int wm_bar_task_w(int sw, int count) {
-    int avail = sw - (WM_BAR_PAD * 3 + WM_BAR_BTN_H + 4) - WM_BAR_STATUS_W - WM_BAR_PAD;
+    int avail = sw - (WM_BAR_PAD * 3 + WM_BAR_BTN_H + 4) - WM_BAR_STATUS_W - WM_BAR_PAD -
+                (WM_BAR_BTN_H + WM_BAR_PAD);
     int w;
     if (count <= 0) return WM_BAR_TASK_MAX;
     w = avail / count - 4;
@@ -207,12 +209,20 @@ static ic_rect_t wm_bar_status_rect(int sw, int sh) {
     return ic_rect_make(sw - WM_BAR_STATUS_W - WM_BAR_PAD, b.y, WM_BAR_STATUS_W, WM_BAR_H);
 }
 
+/* Wi-Fi button, just left of the status (audio and clock) area */
+ic_rect_t wm_bar_wifi_rect(int sw, int sh) {
+    ic_rect_t s = wm_bar_status_rect(sw, sh);
+    ic_rect_t l = wm_bar_launcher_rect(sw, sh);
+    return ic_rect_make(s.x - WM_BAR_PAD - WM_BAR_BTN_H, l.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
+}
+
 int wm_bar_hit(int sw, int sh, const wm_bar_t *b, int mx, int my) {
     if (!ic_ui_hit(wm_bar_rect(sw, sh), mx, my)) return WM_BAR_NONE;
     if (ic_ui_hit(wm_bar_launcher_rect(sw, sh), mx, my)) return WM_BAR_LAUNCHER;
+    if (ic_ui_hit(wm_bar_wifi_rect(sw, sh), mx, my)) return WM_BAR_WIFI;
     for (int i = 0; b && i < b->count; i++) {
         ic_rect_t r = wm_bar_task_rect(sw, sh, b->count, i);
-        if (r.x + r.w > wm_bar_status_rect(sw, sh).x) break;
+        if (r.x + r.w > wm_bar_wifi_rect(sw, sh).x) break;
         if (ic_ui_hit(r, mx, my)) return i;
     }
     if (ic_ui_hit(wm_bar_status_rect(sw, sh), mx, my)) return WM_BAR_STATUS;
@@ -250,7 +260,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         int hover = b->hover == i;
         int ix = r.x + (r.w >= 100 ? 10 : (r.w - WM_BAR_ICON) / 2);
         ic_rect_t saved;
-        if (r.x + r.w > status.x) break;
+        if (r.x + r.w > wm_bar_wifi_rect(sw, sh).x) break;
         if (t->focused) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
         else if (hover) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL + 2.0f, p->fill_hover);
         if (t->icon && ic_icon_valid(t->icon)) {
@@ -271,7 +281,27 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         }
     }
 
-    
+    /* Wi-Fi: full colour when online, accent while connecting, faint when
+     * idle, off or without an adapter */
+    {
+        ic_rect_t wr = wm_bar_wifi_rect(sw, sh);
+        int st = b ? b->wifi_state : WM_WIFI_NONE;
+        int open = b && b->wifi_open;
+        ic_color_t tint = st == WM_WIFI_ONLINE ? p->label :
+                          st == WM_WIFI_BUSY ? p->accent :
+                          st == WM_WIFI_IDLE ? p->label_secondary : p->label_tertiary;
+        if (open) ic_gfx_rrect(c, wr.x, wr.y, wr.w, wr.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
+        else if (b && b->hover == WM_BAR_WIFI)
+            ic_gfx_rrect(c, wr.x, wr.y, wr.w, wr.h, IC_R_CONTROL + 2.0f, p->fill_hover);
+        ic_symbol_draw(c, IC_SYM_WIFI, (float)wr.x + (float)wr.w * 0.5f,
+                       (float)wr.y + (float)wr.h * 0.5f, 20.0f, open ? p->accent : tint);
+        if (st == WM_WIFI_NONE || st == WM_WIFI_OFF) {
+            /* slash through the icon */
+            float cx = (float)wr.x + (float)wr.w * 0.5f, cy = (float)wr.y + (float)wr.h * 0.5f;
+            ic_gfx_line(c, cx - 8.0f, cy + 8.0f, cx + 8.0f, cy - 8.0f, 1.6f, tint);
+        }
+    }
+
     {
         int right = status.x + status.w;
         const ic_face_t *ft = ic_font(IC_FONT_BODY_EMPH);

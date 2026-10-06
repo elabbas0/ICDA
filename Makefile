@@ -733,7 +733,7 @@ userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
 	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
 
-wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
       userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o
@@ -742,12 +742,16 @@ wm_frame.o: userspace/wm_frame.c userspace/wm_frame.h $(IC_HEADERS)
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_frame.c -o /tmp/icda-wm_frame.o
 	cp -f /tmp/icda-wm_frame.o wm_frame.o
 
-wm_shell.o: userspace/wm_shell.c userspace/wm_shell.h $(IC_HEADERS) userspace/ic_version.h version.h
+wm_shell.o: userspace/wm_shell.c userspace/wm_shell.h userspace/wm_wifi.h $(IC_HEADERS) userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_shell.c -o /tmp/icda-wm_shell.o
 	cp -f /tmp/icda-wm_shell.o wm_shell.o
 
-userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o gui.o libicda.o
+wm_wifi.o: userspace/wm_wifi.c userspace/wm_wifi.h userspace/wm_shell.h $(IC_HEADERS)
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_wifi.c -o /tmp/icda-wm_wifi.o
+	cp -f /tmp/icda-wm_wifi.o wm_wifi.o
+
+userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o gui.o libicda.o
 	cp -f /tmp/icda-wm.app userspace/wm.app
 
 desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h $(IC_HEADERS) userspace/font.h userspace/icda_sys.h \

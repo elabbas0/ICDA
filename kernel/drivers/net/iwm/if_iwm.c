@@ -9600,8 +9600,6 @@ iwm_icda_attach(struct iwm_softc *sc)
 	ic->ic_updateedca = iwm_updateedca;
 	ic->ic_updatechan = iwm_updatechan;
 	ic->ic_updatedtim = iwm_updatedtim;
-
-	refcnt_init(&sc->task_refs);
 	return 0;
 
 fail4:	while (--txq_i >= 0)
