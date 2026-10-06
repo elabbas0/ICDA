@@ -1,0 +1,25 @@
+# System files shipped in \SYSTEM on the ICDA partition and updated by OTA
+# patches: <path under SYSTEM> <build output>.  The installed kernel embeds
+# only /sbin/init.app; everything else here is loaded from \SYSTEM at boot.
+apps/hello.app        userspace/hello.icx
+apps/pid.app          userspace/pid.icx
+apps/ticker.app       userspace/ticker.icx
+apps/audioplay.app    userspace/audioplay.app
+apps/editor.app       userspace/editor.app
+apps/diskman.app      userspace/diskman.app
+apps/curl.app         userspace/curl.app
+apps/wm.app           userspace/wm.app
+apps/desktop.app      userspace/desktop.app
+apps/terminal.app     userspace/terminal.app
+apps/taskman.app      userspace/taskman.app
+apps/browser.app      userspace/browser.app
+apps/settings.app     userspace/settings.app
+bin/hello.elf         userspace/hello.elf
+bin/pid.elf           userspace/pid.elf
+bin/argc.elf          userspace/argc.elf
+bin/libctest.elf      userspace/libctest.elf
+bin/busybox           resources/linux/busybox
+bin/fetch             userspace/fetch.elf
+sbin/init.app         userspace/init.app
+sbin/updated          userspace/updated.elf
+etc/ssl/certs.pem     resources/ssl/cacert.pem

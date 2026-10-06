@@ -47,6 +47,8 @@ extern const char userprog_busybox_start[];
 extern const char userprog_busybox_end[];
 extern const char userprog_fetch_start[];
 extern const char userprog_fetch_end[];
+extern const char userprog_updated_start[];
+extern const char userprog_updated_end[];
 extern const char userprog_cacert_start[];
 extern const char userprog_cacert_end[];
 extern const char userprog_ticker_start[];
@@ -151,6 +153,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/libctest.elf", 0, 0 },
     { "/bin/busybox", 0, 0 },
     { "/bin/fetch", 0, 0 },
+    { "/sbin/updated", 0, 0 },
     { "/etc/ssl/certs.pem", 0, 0 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
@@ -205,6 +208,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_libctest_elf_start, userprog_libctest_elf_end);
     initramfs_seed_at(&n, userprog_busybox_start, userprog_busybox_end);
     initramfs_seed_at(&n, userprog_fetch_start, userprog_fetch_end);
+    initramfs_seed_at(&n, userprog_updated_start, userprog_updated_end);
     initramfs_seed_at(&n, userprog_cacert_start, userprog_cacert_end);
     initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
     initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);
@@ -225,6 +229,9 @@ int initramfs_init(void) {
 
 int initramfs_populate(void) {
     for (uint64_t i = 0; i < sizeof(initramfs_files) / sizeof(initramfs_files[0]); i++) {
+        /* the installed kernel embeds only init; the other programs come
+         * from \SYSTEM on the ICDA partition (sysupdate.c) */
+        if (!initramfs_files[i].data || !initramfs_files[i].size) continue;
         if (vfs_seed_readonly(initramfs_files[i].path, initramfs_files[i].data, initramfs_files[i].size) != 0) {
             return -1;
         }

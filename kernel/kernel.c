@@ -28,6 +28,7 @@
 #include "fs/initramfs.h"
 #include "fs/install.h"
 #include "fs/bootlog.h"
+#include "fs/sysupdate.h"
 #include "power/power.h"
 #include "fs/ntfs.h"
 #include "fs/persistfs.h"
@@ -452,6 +453,10 @@ void kernel_main(void *multiboot_info) {
         /* save the boot log to the system partition from here on */
         bootlog_flush("storage ready");
         bootlog_start_thread();
+        /* system files (\SYSTEM) and OTA patch state; personal files are
+         * the overlay above and are not touched */
+        sysupdate_boot();
+        bootlog_flush("system files loaded");
     } else {
         if (live_installer) {
             boot_line("storage", "live mode: disk persistence disabled, continuing with ramfs only");

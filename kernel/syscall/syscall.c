@@ -34,6 +34,7 @@
 #include "uaccess.h"
 #include "native_abi.h"
 #include "../tty/pty.h"
+#include "../fs/sysupdate.h"
 
 
 
@@ -270,6 +271,14 @@ static uint64_t sys_vfs_write(const char *path, const char *buf, uint64_t size) 
         path[10] == 'l' && path[11] == 0) {
         for (uint64_t i = 0; i < size; i++) serial_write_char(buf[i]);
         return size;
+    }
+
+    /* /dev/sysupdate takes whole patch chunks ("put"), not just commands */
+    {
+        const char *s = "/dev/sysupdate";
+        uint64_t i = 0;
+        while (s[i] && path[i] == s[i]) i++;
+        if (!s[i] && !path[i]) return sysupdate_write_user(buf, size);
     }
 
     /* Device nodes that take commands (/dev/wifi) */
@@ -1026,7 +1035,9 @@ static uint64_t sys_gpu_cursor(int x, int y, const uint32_t *image, int w, int h
 
 static uint64_t sys_power(uint64_t action) {
     (void)vfs_flush(1);
-    
+    /* a downloaded patch is installed only here, with nothing running */
+    sysupdate_apply();
+
     if (action == 1) {
         power_reboot();
     } else {

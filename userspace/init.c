@@ -39,6 +39,9 @@ int init_main(int argc, char **argv) {
 
 
 
+    /* OTA patches in the background (absent on systems without \SYSTEM) */
+    (void)icda_spawn("/sbin/updated");
+
     pid = icda_spawn(target);
     if ((long)pid < 0) {
         icda_write("init: spawn failed\n");

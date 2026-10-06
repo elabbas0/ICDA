@@ -426,7 +426,7 @@ int wm_wifi_click(int sw, int sh, int mx, int my) {
         return WM_WIFI_REDRAW;
     }
     if (h == HOVER_SETTINGS) {
-        icda_spawn("/apps/settings.app");
+        icda_spawn_args("/apps/settings.app", "wifi");
         return WM_WIFI_CLOSE;
     }
     return WM_WIFI_KEEP;

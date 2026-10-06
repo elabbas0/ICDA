@@ -261,9 +261,11 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_line(m, 0.12f, 0.12f, 0.33f, 0.33f);
         break;
     case IC_SYM_RELOAD:
-        sym_arc(m, 0.0f, 0.0f, 0.30f, -PI * 0.35f, PI * 1.45f);
+        /* clockwise: the arc runs from 1:30 round to 12, where the head points
+         * right, along the arc and into the gap */
+        sym_arc(m, 0.0f, 0.02f, 0.30f, -PI * 0.25f, PI * 1.5f);
         {
-            const float p[] = { 0.22f, -0.40f, 0.26f, -0.19f, 0.05f, -0.17f };
+            const float p[] = { -0.08f, -0.40f, 0.04f, -0.28f, -0.08f, -0.16f };
             sym_poly(m, p, 3, 0);
         }
         break;
@@ -272,10 +274,11 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_line(m, 0.0f, -0.36f, 0.0f, -0.02f);
         break;
     case IC_SYM_RESTART:
-        /* counter-clockwise: gap at the top right, arrowhead pointing left */
-        sym_arc(m, 0.0f, 0.02f, 0.30f, -PI * 0.25f, PI * 1.5f);
+        /* counter-clockwise: the arc runs from 10:30 round to 12, where the
+         * head points left, along the arc and into the gap */
+        sym_arc(m, 0.0f, 0.02f, 0.30f, -PI * 0.5f, PI * 1.25f);
         {
-            const float p[] = { 0.05f, -0.42f, -0.07f, -0.28f, 0.07f, -0.15f };
+            const float p[] = { 0.08f, -0.40f, -0.04f, -0.28f, 0.08f, -0.16f };
             sym_poly(m, p, 3, 0);
         }
         break;

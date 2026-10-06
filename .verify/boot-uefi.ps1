@@ -9,6 +9,7 @@ $args = @("-machine", $Machine, "-smp", "2", "-m", "2G",
           "-drive", "if=pflash,format=raw,readonly=on,file=.verify/ovmf-code.fd",
           "-drive", "if=pflash,format=raw,file=.verify/ovmf-vars.fd",
           "-drive", "file=$Disk,format=raw,media=disk",
+          "-nic", "user,model=e1000",
           "-display", "none", "-monitor", "none", "-serial", "file:.verify/serial.log",
           "-qmp", "tcp:127.0.0.1:4444,server,nowait", "-no-reboot")
 if ($Iso) { $args += @("-cdrom", $Iso) }

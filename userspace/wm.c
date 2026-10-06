@@ -469,8 +469,11 @@ static int cursor_shape_for_hit(wm_hit_t hit) {
     switch (hit) {
     case WM_HIT_RESIZE_L:
     case WM_HIT_RESIZE_R:  return CUR_EW;
-    case WM_HIT_RESIZE_B:  return CUR_NS;
+    case WM_HIT_RESIZE_B:
+    case WM_HIT_RESIZE_T:  return CUR_NS;
+    case WM_HIT_RESIZE_TL:
     case WM_HIT_RESIZE_BR: return CUR_NWSE;
+    case WM_HIT_RESIZE_TR:
     case WM_HIT_RESIZE_BL: return CUR_NESW;
     default:               return CUR_ARROW;
     }
@@ -1285,6 +1288,32 @@ static void wifi_set(int open) {
     mark_dirty_wifi();
     mark_dirty_bar();
 }
+
+/* A downloaded OTA patch waits for a restart (from /dev/sysupdate). */
+static int update_ready = 0;
+
+static int update_poll(void) {
+    static uint64_t last;
+    char r[512];
+    long n;
+    int ready = 0;
+    uint64_t now = icda_ticks();
+    if (last && now - last < 300) return 0;
+    last = now;
+    n = (long)icda_read_file("/dev/sysupdate", r, sizeof(r) - 1);
+    if (n > 0) {
+        r[n] = 0;
+        for (long i = 0; i + 9 < n; i++) {
+            if ((i == 0 || r[i - 1] == '\n') && ic_memcmp(r + i, "pending: ", 9) == 0) {
+                ready = ic_memcmp(r + i + 9, "none", 4) != 0 && r[i + 9] != '\n';
+                break;
+            }
+        }
+    }
+    if (ready == update_ready) return 0;
+    update_ready = ready;
+    return 1;
+}
 static void clock_refresh(void) {
     ic_datetime_t t;
     if (ic_wallclock(&t) != 0) {
@@ -1326,6 +1355,7 @@ static int bar_build(wm_bar_t *b, icda_audio_info_t *audio) {
     b->audio_text = 0;
     b->wifi_state = wm_wifi_bar_state();
     b->wifi_open = wifi_open;
+    b->update_ready = update_ready;
     if (audio && (long)icda_audio_info(audio) >= 0 && audio->active) b->audio_text = audio->name;
     return n;
 }
@@ -2608,6 +2638,11 @@ static void handle_bar_click(int hit) {
         wifi_set(!wifi_open);
         return;
     }
+    if (hit == WM_BAR_UPDATE) {
+        wifi_set(0);
+        icda_spawn_args("/apps/settings.app", "updates");
+        return;
+    }
     wifi_set(0);
     if (hit >= 0) {
         int idx = bar_task_slot(hit);
@@ -2652,25 +2687,39 @@ static void update_resize(void) {
     dx = mouse_x - resize_mx;
     dy = mouse_y - resize_my;
     r = resize_start;
-    if (resize_edge == WM_HIT_RESIZE_R || resize_edge == WM_HIT_RESIZE_BR) r.w += dx;
-    if (resize_edge == WM_HIT_RESIZE_L || resize_edge == WM_HIT_RESIZE_BL) {
-        r.x += dx;
-        r.w -= dx;
+    {
+        int e = resize_edge;
+        int west = e == WM_HIT_RESIZE_L || e == WM_HIT_RESIZE_BL || e == WM_HIT_RESIZE_TL;
+        int east = e == WM_HIT_RESIZE_R || e == WM_HIT_RESIZE_BR || e == WM_HIT_RESIZE_TR;
+        int north = e == WM_HIT_RESIZE_T || e == WM_HIT_RESIZE_TL || e == WM_HIT_RESIZE_TR;
+        int south = e == WM_HIT_RESIZE_B || e == WM_HIT_RESIZE_BL || e == WM_HIT_RESIZE_BR;
+        if (east) r.w += dx;
+        if (west) {
+            r.x += dx;
+            r.w -= dx;
+        }
+        if (south) r.h += dy;
+        if (north) {
+            /* the title bar stays on screen */
+            if (r.y + dy < WM_TITLE_H) dy = WM_TITLE_H - r.y;
+            r.y += dy;
+            r.h -= dy;
+        }
+        if (r.w < WIN_MIN_W) {
+            if (west) r.x -= WIN_MIN_W - r.w;
+            r.w = WIN_MIN_W;
+        }
+        if (r.h < WIN_MIN_H) {
+            if (north) r.y -= WIN_MIN_H - r.h;
+            r.h = WIN_MIN_H;
+        }
     }
-    if (resize_edge == WM_HIT_RESIZE_B || resize_edge == WM_HIT_RESIZE_BR ||
-        resize_edge == WM_HIT_RESIZE_BL) {
-        r.h += dy;
-    }
-    if (r.w < WIN_MIN_W) {
-        if (resize_edge == WM_HIT_RESIZE_L || resize_edge == WM_HIT_RESIZE_BL) r.x -= WIN_MIN_W - r.w;
-        r.w = WIN_MIN_W;
-    }
-    if (r.h < WIN_MIN_H) r.h = WIN_MIN_H;
     if (r.y + r.h > scr_h - WM_BAR_H) r.h = scr_h - WM_BAR_H - r.y;
     if (r.w > scr_w) r.w = scr_w;
-    if (r.x == win->x && r.w == win->w && r.h == win->h) return;
+    if (r.x == win->x && r.y == win->y && r.w == win->w && r.h == win->h) return;
     mark_dirty_win(win);
     win->x = r.x;
+    win->y = r.y;
     win->w = r.w;
     win->h = r.h;
     mark_dirty_win(win);
@@ -3183,6 +3232,7 @@ int main(int argc, char **argv) {
             wch = wm_wifi_poll(wifi_open ? 900 : 2900);
             if (wch & 1) mark_dirty_bar();
             if ((wch & 2) && wifi_open) mark_dirty_wifi();
+            if (update_poll()) mark_dirty_bar();
         }
 
         while (icda_msg_poll(wm_queue) > 0) {

@@ -15,6 +15,7 @@
 #include "../proc/sched.h"
 #include "../syscall/syscall.h"
 #include "../drivers/net/iwm/wifi.h"
+#include "../fs/sysupdate.h"
 
 
 
@@ -297,6 +298,14 @@ static const dev_calls_t dev_rtc_calls = {
     0,
 };
 
+/* /dev/sysupdate: OTA patch status and staging (see fs/sysupdate.h) */
+static const dev_calls_t dev_sysupdate_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    sysupdate_node_read,
+    sysupdate_node_write,
+};
+
 /* /dev/wifi: Wi-Fi control (commands in, status/scan/log out) */
 static const dev_calls_t dev_wifi_calls = {
     0, 0, 0, 0, 0, 0, 0, 0,
@@ -357,6 +366,12 @@ int dev_populate(void) {
     }
     if (!vfs_resolve(vfs_root(), "/dev/wifi")) {
         (void)vfs_create(vfs_root(), "/dev/wifi");
+    }
+    if (!vfs_resolve(vfs_root(), "/dev/sysupdate")) {
+        (void)vfs_create(vfs_root(), "/dev/sysupdate");
+    }
+    if (devops_register("/dev/sysupdate", &dev_sysupdate_calls) != 0) {
+        rc = -1;
     }
     if (devops_register("/dev/wifi", &dev_wifi_calls) != 0) {
         rc = -1;

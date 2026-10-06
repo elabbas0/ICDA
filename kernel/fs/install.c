@@ -268,6 +268,73 @@ static int ensure_layout(void) {
     return 0;
 }
 
+/* System files for OTA patches (see sysupdate.h): \SYSTEM gets the live
+ * system's programs, and the kernel goes next to ICDAROOT.BIN, which is
+ * where GRUB looks first and where patches replace it. */
+static int install_copy_tree(fatfs_t *vol, vfs_node_t *node, char *vpath, uint64_t cap, uint32_t *files) {
+    uint64_t base = 0;
+    while (vpath[base]) base++;
+    if (vfs_node_type(node) == VFS_NODE_DIR) {
+        uint64_t count = vfs_child_count(node);
+        for (uint64_t i = 0; i < count; i++) {
+            vfs_node_t *child = vfs_child_at(node, i);
+            const char *name = vfs_node_name(child);
+            uint64_t n = 0;
+            if (!name) continue;
+            while (name[n]) n++;
+            if (base + 1 + n + 1 > cap) continue;
+            vpath[base] = '/';
+            for (uint64_t k = 0; k <= n; k++) vpath[base + 1 + k] = name[k];
+            if (install_copy_tree(vol, child, vpath, cap, files) != 0) return -1;
+            vpath[base] = 0;
+        }
+        return 0;
+    }
+    {
+        char fpath[300];
+        uint64_t o = 0;
+        const char *pre = "/SYSTEM";
+        while (*pre) fpath[o++] = *pre++;
+        for (uint64_t k = 0; vpath[k] && o + 1 < sizeof(fpath); k++) fpath[o++] = vpath[k];
+        fpath[o] = 0;
+        for (uint64_t k = o; k > 0; k--) {
+            if (fpath[k] == '/') {
+                fpath[k] = 0;
+                (void)fatfs_mkdir(vol, fpath);
+                fpath[k] = '/';
+                break;
+            }
+        }
+        if (fatfs_write(vol, fpath, vfs_node_data(node), vfs_node_size(node)) != 0) return -1;
+        (*files)++;
+    }
+    return 0;
+}
+
+static int install_system_files(const partition_info_t *root, uint32_t *files) {
+    static const char *const dirs[] = { "/apps", "/bin", "/sbin", "/etc/ssl" };
+    fatfs_t vol;
+    char vpath[256];
+    if (fatfs_mount_part(&vol, root) != 0) return -1;
+    install_progress("Writing system files", "\\SYSTEM", 0, 1);
+    for (uint64_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+        vfs_node_t *node = vfs_resolve(vfs_root(), dirs[d]);
+        uint64_t k = 0;
+        if (!node) continue;
+        while (dirs[d][k]) {
+            vpath[k] = dirs[d][k];
+            k++;
+        }
+        vpath[k] = 0;
+        if (install_copy_tree(&vol, node, vpath, sizeof(vpath), files) != 0) return -1;
+    }
+    if (fatfs_mkdir(&vol, "/EFI/ICDA") != 0) return -1;
+    if (fatfs_write(&vol, "/EFI/ICDA/KERNEL.BIN", boot_asset_kernel_bin_start, boot_asset_kernel_bin_size()) != 0)
+        return -1;
+    (*files)++;
+    return fatfs_flush(&vol);
+}
+
 static int fat32_install_boot_partition(const partition_info_t *part) {
     fatfs_t vol;
     fatfs_entry_t existing;
@@ -518,6 +585,13 @@ int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partit
     total_bytes_written += bundle_size;
     total_bytes_written += 16;
     kfree(bundle);
+    {
+        uint32_t sys_files = 0;
+        if (install_system_files(root_part, &sys_files) != 0) {
+            return -18;
+        }
+        total_files_written += sys_files;
+    }
     install_progress("Preparing boot disk", "Writing EFI boot files", 0, 1);
     if (fat32_install_boot_partition(boot_part) != 0) {
         return -17;

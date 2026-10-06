@@ -189,7 +189,7 @@ ic_rect_t wm_bar_launcher_rect(int sw, int sh) {
 
 static int wm_bar_task_w(int sw, int count) {
     int avail = sw - (WM_BAR_PAD * 3 + WM_BAR_BTN_H + 4) - WM_BAR_STATUS_W - WM_BAR_PAD -
-                (WM_BAR_BTN_H + WM_BAR_PAD);
+                2 * (WM_BAR_BTN_H + WM_BAR_PAD);
     int w;
     if (count <= 0) return WM_BAR_TASK_MAX;
     w = avail / count - 4;
@@ -216,13 +216,20 @@ ic_rect_t wm_bar_wifi_rect(int sw, int sh) {
     return ic_rect_make(s.x - WM_BAR_PAD - WM_BAR_BTN_H, l.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
 }
 
+/* "update ready" button, left of Wi-Fi (shown only while a patch waits) */
+ic_rect_t wm_bar_update_rect(int sw, int sh) {
+    ic_rect_t w = wm_bar_wifi_rect(sw, sh);
+    return ic_rect_make(w.x - WM_BAR_PAD - WM_BAR_BTN_H, w.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
+}
+
 int wm_bar_hit(int sw, int sh, const wm_bar_t *b, int mx, int my) {
     if (!ic_ui_hit(wm_bar_rect(sw, sh), mx, my)) return WM_BAR_NONE;
     if (ic_ui_hit(wm_bar_launcher_rect(sw, sh), mx, my)) return WM_BAR_LAUNCHER;
     if (ic_ui_hit(wm_bar_wifi_rect(sw, sh), mx, my)) return WM_BAR_WIFI;
+    if (b && b->update_ready && ic_ui_hit(wm_bar_update_rect(sw, sh), mx, my)) return WM_BAR_UPDATE;
     for (int i = 0; b && i < b->count; i++) {
         ic_rect_t r = wm_bar_task_rect(sw, sh, b->count, i);
-        if (r.x + r.w > wm_bar_wifi_rect(sw, sh).x) break;
+        if (r.x + r.w > wm_bar_update_rect(sw, sh).x) break;
         if (ic_ui_hit(r, mx, my)) return i;
     }
     if (ic_ui_hit(wm_bar_status_rect(sw, sh), mx, my)) return WM_BAR_STATUS;
@@ -260,7 +267,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         int hover = b->hover == i;
         int ix = r.x + (r.w >= 100 ? 10 : (r.w - WM_BAR_ICON) / 2);
         ic_rect_t saved;
-        if (r.x + r.w > wm_bar_wifi_rect(sw, sh).x) break;
+        if (r.x + r.w > wm_bar_update_rect(sw, sh).x) break;
         if (t->focused) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
         else if (hover) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_CONTROL + 2.0f, p->fill_hover);
         if (t->icon && ic_icon_valid(t->icon)) {
@@ -279,6 +286,15 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
             ic_gfx_rrect(c, r.x + (r.w - iw) / 2, bar.y + bar.h - 5, iw, 3, 1.5f,
                          t->focused ? p->accent : p->label_tertiary);
         }
+    }
+
+    /* update ready: an accent badge that opens Settings > Updates */
+    if (b && b->update_ready) {
+        ic_rect_t ur = wm_bar_update_rect(sw, sh);
+        float cx = (float)ur.x + (float)ur.w * 0.5f, cy = (float)ur.y + (float)ur.h * 0.5f;
+        ic_gfx_rrect(c, ur.x, ur.y, ur.w, ur.h, IC_R_CONTROL + 2.0f,
+                     b->hover == WM_BAR_UPDATE ? p->fill_hover : ic_color_with_alpha(p->accent, 0x30));
+        ic_symbol_draw(c, IC_SYM_RELOAD, cx, cy, 18.0f, p->accent);
     }
 
     /* Wi-Fi: full colour when online, accent while connecting, faint when

@@ -27,7 +27,10 @@ typedef enum {
     WM_HIT_RESIZE_R,
     WM_HIT_RESIZE_B,
     WM_HIT_RESIZE_BL,
-    WM_HIT_RESIZE_BR
+    WM_HIT_RESIZE_BR,
+    WM_HIT_RESIZE_T,
+    WM_HIT_RESIZE_TL,
+    WM_HIT_RESIZE_TR
 } wm_hit_t;
 
 typedef struct {
@@ -48,7 +51,7 @@ float     wm_frame_radius(const wm_frame_t *f);
 
 wm_hit_t  wm_frame_hit(const wm_frame_t *f, int mx, int my);
 static inline int wm_hit_is_resize(wm_hit_t h) {
-    return h >= WM_HIT_RESIZE_L && h <= WM_HIT_RESIZE_BR;
+    return h >= WM_HIT_RESIZE_L && h <= WM_HIT_RESIZE_TR;
 }
 
 

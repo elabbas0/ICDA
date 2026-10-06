@@ -51,6 +51,15 @@ wm_hit_t wm_frame_hit(const wm_frame_t *f, int mx, int my) {
         int corner_r = mx >= fr.x + fr.w - WM_GRIP_CORNER && mx < fr.x + fr.w + WM_GRIP_OUT;
         int corner_l = mx >= fr.x - WM_GRIP_OUT && mx < fr.x + WM_GRIP_CORNER;
         int corner_b = my >= fr.y + fr.h - WM_GRIP_CORNER && my < fr.y + fr.h + WM_GRIP_OUT;
+        /* top edge: a thin strip over the title bar, so dragging the title
+         * below it still moves the window */
+        int top = my >= fr.y - WM_GRIP_OUT && my < fr.y + WM_GRIP_IN;
+        int corner_t = my >= fr.y - WM_GRIP_OUT && my < fr.y + WM_GRIP_CORNER;
+        if (in_x && corner_t) {
+            if (corner_r && (right || top)) return WM_HIT_RESIZE_TR;
+            if (corner_l && (left || top)) return WM_HIT_RESIZE_TL;
+            if (top) return WM_HIT_RESIZE_T;
+        }
         if (in_x && in_y) {
             if (corner_b && corner_r && (right || bottom)) return WM_HIT_RESIZE_BR;
             if (corner_b && corner_l && (left || bottom)) return WM_HIT_RESIZE_BL;

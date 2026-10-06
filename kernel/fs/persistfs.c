@@ -141,6 +141,23 @@ static void path_pop(char *path, uint64_t old_len) {
     path[old_len] = '\0';
 }
 
+/* System files come from the kernel and \SYSTEM (OTA patches), never from
+ * the personal overlay: they are neither saved into nor restored from it, so
+ * a patch replaces them and an old overlay cannot shadow them. */
+static int persistfs_system_path(const char *path) {
+    static const char *const prefixes[] = {
+        "/apps", "/bin", "/sbin", "/usr", "/dev", "/etc/ssl", "/etc/icda-release.txt",
+        "/etc/motd.txt", "/etc/files.txt",
+    };
+    for (uint64_t k = 0; k < sizeof(prefixes) / sizeof(prefixes[0]); k++) {
+        const char *p = prefixes[k];
+        uint64_t i = 0;
+        while (p[i] && path[i] == p[i]) i++;
+        if (!p[i] && (path[i] == 0 || path[i] == '/')) return 1;
+    }
+    return 0;
+}
+
 static uint64_t persistfs_measure_node(vfs_node_t *node, char *path, uint64_t cap, uint32_t *entry_count) {
     uint64_t total = 0;
     uint64_t old_len = str_len(path);
@@ -152,6 +169,10 @@ static uint64_t persistfs_measure_node(vfs_node_t *node, char *path, uint64_t ca
         return 0;
     }
     if (path_push(path, cap, vfs_node_name(node)) != 0) {
+        return 0;
+    }
+    if (persistfs_system_path(path)) {
+        path_pop(path, old_len);
         return 0;
     }
 
@@ -186,6 +207,10 @@ static uint8_t *persistfs_write_node(uint8_t *cursor, vfs_node_t *node, char *pa
     }
     if (path_push(path, cap, vfs_node_name(node)) != 0) {
         return 0;
+    }
+    if (persistfs_system_path(path)) {
+        path_pop(path, old_len);
+        return cursor;
     }
 
     if (!vfs_node_readonly(node)) {
@@ -324,6 +349,9 @@ int persistfs_import_image(const char *buffer_in, uint64_t size, uint64_t *entri
             cursor += entry.data_size;
         }
 
+        if (persistfs_system_path(path)) {
+            continue;   /* older overlays carried system files; ignore them */
+        }
         if (vfs_import_node(path, entry.type, entry.readonly, data, entry.data_size,
                             entry.inode, entry.created, entry.modified) != 0) {
             return -1;
