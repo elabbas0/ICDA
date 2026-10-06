@@ -176,6 +176,10 @@ static int boot_cmdline_has_flag(void *multiboot_info, const char *flag) {
 
 void kernel_main(void *multiboot_info) {
     int live_installer = boot_cmdline_has_flag(multiboot_info, "icda.live=1");
+    /* troubleshooting switches, offered as GRUB menu entries */
+    int boot_verbose = boot_cmdline_has_flag(multiboot_info, "icda.verbose=1");
+    int boot_nosmp = boot_cmdline_has_flag(multiboot_info, "icda.nosmp=1");
+    net_drv_skip_wifi = boot_cmdline_has_flag(multiboot_info, "icda.nowifi=1");
     serial_init();
     efi_init(multiboot_info);
     bootstage_set(1, "serial");
@@ -194,7 +198,7 @@ void kernel_main(void *multiboot_info) {
     
 
 
-    if (has_fb) {
+    if (has_fb && !boot_verbose) {
         splash_init();
     }
 
@@ -476,14 +480,22 @@ void kernel_main(void *multiboot_info) {
     {
         splash_finish();
         if (has_fb) {
-            if (vt_is_gui()) {
+            if (boot_verbose) {
+                /* keep the boot log on screen until the desktop draws */
+            } else if (vt_is_gui()) {
                 console_mute_fb(1);
             } else {
                 console_clear();
                 fb_clear(FB_BLACK);
             }
         }
-        smp_init(multiboot_info);
+        if (boot_nosmp) {
+            boot_line("smp", "skipped (icda.nosmp=1), running on one CPU");
+        } else {
+            boot_line("smp", "starting application processors");
+            smp_init(multiboot_info);
+            boot_line("smp", "application processors started");
+        }
         bootstage_set(22, "shell");
 #if CI_SELFTEST
         
@@ -543,6 +555,7 @@ void kernel_main(void *multiboot_info) {
             uint64_t init_pid = 0;
             uint64_t init_code = 0;
             int shell_rc;
+            boot_line("init", "starting /sbin/init.app");
             if (user_spawn_path_args("/sbin/init.app",
                                      vt_is_gui() ? "gui" : "text",
                                      &init_pid) != 0) {

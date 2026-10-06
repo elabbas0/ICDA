@@ -12,6 +12,7 @@ typedef enum {
 } net_drv_type_t;
 
 static net_drv_type_t active_driver = NET_DRV_NONE;
+int net_drv_skip_wifi;
 
 int net_drv_init(void) {
     
@@ -22,7 +23,7 @@ int net_drv_init(void) {
     }
 
     /* Intel Wireless 8260; the driver thread brings it up in the background. */
-    if (wifi_init() == 0) {
+    if (!net_drv_skip_wifi && wifi_init() == 0) {
         active_driver = NET_DRV_WIFI;
         serial_write("[net-drv] wifi (iwm) found\n");
         return 0;
