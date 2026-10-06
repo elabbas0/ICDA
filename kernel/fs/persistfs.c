@@ -5,6 +5,21 @@
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/partition.h"
 #include "../memory/heap.h"
+#include "../drivers/serial/serial.h"
+
+/* One serial line per candidate root partition, for diagnosing installs. */
+static void persistfs_log_partition(uint32_t index, const char *what) {
+    char line[64] = "[persist] partition ";
+    int n = 20;
+    if (index >= 10) line[n++] = (char)('0' + index / 10 % 10);
+    line[n++] = (char)('0' + index % 10);
+    line[n++] = ':';
+    line[n++] = ' ';
+    for (const char *p = what; *p && n < 61; p++) line[n++] = *p;
+    line[n++] = '\n';
+    line[n] = 0;
+    serial_write(line);
+}
 
 #define PERSISTFS_MAGIC   0x31534641444349ULL
 #define PERSISTFS_VERSION 1U
@@ -421,17 +436,27 @@ int persistfs_init(void) {
             int32_t swap_partition = -1;
             uint64_t loaded = 0;
 
-            if (!part || part->fs_hint != PARTITION_FS_FAT32 || part->role != PARTITION_ROLE_SYSTEM) {
+            /* ICDA's partition is either typed as ICDA System, or a plain FAT32
+               data partition holding ICDAROOT.BIN (no partition-type change
+               needed when installing from Windows) */
+            if (!part || part->fs_hint != PARTITION_FS_FAT32 ||
+                (part->role != PARTITION_ROLE_SYSTEM && part->role != PARTITION_ROLE_DATA)) {
+                if (part) persistfs_log_partition(i, part->fs_hint == PARTITION_FS_FAT32 ? "skipped (role)" : "skipped (not FAT32)");
                 continue;
             }
             if (system_install_read_root_bundle(part, &bundle, &size, &swap_partition) != 0) {
+                persistfs_log_partition(i, "no ICDAROOT.BIN");
                 continue;
             }
             if (persistfs_import_image(bundle, size, &loaded) != 0) {
+                persistfs_log_partition(i, "ICDAROOT.BIN rejected");
                 kfree(bundle);
                 continue;
             }
+            persistfs_log_partition(i, "ICDA system partition");
             kfree(bundle);
+            /* in memory only: keeps the volume importer from also mounting it writable */
+            partition_mark_system(i);
             persistfs_available = 1;
             persistfs_entries_loaded = loaded;
             persistfs_active_partition_index = (int)i;

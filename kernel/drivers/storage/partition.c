@@ -333,3 +333,9 @@ const char *partition_role_name(partition_role_t role) {
         default: return "unknown";
     }
 }
+
+/* Marks a partition as ICDA's system partition for this boot.  Only the
+ * in-memory table changes; the partition table on disk is not written. */
+void partition_mark_system(uint32_t index) {
+    if (index < partitions_found) partitions[index].role = PARTITION_ROLE_SYSTEM;
+}
