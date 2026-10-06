@@ -7,6 +7,7 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../proc/sched.h"
+#include "../fs/bootlog.h"
 
 #define AP_TRAMPOLINE 0x8000ULL
 #define AP_STACK_PAGES 4
@@ -68,10 +69,65 @@ static void log_num(const char *what, uint64_t v) {
     serial_write("\n");
 }
 
-/* Waits for n PIT ticks with interrupts briefly enabled (boot only). */
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* Upper bound for one PIT tick (10 ms) in TSC cycles: generous for any CPU
+ * up to ~10 GHz, so a timer that never fires cannot hang the boot. */
+#define TICK_TSC_LIMIT 100000000ULL
+
+static int timer_dead;
+
+/* Waits for n PIT ticks with interrupts enabled (boot only).  Spins instead
+ * of hlt so a missing timer interrupt ends in a timeout, not a hang. */
 static void wait_ticks(uint64_t n) {
     uint64_t end = sched_ticks() + n;
-    while (sched_ticks() < end) __asm__ volatile("sti; hlt; cli");
+    uint64_t start = rdtsc();
+    if (timer_dead) return;
+    __asm__ volatile("sti");
+    while (sched_ticks() < end) {
+        if (rdtsc() - start > (n + 2) * TICK_TSC_LIMIT) {
+            timer_dead = 1;
+            break;
+        }
+        __asm__ volatile("pause");
+    }
+    __asm__ volatile("cli");
+}
+
+static inline void outb_p(uint16_t port, uint8_t v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
+static inline uint8_t inb_p(uint16_t port) { uint8_t v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+
+static uint16_t pit_count(void) {
+    uint8_t lo, hi;
+    outb_p(0x43, 0x00);                 /* latch channel 0 */
+    lo = inb_p(0x40);
+    hi = inb_p(0x40);
+    return (uint16_t)(lo | (hi << 8));
+}
+
+/* Logs what decides whether SMP start can work on this machine. */
+static void smp_log_timer_state(void) {
+    uint32_t lo, hi;
+    uint16_t a, b;
+    uint64_t t0, t1;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1BU));
+    log_num("[smp] apic base: ", ((uint64_t)hi << 32 | lo) & 0xFFFFF000ULL);
+    log_num("[smp]   apic enabled: ", (lo >> 11) & 1);
+    log_num("[smp]   x2apic mode: ", (lo >> 10) & 1);
+    a = pit_count();
+    t0 = rdtsc();
+    while (rdtsc() - t0 < 2000000ULL) __asm__ volatile("pause");
+    b = pit_count();
+    log_num("[smp] pit counter moving: ", a != b);
+    t0 = sched_ticks();
+    wait_ticks(5);
+    t1 = sched_ticks();
+    log_num("[smp] timer ticks seen in check: ", t1 - t0);
+    bootlog_flush("SMP timer check done");
 }
 
 static void gdt_setup_cpu(cpu_t *c) {
@@ -170,9 +226,15 @@ void smp_init(void *multiboot_info) {
     smp_cpus[0].online = 1;
     apic_to_cpu[bsp_apic & 0xFF] = 0;
 
+    smp_log_timer_state();
+    if (timer_dead) {
+        serial_write("[smp] timer interrupts are not arriving, staying on one CPU\n");
+        bootlog_flush("SMP skipped: no timer");
+        return;
+    }
     lapic_ticks_per_tick = lapic_calibrate(wait_ticks);
     log_num("[smp] lapic counts per tick: ", lapic_ticks_per_tick);
-    if (!lapic_ticks_per_tick) return;
+    if (!lapic_ticks_per_tick || timer_dead) return;
     {
         uint64_t size = (uint64_t)(ap_trampoline_end - ap_trampoline_start);
         uint8_t *dst = (uint8_t *)PHYS_TO_VIRT(AP_TRAMPOLINE);
@@ -193,6 +255,8 @@ void smp_init(void *multiboot_info) {
                 apic_to_cpu[apic] = (uint8_t)cpu_count;
                 found++;
                 cpu_count++;
+                log_num("[smp] starting cpu with apic id ", apic);
+                bootlog_flush(0);
                 if (start_ap(c) != 0) {
                     cpu_count--;
                     serial_write("[smp] AP failed to start\n");

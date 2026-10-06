@@ -139,7 +139,8 @@ void lapic_send_ipi(uint32_t apic_id, uint32_t low) {
     if (!lapic_base) return;
     lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
     lapic_write(LAPIC_REG_ICR_LOW, low);
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1U << 12)) __asm__ volatile("pause");
+    for (uint32_t i = 0; i < 1000000U && (lapic_read(LAPIC_REG_ICR_LOW) & (1U << 12)); i++)
+        __asm__ volatile("pause");
 }
 
 void lapic_timer_periodic(uint8_t vector, uint32_t count) {
