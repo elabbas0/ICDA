@@ -1,4 +1,5 @@
 #include "serial.h"
+#include "../../fs/bootlog.h"
 #include "../device.h"
 #include <stdint.h>
 
@@ -48,6 +49,7 @@ int serial_ready(void) {
 }
 
 void serial_write_char(char c) {
+    bootlog_putc(c);   /* also kept for /BOOTLOG.TXT: laptops have no COM1 */
     if (!initialized) return;
 
     if (c == '\n') {

@@ -1,4 +1,5 @@
 #include "console.h"
+#include "../../fs/bootlog.h"
 
 #include "../device.h"
 #include "../../diag/splash.h"
@@ -302,6 +303,8 @@ void console_write(const char *str, console_style_t style) {
     if (serial_device && console_serial_mirror_enabled) {
         serial_ops = (const serial_device_ops_t *)serial_device->ops;
         serial_ops->write(serial_device->context, str);
+    } else {
+        bootlog_puts(str);   /* mirrored text is captured by the serial path */
     }
 
     if (console_has_framebuffer && console_display_is_framebuffer) {

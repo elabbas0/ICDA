@@ -27,6 +27,7 @@
 #include "fs/exfat.h"
 #include "fs/initramfs.h"
 #include "fs/install.h"
+#include "fs/bootlog.h"
 #include "power/power.h"
 #include "fs/ntfs.h"
 #include "fs/persistfs.h"
@@ -444,6 +445,9 @@ void kernel_main(void *multiboot_info) {
         if (system_install_present()) {
             boot_line("system", "installed writable overlay active");
         }
+        /* save the boot log to the system partition from here on */
+        bootlog_flush("storage ready");
+        bootlog_start_thread();
     } else {
         if (live_installer) {
             boot_line("storage", "live mode: disk persistence disabled, continuing with ramfs only");
@@ -493,8 +497,10 @@ void kernel_main(void *multiboot_info) {
             boot_line("smp", "skipped (icda.nosmp=1), running on one CPU");
         } else {
             boot_line("smp", "starting application processors");
+            bootlog_flush("before SMP start");
             smp_init(multiboot_info);
             boot_line("smp", "application processors started");
+            bootlog_flush("after SMP start");
         }
         bootstage_set(22, "shell");
 #if CI_SELFTEST
@@ -556,6 +562,7 @@ void kernel_main(void *multiboot_info) {
             uint64_t init_code = 0;
             int shell_rc;
             boot_line("init", "starting /sbin/init.app");
+            bootlog_flush("starting init");
             if (user_spawn_path_args("/sbin/init.app",
                                      vt_is_gui() ? "gui" : "text",
                                      &init_pid) != 0) {
