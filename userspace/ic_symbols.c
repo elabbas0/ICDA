@@ -272,9 +272,10 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_line(m, 0.0f, -0.36f, 0.0f, -0.02f);
         break;
     case IC_SYM_RESTART:
-        sym_arc(m, 0.0f, 0.02f, 0.30f, -PI * 0.5f, PI * 1.25f);
+        /* counter-clockwise: gap at the top right, arrowhead pointing left */
+        sym_arc(m, 0.0f, 0.02f, 0.30f, -PI * 0.25f, PI * 1.5f);
         {
-            const float p[] = { -0.05f, -0.42f, 0.07f, -0.28f, -0.07f, -0.15f };
+            const float p[] = { 0.05f, -0.42f, -0.07f, -0.28f, 0.07f, -0.15f };
             sym_poly(m, p, 3, 0);
         }
         break;

@@ -318,33 +318,26 @@ uint64_t pmm_alloc_contiguous_aligned_below(uint64_t count, uint64_t align, uint
         max_frame = total_frames;
     }
 
+    /* A run may only start on an aligned frame; it grows until it reaches
+     * count frames or hits a used one. */
     for (uint64_t f = 0; f < max_frame; f++) {
-        if ((f % align_frames) == 0) {
-            run_start = f;
+        if (frame_used(f)) {
             run_len = 0;
+            continue;
         }
-
-        if (!frame_used(f) && f >= run_start) {
-            run_len++;
-            if (run_len == count) {
-                uint64_t start_addr = FRAME_TO_ADDR(run_start);
-                uint64_t end_addr = FRAME_TO_ADDR(run_start + count);
-                if (end_addr <= max_addr) {
-                    for (uint64_t i = run_start; i < run_start + count; i++) {
-                        frame_set(i);
-                        used_frames++;
-                    }
-                    return start_addr;
-                }
+        if (run_len == 0) {
+            if (f % align_frames) continue;
+            run_start = f;
+        }
+        if (++run_len == count) {
+            uint64_t start_addr = FRAME_TO_ADDR(run_start);
+            uint64_t end_addr = FRAME_TO_ADDR(run_start + count);
+            if (end_addr > max_addr) return 0;
+            for (uint64_t i = run_start; i < run_start + count; i++) {
+                frame_set(i);
+                used_frames++;
             }
-        } else {
-            run_len = 0;
-            if (align_frames > 1) {
-                uint64_t next = ((f / align_frames) + 1ULL) * align_frames;
-                if (next > f) {
-                    f = next - 1ULL;
-                }
-            }
+            return start_addr;
         }
     }
 
