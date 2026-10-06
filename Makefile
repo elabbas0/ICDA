@@ -593,8 +593,12 @@ settings_updates.o: userspace/settings_updates.c userspace/settings_updates.h $(
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_updates.c -o /tmp/icda-settings_updates.o
 	cp -f /tmp/icda-settings_updates.o settings_updates.o
 
-userspace/settings.app: crt0.o settings.o settings_wifi.o settings_updates.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o settings_wifi.o settings_updates.o gui.o libicda.o
+settings_keys.o: userspace/settings_keys.c userspace/settings_keys.h userspace/shortcuts.h $(IC_HEADERS) userspace/icda_sys.h Makefile
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_keys.c -o /tmp/icda-settings_keys.o
+	cp -f /tmp/icda-settings_keys.o settings_keys.o
+
+userspace/settings.app: crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o gui.o libicda.o
 	cp -f /tmp/icda-settings.app userspace/settings.app
 
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app
@@ -750,7 +754,7 @@ userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
 	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
 
-wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/shortcuts.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
       userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o

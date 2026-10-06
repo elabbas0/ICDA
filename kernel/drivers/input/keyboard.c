@@ -54,6 +54,8 @@ static int caps_lock = 0;
 static int extended_prefix = 0;
 static int f12_down = 0;
 static int f11_down = 0;
+static int super_down = 0;   /* Windows key */
+static int super_used = 0;   /* another key went with it (so no "tap") */
 static kernel_device_t keyboard_device;
 
 static int keyboard_device_has_char(void *context) {
@@ -90,6 +92,16 @@ static void queue_push_seq(const char *seq) {
     while (*seq) {
         queue_push(*seq++);
     }
+}
+
+/* System shortcut: 0x82, 0x40 | modifiers (1 shift, 2 ctrl, 4 alt, 8 super),
+ * key (see userspace/shortcuts.h).  The window manager consumes these. */
+static void push_chord(uint8_t key) {
+    uint8_t mods = (uint8_t)((shift_down ? 1 : 0) | (ctrl_down ? 2 : 0) | (alt_down ? 4 : 0) | (super_down ? 8 : 0));
+    queue_push((char)0x82);
+    queue_push((char)(0x40 | mods));
+    queue_push((char)key);
+    sched_wake_input_waiters();
 }
 
 static int is_alpha(char c) {
@@ -179,10 +191,34 @@ static void keyboard_handle_scancode(uint8_t scancode) {
             case 0x9D: ctrl_down = 0; return;
             case 0x38: alt_down = 1; return;
             case 0xB8: alt_down = 0; return;
+            case 0x5B: case 0x5C:            /* Windows key down */
+                if (!super_down) super_used = 0;
+                super_down = 1;
+                return;
+            case 0xDB: case 0xDC:            /* Windows key up: alone means "tap" */
+                if (super_down && !super_used) push_chord(0);   /* still counts as held */
+                super_down = 0;
+                return;
             default: break;
         }
         if (scancode & 0x80) {
             return;
+        }
+        if (super_down || (ctrl_down && alt_down)) {
+            uint8_t key = 0;
+            switch (scancode) {
+                case 0x48: key = 0xE1; break;   /* up */
+                case 0x50: key = 0xE2; break;   /* down */
+                case 0x4B: key = 0xE3; break;   /* left */
+                case 0x4D: key = 0xE4; break;   /* right */
+                case 0x53: key = 0xE5; break;   /* delete */
+                default: break;
+            }
+            if (key) {
+                super_used = 1;
+                push_chord(key);
+                return;
+            }
         }
         switch (scancode) {
             case 0x48: push_csi("A"); return;
@@ -234,6 +270,27 @@ static void keyboard_handle_scancode(uint8_t scancode) {
     if (ctrl_down && alt_down && scancode >= 0x3B && scancode <= 0x40) {
         vt_request_switch((int)(scancode - 0x3B + 1));
         return;
+    }
+
+    /* system shortcuts (see push_chord): Windows key + anything, Ctrl+Alt +
+     * key, Alt + F-key, plain F1..F10, Alt+Tab, Ctrl+Shift+Esc */
+    if (!(scancode & 0x80)) {
+        int fkey = (scancode >= 0x3B && scancode <= 0x44) ? scancode - 0x3B + 1 :
+                   scancode == 0x57 ? 11 : scancode == 0x58 ? 12 : 0;
+        uint8_t key = fkey ? (uint8_t)(0xF1 + fkey - 1) : (uint8_t)(scancode < 128 ? keymap[scancode] : 0);
+        int chord = 0;
+        if (super_down && key) chord = 1;
+        else if (ctrl_down && alt_down && key) chord = 1;
+        else if (alt_down && fkey) chord = 1;
+        else if (fkey && fkey <= 10 && !ctrl_down && !alt_down) chord = 1;
+        else if (alt_down && !ctrl_down && scancode == 0x0F) chord = 1;               /* Alt+Tab */
+        else if (ctrl_down && shift_down && scancode == 0x01) chord = 1;               /* Ctrl+Shift+Esc */
+        if (chord) {
+            if (key == '\n') key = 0x0D;
+            super_used = 1;
+            push_chord(key);
+            return;
+        }
     }
 
     /* F12 (make 0x58): emit 0x80 sentinel ONCE per press.  The WM

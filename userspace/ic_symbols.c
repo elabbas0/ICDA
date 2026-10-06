@@ -338,6 +338,15 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_poly(m, fold, 3, 0);
         break;
     }
+    case IC_SYM_KEYBOARD:
+        /* outline, two rows of keys, space bar */
+        sym_rrect(m, -0.42f, -0.24f, 0.42f, 0.24f, 0.07f);
+        for (int k = 0; k < 5; k++) {
+            sym_disc(m, -0.26f + 0.13f * k, -0.09f, 0.035f);
+            sym_disc(m, -0.26f + 0.13f * k, 0.02f, 0.035f);
+        }
+        sym_line(m, -0.16f, 0.13f, 0.16f, 0.13f);
+        break;
     case IC_SYM_DISK:
         sym_rrect(m, -0.38f, -0.22f, 0.38f, 0.22f, 0.08f);
         sym_line(m, -0.38f, 0.04f, 0.38f, 0.04f);

@@ -19,6 +19,7 @@
 #include "wm_frame.h"
 #include "wm_shell.h"
 #include "wm_wifi.h"
+#include "shortcuts.h"
 
 #define MAX_WINDOWS 16
 #define BACK_BUFFER_WIDTH 2560
@@ -3088,8 +3089,141 @@ static void pointer_moved(void) {
     }
 }
 
+/* ---- keyboard shortcuts (shortcuts.h) --------------------------------------- */
+
+static sc_bindings_t sc_binds;
+static uint64_t sc_loaded_tick;
+
+static void sc_refresh(void) {
+    /* re-read at most once a second, so Settings changes apply at once */
+    uint64_t now = icda_ticks();
+    if (sc_loaded_tick && now - sc_loaded_tick < 100) return;
+    sc_loaded_tick = now;
+    sc_load(&sc_binds);
+}
+
+static void sc_spawn(const char *path) {
+    launcher_set(0);
+    wifi_set(0);
+    icda_spawn(path);
+}
+
+static int sc_top_window(void) {
+    /* the focused window, or the front-most visible one */
+    if (focused_window_idx >= 0 && windows[focused_window_idx].valid && !windows[focused_window_idx].minimized)
+        return focused_window_idx;
+    for (int i = task_count - 1; i >= 0; i--) {
+        int idx = task_order[i];
+        if (windows[idx].valid && !windows[idx].closing && !windows[idx].minimized) return idx;
+    }
+    return -1;
+}
+
+/* Alt+Tab: bring the next window (in taskbar order) to the front */
+static void sc_switch_window(void) {
+    int n = 0, cur = -1;
+    int list[MAX_WINDOWS];
+    for (int i = 0; i < task_count; i++) {
+        int idx = task_order[i];
+        if (!windows[idx].valid || windows[idx].closing) continue;
+        if (idx == focused_window_idx) cur = n;
+        list[n++] = idx;
+    }
+    if (!n) return;
+    {
+        int next = list[(cur + 1) % n];
+        if (windows[next].minimized) restore_window(next);
+        bring_to_front(next);
+    }
+}
+
+static void sc_show_desktop(void) {
+    int any = 0;
+    for (int i = 0; i < task_count; i++) {
+        int idx = task_order[i];
+        if (windows[idx].valid && !windows[idx].closing && !windows[idx].minimized) {
+            minimize_window(idx);
+            any = 1;
+        }
+    }
+    if (!any) {
+        /* pressed again: bring them back */
+        for (int i = 0; i < task_count; i++) {
+            int idx = task_order[i];
+            if (windows[idx].valid && !windows[idx].closing && windows[idx].minimized) restore_window(idx);
+        }
+    }
+}
+
+static void sc_run(const char *id) {
+    int w = sc_top_window();
+    if (ic_streq(id, "start")) launcher_set(!launcher_open);
+    else if (ic_streq(id, "explorer")) sc_spawn("/apps/desktop.app");
+    else if (ic_streq(id, "terminal")) sc_spawn("/apps/terminal.app");
+    else if (ic_streq(id, "browser")) sc_spawn("/apps/browser.app");
+    else if (ic_streq(id, "settings")) sc_spawn("/apps/settings.app");
+    else if (ic_streq(id, "activity")) sc_spawn("/apps/taskman.app");
+    else if (ic_streq(id, "close")) {
+        if (w >= 0) {
+            send_close_to_app(&windows[w]);
+            start_close(&windows[w]);
+        }
+    } else if (ic_streq(id, "minimize")) {
+        if (w >= 0) minimize_window(w);
+    } else if (ic_streq(id, "maximize")) {
+        if (w >= 0) toggle_maximize(w);
+    } else if (ic_streq(id, "switch")) sc_switch_window();
+    else if (ic_streq(id, "desktop")) sc_show_desktop();
+    else if (ic_streq(id, "overview")) overview_set(!overview_open);
+    else if (ic_streq(id, "wifi")) wifi_set(!wifi_open);
+}
+
+/* Settings > Keyboard is recording: hand the chord to the focused app. */
+static int sc_forward_if_capturing(uint8_t mods, uint8_t key) {
+    char flag[4];
+    if ((long)icda_read_file(SC_CAPTURE_FLAG, flag, sizeof flag) < 0) return 0;
+    if (focused_window_idx < 0 || !windows[focused_window_idx].valid) return 0;
+    /* only Settings records shortcuts; a stale flag cannot steal them elsewhere */
+    if (!ic_streq(windows[focused_window_idx].title, "Settings")) return 0;
+    {
+        wm_window_t *win = &windows[focused_window_idx];
+        gui_msg_t kmsg;
+        clear_msg(&kmsg);
+        kmsg.type = GUI_MSG_KEY_EVENT;
+        kmsg.window_id = win->id;
+        kmsg.key.keycode = SC_APP_KEY_BASE | ((uint32_t)mods << 8) | key;
+        kmsg.key.pressed = 1;
+        send_maybe(win->app_queue_handle, &kmsg);
+    }
+    return 1;
+}
+
+static void sc_chord(uint8_t mods, uint8_t key) {
+    int a;
+    if (sc_forward_if_capturing(mods, key)) return;
+    sc_refresh();
+    a = sc_match(&sc_binds, mods, key);
+    if (a >= 0) sc_run(sc_actions[a].id);
+}
+
 static void handle_key(long key) {
     static int esc_swallow = 0;
+    static int chord_state = 0;     /* 1 waiting for modifiers, 2 for the key */
+    static uint8_t chord_mods;
+    if (chord_state == 1) {
+        chord_mods = (uint8_t)(key & 0x0F);
+        chord_state = 2;
+        return;
+    }
+    if (chord_state == 2) {
+        chord_state = 0;
+        sc_chord(chord_mods, (uint8_t)key);
+        return;
+    }
+    if (key == SC_CHORD) {
+        chord_state = 1;
+        return;
+    }
     if (esc_swallow == 1) {
         esc_swallow = key == '[' ? 2 : 0;
         if (esc_swallow) return;
@@ -3304,12 +3438,14 @@ int main(int argc, char **argv) {
 
         {
             long key = icda_read_char_timeout(1);
-            int in_seq = 0;
+            int in_seq = 0, chord_left = 0;
             for (int n = 0; key >= 0 && n < 16; n++) {
                 handle_key(key);
-                if (key == 27) in_seq = 1;
+                if (chord_left) chord_left--;           /* chord bytes are not escape sequences */
+                else if (key == SC_CHORD) chord_left = 2;
+                else if (key == 27) in_seq = 1;
                 else if (!in_seq || !(key == '[' || key == ';' || (key >= '0' && key <= '9'))) in_seq = 0;
-                if (!in_seq) break;
+                if (!in_seq && !chord_left) break;
                 key = icda_read_char_timeout(1);
             }
         }
