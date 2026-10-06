@@ -399,4 +399,9 @@ int ic_layout_col(ic_rect_t parent, int pad, int gap,
                   const int *heights, int count,
                   ic_rect_t *out, int out_cap);
 
-#endif 
+
+/* "Version 1.6.1": the installed release (/etc/icda-release.txt, written by
+ * OTA patches), or the version this program was built as. */
+const char *ic_version_label(void);
+
+#endif

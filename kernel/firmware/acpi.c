@@ -50,10 +50,17 @@ static const struct acpi_rsdp *map_rsdp(uint64_t phys) {
     return rsdp;
 }
 
+/* GRUB passes the RSDP twice: an ACPI 1.0 copy (20 bytes, tag type 14) and
+ * the full ACPI 2.0 one (tag type 15).  The 1.0 copy still carries the
+ * firmware's revision 2, but its XSDT field lies past the 20 bytes (in the
+ * next tag), so it is only ever used as revision 0, through the RSDT. */
+static struct acpi_rsdp rsdp_v1;
+
 static const struct acpi_rsdp *find_rsdp_in_multiboot(void *multiboot_info) {
     struct multiboot_info *info = (struct multiboot_info *)multiboot_info;
     uint8_t *tag_ptr = (uint8_t *)multiboot_info + 8;
     uint8_t *end_ptr = (uint8_t *)multiboot_info + info->total_size;
+    const struct acpi_rsdp *v1 = 0;
 
     for (uint8_t *p = tag_ptr; p + 8 <= end_ptr; ) {
         struct multiboot_tag *tag = (struct multiboot_tag *)p;
@@ -69,19 +76,26 @@ static const struct acpi_rsdp *find_rsdp_in_multiboot(void *multiboot_info) {
              tag->type == MULTIBOOT_TAG_TYPE_ACPI_OLD) && tag->size >= 8 + 20) {
             struct multiboot_tag_acpi *acpi_tag = (struct multiboot_tag_acpi *)tag;
             const struct acpi_rsdp *rsdp = (const struct acpi_rsdp *)acpi_tag->rsdp;
-            uint32_t len = 20;
-            if (tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW && rsdp->revision >= 2 &&
-                rsdp->length >= 20 && rsdp->length <= tag->size - 8)
-                len = rsdp->length;
-            if (signature_eq(rsdp->signature, "RSD PTR ", 8) && checksum_ok(rsdp, len)) {
-                return rsdp;
+            if (signature_eq(rsdp->signature, "RSD PTR ", 8) && checksum_ok(rsdp, 20)) {
+                if (tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW && rsdp->revision >= 2 &&
+                    rsdp->length >= sizeof(struct acpi_rsdp) && rsdp->length <= tag->size - 8 &&
+                    checksum_ok(rsdp, rsdp->length)) {
+                    return rsdp;
+                }
+                if (tag->type == MULTIBOOT_TAG_TYPE_ACPI_OLD && !v1) {
+                    const uint8_t *s = (const uint8_t *)rsdp;
+                    uint8_t *d = (uint8_t *)&rsdp_v1;
+                    for (uint32_t i = 0; i < sizeof(rsdp_v1); i++) d[i] = i < 20 ? s[i] : 0;
+                    rsdp_v1.revision = 0;
+                    v1 = &rsdp_v1;
+                }
             }
         }
 
         p += (tag->size + 7) & ~7U;
     }
 
-    return 0;
+    return v1;
 }
 
 static const struct acpi_rsdp *scan_rsdp_range(uint64_t start, uint64_t end) {

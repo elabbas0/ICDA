@@ -9,6 +9,7 @@
 
 static uint64_t hz = 2000000000ULL;
 static uint64_t per_us = 2000;
+static uint64_t boot_tsc;
 static const char *source = "default 2 GHz";
 
 static inline void cpuid(uint32_t leaf, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
@@ -80,6 +81,7 @@ static uint64_t from_pit(void) {
 }
 
 void tsc_init(void) {
+    boot_tsc = tsc_read();
     uint64_t f = from_cpuid();
     if (!f) f = from_pit();
     if (f) hz = f;
@@ -97,4 +99,11 @@ uint64_t tsc_us(void) {
 void udelay(uint64_t us) {
     uint64_t start = tsc_read(), cycles = us * per_us;
     while (tsc_read() - start < cycles) __asm__ volatile("pause");
+}
+
+/* 10 ms ticks of real time since tsc_init, or 0 if the TSC frequency was
+ * only guessed (then the PIT tick count is the better clock). */
+uint64_t tsc_centis(void) {
+    if (source[0] == 'd') return 0;
+    return (tsc_read() - boot_tsc) / (per_us * 10000ULL);
 }

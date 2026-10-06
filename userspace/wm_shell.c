@@ -484,7 +484,7 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
         int top = foot.y + (foot.h - block) / 2;
         int x = foot.x + WM_LAUNCH_PAD + 6;
         ic_text_draw(c, fh, x, top + fh->cap_h, "ICDA", p->label);
-        ic_text_draw(c, fc, x, top + fh->cap_h + 6 + fc->cap_h, "Version " IC_VERSION_STRING,
+        ic_text_draw(c, fc, x, top + fh->cap_h + 6 + fc->cap_h, ic_version_label(),
                      p->label_secondary);
     }
     {

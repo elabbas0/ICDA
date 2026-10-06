@@ -318,7 +318,7 @@ static void draw_about(ic_app_t *app, ic_canvas_t *c) {
                     "ICDA", p->label, IC_ALIGN_CENTER);
     y += 30;
     ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(content_x(), y, content_w(app), 18),
-                    "Version " IC_VERSION_STRING, p->label_secondary, IC_ALIGN_CENTER);
+                    ic_version_label(), p->label_secondary, IC_ALIGN_CENTER);
     y += 36;
     {
         ic_rect_t g = group_rect(app, y, 3);

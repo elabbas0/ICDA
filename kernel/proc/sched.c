@@ -6,6 +6,7 @@
 #include "../cpu/gdt.h"
 #include "../cpu/smp.h"
 #include "../cpu/fpu.h"
+#include "../cpu/tsc.h"
 #include "../fs/fd.h"
 #include "../ipc/shm.h"
 #include "../tty/pty.h"
@@ -425,8 +426,14 @@ static void schedule_inner(int force) {
 
 /* Called from the PIT interrupt before the kernel lock is taken, so time
  * keeps moving even while another CPU holds the lock. */
+/* The PIT tick can be missed while the CPU runs with interrupts off (Wi-Fi
+ * firmware load, disk writes), which made uptime - and every animation
+ * timed against it - fall behind real time.  Catch up from the TSC. */
 void sched_tick(void) {
-    __sync_fetch_and_add(&uptime_ticks, 1);
+    uint64_t next = uptime_ticks + 1;
+    uint64_t real = tsc_centis();
+    if (real > next) next = real;
+    __atomic_store_n(&uptime_ticks, next, __ATOMIC_RELAXED);
 }
 
 /* Per-CPU LAPIC timer on application processors: preemption only. */

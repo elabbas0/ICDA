@@ -1273,3 +1273,24 @@ int ic_layout_col(ic_rect_t parent, int pad, int gap,
     }
     return 0;
 }
+
+const char *ic_version_label(void) {
+    static char label[40];
+    if (!label[0]) {
+        char rel[512];
+        long n = (long)icda_read_file("/etc/icda-release.txt", rel, sizeof(rel) - 1);
+        ic_strcpy(label, "Version " IC_VERSION_STRING, sizeof(label));
+        if (n > 0) {
+            rel[n] = 0;
+            for (long i = 0; i + 8 < n; i++) {
+                if ((i == 0 || rel[i - 1] == '\n') && ic_memcmp(rel + i, "version ", 8) == 0) {
+                    long e = i + 8, k = 8;
+                    while (e < n && rel[e] != '\n' && k + 1 < (long)sizeof(label)) label[k++] = rel[e++];
+                    label[k] = 0;
+                    break;
+                }
+            }
+        }
+    }
+    return label;
+}

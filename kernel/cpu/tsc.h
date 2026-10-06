@@ -12,5 +12,6 @@ uint64_t    tsc_hz(void);
 uint64_t    tsc_us(void);               /* microseconds since an arbitrary start */
 void        udelay(uint64_t us);
 const char *tsc_source(void);           /* how the frequency was found */
+uint64_t    tsc_centis(void);           /* real 10 ms ticks since tsc_init, 0 if unknown */
 
 #endif
