@@ -4,6 +4,7 @@
 #include "../../memory/pmm.h"
 #include "../../memory/vmm.h"
 #include "../../proc/sched.h"
+#include "../serial/serial.h"
 
 #include <stdint.h>
 
@@ -166,7 +167,9 @@ static int ahci_port_ready(hba_port_t *port) {
 }
 
 #define AHCI_TIMEOUT_TICKS 3000ULL
-#define AHCI_SPIN_FALLBACK 400000000U
+/* used only while the timer is not ticking yet (early boot): each spin is an
+ * uncached register read, about a microsecond on real hardware */
+#define AHCI_SPIN_FALLBACK 20000000U
 
 static int ahci_timed_out(uint64_t start, uint32_t spins) {
     uint64_t now = sched_ticks();
@@ -197,8 +200,10 @@ static int ahci_issue(ahci_device_t *dev, uint8_t command, uint64_t lba, uint16_
     mem_zero((uint8_t *)&hdr[0], sizeof(hba_cmd_header_t));
     mem_zero((uint8_t *)tbl, sizeof(hba_cmd_tbl_t));
 
-    hdr[0].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
-    hdr[0].flags = write ? (1U << 6) : 0;
+    /* DW0 byte 0: CFL in bits 0-4, W (write) in bit 6; byte 1 holds the
+     * port-multiplier number, which must stay 0 */
+    hdr[0].cfl = (uint8_t)((sizeof(fis_reg_h2d_t) / sizeof(uint32_t)) | (write ? (1U << 6) : 0));
+    hdr[0].flags = 0;
     hdr[0].prdtl = 1;
     hdr[0].ctba = (uint32_t)dev->cmdtbl_phys;
     hdr[0].ctbau = (uint32_t)(dev->cmdtbl_phys >> 32);
@@ -230,9 +235,14 @@ static int ahci_issue(ahci_device_t *dev, uint8_t command, uint64_t lba, uint16_
             if ((dev->port->ci & 1U) == 0) break;
         }
     }
-    if (dev->port->ci & 1U) return -1;
-    if (dev->port->is & HBA_PXIS_TFES) return -1;
-    if (dev->port->tfd & 0x01U) return -1;
+    if (dev->port->ci & 1U) {
+        serial_write("[ahci] command timed out\n");
+        return -1;
+    }
+    if ((dev->port->is & HBA_PXIS_TFES) || (dev->port->tfd & 0x01U)) {
+        serial_write("[ahci] command failed (device error)\n");
+        return -1;
+    }
     return 0;
 }
 

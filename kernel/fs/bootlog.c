@@ -20,6 +20,7 @@ static uint32_t log_len;
 static uint32_t log_flushed_len;
 static int      log_wrapped;
 static int      log_writing;
+static int      log_failed;             /* a write failed: stop touching the disk */
 
 void bootlog_putc(char c) {
     if (log_writing) return;            /* don't log our own disk writes */
@@ -58,6 +59,7 @@ int bootlog_flush(const char *milestone) {
     }
     idx = persistfs_active_partition();
     if (idx < 0) return -1;              /* not booted from an installed system */
+    if (log_failed) return -1;
     if (log_len == log_flushed_len && !milestone) return 0;
     part = partition_get((uint32_t)idx);
     if (!part || part->fs_hint != PARTITION_FS_FAT32) return -1;
@@ -66,6 +68,10 @@ int bootlog_flush(const char *milestone) {
     if (rc == 0) rc = fatfs_write(&vol, BOOTLOG_PATH, log_buf, log_len);
     log_writing = 0;
     if (rc == 0) log_flushed_len = log_len;
+    else {
+        log_failed = 1;
+        bootlog_puts("[bootlog] writing BOOTLOG.TXT failed, boot log saving disabled\n");
+    }
     return rc;
 }
 
