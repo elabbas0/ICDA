@@ -121,11 +121,55 @@ void pmm_init(void *multiboot_info) {
 
     uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
     uint64_t bitmap_bytes = bitmap_words * 8;
-    uint64_t multiboot_end = (uint64_t)multiboot_info + info->total_size;
-    uint64_t bitmap_base = (uint64_t)kernel_end - 0xFFFFFFFF80000000ULL;
-    if (multiboot_end > bitmap_base)
-        bitmap_base = multiboot_end;
-    bitmap_base = align_up_u64(bitmap_base, 4096);
+    uint64_t multiboot_start = (uint64_t)multiboot_info;
+    uint64_t multiboot_end = multiboot_start + info->total_size;
+    uint64_t kernel_phys_end = (uint64_t)kernel_end - 0xFFFFFFFF80000000ULL;
+    uint64_t bitmap_base = 0;
+
+    /* The bitmap must sit in RAM the firmware reports as available.  On
+     * UEFI, GRUB puts the boot information high up, often right below ACPI
+     * tables or firmware runtime regions, so "just after the boot info" can
+     * overwrite them.  Take the lowest available spot above the kernel that
+     * does not overlap the boot information (identity-mapped, below 4 GB). */
+    for (uint8_t *p = tag_ptr; p < end_ptr && !bitmap_base; ) {
+        struct multiboot_tag *tag = (struct multiboot_tag *)p;
+        if (tag->type == MULTIBOOT_TAG_TYPE_END) break;
+        if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
+            struct multiboot_tag_mmap *mmap = (struct multiboot_tag_mmap *)tag;
+            uint8_t *ep  = (uint8_t *)mmap->entries;
+            uint8_t *end = (uint8_t *)mmap + mmap->size;
+            uint64_t best = 0;
+            for (; ep < end; ep += mmap->entry_size) {
+                struct multiboot_mmap_entry *e = (struct multiboot_mmap_entry *)ep;
+                uint64_t start, limit = e->addr + e->len;
+                if (e->type != MULTIBOOT_MEMORY_AVAILABLE) continue;
+                start = align_up_u64(e->addr > kernel_phys_end ? e->addr : kernel_phys_end, 4096);
+                if (start < multiboot_end && start + bitmap_bytes > multiboot_start)
+                    start = align_up_u64(multiboot_end, 4096);
+                if (start + bitmap_bytes > limit || start + bitmap_bytes > 0x100000000ULL) continue;
+                if (!best || start < best) best = start;
+            }
+            bitmap_base = best;
+        }
+        uint32_t step = (tag->size + 7) & ~7;
+        if (step == 0) break;
+        p += step;
+    }
+    if (!bitmap_base) {
+        bitmap_base = kernel_phys_end;
+        if (multiboot_end > bitmap_base)
+            bitmap_base = multiboot_end;
+        bitmap_base = align_up_u64(bitmap_base, 4096);
+    }
+    console_write("pmm: boot info at ", CONSOLE_STYLE_INFO);
+    print_hex64(multiboot_start);
+    console_write(" size ", CONSOLE_STYLE_INFO);
+    print_dec64(info->total_size);
+    console_write(", bitmap at ", CONSOLE_STYLE_INFO);
+    print_hex64(bitmap_base);
+    console_write(" size ", CONSOLE_STYLE_INFO);
+    print_dec64(bitmap_bytes);
+    console_write("\n", CONSOLE_STYLE_INFO);
 
     bitmap      = (uint64_t *)bitmap_base;
     used_frames = total_frames;

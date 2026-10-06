@@ -2,6 +2,8 @@
 
 #include "../cpu/multiboot2.h"
 #include "../memory/vmm.h"
+#include "../drivers/serial/serial.h"
+#include "../fs/bootlog.h"
 
 static const struct acpi_rsdp *g_rsdp = 0;
 static const struct acpi_madt *g_madt = 0;
@@ -53,20 +55,25 @@ static const struct acpi_rsdp *find_rsdp_in_multiboot(void *multiboot_info) {
     uint8_t *tag_ptr = (uint8_t *)multiboot_info + 8;
     uint8_t *end_ptr = (uint8_t *)multiboot_info + info->total_size;
 
-    for (uint8_t *p = tag_ptr; p < end_ptr; ) {
+    for (uint8_t *p = tag_ptr; p + 8 <= end_ptr; ) {
         struct multiboot_tag *tag = (struct multiboot_tag *)p;
         if (tag->type == MULTIBOOT_TAG_TYPE_END) {
             break;
         }
+        if (tag->size < 8 || p + tag->size > end_ptr) {
+            serial_write("[acpi] boot information damaged\n");
+            break;
+        }
 
-        if (tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW ||
-            tag->type == MULTIBOOT_TAG_TYPE_ACPI_OLD) {
+        if ((tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW ||
+             tag->type == MULTIBOOT_TAG_TYPE_ACPI_OLD) && tag->size >= 8 + 20) {
             struct multiboot_tag_acpi *acpi_tag = (struct multiboot_tag_acpi *)tag;
             const struct acpi_rsdp *rsdp = (const struct acpi_rsdp *)acpi_tag->rsdp;
-            if (signature_eq(rsdp->signature, "RSD PTR ", 8) &&
-                checksum_ok(rsdp, (tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW && rsdp->length)
-                                      ? rsdp->length
-                                      : 20)) {
+            uint32_t len = 20;
+            if (tag->type == MULTIBOOT_TAG_TYPE_ACPI_NEW && rsdp->revision >= 2 &&
+                rsdp->length >= 20 && rsdp->length <= tag->size - 8)
+                len = rsdp->length;
+            if (signature_eq(rsdp->signature, "RSD PTR ", 8) && checksum_ok(rsdp, len)) {
                 return rsdp;
             }
         }
@@ -102,65 +109,71 @@ static const struct acpi_rsdp *find_rsdp_legacy(void) {
     return scan_rsdp_range(0xE0000, 0x100000);
 }
 
+/* Real firmware tables are trusted only as far as they check out: lengths
+ * are bounded before anything is summed or walked. */
+#define ACPI_MAX_TABLE_LEN (4U * 1024U * 1024U)
+#define ACPI_MAX_ENTRIES   256U
+
+static int acpi_log_tables;
+
+static void log_hex(uint64_t v) {
+    char buf[19];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++) buf[2 + i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 0xF];
+    buf[18] = 0;
+    serial_write(buf);
+}
+
+static const struct acpi_sdt_header *map_table(uint64_t phys) {
+    const struct acpi_sdt_header *t;
+    if (!phys) return 0;
+    t = (const struct acpi_sdt_header *)vmm_map_physical(phys, sizeof(struct acpi_sdt_header),
+                                                         VMM_WRITE | PTE_NO_CACHE);
+    if (!t || t->length < sizeof(struct acpi_sdt_header) || t->length > ACPI_MAX_TABLE_LEN) return 0;
+    t = (const struct acpi_sdt_header *)vmm_map_physical(phys, t->length, VMM_WRITE | PTE_NO_CACHE);
+    if (!t || !checksum_ok(t, t->length)) return 0;
+    return t;
+}
+
 const struct acpi_sdt_header *acpi_find_table(const char signature[4]) {
     const struct acpi_sdt_header *root;
-    uint64_t entry_phys;
-    uint32_t entry_size;
-    uint32_t entry_count;
+    int xsdt;
+    uint32_t entry_size, entry_count;
 
     if (!g_rsdp) {
         return 0;
     }
-
-    if (g_rsdp->revision >= 2 && g_rsdp->xsdt_address) {
-        root = (const struct acpi_sdt_header *)
-            vmm_map_physical(g_rsdp->xsdt_address, sizeof(struct acpi_sdt_header),
-                             VMM_WRITE | PTE_NO_CACHE);
-        entry_size = 8;
-    } else {
-        root = (const struct acpi_sdt_header *)
-            vmm_map_physical(g_rsdp->rsdt_address, sizeof(struct acpi_sdt_header),
-                             VMM_WRITE | PTE_NO_CACHE);
-        entry_size = 4;
-    }
-
+    xsdt = g_rsdp->revision >= 2 && g_rsdp->xsdt_address;
+    root = map_table(xsdt ? g_rsdp->xsdt_address : g_rsdp->rsdt_address);
     if (!root) {
+        if (acpi_log_tables) serial_write("[acpi] root table unreadable\n");
         return 0;
     }
-
-    root = (const struct acpi_sdt_header *)
-        vmm_map_physical((g_rsdp->revision >= 2 && g_rsdp->xsdt_address)
-                             ? g_rsdp->xsdt_address
-                             : g_rsdp->rsdt_address,
-                         root->length, VMM_WRITE | PTE_NO_CACHE);
-    if (!root || !checksum_ok(root, root->length)) {
-        return 0;
-    }
-
+    entry_size = xsdt ? 8 : 4;
     entry_count = (root->length - sizeof(struct acpi_sdt_header)) / entry_size;
+    if (entry_count > ACPI_MAX_ENTRIES) entry_count = ACPI_MAX_ENTRIES;
+
     for (uint32_t i = 0; i < entry_count; i++) {
-        if (entry_size == 8) {
-            const uint64_t *entries = (const uint64_t *)((const uint8_t *)root + sizeof(struct acpi_sdt_header));
-            entry_phys = entries[i];
-        } else {
-            const uint32_t *entries = (const uint32_t *)((const uint8_t *)root + sizeof(struct acpi_sdt_header));
-            entry_phys = entries[i];
-        }
+        const uint8_t *e = (const uint8_t *)root + sizeof(struct acpi_sdt_header) + i * entry_size;
+        uint64_t entry_phys = 0;
+        const struct acpi_sdt_header *table;
+        for (uint32_t b = 0; b < entry_size; b++) entry_phys |= (uint64_t)e[b] << (8 * b);
 
-        const struct acpi_sdt_header *table =
-            (const struct acpi_sdt_header *)vmm_map_physical(entry_phys, sizeof(struct acpi_sdt_header),
-                                                             VMM_WRITE | PTE_NO_CACHE);
-        if (!table) {
-            continue;
+        if (acpi_log_tables) {
+            serial_write("[acpi] table at ");
+            log_hex(entry_phys);
+            bootlog_flush(0);
         }
-
-        table = (const struct acpi_sdt_header *)vmm_map_physical(entry_phys, table->length,
-                                                                 VMM_WRITE | PTE_NO_CACHE);
-        if (!table || !checksum_ok(table, table->length)) {
-            continue;
+        table = map_table(entry_phys);
+        if (acpi_log_tables) {
+            char sig[5] = { '?', '?', '?', '?', 0 };
+            if (table) for (int k = 0; k < 4; k++) sig[k] = table->signature[k];
+            serial_write(table ? ": " : ": invalid ");
+            serial_write(sig);
+            serial_write("\n");
         }
-
-        if (signature_eq(table->signature, signature, 4)) {
+        if (table && signature_eq(table->signature, signature, 4)) {
             return table;
         }
     }
@@ -171,17 +184,29 @@ const struct acpi_sdt_header *acpi_find_table(const char signature[4]) {
 int acpi_init(void *multiboot_info) {
     g_rsdp = find_rsdp_in_multiboot(multiboot_info);
     if (!g_rsdp) {
+        serial_write("[acpi] no RSDP from the boot loader, scanning low memory\n");
         g_rsdp = find_rsdp_legacy();
     }
     if (!g_rsdp) {
+        serial_write("[acpi] no RSDP\n");
         return -1;
     }
+    serial_write("[acpi] rsdp revision ");
+    log_hex(g_rsdp->revision);
+    serial_write(g_rsdp->revision >= 2 ? " xsdt " : " rsdt ");
+    log_hex(g_rsdp->revision >= 2 ? g_rsdp->xsdt_address : g_rsdp->rsdt_address);
+    serial_write("\n");
+    bootlog_flush(0);
 
+    acpi_log_tables = 1;
     g_madt = (const struct acpi_madt *)acpi_find_table("APIC");
+    acpi_log_tables = 0;
     if (!g_madt) {
+        serial_write("[acpi] no MADT\n");
         return -1;
     }
     g_mcfg = (const struct acpi_mcfg *)acpi_find_table("MCFG");
+    bootlog_flush("ACPI tables read");
 
     return 0;
 }
