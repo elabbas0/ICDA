@@ -548,7 +548,7 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h $(IC_HEADER
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/browser.c -o /tmp/icda-browser.o
 	cp -f /tmp/icda-browser.o browser.o
 
-SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o \
+SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o surfer_download.o \
                      surfer_js.o surfer_prelude.o $(QJS_OBJS) $(LIBM_OBJS)
 
 # QuickJS (third_party/quickjs, MIT).  -D__ICDA__ drops Atomics (no OS threads).

@@ -18,6 +18,7 @@
 #include "image.h"
 #include "form.h"
 #include "js.h"
+#include "download.h"
 
 #define WIN_W        1024
 #define WIN_H        720
@@ -895,6 +896,8 @@ static void begin_navigate(ic_app_t *app) {
     sf.nav_stopped = 0;
     sf.nav_redirects = 0;
     sf.nav_t0 = now_ms();
+    sf.t_doc = sf.t_shown = sf.nav_t0;
+    sf.t_render_ms = sf.t_js_ms = 0;
     if (strcmp(sf.nav_url, HOME_URL) == 0 || strcmp(sf.nav_url, "about:blank") == 0) {
         page_clear();
         sf.scroll = 0;
@@ -924,6 +927,14 @@ static void doc_step(ic_app_t *app) {
     char final_url[URL_CAP];
     if (http_poll(r, 0) == HTTP_PENDING) {
         if (r->headers_done) {
+            if (r->status == 200 && dl_wanted(r)) {
+                /* a file, not a page: save it and keep showing this page */
+                dl_begin(r, sf.nav_url);
+                sf.nav_req = 0;
+                if (!sf.addr_focused) set_address(sf.url);
+                nav_finish("Download started");
+                return;
+            }
             char msg[64];
             snprintf(msg, sizeof msg, "Loading... %lu KB", (unsigned long)(r->body_len / 1024));
             set_status(msg);
@@ -940,6 +951,13 @@ static void doc_step(ic_app_t *app) {
             if (sf.nav_req) return;
             r = 0;
         }
+    }
+    if (r && r->state == HTTP_DONE && r->status == 200 && dl_wanted(r)) {
+        sf.nav_req = 0;
+        dl_begin(r, sf.nav_url);
+        if (!sf.addr_focused) set_address(sf.url);
+        nav_finish("Download started");
+        return;
     }
     sf.nav_req = 0;
     snprintf(final_url, sizeof final_url, "%s", sf.nav_url);
@@ -1211,7 +1229,15 @@ static void focus_step(ic_app_t *app, int dir) {
 static void activate(ic_app_t *app, dom_node_t *n, int click_x) {
     int kind = form_kind(n);
     if (n->tag == T_A) {
-        open_link(dom_attr(n, "href"));
+        if (dom_attr(n, "download") && dom_attr(n, "href")) {
+            /* <a download>: save instead of navigating */
+            char url[URL_CAP];
+            if (url_resolve(sf.doc ? sf.doc->base_url : sf.url, dom_attr(n, "href"), url, sizeof url) == 0 &&
+                (starts_with(url, "http://") || starts_with(url, "https://")))
+                dl_begin_url(url, dom_attr(n, "download"));
+        } else {
+            open_link(dom_attr(n, "href"));
+        }
         return;
     }
     if (form_disabled(n)) return;
@@ -1669,7 +1695,7 @@ static void draw_page(ic_app_t *app, ic_canvas_t *c) {
 static void draw_status(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t s = status_rect(app);
     const ic_palette_t *pal = ic_palette();
-    ic_ui_statusbar(c, s, sf.hover_url[0] ? sf.hover_url : sf.status);
+    ic_ui_statusbar(c, s, sf.hover_url[0] ? sf.hover_url : dl_status() ? dl_status() : sf.status);
     if (sf.doc && sf.doc->title[0] && !sf.hover_url[0]) {
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(s.x + s.w / 2, s.y, s.w / 2 - IC_SP_3, s.h),
                         sf.doc->title, pal->label_tertiary, IC_ALIGN_RIGHT);
@@ -1686,10 +1712,12 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     draw_toolbar(app, c);
     draw_page(app, c);
     draw_status(app, c);
-    if (sf.addr_focused || images_busy() || nav_busy() || sf.css_late) ic_app_animate(app);
+    dl_draw(app, c);
+    if (sf.addr_focused || images_busy() || nav_busy() || sf.css_late || dl_busy()) ic_app_animate(app);
 }
 
 static void tick(ic_app_t *app) {
+    if (dl_tick()) ic_app_invalidate(app);
     if (sf.nav_pending) {
         sf.nav_pending = 0;
         begin_navigate(app);
@@ -1818,6 +1846,11 @@ static dom_node_t *link_at(ic_app_t *app, int x, int y) {
 static void event(ic_app_t *app, const ic_event_t *ev) {
     ic_rect_t a = addr_rect(app);
     ic_rect_t p = page_rect(app);
+    if (dl_sheet_open()) {
+        (void)dl_event(app, ev);
+        ic_app_invalidate(app);
+        return;
+    }
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE: {
         dom_node_t *ln = link_at(app, ev->x, ev->y);
