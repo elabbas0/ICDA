@@ -35,6 +35,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# DISABLED: on the dev laptop this script crashed Windows (bugcheck) partway
+# through and left it unbootable until `bcdboot` repaired the boot files.
+# Do not run it until the cause is understood and the steps are redone safely.
+Write-Host "icda-dualboot.ps1 is disabled: it crashed Windows on its first real run. See the commit log." -ForegroundColor Red
+exit 1
+
 $IcdaGuid  = "{5e2a3f8c-1d4b-4e6a-9c7d-1cda00000001}"
 $BasicGuid = "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}"
 $EspGuid   = "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
