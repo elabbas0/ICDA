@@ -52,6 +52,7 @@ struct js_page {
     char        url[URL_CAP];
     JSValue     proto_target, proto_node, proto_element, proto_chardata, proto_text, proto_comment,
                 proto_document, proto_fragment;
+    JSValue     proto_known;   /* standard HTML tags: carries tag-specific properties */
     JSValue     tag_proto[T_COUNT];
     JSValue    *wrappers;
     int         nwrap, capwrap;
@@ -137,7 +138,7 @@ static JSValue proto_for(js_page_t *p, dom_node_t *n) {
     switch (n->type) {
     case N_ELEMENT:
         if (n->tag < T_COUNT && !JS_IsUndefined(p->tag_proto[n->tag])) return p->tag_proto[n->tag];
-        return p->proto_element;
+        return n->tag != T_UNKNOWN ? p->proto_known : p->proto_element;
     case N_TEXT: return p->proto_text;
     case N_COMMENT: return p->proto_comment;
     case N_DOCUMENT: return p->proto_document;
@@ -642,6 +643,11 @@ static JSValue el_set_attr(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     value = JS_ToCStringLen(ctx, &vlen, argv[1]);
     if (!value) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
     set_attr(p, n, name, value, vlen);
+    /* an image given a source gets its load event (Surfer fetches the
+     * picture itself); lazy loaders reveal the image on it */
+    if (n->tag == T_IMG && vlen && (name[0] == 's' || name[0] == 'S') && (name[1] == 'r' || name[1] == 'R') &&
+        (name[2] == 'c' || name[2] == 'C') && !name[3] && !ptr_in(p->loads, p->nloads, n))
+        ptr_push(&p->loads, &p->nloads, &p->caploads, n);
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, value);
     return JS_UNDEFINED;
@@ -935,7 +941,7 @@ static JSValue el_computed(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     }
     JS_SetPropertyStr(ctx, o, "display", JS_NewString(ctx, s->display < 20 ? displays[s->display] : "block"));
     JS_SetPropertyStr(ctx, o, "position", JS_NewString(ctx, s->position < 5 ? positions[s->position] : "static"));
-    JS_SetPropertyStr(ctx, o, "visibility", JS_NewString(ctx, s->visibility ? "hidden" : "visible"));
+    JS_SetPropertyStr(ctx, o, "visibility", JS_NewString(ctx, s->visibility ? "visible" : "hidden"));
     color_str(buf, sizeof buf, s->color);
     JS_SetPropertyStr(ctx, o, "color", JS_NewString(ctx, buf));
     color_str(buf, sizeof buf, s->bg_color);
@@ -1202,6 +1208,7 @@ static void req_finish(js_page_t *p, int i) {
     args[2] = ok ? JS_NewArrayBufferCopy(ctx, r->body ? r->body : (const uint8_t *)"", r->body_len) : JS_NULL;
     args[3] = JS_NewString(ctx, q->url);
     args[4] = ok ? JS_NULL : JS_NewString(ctx, r && r->error[0] ? r->error : "network error");
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;
     ret = JS_Call(ctx, q->cb, JS_UNDEFINED, 5, args);
     if (JS_IsException(ret)) report_exception(p, "fetch callback");
     JS_FreeValue(ctx, ret);
@@ -1481,7 +1488,9 @@ static int script_kind(dom_node_t *el) {
 static void run_jobs(js_page_t *p) {
     JSContext *c1;
     for (int i = 0; i < MAX_JOBS_PER_TICK; i++) {
-        int r = JS_ExecutePendingJob(p->rt, &c1);
+        int r;
+        p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;   /* each job its own budget */
+        r = JS_ExecutePendingJob(p->rt, &c1);
         if (r == 0) break;
         if (r < 0) report_exception(p, "promise job");
     }
@@ -1727,7 +1736,13 @@ js_page_t *js_page_new(dom_doc_t *doc, const char *url, const js_host_t *host) {
     p->rt = JS_NewRuntime();
     if (!p->rt) { free(p); return 0; }
     JS_SetMemoryLimit(p->rt, 512u * 1024 * 1024);
-    JS_SetMaxStackSize(p->rt, 768 * 1024);
+    /* component frameworks recurse deeply: YouTube's signal updates through
+     * nested custom elements went past 24 MB of native stack.  The process
+     * has 64 MB of stack, paged in only as it is used */
+    JS_SetMaxStackSize(p->rt, 48 * 1024 * 1024);
+#ifdef TLS_HOST
+    if (getenv("JSSTACK")) JS_SetMaxStackSize(p->rt, (size_t)atoi(getenv("JSSTACK")) * 1024);
+#endif
     JS_SetInterruptHandler(p->rt, interrupt_cb, p);
     p->ctx = ctx = JS_NewContext(p->rt);
     if (!ctx) { JS_FreeRuntime(p->rt); free(p); return 0; }
@@ -1769,13 +1784,18 @@ js_page_t *js_page_new(dom_doc_t *doc, const char *url, const js_host_t *host) {
     elproto = make_interface(ctx, global, "Element", p->proto_node);
     JS_SetPropertyFunctionList(ctx, elproto, element_funcs, sizeof element_funcs / sizeof element_funcs[0]);
     p->proto_element = make_interface(ctx, global, "HTMLElement", elproto);
+    /* value, src, href, type ... live here, under the per-tag interfaces, so
+     * unknown and custom elements see a plain HTMLElement (as polymer-resin
+     * expects when it decides which bound properties need sanitizing) */
+    p->proto_known = JS_NewObjectProto(ctx, p->proto_element);
+    JS_SetPropertyStr(ctx, global, "__stdElementProto", JS_DupValue(ctx, p->proto_known));
     JS_FreeValue(ctx, elproto);
     {
         JSValue svg = make_interface(ctx, global, "SVGElement", p->proto_element);
         JS_FreeValue(ctx, svg);
     }
     for (size_t i = 0; i < sizeof tag_interfaces / sizeof tag_interfaces[0]; i++) {
-        p->tag_proto[tag_interfaces[i].tag] = make_interface(ctx, global, tag_interfaces[i].name, p->proto_element);
+        p->tag_proto[tag_interfaces[i].tag] = make_interface(ctx, global, tag_interfaces[i].name, p->proto_known);
     }
     p->proto_document = make_interface(ctx, global, "Document", p->proto_node);
     JS_SetPropertyFunctionList(ctx, p->proto_document, document_funcs, sizeof document_funcs / sizeof document_funcs[0]);
@@ -1813,6 +1833,7 @@ void js_page_free(js_page_t *p) {
     JS_FreeValue(p->ctx, p->proto_target);
     JS_FreeValue(p->ctx, p->proto_node);
     JS_FreeValue(p->ctx, p->proto_element);
+    JS_FreeValue(p->ctx, p->proto_known);
     JS_FreeValue(p->ctx, p->proto_chardata);
     JS_FreeValue(p->ctx, p->proto_text);
     JS_FreeValue(p->ctx, p->proto_comment);
@@ -1959,6 +1980,50 @@ static int interrupt_cb(JSRuntime *rt, void *opaque) {
         logf_(p, "script stopped after %d s without finishing", SCRIPT_BUDGET_MS / 1000);
         return 1;
     }
+#ifdef TLS_HOST
+    /* JSPROF: a stack sample every 50 ms, "[prof] top < caller < ..." */
+    {
+        static double next;
+        static int inside;
+        if (getenv("JSPROF") && !inside && now_ms() >= next) {
+            JSValue r;
+            next = now_ms() + 50;
+            inside = 1;
+            r = JS_Eval(p->ctx, "new Error().stack", 17, "<prof>", JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsString(r)) {
+                const char *s = JS_ToCString(p->ctx, r);
+                char line[1000];
+                size_t o = 0;
+                int frames = 0;
+                for (const char *q = s; q && *q && frames < 4 && o + 2 < sizeof line;) {
+                    const char *e = strchr(q, '\n');
+                    size_t n = e ? (size_t)(e - q) : strlen(q);
+                    if (!strstr(q, "<prof>") || strstr(q, "<prof>") > q + n) {
+                        const char *at = q;
+                        while (at < q + n && (*at == ' ')) at++;
+                        if (n > 4) {
+                            size_t m = (size_t)(q + n - at);
+                            if (m > 420) m = 420;
+                            if (o + m + 3 < sizeof line) {
+                                memcpy(line + o, at, m);
+                                o += m;
+                                memcpy(line + o, " < ", 3);
+                                o += 3;
+                            }
+                            frames++;
+                        }
+                    }
+                    q = e ? e + 1 : 0;
+                }
+                line[o] = 0;
+                logf_(p, "[prof] %s", line);
+                JS_FreeCString(p->ctx, s);
+            }
+            JS_FreeValue(p->ctx, r);
+            inside = 0;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -2027,6 +2092,7 @@ int js_tick(js_page_t *p) {
 #ifdef TLS_HOST
             double tf0 = now_ms();
 #endif
+            p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS;   /* each callback its own budget */
             arg = tm.raf ? JS_NewFloat64(p->ctx, t) : JS_UNDEFINED;
             r = tm.raf ? JS_Call(p->ctx, tm.fn, JS_UNDEFINED, 1, &arg)
                        : JS_Call(p->ctx, tm.fn, JS_UNDEFINED, tm.argc, tm.argv);

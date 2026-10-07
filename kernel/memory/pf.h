@@ -15,7 +15,7 @@
 
 
 #define USER_STACK_TOP    0x00007FFFFFFFE000ULL  
-#define USER_STACK_LIMIT  0x00007FFFFFF00000ULL  
+#define USER_STACK_LIMIT  0x00007FFFFBFFE000ULL   /* 64 MB of stack, mapped as it is touched */
 
 
 

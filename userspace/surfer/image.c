@@ -55,6 +55,8 @@ void image_release(image_t *img) {
 
 /* ---- SVG ------------------------------------------------------------------ */
 
+#include <stdio.h>   /* before the sscanf redirect below, so its declaration is untouched */
+
 /* nanosvg only uses sscanf for "#rrggbb" and "#rgb" colours */
 static int nsvg_scan_hex(const char *s, const char *fmt, unsigned int *r, unsigned int *g, unsigned int *b) {
     int digits = fmt[2] == '2' ? 2 : 1;

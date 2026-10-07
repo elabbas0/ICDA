@@ -1416,25 +1416,144 @@ static void bg_size(css_style_t *st, const char *v, size_t vl, const ctx_t *c) {
     st->bg_size_mode = st->bg_size[0].unit == U_AUTO && st->bg_size[1].unit == U_AUTO ? 0 : 3;
 }
 
+/* ---- inherit / initial / unset ------------------------------------------
+ * The fields each property (and shorthand) controls, copied from the parent
+ * style (inherit) or from a style holding initial values (initial). */
+static void inherit(css_style_t *st, const css_style_t *p);
+
+static void copy_prop(css_style_t *st, const css_style_t *f, int prop) {
+    int i;
+    switch (prop) {
+    case PR_DISPLAY: st->display = f->display; break;
+    case PR_POSITION: st->position = f->position; break;
+    case PR_FLOAT: st->float_ = f->float_; break;
+    case PR_CLEAR: st->clear = f->clear; break;
+    case PR_BOX_SIZING: st->box_sizing = f->box_sizing; break;
+    case PR_OVERFLOW: case PR_OVERFLOW_X: case PR_OVERFLOW_Y: st->overflow = f->overflow; break;
+    case PR_VISIBILITY: st->visibility = f->visibility; break;
+    case PR_WHITE_SPACE: st->white_space = f->white_space; break;
+    case PR_TEXT_ALIGN: st->text_align = f->text_align; break;
+    case PR_TEXT_TRANSFORM: st->text_transform = f->text_transform; break;
+    case PR_FONT_STYLE: st->font_italic = f->font_italic; break;
+    case PR_FONT_WEIGHT: st->font_weight = f->font_weight; break;
+    case PR_FONT_SIZE: st->font_size = f->font_size; break;
+    case PR_FONT_FAMILY: st->font_family = f->font_family; break;
+    case PR_FONT:
+        st->font_italic = f->font_italic; st->font_weight = f->font_weight; st->font_size = f->font_size;
+        st->font_family = f->font_family; st->lh_type = f->lh_type; st->lh_value = f->lh_value;
+        st->line_height = f->line_height;
+        break;
+    case PR_LINE_HEIGHT: st->lh_type = f->lh_type; st->lh_value = f->lh_value; st->line_height = f->line_height; break;
+    case PR_LETTER_SPACING: st->letter_spacing = f->letter_spacing; break;
+    case PR_WORD_SPACING: st->word_spacing = f->word_spacing; break;
+    case PR_TEXT_INDENT: st->text_indent = f->text_indent; break;
+    case PR_COLOR: st->color = f->color; break;
+    case PR_BACKGROUND:
+        st->bg_color = f->bg_color; st->bg_image = f->bg_image; st->bg_repeat = f->bg_repeat;
+        st->bg_size_mode = f->bg_size_mode;
+        for (i = 0; i < 2; i++) { st->bg_size[i] = f->bg_size[i]; st->bg_pos[i] = f->bg_pos[i]; }
+        break;
+    case PR_BACKGROUND_COLOR: st->bg_color = f->bg_color; break;
+    case PR_BACKGROUND_IMAGE: st->bg_image = f->bg_image; break;
+    case PR_BACKGROUND_SIZE: st->bg_size_mode = f->bg_size_mode; st->bg_size[0] = f->bg_size[0]; st->bg_size[1] = f->bg_size[1]; break;
+    case PR_BACKGROUND_REPEAT: st->bg_repeat = f->bg_repeat; break;
+    case PR_BACKGROUND_POSITION: st->bg_pos[0] = f->bg_pos[0]; st->bg_pos[1] = f->bg_pos[1]; break;
+    case PR_WIDTH: st->width = f->width; break;
+    case PR_HEIGHT: st->height = f->height; break;
+    case PR_MIN_WIDTH: st->min_w = f->min_w; break;
+    case PR_MIN_HEIGHT: st->min_h = f->min_h; break;
+    case PR_MAX_WIDTH: st->max_w = f->max_w; break;
+    case PR_MAX_HEIGHT: st->max_h = f->max_h; break;
+    case PR_MARGIN: for (i = 0; i < 4; i++) st->margin[i] = f->margin[i]; break;
+    case PR_MARGIN_TOP: case PR_MARGIN_RIGHT: case PR_MARGIN_BOTTOM: case PR_MARGIN_LEFT:
+        st->margin[prop - PR_MARGIN_TOP] = f->margin[prop - PR_MARGIN_TOP]; break;
+    case PR_PADDING: for (i = 0; i < 4; i++) st->padding[i] = f->padding[i]; break;
+    case PR_PADDING_TOP: case PR_PADDING_RIGHT: case PR_PADDING_BOTTOM: case PR_PADDING_LEFT:
+        st->padding[prop - PR_PADDING_TOP] = f->padding[prop - PR_PADDING_TOP]; break;
+    case PR_INSET: for (i = 0; i < 4; i++) st->inset[i] = f->inset[i]; break;
+    case PR_TOP: case PR_RIGHT: case PR_BOTTOM: case PR_LEFT: st->inset[prop - PR_TOP] = f->inset[prop - PR_TOP]; break;
+    case PR_BORDER: case PR_BORDER_WIDTH: case PR_BORDER_STYLE: case PR_BORDER_COLOR:
+        for (i = 0; i < 4; i++) {
+            if (prop != PR_BORDER_STYLE && prop != PR_BORDER_COLOR) st->border_w[i] = f->border_w[i];
+            if (prop != PR_BORDER_WIDTH && prop != PR_BORDER_COLOR) st->border_style[i] = f->border_style[i];
+            if (prop != PR_BORDER_WIDTH && prop != PR_BORDER_STYLE) st->border_color[i] = f->border_color[i];
+        }
+        break;
+    case PR_BORDER_TOP: case PR_BORDER_RIGHT: case PR_BORDER_BOTTOM: case PR_BORDER_LEFT:
+        i = prop - PR_BORDER_TOP;
+        st->border_w[i] = f->border_w[i]; st->border_style[i] = f->border_style[i]; st->border_color[i] = f->border_color[i];
+        break;
+    case PR_BORDER_TOP_WIDTH: case PR_BORDER_RIGHT_WIDTH: case PR_BORDER_BOTTOM_WIDTH: case PR_BORDER_LEFT_WIDTH:
+        st->border_w[prop - PR_BORDER_TOP_WIDTH] = f->border_w[prop - PR_BORDER_TOP_WIDTH]; break;
+    case PR_BORDER_TOP_COLOR: case PR_BORDER_RIGHT_COLOR: case PR_BORDER_BOTTOM_COLOR: case PR_BORDER_LEFT_COLOR:
+        st->border_color[prop - PR_BORDER_TOP_COLOR] = f->border_color[prop - PR_BORDER_TOP_COLOR]; break;
+    case PR_BORDER_TOP_STYLE: case PR_BORDER_RIGHT_STYLE: case PR_BORDER_BOTTOM_STYLE: case PR_BORDER_LEFT_STYLE:
+        st->border_style[prop - PR_BORDER_TOP_STYLE] = f->border_style[prop - PR_BORDER_TOP_STYLE]; break;
+    case PR_BORDER_RADIUS: st->radius = f->radius; break;
+    case PR_LIST_STYLE: st->list_style = f->list_style; st->list_inside = f->list_inside; break;
+    case PR_LIST_STYLE_TYPE: st->list_style = f->list_style; break;
+    case PR_LIST_STYLE_POSITION: st->list_inside = f->list_inside; break;
+    case PR_VERTICAL_ALIGN: st->vertical_align = f->vertical_align; break;
+    case PR_TEXT_DECORATION: case PR_TEXT_DECORATION_LINE: st->decoration = f->decoration; break;
+    case PR_OPACITY: st->opacity = f->opacity; break;
+    case PR_Z_INDEX: st->z_index = f->z_index; st->z_auto = f->z_auto; break;
+    case PR_FLEX: st->flex_grow = f->flex_grow; st->flex_shrink = f->flex_shrink; st->flex_basis = f->flex_basis; break;
+    case PR_FLEX_DIRECTION: st->flex_dir = f->flex_dir; break;
+    case PR_FLEX_WRAP: st->flex_wrap = f->flex_wrap; break;
+    case PR_FLEX_FLOW: st->flex_dir = f->flex_dir; st->flex_wrap = f->flex_wrap; break;
+    case PR_FLEX_GROW: st->flex_grow = f->flex_grow; break;
+    case PR_FLEX_SHRINK: st->flex_shrink = f->flex_shrink; break;
+    case PR_FLEX_BASIS: st->flex_basis = f->flex_basis; break;
+    case PR_JUSTIFY_CONTENT: st->justify = f->justify; break;
+    case PR_ALIGN_ITEMS: st->align_items = f->align_items; break;
+    case PR_ALIGN_SELF: st->align_self = f->align_self; break;
+    case PR_ALIGN_CONTENT: st->align_content = f->align_content; break;
+    case PR_ORDER: st->order = f->order; break;
+    case PR_GAP: st->gap_row = f->gap_row; st->gap_col = f->gap_col; break;
+    case PR_ROW_GAP: st->gap_row = f->gap_row; break;
+    case PR_COLUMN_GAP: st->gap_col = f->gap_col; break;
+    case PR_GRID_TEMPLATE_COLUMNS: st->grid_cols = f->grid_cols; break;
+    case PR_CONTENT: st->content = f->content; break;
+    case PR_TABLE_LAYOUT: st->table_layout_fixed = f->table_layout_fixed; break;
+    case PR_BORDER_COLLAPSE: st->border_collapse = f->border_collapse; break;
+    case PR_CURSOR: st->cursor_pointer = f->cursor_pointer; break;
+    default: break;
+    }
+}
+
+/* properties that inherit by default (what unset does) */
+static int prop_inherits(int prop) {
+    switch (prop) {
+    case PR_VISIBILITY: case PR_WHITE_SPACE: case PR_TEXT_ALIGN: case PR_TEXT_TRANSFORM: case PR_FONT_STYLE:
+    case PR_FONT_WEIGHT: case PR_FONT_SIZE: case PR_FONT_FAMILY: case PR_FONT: case PR_LINE_HEIGHT:
+    case PR_LETTER_SPACING: case PR_WORD_SPACING: case PR_TEXT_INDENT: case PR_COLOR: case PR_LIST_STYLE:
+    case PR_LIST_STYLE_TYPE: case PR_LIST_STYLE_POSITION: case PR_BORDER_COLLAPSE: case PR_CURSOR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, arena_t *a) {
     css_len_t l;
     int ok;
     size_t vl = strlen(v);
     const css_style_t *ps = c->parent;
-    if (ieq(v, vl, "inherit")) {
-        if (!ps) return;
-        switch (prop) {
-        case PR_COLOR: st->color = ps->color; break;
-        case PR_BACKGROUND_COLOR: st->bg_color = ps->bg_color; break;
-        case PR_FONT_SIZE: st->font_size = ps->font_size; break;
-        case PR_DISPLAY: st->display = ps->display; break;
-        case PR_WIDTH: st->width = ps->width; break;
-        case PR_HEIGHT: st->height = ps->height; break;
-        default: break;
+    if (ieq(v, vl, "inherit") || ieq(v, vl, "initial") || ieq(v, vl, "unset") || ieq(v, vl, "revert") ||
+        ieq(v, vl, "revert-layer")) {
+        static css_style_t initial;
+        static int have_initial;
+        int from_parent;
+        if (!have_initial) {
+            inherit(&initial, 0);
+            have_initial = 1;
         }
+        if (ieq(v, vl, "inherit")) from_parent = 1;
+        else if (ieq(v, vl, "initial")) from_parent = 0;
+        else from_parent = prop_inherits(prop);       /* unset, revert */
+        copy_prop(st, from_parent && ps ? ps : &initial, prop);
         return;
     }
-    if (ieq(v, vl, "initial") || ieq(v, vl, "unset") || ieq(v, vl, "revert")) return;
     switch (prop) {
     case PR_DISPLAY: {
         int k = keyword(v, display_kw, 20);
@@ -2247,13 +2366,45 @@ static void bloom_element(dom_node_t *el, int d) {
 static void clear_styles(dom_node_t *n) {
     for (dom_node_t *c = n->first; c; c = c->next) {
         c->style = 0;
+        c->gen[0] = c->gen[1] = 0;
         clear_styles(c);
     }
+}
+
+/* ::before / ::after with any content (also "") become a synthetic element
+ * that layout treats as a child of el: it can be a block, be positioned,
+ * have padding and a background - the aspect-ratio boxes, overlays and
+ * separators sites build from empty pseudo-elements.  Allocated in the
+ * style arena, so each cascade makes them anew. */
+static dom_node_t *generated(cascade_t *cs, dom_node_t *el, css_style_t *ps, int which) {
+    dom_node_t *g;
+    if (!ps || !ps->content || ps->display == D_NONE) return 0;
+    g = (dom_node_t *)arena_alloc(cs->arena, sizeof(dom_node_t));
+    if (!g) return 0;
+    memset(g, 0, sizeof *g);
+    g->type = N_ELEMENT;
+    g->tag = T_UNKNOWN;
+    g->name = which ? "::after" : "::before";
+    g->parent = el;
+    g->style = ps;
+    if (ps->content[0]) {
+        dom_node_t *t = (dom_node_t *)arena_alloc(cs->arena, sizeof(dom_node_t));
+        if (t) {
+            memset(t, 0, sizeof *t);
+            t->type = N_TEXT;
+            t->text = ps->content;
+            t->text_len = strlen(ps->content);
+            t->parent = g;
+            g->first = g->last = t;
+        }
+    }
+    return g;
 }
 
 static void walk(cascade_t *cs, dom_node_t *n, const css_style_t *parent) {
     for (dom_node_t *c = n->first; c; c = c->next) {
         if (c->type != N_ELEMENT) continue;
+        c->gen[0] = c->gen[1] = 0;
         hash_classes(cs, c);
         c->style = compute(cs, c, parent, 0);
         if (!c->style) {
@@ -2267,6 +2418,8 @@ static void walk(cascade_t *cs, dom_node_t *n, const css_style_t *parent) {
         }
         c->style->before = compute(cs, c, c->style, 1);
         c->style->after = compute(cs, c, c->style, 2);
+        c->gen[0] = generated(cs, c, c->style->before, 0);
+        c->gen[1] = generated(cs, c, c->style->after, 1);
         bloom_element(c, 1);
         walk(cs, c, c->style);
         bloom_element(c, -1);

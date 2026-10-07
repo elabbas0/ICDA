@@ -7,6 +7,21 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Children in layout order: the ::before box, the DOM children, the ::after
+ * box.  The pseudo-element boxes are synthetic nodes the cascade hangs off
+ * their element (dom_node_t.gen); scripts never see them. */
+static dom_node_t *lfirst(const dom_node_t *n) {
+    return n->gen[0] ? n->gen[0] : n->first ? n->first : n->gen[1];
+}
+
+static dom_node_t *lnext(const dom_node_t *k) {
+    const dom_node_t *p = k->parent;
+    if (!p) return k->next;
+    if (k == p->gen[0]) return p->first ? p->first : p->gen[1];
+    if (k == p->gen[1]) return 0;
+    return k->next ? k->next : p->gen[1];
+}
+
 #define MAX_FLOATS 128
 #define MAX_ABS    256
 
@@ -33,6 +48,7 @@ typedef struct {
     abs_t         abs[MAX_ABS];
     int           nabs;
     int           depth;
+    float         pct_h;   /* definite content height of the containing block, -1 if none */
 } lctx_t;
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -200,7 +216,7 @@ static void intrinsic(lctx_t *c, dom_node_t *n, const css_style_t *st, float *mn
 static void replaced_size(lctx_t *c, dom_node_t *n, const css_style_t *st, float cb_w, float *w, float *h) {
     int iw = 0, ih = 0;
     void *image = 0;
-    float cw = res(st->width, cb_w, -1), ch = res(st->height, -1, -1);
+    float cw = res(st->width, cb_w, -1), ch = res(st->height, c->pct_h, -1);
     if ((n->tag == T_IMG || n->tag == T_SVG) && c->img) c->img(n, c->img_ctx, &iw, &ih, &image);
     if (n->tag == T_INPUT) {
         const char *type = dom_attr(n, "type");
@@ -270,7 +286,7 @@ static void intrinsic(lctx_t *c, dom_node_t *n, const css_style_t *st, float *mn
     {
         float line_max = 0, line_min = 0, block_max = 0, block_min = 0;
         int row = st->display == D_FLEX && (st->flex_dir == FD_ROW || st->flex_dir == FD_ROW_REVERSE);
-        for (dom_node_t *k = n->first; k; k = k->next) {
+        for (dom_node_t *k = lfirst(n); k; k = lnext(k)) {
             float a = 0, b = 0;
             if (k->type == N_TEXT) {
                 text_intrinsic(k->text, k->text_len, st, &a, &b);
@@ -375,15 +391,7 @@ static void collect_inline(lctx_t *c, items_t *v, dom_node_t *n, const css_style
             item_t it = { IT_SPACE_OPEN, 0, 0, st, bg, link, 0, open, n };
             push_item(v, it);
         }
-        if (st->before && st->before->content && st->before->content[0]) {
-            item_t it = { IT_TEXT, st->before->content, strlen(st->before->content), st->before, bg, link, 0, 0, n };
-            push_item(v, it);
-        }
-        for (dom_node_t *k = n->first; k; k = k->next) collect_inline(c, v, k, st, bg, link, cb_w);
-        if (st->after && st->after->content && st->after->content[0]) {
-            item_t it = { IT_TEXT, st->after->content, strlen(st->after->content), st->after, bg, link, 0, 0, n };
-            push_item(v, it);
-        }
+        for (dom_node_t *k = lfirst(n); k; k = lnext(k)) collect_inline(c, v, k, st, bg, link, cb_w);
         if (close > 0) {
             item_t it = { IT_SPACE_CLOSE, 0, 0, st, bg, link, 0, close, n };
             push_item(v, it);
@@ -798,14 +806,14 @@ static void layout_children(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, floa
     items_t items = { 0 };
     float fb = 0;
     int have_block = 0;
-    for (dom_node_t *k = n->first;; k = k->next) {
+    for (dom_node_t *k = lfirst(n);; k = lnext(k)) {
         const css_style_t *ks = k && k->type == N_ELEMENT ? k->style : 0;
         int flush = !k;
         if (k && k->type == N_ELEMENT) {
             if (!ks || ks->display == D_NONE) continue;
             if (ks->display == D_CONTENTS) {
                 /* children participate directly; approximate by inline collection */
-                for (dom_node_t *g = k->first; g; g = g->next) collect_inline(c, &items, g, b->st, 0, link_of(k), right - left);
+                for (dom_node_t *g = lfirst(k); g; g = lnext(g)) collect_inline(c, &items, g, b->st, 0, link_of(k), right - left);
                 continue;
             }
             if (ks->position == P_ABSOLUTE || ks->position == P_FIXED) {
@@ -1050,12 +1058,27 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
         own = (bfc_t *)calloc(1, sizeof(bfc_t));
         bfc = own;
     }
+    /* percentage heights inside resolve against this box when its height is
+     * known before its content: given, or fixed by top and bottom */
+    float saved_pct_h = c->pct_h;
+    {
+        float known = -1;
+        if (!is_auto(st->height) && !(st->height.unit == U_PCT && cb_h < 0)) {
+            known = res(st->height, cb_h, -1);
+            if (known >= 0 && st->box_sizing) known -= vframe(b);
+        } else if ((st->position == P_ABSOLUTE || st->position == P_FIXED) && cb_h >= 0 &&
+                   !is_auto(st->inset[0]) && !is_auto(st->inset[2])) {
+            known = cb_h - res(st->inset[0], cb_h, 0) - res(st->inset[2], cb_h, 0) - b->mt - b->mb - vframe(b);
+        }
+        c->pct_h = known;
+    }
     {
         int abs_mark = c->nabs;
         if (b->kind == BX_REPLACED) content_h = 0;
         else if (b->kind == BX_FLEX || b->kind == BX_GRID) layout_flex(c, b, n, bfc, &content_h);
         else if (b->kind == BX_TABLE) layout_table(c, b, n, &content_h);
         else layout_children(c, b, n, bfc, &content_h);
+        c->pct_h = saved_pct_h;
         if (b->kind == BX_REPLACED) {
             float rw, rh;
             replaced_size(c, n, st, cb_w, &rw, &rh);
@@ -1164,10 +1187,10 @@ static void layout_flex(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, float *c
     int ni = 0, cap = 0;
     float y = top;
     (void)bfc;
-    for (dom_node_t *k = n->first; k; k = k->next) cap++;
+    for (dom_node_t *k = lfirst(n); k; k = lnext(k)) cap++;
     items = (fitem_t *)calloc((size_t)(cap ? cap : 1), sizeof(fitem_t));
     if (!items) return;
-    for (dom_node_t *k = n->first; k; k = k->next) {
+    for (dom_node_t *k = lfirst(n); k; k = lnext(k)) {
         if (k->type == N_TEXT) {
             int blank = 1;
             for (size_t i = 0; i < k->text_len; i++) {
@@ -1632,6 +1655,7 @@ layout_t *layout_document(dom_doc_t *doc, float viewport_w, float viewport_h, im
         free(bfc);
         return 0;
     }
+    c->pct_h = -1;
     L->viewport_w = viewport_w;
     L->viewport_h = viewport_h;
     c->L = L;

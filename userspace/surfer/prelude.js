@@ -38,7 +38,17 @@ const fmt = (args) => Array.prototype.map.call(args, (a) => show(a)).join(' ');
 const counts = {}, timers = {};
 G.console = {
     log() { __log(fmt(arguments)); }, info() { __log(fmt(arguments)); }, debug() { __log(fmt(arguments)); },
-    warn() { __log('warn: ' + fmt(arguments)); }, error() { __log('error: ' + fmt(arguments)); },
+    warn() { __log('warn: ' + fmt(arguments)); },
+    error() {
+        __log('error: ' + fmt(arguments));
+        /* like a browser console: where an Error came from (more of it for
+         * stack overflows, so the repeating cycle shows) */
+        for (const a of arguments) if (a instanceof Error && a.stack) {
+            const frames = String(a.stack).split('\n').map((s) => s.trim()).filter(Boolean);
+            const n = /stack overflow/.test(a.message) ? 90 : 6;
+            __log('    ' + frames.slice(0, n).join(' | '));
+        }
+    },
     trace() { __log('trace: ' + fmt(arguments)); }, dir(o) { __log(show(o)); }, dirxml(o) { __log(show(o)); },
     table(o) { __log(show(o)); }, group() {}, groupCollapsed() {}, groupEnd() {},
     time(l) { timers[l || 'default'] = __now(); },
@@ -593,11 +603,26 @@ def(EP, 'currentSrc', function () { return this.src; });
 val(EP, 'decode', function () { return Promise.resolve(); });
 def(EP, 'contentWindow', () => null);
 def(EP, 'contentDocument', () => null);
+/* A template's content is one DocumentFragment that lives as long as the
+ * template; the parser puts the children in the template itself, so they
+ * move into it on access (also after innerHTML is set again). */
+const templateContent = new WeakMap();
 def(EP, 'content', function () {
-    if (this.localName !== 'template') return undefined;
-    const f = doc.createDocumentFragment();
-    for (const c of childArray(this, false)) f.appendChild(c.cloneNode(true));
+    if (notNode(this)) return undefined;
+    if (this.localName !== 'template') { const v = this.getAttribute('content'); return v === null ? '' : v; }   /* <meta content> */
+    let f = templateContent.get(this);
+    if (!f) {
+        f = doc.createDocumentFragment();
+        templateContent.set(this, f);
+    }
+    if (this.firstChild) {
+        if (f.firstChild) while (f.firstChild) f.removeChild(f.firstChild);   /* innerHTML replaced it */
+        while (this.firstChild) f.appendChild(this.firstChild);
+    }
     return f;
+}, function (v) {
+    if (notNode(this)) Object.defineProperty(this, 'content', { value: v, writable: true, enumerable: true, configurable: true });
+    else if (this.localName !== 'template') this.setAttribute('content', v);
 });
 val(EP, 'showModal', function () { this.setAttribute('open', ''); });
 val(EP, 'show', function () { this.setAttribute('open', ''); });
@@ -1464,24 +1489,87 @@ class MutationObserver {
     takeRecords() { return []; }
 }
 G.MutationObserver = G.WebKitMutationObserver = MutationObserver;
-class IntersectionObserver {
-    constructor(cb, opts) { this._cb = cb; this._t = new Set(); this.root = (opts && opts.root) || null; this.rootMargin = (opts && opts.rootMargin) || '0px'; this.thresholds = [0]; }
-    observe(el) {
-        if (this._t.has(el)) return;
-        this._t.add(el);
-        /* everything counts as visible: lazy content loads right away */
-        setTimeout(() => {
-            if (!this._t.has(el)) return;
-            const r = el.getBoundingClientRect();
-            try { this._cb([{ target: el, isIntersecting: true, intersectionRatio: 1, boundingClientRect: r, intersectionRect: r, rootBounds: null, time: performance.now() }], this); } catch (e) { reportError(e); }
-        }, 0);
+/* IntersectionObserver against the viewport, from layout.  Targets are
+ * checked a few times a second; each change of state is reported, and the
+ * first check of a target always is (as in browsers).  A target without a
+ * box of its own yet - an <img> before its src is chosen, filling its
+ * parent - is measured by its nearest ancestor that has one, so lazy
+ * loaders that wait for a non-empty intersection get started. */
+const ioAll = new Set();
+let ioTimer = 0;
+function ioMargin(m) {
+    const v = String(m || '0px').trim().split(/\s+/).map((s) => parseFloat(s) || 0);
+    return { top: v[0] || 0, right: v[1] !== undefined ? v[1] : v[0] || 0, bottom: v[2] !== undefined ? v[2] : v[0] || 0,
+        left: v[3] !== undefined ? v[3] : v[1] !== undefined ? v[1] : v[0] || 0 };
+}
+function ioBox(el) {
+    let r = el.getBoundingClientRect();
+    for (let e = el; (r.width <= 0 || r.height <= 0) && e.parentElement; ) {
+        e = e.parentElement;
+        r = e.getBoundingClientRect();
     }
+    return r;
+}
+function ioCheck() {
+    ioTimer = 0;
+    let any = false;
+    for (const io of Array.from(ioAll)) {
+        if (!io._t.size) continue;
+        any = true;
+        const m = ioMargin(io.rootMargin), vw = G.innerWidth, vh = G.innerHeight;
+        const root = { x: -m.left, y: -m.top, left: -m.left, top: -m.top, width: vw + m.left + m.right, height: vh + m.top + m.bottom,
+            right: vw + m.right, bottom: vh + m.bottom };
+        const entries = [];
+        for (const [el, prev] of Array.from(io._t)) {
+            if (!el.isConnected) {
+                if (prev !== false) io._t.set(el, false);
+                continue;
+            }
+            const own = el.getBoundingClientRect(), r = ioBox(el);
+            const x1 = Math.max(r.left, root.left), y1 = Math.max(r.top, root.top);
+            const x2 = Math.min(r.left + r.width, root.right), y2 = Math.min(r.top + r.height, root.bottom);
+            const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
+            const hit = w > 0 && h > 0;
+            if (prev === hit) continue;
+            io._t.set(el, hit);
+            entries.push(new IntersectionObserverEntry({
+                target: el, isIntersecting: hit, isVisible: hit, time: performance.now(), rootBounds: root,
+                intersectionRatio: hit ? Math.min(1, (w * h) / Math.max(1, r.width * r.height)) : 0,
+                boundingClientRect: own,
+                intersectionRect: hit ? { x: x1, y: y1, left: x1, top: y1, width: w, height: h, right: x2, bottom: y2 }
+                                      : { x: 0, y: 0, left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 }
+            }));
+        }
+        if (entries.length) { try { io._cb(entries, io); } catch (e) { reportError(e); } }
+    }
+    if (any) ioTimer = setTimeout(ioCheck, 250);
+}
+const ioWake = () => { if (!ioTimer) ioTimer = setTimeout(ioCheck, 0); };
+G.__ioDebug = () => ({ observers: ioAll.size, targets: Array.from(ioAll).reduce((n, o) => n + o._t.size, 0), timer: ioTimer, states: Array.from(ioAll).map((o) => Array.from(o._t.values()).map(String).join('')).join('|').slice(0, 200) });
+G.addEventListener('scroll', () => { if (ioTimer) { clearTimeout(ioTimer); ioTimer = 0; } ioWake(); });
+class IntersectionObserver {
+    constructor(cb, opts) {
+        this._cb = cb; this._t = new Map();
+        this.root = (opts && opts.root) || null;
+        this.rootMargin = (opts && opts.rootMargin) || '0px';
+        this.thresholds = [].concat(opts && opts.threshold !== undefined ? opts.threshold : 0);
+        ioAll.add(this);
+    }
+    observe(el) { if (el && !this._t.has(el)) { this._t.set(el, undefined); ioWake(); } }
     unobserve(el) { this._t.delete(el); }
     disconnect() { this._t.clear(); }
     takeRecords() { return []; }
 }
 G.IntersectionObserver = IntersectionObserver;
-G.IntersectionObserverEntry = function IntersectionObserverEntry() {};
+/* a real entry type: polyfills (YouTube ships one) check for
+ * 'intersectionRatio' in IntersectionObserverEntry.prototype and otherwise
+ * replace the observer above with their own */
+class IntersectionObserverEntry {
+    constructor(init) { this._e = init || {}; }
+}
+for (const k of ['target', 'isIntersecting', 'intersectionRatio', 'boundingClientRect', 'intersectionRect', 'rootBounds', 'time', 'isVisible'])
+    def(IntersectionObserverEntry.prototype, k, function () { return this._e[k]; });
+G.IntersectionObserverEntry = IntersectionObserverEntry;
 class ResizeObserver {
     constructor(cb) { this._cb = cb; this._t = new Set(); }
     observe(el) {
@@ -1753,6 +1841,48 @@ if (!G.Intl) {
     Date.prototype.toLocaleTimeString = function (l, o) { return new DateTimeFormat(l, Object.assign({ hour: 'numeric', minute: '2-digit', second: '2-digit' }, o)).format(this); };
     Date.prototype.toLocaleString = function (l, o) { return new DateTimeFormat(l, o || { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(this); };
     String.prototype.localeCompare = function (b, l, o) { return new Collator(l, o).compare(this, b); };
+}
+
+/* document.all is a falsy object in browsers, which JavaScript itself cannot
+ * make.  NaN is the nearest stand-in: falsy (old `if (document.all)` IE
+ * checks stay off) and never === anything, so tests like polymer-resin's
+ * `if (!v && v !== document.all) return v` let undefined through as in a
+ * browser - with undefined they sanitized it into "zClosurez". */
+Object.defineProperty(DP, 'all', { get: () => NaN, configurable: true });
+
+/* ---- tag-specific properties off Element.prototype ----------------------
+ * Browsers put value, src, href, type ... on HTMLInputElement,
+ * HTMLImageElement and so on; an unknown or custom element has none of them.
+ * Above they are defined once on Element.prototype for simplicity; here they
+ * move to the prototype every standard HTML tag inherits from
+ * (__stdElementProto, under the per-tag interfaces), so `'text' in
+ * document.createElement('x-y')` is false as in a browser.  polymer-resin
+ * (YouTube) relies on that to leave bound properties of custom elements
+ * alone. */
+{
+    const STD = G.__stdElementProto;
+    const SPECIFIC = ['value', 'checked', 'selectedIndex', 'htmlFor', 'defaultValue', 'method', 'selected',
+        'defaultSelected', 'index', 'text', 'options', 'selectedOptions', 'length', 'add', 'form', 'elements', 'submit',
+        'requestSubmit', 'reset', 'checkValidity', 'reportValidity', 'setCustomValidity', 'validity',
+        'validationMessage', 'willValidate', 'labels', 'select', 'setSelectionRange', 'setRangeText', 'selectionStart',
+        'selectionEnd', 'selectionDirection', 'valueAsNumber', 'files', 'indeterminate', 'play', 'pause', 'load',
+        'canPlayType', 'paused', 'currentTime', 'duration', 'getContext', 'toDataURL', 'naturalWidth', 'naturalHeight',
+        'complete', 'currentSrc', 'decode', 'contentWindow', 'contentDocument', 'content', 'showModal', 'show', 'close',
+        'relList', 'name', 'type', 'alt', 'placeholder', 'rel', 'target', 'download', 'accept', 'autocomplete',
+        'enctype', 'pattern', 'min', 'max', 'step', 'crossOrigin', 'referrerPolicy', 'loading', 'decoding', 'media',
+        'sizes', 'srcset', 'width', 'height', 'label', 'integrity', 'as', 'charset', 'httpEquiv', 'disabled',
+        'readOnly', 'required', 'multiple', 'async', 'defer', 'noModule', 'open', 'controls', 'autoplay', 'loop',
+        'muted', 'defaultChecked', 'noValidate', 'formNoValidate', 'isMap', 'href', 'src', 'action', 'cite', 'poster',
+        'formAction'];
+    if (STD) {
+        for (const name of SPECIFIC) {
+            const d = Object.getOwnPropertyDescriptor(EP, name);
+            if (!d) continue;
+            Object.defineProperty(STD, name, d);
+            delete EP[name];
+        }
+        delete G.__stdElementProto;
+    }
 }
 
 /* ---- DOM change notifications: custom elements and MutationObserver ------

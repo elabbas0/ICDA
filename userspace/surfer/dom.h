@@ -59,6 +59,7 @@ typedef struct dom_node {
     void            *layout;   /* layout box, owned by the layout pass */
     struct form_ctl *ctl;      /* live form-control state (value, checked), see form.h */
     void            *js;       /* script wrapper object, owned by the script engine */
+    struct dom_node *gen[2];   /* ::before, ::after as layout-only children (cascade-owned) */
 } dom_node_t;
 
 typedef struct {
