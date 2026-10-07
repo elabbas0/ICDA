@@ -137,3 +137,4 @@ gui-cursor.txt
 *.tar.gz
 scripts/locate-cursor*.ps1
 ap_trampoline.bin
+tests/linux/out/

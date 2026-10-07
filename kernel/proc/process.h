@@ -37,7 +37,8 @@ typedef enum {
     THREAD_BLOCK_NONE = 0,
     THREAD_BLOCK_SLEEP = 1,
     THREAD_BLOCK_WAIT_CHILD = 2,
-    THREAD_BLOCK_INPUT = 3
+    THREAD_BLOCK_INPUT = 3,
+    THREAD_BLOCK_FUTEX = 4
 } thread_block_reason_t;
 
 struct thread;
@@ -85,6 +86,11 @@ typedef struct process {
     
     uint64_t         cpu_ticks;
     uint64_t         mem_bytes;
+    /* threads (Linux clone with CLONE_THREAD): the threads of one process
+     * run on one CPU at a time, which keeps the address space and the
+     * kernel state they share free of cross-CPU races */
+    struct thread   *on_cpu;
+    int              nthreads;     /* live threads */
     char             name[64];
 } process_t;
 
@@ -116,6 +122,10 @@ typedef struct thread {
     uint64_t         fs_base;
     void            *lx_frame;
     int              pinned;
+    uint64_t         clear_tid;     /* CLONE_CHILD_CLEARTID: zeroed and woken on exit */
+    uint64_t         futex_addr;    /* THREAD_BLOCK_FUTEX: waiting on this user address */
+    int              futex_woken;   /* set by a futex wake (not a timeout) */
+    int              sibling;       /* a thread besides the main one */
 } thread_t;
 
 #endif

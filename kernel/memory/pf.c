@@ -252,6 +252,7 @@ static void page_fault_handler(struct registers *regs) {
         process_t *proc = sched_current_process();
         thread_t *thread = sched_current_thread();
         if (proc && proc->kind == PROCESS_USER && thread) {
+            sched_stop_threads(proc, thread);
             fd_proc_exit(proc);
             shm_proc_exit(proc);
             pty_proc_exit(proc);

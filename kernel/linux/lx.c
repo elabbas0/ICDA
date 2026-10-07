@@ -1899,6 +1899,147 @@ static void lx_fork_child_start(void) {
     lx_resume_user(&frame);
 }
 
+/* ---- threads: clone(CLONE_VM | CLONE_THREAD), futex, thread exit ---------
+ * A thread is another thread_t in the same process: the address space, the
+ * descriptors and the signal state are the process's.  Thread ids: the main
+ * thread's is the pid (as in Linux), the others LX_TID_BASE + their kernel
+ * thread id, which no pid reaches. */
+#define ETIMEDOUT   110
+#define LX_TID_BASE 0x100000
+
+static int64_t lx_tid(const thread_t *t) {
+    if (!t || !t->sibling) return t && t->owner ? (int64_t)t->owner->pid : 0;
+    return LX_TID_BASE + (int64_t)t->tid;
+}
+
+/* tid -> thread of the current process (0 if none) */
+static thread_t *lx_thread_of(process_t *p, int64_t tid) {
+    thread_t *start = sched_current_thread(), *t = start;
+    if (!start) return 0;
+    do {
+        if (t->owner == p && t->state != THREAD_ZOMBIE && lx_tid(t) == tid) return t;
+        t = t->next;
+    } while (t && t != start);
+    return 0;
+}
+
+static uint64_t sys_clone_thread(struct registers *regs, uint64_t flags, uint64_t new_sp, uint64_t parent_tid,
+                                 uint64_t child_tid, uint64_t tls) {
+    process_t *p = sched_current_process();
+    struct registers *frame;
+    thread_t *t;
+    int32_t tid;
+    if (!(flags & 0x100) || !(flags & 0x800) || !new_sp) return ERR(EINVAL);  /* CLONE_VM, CLONE_SIGHAND */
+    frame = (struct registers *)kmalloc(sizeof(struct registers));
+    if (!frame) return ERR(ENOMEM);
+    *frame = *regs;
+    frame->rax = 0;
+    frame->rsp = new_sp;
+    t = proc_create_sibling_thread(p, frame->rip, frame->rsp, lx_fork_child_start);
+    if (!t) {
+        kfree(frame);
+        return ERR(EAGAIN);
+    }
+    t->lx_frame = frame;
+    t->fs_base = (flags & 0x80000) ? tls : cpu_fs_base();           /* CLONE_SETTLS */
+    t->clear_tid = (flags & 0x200000) ? child_tid : 0;              /* CLONE_CHILD_CLEARTID */
+    tid = (int32_t)lx_tid(t);
+    if ((flags & 0x100000) && parent_tid) (void)copy_to_user((void *)parent_tid, &tid, 4);  /* CLONE_PARENT_SETTID */
+    if ((flags & 0x1000000) && child_tid) (void)copy_to_user((void *)child_tid, &tid, 4);   /* CLONE_CHILD_SETTID */
+    return (uint64_t)(int64_t)tid;
+}
+
+/* exit() of one thread while others go on; the last one ends the process */
+static void lx_thread_exit(uint64_t code) {
+    thread_t *t = sched_current_thread();
+    process_t *p = sched_current_process();
+    if (t->clear_tid) {
+        int32_t zero = 0;
+        (void)copy_to_user((void *)t->clear_tid, &zero, 4);
+        (void)sched_futex_wake(t->clear_tid, 0x7FFFFFFF);
+        t->clear_tid = 0;
+    }
+    if (p->nthreads <= 1) {
+        user_request_exit_to_kernel(code);
+        return;
+    }
+    p->nthreads--;
+    t->state = THREAD_ZOMBIE;
+    t->block_reason = THREAD_BLOCK_NONE;
+    sched_yield();
+    for (;;) __asm__ volatile("hlt");
+}
+
+/* timespec -> ticks from now (rounded up); abs: against the given clock */
+static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out) {
+    uint64_t ts[2], now_ns, when_ns;
+    if (copy_from_user(ts, (const void *)uts, sizeof(ts)) != 0) return ERR(EFAULT);
+    if (ts[1] >= 1000000000ULL) return ERR(EINVAL);
+    when_ns = ts[0] * 1000000000ULL + ts[1];
+    if (abs) {
+        uint64_t ticks = sched_ticks();
+        now_ns = (realtime ? now_epoch() * 1000000000ULL : (ticks / 100) * 1000000000ULL) + (ticks % 100) * 10000000ULL;
+        if (when_ns <= now_ns) return ERR(ETIMEDOUT);
+        when_ns -= now_ns;
+    }
+    *out = (when_ns + 9999999ULL) / 10000000ULL;
+    if (!*out) *out = 1;
+    return 0;
+}
+
+static uint64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t utime, uint64_t uaddr2, uint64_t val3) {
+    struct lx_state *s = lx_get(sched_current_process());
+    int cmd = (int)(op & 0x7F), realtime = (op & 0x100) != 0;
+    if (uaddr & 3) return ERR(EINVAL);
+    switch (cmd) {
+    case 0:     /* FUTEX_WAIT (relative timeout) */
+    case 9: {   /* FUTEX_WAIT_BITSET (absolute timeout) */
+        int32_t cur;
+        uint64_t ticks = 0;
+        if (cmd == 9 && !val3) return ERR(EINVAL);
+        if (utime) {
+            int64_t r = futex_ticks(utime, cmd == 9, realtime, &ticks);
+            if (r < 0) return (uint64_t)r;
+        }
+        if (copy_from_user(&cur, (const void *)uaddr, 4) != 0) return ERR(EFAULT);
+        if (cur != (int32_t)val) return ERR(EAGAIN);
+        if (signal_pending(s)) return ERR(EINTR);
+        if (sched_futex_wait(uaddr, ticks)) return 0;
+        if (signal_pending(s)) return ERR(EINTR);
+        return utime ? ERR(ETIMEDOUT) : 0;
+    }
+    case 1:     /* FUTEX_WAKE */
+    case 10:    /* FUTEX_WAKE_BITSET */
+        return (uint64_t)sched_futex_wake(uaddr, (int)(val > 0x7FFFFFFF ? 0x7FFFFFFF : val));
+    case 3:     /* FUTEX_REQUEUE */
+    case 4: {   /* FUTEX_CMP_REQUEUE */
+        int n;
+        if (cmd == 4) {
+            int32_t cur;
+            if (copy_from_user(&cur, (const void *)uaddr, 4) != 0) return ERR(EFAULT);
+            if (cur != (int32_t)val3) return ERR(EAGAIN);
+        }
+        n = sched_futex_wake(uaddr, (int)(val > 0x7FFFFFFF ? 0x7FFFFFFF : val));
+        return (uint64_t)(n + sched_futex_requeue(uaddr, uaddr2, (int)(utime > 0x7FFFFFFF ? 0x7FFFFFFF : utime)));
+    }
+    case 5: {   /* FUTEX_WAKE_OP: *uaddr2 op= arg, wake uaddr, and uaddr2 if the old value passes */
+        int32_t old, arg = (int32_t)((val3 >> 12) & 0xFFF), cmparg = (int32_t)(val3 & 0xFFF), nv;
+        int opc = (int)((val3 >> 28) & 7), cmp = (int)((val3 >> 24) & 15), n, ok;
+        if (val3 & (1u << 31)) arg = 1 << (arg & 31);
+        if (copy_from_user(&old, (const void *)uaddr2, 4) != 0) return ERR(EFAULT);
+        nv = opc == 0 ? arg : opc == 1 ? old + arg : opc == 2 ? (old | arg) : opc == 3 ? (old & ~arg) : (old ^ arg);
+        if (copy_to_user((void *)uaddr2, &nv, 4) != 0) return ERR(EFAULT);
+        n = sched_futex_wake(uaddr, (int)val);
+        ok = cmp == 0 ? old == cmparg : cmp == 1 ? old != cmparg : cmp == 2 ? old < cmparg :
+             cmp == 3 ? old <= cmparg : cmp == 4 ? old > cmparg : old >= cmparg;
+        if (ok) n += sched_futex_wake(uaddr2, (int)(utime > 0x7FFFFFFF ? 0x7FFFFFFF : utime));
+        return (uint64_t)n;
+    }
+    default:
+        return ERR(ENOSYS);  /* priority-inheritance futexes */
+    }
+}
+
 static uint64_t sys_fork(struct registers *regs, uint64_t flags, uint64_t new_sp, uint64_t child_tid) {
     process_t *parent = sched_current_process();
     struct lx_state *ps = lx_get(parent), *cs;
@@ -2078,6 +2219,10 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
         rc = -ENOEXEC;
         goto out;
     }
+    sched_stop_threads(p, t);        /* the other threads end; this one becomes the process */
+    p->main_thread = t;
+    t->sibling = 0;
+    t->clear_tid = 0;
     vmm_switch_address_space(p->addr_space);
     pf_set_current_as(p->addr_space);
     if (old_as) vmm_destroy_address_space(old_as);
@@ -2196,10 +2341,13 @@ uint64_t lx_syscall(struct registers *regs) {
         case 35: return sys_nanosleep((const uint64_t *)a0);
         case 37: return 0;
         case 39: return p->pid;
-        case 56: return sys_fork(regs, a0, a1, a3);
+        case 56:
+            if (a0 & 0x10000) return sys_clone_thread(regs, a0, a1, a2, a3, a4);   /* CLONE_THREAD */
+            return sys_fork(regs, a0, a1, a3);
         case 57: case 58: return sys_fork(regs, 0, 0, 0);
         case 59: return sys_execve(regs, (const char *)a0, (const uint64_t *)a1, (const uint64_t *)a2);
-        case 60: case 231:
+        case 60: lx_thread_exit(a0 & 0xFF); return 0;
+        case 231:
             user_request_exit_to_kernel(a0 & 0xFF);
             return 0;
         case 61: return sys_wait4((int64_t)(int32_t)a0, (int32_t *)a1, a2);
@@ -2271,16 +2419,16 @@ uint64_t lx_syscall(struct registers *regs) {
             }
             return ERR(EINVAL);
         case 160: return 0;
-        case 186: return p->pid;
-        case 200: return sys_kill((int64_t)a0, (int64_t)a1);
+        case 186: return (uint64_t)lx_tid(sched_current_thread());
+        case 200: return sys_kill(lx_thread_of(p, (int64_t)a0) ? (int64_t)p->pid : (int64_t)a0, (int64_t)a1);
         case 201: {
             uint64_t now = now_epoch();
             if (a0 && copy_to_user((void *)a0, &now, 8) != 0) return ERR(EFAULT);
             return now;
         }
-        case 202: return (a1 & 0x7F) == 0 ? ERR(EAGAIN) : 0;
+        case 202: return sys_futex(a0, a1, a2, a3, a4, a5);
         case 217: return sys_getdents64((int64_t)a0, (uint8_t *)a1, a2);
-        case 218: p->lx->clear_tid = a0; return p->pid;
+        case 218: sched_current_thread()->clear_tid = a0; return (uint64_t)lx_tid(sched_current_thread());
         case 228: return sys_clock_gettime(a0, (uint64_t *)a1);
         case 229: {
             uint64_t res[2] = { 0, 10000000ULL };
@@ -2288,7 +2436,7 @@ uint64_t lx_syscall(struct registers *regs) {
             return 0;
         }
         case 230: return sys_clock_nanosleep(a0, a1, (const uint64_t *)a2);
-        case 234: return sys_kill((int64_t)a1, (int64_t)a2);
+        case 234: return sys_kill((int64_t)a0 == (int64_t)p->pid ? (int64_t)p->pid : (int64_t)a1, (int64_t)a2);
         case 257: return sys_openat((int64_t)(int32_t)a0, (const char *)a1, a2);
         case 258: return sys_mkdirat((int64_t)(int32_t)a0, (const char *)a1);
         case 260: case 268: case 280: return 0;

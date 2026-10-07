@@ -413,6 +413,7 @@ void user_request_exit_to_kernel(uint64_t code) {
     thread_t *thread = sched_current_thread();
     process_t *proc = sched_current_process();
     if (proc) {
+        sched_stop_threads(proc, thread);
         fd_proc_exit(proc);
         shm_proc_exit(proc);
         pty_proc_exit(proc);
@@ -761,9 +762,19 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
     }
 
     user_proc->state = PROCESS_READY;
-    if (path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/' &&
-        !(image_size > 7 && (uint8_t)image[7] == USER_ELF_OSABI_ICDA)) {
-        user_proc->linux_personality = 1;
+    /* Linux programs: anything in /bin, and elsewhere any program that is
+     * neither marked as ICDA's nor named like a native one (.app .icx .elf) */
+    if (!(image_size > 7 && (uint8_t)image[7] == USER_ELF_OSABI_ICDA)) {
+        uint64_t n = 0;
+        int native_name;
+        while (path[n]) n++;
+        native_name = n > 4 && path[n - 4] == '.' &&
+                      ((path[n - 3] == 'a' && path[n - 2] == 'p' && path[n - 1] == 'p') ||
+                       (path[n - 3] == 'i' && path[n - 2] == 'c' && path[n - 1] == 'x') ||
+                       (path[n - 3] == 'e' && path[n - 2] == 'l' && path[n - 1] == 'f'));
+        if ((path[0] == '/' && path[1] == 'b' && path[2] == 'i' && path[3] == 'n' && path[4] == '/') || !native_name) {
+            user_proc->linux_personality = 1;
+        }
     }
     if (user_load_image(user_proc, image, image_size, &entry_rip) != 0) {
         return -1;

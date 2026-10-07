@@ -108,43 +108,39 @@ static void sched_wake_parent_if_waiting(process_t *proc) {
 }
 
 static void wake_blocked_threads(void) {
-    process_t *proc = process_list;
-
-    while (proc) {
-        thread_t *thread = proc->main_thread;
-        if (thread &&
-            thread->state == THREAD_BLOCKED &&
-            (thread->block_reason == THREAD_BLOCK_SLEEP ||
-             (thread->block_reason == THREAD_BLOCK_INPUT && thread->wake_tick != 0)) &&
-            thread->wake_tick <= uptime_ticks) {
+    thread_t *start = current_thread_ptr, *thread = start;
+    if (!start) return;
+    do {
+        process_t *proc = thread->owner;
+        if (thread->state == THREAD_BLOCKED && thread->wake_tick != 0 && thread->wake_tick <= uptime_ticks &&
+            (thread->block_reason == THREAD_BLOCK_SLEEP || thread->block_reason == THREAD_BLOCK_INPUT ||
+             thread->block_reason == THREAD_BLOCK_FUTEX)) {
             thread->state = THREAD_READY;
             thread->block_reason = THREAD_BLOCK_NONE;
             thread->wake_tick = 0;
-            if (proc->state == PROCESS_BLOCKED) {
+            if (proc && proc->state == PROCESS_BLOCKED) {
                 proc->state = PROCESS_READY;
             }
         }
-        proc = proc->next_all;
-    }
+        thread = thread->next;
+    } while (thread && thread != start);
 }
 
 void sched_wake_input_waiters(void) {
-    process_t *proc = process_list;
-
-    while (proc) {
-        thread_t *thread = proc->main_thread;
-        if (thread &&
-            thread->state == THREAD_BLOCKED &&
-            thread->block_reason == THREAD_BLOCK_INPUT) {
+    thread_t *start = current_thread_ptr, *thread = start;
+    if (!start) return;
+    do {
+        process_t *proc = thread->owner;
+        if (thread->state == THREAD_BLOCKED && thread->block_reason == THREAD_BLOCK_INPUT) {
             thread->state = THREAD_READY;
             thread->block_reason = THREAD_BLOCK_NONE;
             thread->wake_tick = 0;
-            if (proc->state == PROCESS_BLOCKED) {
+            if (proc && proc->state == PROCESS_BLOCKED) {
                 proc->state = PROCESS_READY;
             }
         }
-        proc = proc->next_all;
-    }
+        thread = thread->next;
+    } while (thread && thread != start);
 }
 
 static void enqueue(thread_t *thread) {
@@ -310,6 +306,7 @@ process_t *proc_create_kernel(void (*entry)(void)) {
 
     proc->main_thread = thread;
     proc->state = PROCESS_READY;
+    proc->nthreads = 1;
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
@@ -345,6 +342,7 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
 
     proc->main_thread = thread;
     proc->state = PROCESS_READY;
+    proc->nthreads = 1;
 
     thread->tid = next_tid++;
     thread->state = THREAD_READY;
@@ -355,6 +353,119 @@ thread_t *proc_create_user_thread(process_t *proc, uint64_t user_rip, uint64_t u
     prepare_kernel_thread_stack(thread, stack_top, entry);
     enqueue(thread);
     return thread;
+}
+
+static void schedule_inner(int force);
+
+/* Another thread in proc (Linux clone with CLONE_THREAD): its own kernel
+ * stacks, the process's address space; entry runs first in kernel mode. */
+thread_t *proc_create_sibling_thread(process_t *proc, uint64_t user_rip, uint64_t user_rsp, void (*entry)(void)) {
+    thread_t *thread = alloc_thread();
+    uint64_t stack_top, entry_stack_top;
+
+    if (!proc || !entry || !thread) {
+        if (thread) pmm_free(VIRT_TO_PHYS((uint64_t)thread));
+        return NULL;
+    }
+    stack_top = alloc_kernel_stack();
+    if (!stack_top) {
+        pmm_free(VIRT_TO_PHYS((uint64_t)thread));
+        return NULL;
+    }
+    entry_stack_top = alloc_kernel_stack();
+    if (!entry_stack_top) {
+        pmm_free_range(VIRT_TO_PHYS(stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
+        pmm_free(VIRT_TO_PHYS((uint64_t)thread));
+        return NULL;
+    }
+    thread->tid = next_tid++;
+    thread->state = THREAD_READY;
+    thread->owner = proc;
+    thread->sibling = 1;
+    thread->user_entry_stack_top = entry_stack_top;
+    thread->user_rip = user_rip;
+    thread->user_rsp = user_rsp;
+    prepare_kernel_thread_stack(thread, stack_top, entry);
+    proc->nthreads++;
+    enqueue(thread);
+    return thread;
+}
+
+/* Visits every thread on the run ring. */
+#define FOR_EACH_THREAD(t)                                                   \
+    for (thread_t *t##_start = current_thread_ptr, *t = t##_start; t;        \
+         t = (t->next == t##_start ? NULL : t->next))
+
+/* Ends every thread of proc except keep (process exit); they never run again. */
+void sched_stop_threads(process_t *proc, thread_t *keep) {
+    if (!proc || !current_thread_ptr) return;
+    FOR_EACH_THREAD(t) {
+        if (t->owner != proc || t == keep || t->state == THREAD_ZOMBIE) continue;
+        t->state = THREAD_ZOMBIE;
+        t->block_reason = THREAD_BLOCK_NONE;
+        t->wake_tick = 0;
+    }
+    proc->nthreads = keep ? 1 : 0;
+}
+
+/* ---- futex: threads sleeping on a user address --------------------------- */
+
+/* Blocks the current thread until a wake on uaddr in its address space or
+ * the timeout (ticks, 0 for none).  The caller has checked the value under
+ * the kernel lock, which wakers hold too.  1 if woken, 0 on timeout. */
+int sched_futex_wait(uint64_t uaddr, uint64_t timeout_ticks) {
+    thread_t *t = current_thread_ptr;
+    process_t *p = t ? t->owner : NULL;
+    if (!t) return 0;
+    t->futex_addr = uaddr;
+    t->futex_woken = 0;
+    t->block_reason = THREAD_BLOCK_FUTEX;
+    t->wake_tick = timeout_ticks ? uptime_ticks + timeout_ticks : 0;
+    t->state = THREAD_BLOCKED;
+    if (p && p->nthreads <= 1 && p->state != PROCESS_EXITED && p->state != PROCESS_REAPED) p->state = PROCESS_BLOCKED;
+    schedule_inner(1);
+    t->futex_addr = 0;
+    return t->futex_woken;
+}
+
+/* Wakes up to n threads of the current address space waiting on uaddr;
+ * returns how many. */
+int sched_futex_wake(uint64_t uaddr, int n) {
+    thread_t *cur = current_thread_ptr;
+    addr_space_t *as = cur && cur->owner ? cur->owner->addr_space : NULL;
+    int woken = 0;
+    if (!cur || n <= 0) return 0;
+    FOR_EACH_THREAD(t) {
+        if (woken >= n) break;
+        if (t->state != THREAD_BLOCKED || t->block_reason != THREAD_BLOCK_FUTEX) continue;
+        if (t->futex_addr != uaddr || !t->owner || t->owner->addr_space != as) continue;
+        t->futex_woken = 1;
+        sched_wake_thread(t);
+        woken++;
+    }
+    return woken;
+}
+
+/* Moves up to n waiters on uaddr to uaddr2 (FUTEX_REQUEUE); returns how many. */
+int sched_futex_requeue(uint64_t uaddr, uint64_t uaddr2, int n) {
+    thread_t *cur = current_thread_ptr;
+    addr_space_t *as = cur && cur->owner ? cur->owner->addr_space : NULL;
+    int moved = 0;
+    if (!cur || n <= 0) return 0;
+    FOR_EACH_THREAD(t) {
+        if (moved >= n) break;
+        if (t->state != THREAD_BLOCKED || t->block_reason != THREAD_BLOCK_FUTEX) continue;
+        if (t->futex_addr != uaddr || !t->owner || t->owner->addr_space != as) continue;
+        t->futex_addr = uaddr2;
+        moved++;
+    }
+    return moved;
+}
+
+/* a thread whose process already has a thread running on another CPU */
+static int busy_elsewhere(const thread_t *t) {
+    const process_t *p = t->owner;
+    return p && p->kind == PROCESS_USER && p->on_cpu && p->on_cpu != current_thread_ptr;
 }
 
 static void schedule_inner(int force) {
@@ -377,7 +488,7 @@ static void schedule_inner(int force) {
      * are pinned to their CPU and only used when nothing else is ready. */
     next = current_thread_ptr->next;
     while (1) {
-        if (next->state == THREAD_READY && !next->pinned) {
+        if (next->state == THREAD_READY && !next->pinned && !busy_elsewhere(next)) {
             break;
         }
         if (next == current_thread_ptr) {
@@ -406,6 +517,8 @@ static void schedule_inner(int force) {
     if (prev->state == THREAD_RUNNING) {
         prev->state = THREAD_READY;
     }
+    if (prev->owner && prev->owner->on_cpu == prev) prev->owner->on_cpu = NULL;
+    if (next->owner && next->owner->kind == PROCESS_USER) next->owner->on_cpu = next;
     next->state = THREAD_RUNNING;
     current_thread_ptr = next;
 
@@ -707,6 +820,7 @@ int sched_kill_process(uint64_t pid, uint64_t exit_code) {
     thread->block_reason = THREAD_BLOCK_NONE;
     thread->wake_tick = 0;
 
+    sched_stop_threads(target, current_thread_ptr->owner == target ? current_thread_ptr : NULL);
     thread->state = THREAD_ZOMBIE;
     sched_wake_parent_if_waiting(target);
     return 0;
@@ -742,6 +856,7 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
             p->exit_code = exit_code;
             t->block_reason = THREAD_BLOCK_NONE;
             t->wake_tick = 0;
+            sched_stop_threads(p, current_thread_ptr->owner == p ? current_thread_ptr : NULL);
             t->state = THREAD_ZOMBIE;
             sched_wake_parent_if_waiting(p);
         }
