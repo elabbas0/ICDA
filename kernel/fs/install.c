@@ -311,6 +311,48 @@ static int install_copy_tree(fatfs_t *vol, vfs_node_t *node, char *vpath, uint64
     return 0;
 }
 
+/* GRUB and the kernel to install.  The live kernel carries them; an installed
+ * system boots the slim kernel, which does not, and takes the copies from its
+ * own partition (FIICDA next to ICDAROOT.BIN).  Read before anything is
+ * written, so a missing file stops the install before it changes a disk. */
+static const char *bf_efi, *bf_kernel;
+static uint64_t bf_efi_len, bf_kernel_len;
+static char *bf_efi_owned, *bf_kernel_owned;
+
+static void boot_files_release(void) {
+    if (bf_efi_owned) kfree(bf_efi_owned);
+    if (bf_kernel_owned) kfree(bf_kernel_owned);
+    bf_efi_owned = bf_kernel_owned = 0;
+    bf_efi = bf_kernel = 0;
+    bf_efi_len = bf_kernel_len = 0;
+}
+
+static int boot_files_load(void) {
+    fatfs_t vol;
+    const partition_info_t *self;
+    int idx;
+    boot_files_release();
+    if (boot_asset_efi_start && boot_asset_efi_size() && boot_asset_kernel_bin_start && boot_asset_kernel_bin_size()) {
+        bf_efi = boot_asset_efi_start;
+        bf_efi_len = boot_asset_efi_size();
+        bf_kernel = boot_asset_kernel_bin_start;
+        bf_kernel_len = boot_asset_kernel_bin_size();
+        return 0;
+    }
+    idx = persistfs_active_partition();
+    self = idx >= 0 ? partition_get((uint32_t)idx) : 0;
+    if (!self || fatfs_mount_part(&vol, self) != 0) return -1;
+    if (fatfs_read(&vol, "/EFI/ICDA/GRUBX64.EFI", &bf_efi_owned, &bf_efi_len) != 0 || !bf_efi_owned || !bf_efi_len ||
+        fatfs_read(&vol, "/EFI/ICDA/KERNEL.BIN", &bf_kernel_owned, &bf_kernel_len) != 0 || !bf_kernel_owned || !bf_kernel_len) {
+        boot_files_release();
+        return -1;
+    }
+    bf_efi = bf_efi_owned;
+    bf_kernel = bf_kernel_owned;
+    serial_write("install: boot files taken from the running system's partition\n");
+    return 0;
+}
+
 static int install_system_files(const partition_info_t *root, uint32_t *files) {
     static const char *const dirs[] = { "/apps", "/bin", "/sbin", "/etc/ssl" };
     fatfs_t vol;
@@ -329,7 +371,7 @@ static int install_system_files(const partition_info_t *root, uint32_t *files) {
         if (install_copy_tree(&vol, node, vpath, sizeof(vpath), files) != 0) return -1;
     }
     if (fatfs_mkdir(&vol, "/EFI/ICDA") != 0) return -1;
-    if (fatfs_write(&vol, "/EFI/ICDA/KERNEL.BIN", boot_asset_kernel_bin_start, boot_asset_kernel_bin_size()) != 0)
+    if (fatfs_write(&vol, "/EFI/ICDA/KERNEL.BIN", bf_kernel, bf_kernel_len) != 0)
         return -1;
     (*files)++;
     return fatfs_flush(&vol);
@@ -340,8 +382,7 @@ static int fat32_install_boot_partition(const partition_info_t *part) {
     fatfs_entry_t existing;
     static const char startup_nsh[] = "\\EFI\\ICDA\\GRUBX64.EFI\r\n";
 
-    if (boot_asset_efi_start == 0 || boot_asset_efi_size() == 0 ||
-        boot_asset_kernel_bin_start == 0 || boot_asset_kernel_bin_size() == 0) {
+    if (!bf_efi || !bf_efi_len || !bf_kernel || !bf_kernel_len) {
         return -31;
     }
     install_progress("Preparing boot disk", "Opening EFI partition", 0, 5);
@@ -349,13 +390,13 @@ static int fat32_install_boot_partition(const partition_info_t *part) {
     install_progress("Preparing boot disk", "Creating \\EFI\\ICDA", 1, 5);
     if (fatfs_mkdir(&vol, "/EFI/ICDA") != 0) return -33;
     install_progress("Writing boot files", "GRUBX64.EFI", 2, 5);
-    if (fatfs_write(&vol, "/EFI/ICDA/GRUBX64.EFI", boot_asset_efi_start, boot_asset_efi_size()) != 0) return -34;
+    if (fatfs_write(&vol, "/EFI/ICDA/GRUBX64.EFI", bf_efi, bf_efi_len) != 0) return -34;
     install_progress("Writing boot files", "KERNEL.BIN", 3, 5);
-    if (fatfs_write(&vol, "/EFI/ICDA/KERNEL.BIN", boot_asset_kernel_bin_start, boot_asset_kernel_bin_size()) != 0) return -35;
+    if (fatfs_write(&vol, "/EFI/ICDA/KERNEL.BIN", bf_kernel, bf_kernel_len) != 0) return -35;
     install_progress("Preparing boot disk", "Fallback loader", 4, 5);
     if (fatfs_lookup(&vol, "/EFI/BOOT/BOOTX64.EFI", &existing) != 0) {
         if (fatfs_mkdir(&vol, "/EFI/BOOT") != 0) return -36;
-        if (fatfs_write(&vol, "/EFI/BOOT/BOOTX64.EFI", boot_asset_efi_start, boot_asset_efi_size()) != 0) return -37;
+        if (fatfs_write(&vol, "/EFI/BOOT/BOOTX64.EFI", bf_efi, bf_efi_len) != 0) return -37;
     }
     if (fatfs_lookup(&vol, "/STARTUP.NSH", &existing) != 0) {
         (void)fatfs_write(&vol, "/STARTUP.NSH", startup_nsh, sizeof(startup_nsh) - 1);
@@ -534,7 +575,7 @@ int system_install_run(uint64_t *files_installed, uint64_t *bytes_installed) {
     return system_install_core(files_installed, bytes_installed);
 }
 
-int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partition_index, int32_t swap_partition_index,
+static int install_partitions(uint32_t efi_partition_index, uint32_t root_partition_index, int32_t swap_partition_index,
                               uint64_t *files_installed, uint64_t *bytes_installed) {
     const partition_info_t *boot_part = partition_get(efi_partition_index);
     const partition_info_t *root_part = partition_get(root_partition_index);
@@ -603,9 +644,9 @@ int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partit
         }
     }
     total_files_written += 4;
-    total_bytes_written += (uint64_t)boot_asset_efi_size();
+    total_bytes_written += bf_efi_len;
     total_bytes_written += (uint64_t)boot_asset_grub_cfg_size();
-    total_bytes_written += (uint64_t)boot_asset_kernel_bin_size();
+    total_bytes_written += bf_kernel_len;
     total_bytes_written += 23;
     install_progress("Finalizing install", "Syncing installed state", 0, 1);
     install_progress("Finalizing install", "Done", 1, 1);
@@ -706,4 +747,17 @@ int system_install_export_scratch(void) {
         return 1;
     }
     return 0;
+}
+
+int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partition_index, int32_t swap_partition_index,
+                              uint64_t *files_installed, uint64_t *bytes_installed) {
+    int rc;
+    if (boot_files_load() != 0) {
+        serial_write("install: GRUBX64.EFI / KERNEL.BIN not found, nothing written\n");
+        return -19;
+    }
+    rc = install_partitions(efi_partition_index, root_partition_index, swap_partition_index, files_installed,
+                            bytes_installed);
+    boot_files_release();
+    return rc;
 }
