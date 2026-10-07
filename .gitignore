@@ -138,3 +138,4 @@ gui-cursor.txt
 scripts/locate-cursor*.ps1
 ap_trampoline.bin
 tests/linux/out/
+userspace/webkit/out/

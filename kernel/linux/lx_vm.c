@@ -589,3 +589,10 @@ void lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap) {
     while (k && n + 1 < cap) out[n++] = num[--k];
     out[n] = 0;
 }
+
+/* 1 if addr is in an executable mapping of a file (a return address, in
+ * crash reports) */
+int lxvm_is_code(process_t *p, uint64_t addr) {
+    lx_vma_t *v = p ? find(p, addr) : 0;
+    return v && v->node && (v->prot & PROT_EXEC);
+}

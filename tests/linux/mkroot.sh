@@ -39,8 +39,10 @@ mkdir -p $S/bin && cp -L $R/bin/busybox $S/bin/busybox
 rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin
 for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; done; true
+[ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
 gcc -O2 -o /tmp/stage/dyntest tests/linux/dyn/dyntest.c -lz -pthread
 du -sh $S
+rm -rf .verify/linuxroot && cp -r $S .verify/linuxroot
 # a 2 GB disk: one FAT32 partition from 1 MiB
 IMG=.verify/linuxdisk.img
 rm -f $IMG

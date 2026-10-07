@@ -2021,9 +2021,29 @@ static void init(ic_app_t *app) {
     navigate(url, 1);
 }
 
+/* Surfer on WebKit (userspace/webkit): with a Linux root holding it - on the
+ * system's own partition or a disk - pages are WebKit's.  Started with the
+ * URL; this engine stays for systems without it and for --classic. */
+static int start_webkit(const char *url) {
+    static const char *const vols[] = { "fat32", "exfat", "ntfs" };
+    char path[96];
+    icda_stat_t st;
+    for (int v = -1; v < 3; v++) {
+        for (int i = 0; i < (v < 0 ? 1 : 8); i++) {
+            if (v < 0) snprintf(path, sizeof path, "/linux/usr/bin/icda-webkit");
+            else snprintf(path, sizeof path, "/volumes/%s-%d/linux/usr/bin/icda-webkit", vols[v], i);
+            if (icda_stat(path, &st) != 0) continue;
+            return (int64_t)icda_spawn_args(path, url ? url : "") > 0 ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
 int main(int argc, char **argv) {
     static const ic_app_desc_t desc = { "Surfer", WIN_W, WIN_H, init, draw, event, tick };
     const char *arg = argc > 1 && argv ? argv[1] : 0;
+    if (arg && !strcmp(arg, "--classic")) arg = argc > 2 ? argv[2] : 0;
+    else if (start_webkit(arg) == 0) return 0;
     media_set_audio(&media_sink);
     if (ic_app_run(&desc, (void *)arg) != 0) {
         icda_write("surfer requires the desktop (Ctrl+Alt+F1)\n");

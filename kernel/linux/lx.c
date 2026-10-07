@@ -655,10 +655,9 @@ static int64_t copy_path(const char *upath, char *out) {
  * ICDA lacks (/lib/..., /usr/..., /etc/fonts/...) is looked up under /linux,
  * or under a "linux" folder at the top of a mounted volume.  ICDA's own
  * paths (/home, /volumes, /dev) keep priority. */
-static const char *const overlay_roots[] = {
-    "/linux", "/volumes/fat32-1/linux", "/volumes/fat32-2/linux", "/volumes/fat32-3/linux", "/volumes/fat32-4/linux",
-    "/volumes/exfat-1/linux", "/volumes/exfat-2/linux", "/volumes/ntfs-1/linux", "/volumes/ntfs-2/linux",
-};
+#define LX_MAX_ROOTS 12
+static char overlay_roots[LX_MAX_ROOTS][80];
+static uint64_t n_roots;
 
 static int has_prefix(const char *s, const char *p) {
     while (*p) if (*s++ != *p++) return 0;
@@ -670,7 +669,33 @@ static int has_prefix(const char *s, const char *p) {
  * the root.  Parsed once per root into a table. */
 typedef struct { const char *from, *to; uint32_t from_len; } lx_link_t;
 typedef struct { const char *data; lx_link_t *links; uint32_t n; } lx_linktab_t;
-static lx_linktab_t linktabs[sizeof(overlay_roots) / sizeof(overlay_roots[0])];
+static lx_linktab_t linktabs[LX_MAX_ROOTS];
+
+/* /linux and a "linux" folder at the top of any mounted volume (the
+ * installed system's own partition, a USB disk ...): looked up afresh, since
+ * volumes come and go */
+static void refresh_roots(void) {
+    vfs_node_t *root = vfs_root(), *vols = vfs_resolve(root, "/volumes");
+    char cand[LX_MAX_ROOTS][80];
+    uint64_t n = 0;
+    if (vfs_resolve(root, "/linux")) kstrcpy(cand[n++], "/linux", 80);
+    for (uint64_t i = 0; vols && i < vfs_child_count(vols) && n < LX_MAX_ROOTS; i++) {
+        vfs_node_t *v = vfs_child_at(vols, i);
+        const char *name = v ? vfs_node_name(v) : 0;
+        if (!name || kstrlen(name) > 50) continue;
+        kstrcpy(cand[n], "/volumes/", 80);
+        kstrcpy(cand[n] + 9, name, 71);
+        kstrcpy(cand[n] + kstrlen(cand[n]), "/linux", 80 - kstrlen(cand[n]));
+        if (vfs_resolve(root, cand[n])) n++;
+    }
+    for (uint64_t i = 0; i < n; i++) {
+        if (i < n_roots && kstreq(overlay_roots[i], cand[i])) continue;
+        kstrcpy(overlay_roots[i], cand[i], 80);
+        linktabs[i].data = 0;                 /* another root in this slot: parse its links again */
+        linktabs[i].n = 0;
+    }
+    n_roots = n;
+}
 
 static lx_linktab_t *linktab(uint64_t ri) {
     lx_linktab_t *t = &linktabs[ri];
@@ -753,8 +778,9 @@ int lx_overlay_path(char *path) {
     vfs_node_t *root = vfs_root();
     char alt[LX_PATH_MAX];
     if (path[0] != '/' || vfs_resolve(root, path)) return 0;
+    refresh_roots();
     /* a path into a Linux root itself (a loader that found a library there) */
-    for (uint64_t i = 0; i < sizeof(overlay_roots) / sizeof(overlay_roots[0]); i++) {
+    for (uint64_t i = 0; i < n_roots; i++) {
         uint64_t n = kstrlen(overlay_roots[i]);
         if (!has_prefix(path, overlay_roots[i]) || (path[n] && path[n] != '/')) continue;
         if (in_root(i, path + n, alt)) {
@@ -764,7 +790,7 @@ int lx_overlay_path(char *path) {
         return 0;
     }
     if (has_prefix(path, "/proc") || has_prefix(path, "/dev") || has_prefix(path, "/volumes")) return 0;
-    for (uint64_t i = 0; i < sizeof(overlay_roots) / sizeof(overlay_roots[0]); i++) {
+    for (uint64_t i = 0; i < n_roots; i++) {
         if (!vfs_resolve(root, overlay_roots[i])) continue;
         if (in_root(i, path, alt)) {
             kstrcpy(path, alt, LX_PATH_MAX);
@@ -2882,6 +2908,20 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     serial_write(" at ");
     serial_write(where);
     serial_write("\n");
+    {   /* likely return addresses on the stack: a rough backtrace */
+        uint64_t words[96];
+        int shown = 0;
+        if (copy_from_user(words, (const void *)regs->rsp, sizeof(words)) == 0) {
+            for (int i = 0; i < 96 && shown < 10; i++) {
+                if (!lxvm_is_code(p, words[i])) continue;
+                lxvm_describe(p, words[i], where, sizeof(where));
+                serial_write("    from ");
+                serial_write(where);
+                serial_write("\n");
+                shown++;
+            }
+        }
+    }
     if (!p->linux_personality || !(s = p->lx)) return 0;
     sa = &s->sa[sig];
     if (sa->handler <= 1 || (s->sigmask & (1ULL << (sig - 1)))) return 0;

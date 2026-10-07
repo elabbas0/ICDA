@@ -38,5 +38,6 @@ void     lxvm_free(process_t *p);
 int      lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot);
 void     lxvm_free_list(void *list);
 void     lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap);
+int      lxvm_is_code(process_t *p, uint64_t addr);
 
 #endif
