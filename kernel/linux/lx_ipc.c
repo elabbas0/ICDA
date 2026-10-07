@@ -45,6 +45,12 @@
 #define MSG_CMSG_CLOEXEC 0x40000000
 #define MSG_CTRUNC     0x8
 
+enum { IN_CONNECT = 1, IN_SENDTO, IN_RECVFROM, IN_SENDMSG, IN_RECVMSG, IN_SHUTDOWN, IN_GETSOCKOPT, IN_SETSOCKOPT,
+       IN_GETNAME, IN_BIND, IN_LISTEN, IN_ACCEPT };
+static int64_t inet_dispatch(int op, int64_t fd, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, int *handled);
+static int64_t inet_socket(int type);
+#define INET(op, fd, a, b, c, d, e) do { int h_; int64_t r_ = inet_dispatch(op, fd, (uint64_t)(a), (uint64_t)(b), (uint64_t)(c), (uint64_t)(d), (uint64_t)(e), &h_); if (h_) return r_; } while (0)
+
 static void *zalloc(uint64_t n) {
     uint8_t *p = (uint8_t *)kmalloc(n);
     if (p)
@@ -294,6 +300,7 @@ static int64_t install_sock(usock_t *s, int type_flags) {
 
 /* sockets the personality does not have yet (AF_INET ...) are refused */
 int64_t lxi_socket(int domain, int type, int proto) {
+    if (domain == 2) return inet_socket(type);
     int t = type & 0xF;
     usock_t *s;
     (void)proto;
@@ -362,6 +369,7 @@ static usock_t *find_bound(const char *name, uint32_t len) {
 }
 
 int64_t lxi_bind(int64_t fd, const void *uaddr, uint64_t len) {
+    INET(IN_BIND, fd, uaddr, len, 0, 0, 0);
     usock_t *s = sock_of(fd, 0);
     int64_t r;
     if (!s) return lxi_fd_file(fd) ? -ENOTSOCK : -EBADF;
@@ -378,6 +386,7 @@ int64_t lxi_bind(int64_t fd, const void *uaddr, uint64_t len) {
 }
 
 int64_t lxi_listen(int64_t fd, int backlog) {
+    INET(IN_LISTEN, fd, backlog, 0, 0, 0, 0);
     usock_t *s = sock_of(fd, 0);
     if (!s) return lxi_fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (s->type == SOCK_DGRAM) return -EOPNOTSUPP;
@@ -387,6 +396,7 @@ int64_t lxi_listen(int64_t fd, int backlog) {
 }
 
 int64_t lxi_connect(int64_t fd, const void *uaddr, uint64_t len) {
+    INET(IN_CONNECT, fd, uaddr, len, 0, 0, 0);
     usock_t *s = sock_of(fd, 0), *l, *server;
     char name[108];
     uint32_t nlen;
@@ -428,6 +438,7 @@ static int64_t put_name(const usock_t *s, void *uaddr, uint32_t *ulen) {
 }
 
 int64_t lxi_accept(int64_t fd, void *uaddr, uint32_t *ulen, int flags) {
+    INET(IN_ACCEPT, fd, uaddr, ulen, flags, 0, 0);
     lx_file_t *f;
     usock_t *l = sock_of(fd, &f), *c;
     if (!l) return f ? -ENOTSOCK : -EBADF;
@@ -462,6 +473,7 @@ typedef struct {
 #define IOV_MAX_K 64
 
 int64_t lxi_sendmsg(int64_t fd, const void *umsg, int flags) {
+    INET(IN_SENDMSG, fd, umsg, flags, 0, 0, 0);
     lx_file_t *f, *files[64];
     usock_t *s = sock_of(fd, &f);
     lx_msghdr_t m;
@@ -495,6 +507,7 @@ int64_t lxi_sendmsg(int64_t fd, const void *umsg, int flags) {
 }
 
 int64_t lxi_recvmsg(int64_t fd, void *umsg, int flags) {
+    INET(IN_RECVMSG, fd, umsg, flags, 0, 0, 0);
     lx_file_t *f, **fds;
     usock_t *s = sock_of(fd, &f);
     lx_msghdr_t m;
@@ -548,6 +561,7 @@ int64_t lxi_recvmsg(int64_t fd, void *umsg, int flags) {
 }
 
 int64_t lxi_sendto(int64_t fd, const void *ubuf, uint64_t len, int flags, const void *uaddr, uint64_t alen) {
+    INET(IN_SENDTO, fd, ubuf, len, flags, uaddr, alen);
     lx_file_t *f;
     usock_t *s = sock_of(fd, &f);
     uint64_t iov[2] = { (uint64_t)ubuf, len };
@@ -557,6 +571,7 @@ int64_t lxi_sendto(int64_t fd, const void *ubuf, uint64_t len, int flags, const 
 }
 
 int64_t lxi_recvfrom(int64_t fd, void *ubuf, uint64_t len, int flags, void *uaddr, uint32_t *ualen) {
+    INET(IN_RECVFROM, fd, ubuf, len, flags, uaddr, ualen);
     lx_file_t *f, **fds;
     usock_t *s = sock_of(fd, &f);
     uint64_t iov[2] = { (uint64_t)ubuf, len };
@@ -576,6 +591,7 @@ int64_t lxi_recvfrom(int64_t fd, void *ubuf, uint64_t len, int flags, void *uadd
 }
 
 int64_t lxi_shutdown(int64_t fd, int how) {
+    INET(IN_SHUTDOWN, fd, how, 0, 0, 0, 0);
     usock_t *s = sock_of(fd, 0);
     if (!s) return lxi_fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (how == 0 || how == 2) s->shut_rd = 1;
@@ -587,6 +603,7 @@ int64_t lxi_shutdown(int64_t fd, int how) {
 }
 
 int64_t lxi_getsockopt(int64_t fd, int level, int opt, void *uval, uint32_t *ulen) {
+    INET(IN_GETSOCKOPT, fd, level, opt, uval, ulen, 0);
     usock_t *s = sock_of(fd, 0);
     uint32_t have, n = 4;
     int32_t v[3] = { 0, 0, 0 };
@@ -613,12 +630,14 @@ int64_t lxi_getsockopt(int64_t fd, int level, int opt, void *uval, uint32_t *ule
 }
 
 int64_t lxi_setsockopt(int64_t fd, int level, int opt, const void *uval, uint64_t len) {
+    INET(IN_SETSOCKOPT, fd, level, opt, uval, len, 0);
     (void)level; (void)opt; (void)uval; (void)len;
     if (!sock_of(fd, 0)) return lxi_fd_file(fd) ? -ENOTSOCK : -EBADF;
     return 0;
 }
 
 int64_t lxi_getsockname(int64_t fd, void *uaddr, uint32_t *ulen, int peer) {
+    INET(IN_GETNAME, fd, uaddr, ulen, peer, 0, 0);
     usock_t *s = sock_of(fd, 0);
     if (!s) return lxi_fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (peer) {
@@ -1062,4 +1081,303 @@ lx_file_t *lxi_shared_anon(uint64_t len) {
     f = lxi_file_new(&mem_ops, m, 2);
     if (!f) kfree(m);
     return f;
+}
+
+/* ==== AF_INET sockets: ICDA's TCP / UDP stack (net/sock.c) =========================== */
+
+#include "../net/sock.h"
+
+#define EINPROGRESS  115
+#define EALREADY     114
+#define ECONNRESET   104
+
+typedef struct {
+    int64_t  h;             /* net/sock.c handle (belongs to the process that made it) */
+    int      udp;
+    int      connected;     /* TCP: connect() issued; UDP: a default peer */
+    uint32_t peer_ip;       /* wire order */
+    uint16_t peer_port;     /* host order */
+    int      shut_wr;
+} inet_t;
+
+static const lx_fops_t inet_ops;
+
+static inet_t *inet_of(int64_t fd, lx_file_t **fp) {
+    lx_file_t *f = lxi_fd_file(fd);
+    if (fp) *fp = f;
+    if (!f || f->kind != LXF_OBJ || f->ops != &inet_ops) return 0;
+    return (inet_t *)f->obj;
+}
+
+static void inet_release(void *obj) {
+    inet_t *s = (inet_t *)obj;
+    (void)sock_syscall(NET_OP_CLOSE, (uint64_t)s->h, 0, 0, 0, 0);
+    kfree(s);
+}
+
+static int inet_ready(lx_file_t *f, int want_write) {
+    inet_t *s = (inet_t *)f->obj;
+    int64_t m = sock_k_ready(s->h);
+    int r = 0;
+    (void)want_write;
+    if (m < 0) return 8;
+    if (m & NET_POLL_IN) r |= 1;
+    if (m & NET_POLL_OUT) r |= 4;
+    if (m & NET_POLL_ERR) r |= 8;
+    if (m & NET_POLL_HUP) r |= 0x10;
+    return r;
+}
+
+static int64_t inet_send(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len, int flags, uint32_t ip, uint16_t port) {
+    for (;;) {
+        int64_t r;
+        if (s->udp) {
+            if (!port) {
+                if (!s->connected) return -107;              /* ENOTCONN */
+                ip = s->peer_ip;
+                port = s->peer_port;
+            }
+            r = sock_syscall(NET_OP_SENDTO, (uint64_t)s->h, (uint64_t)ubuf, len, ip, port);
+        } else {
+            if (s->shut_wr) return -EPIPE;
+            r = sock_syscall(NET_OP_SEND, (uint64_t)s->h, (uint64_t)ubuf, len, 0, 0);
+        }
+        if (r != -EAGAIN) return r;
+        if (nonblock(f, flags)) return -EAGAIN;
+        if (lxi_interrupted()) return -EINTR;
+        sched_sleep(1);
+    }
+}
+
+static int64_t inet_recv(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len, int flags, uint32_t *ip, uint16_t *port) {
+    for (;;) {
+        int64_t r = s->udp ? sock_k_recvfrom(s->h, (uint8_t *)ubuf, len, ip, port)
+                           : sock_syscall(NET_OP_RECV, (uint64_t)s->h, (uint64_t)ubuf, len, 0, 0);
+        if (r != -EAGAIN) {
+            if (!s->udp && ip) {
+                *ip = s->peer_ip;
+                *port = s->peer_port;
+            }
+            return r;
+        }
+        if (nonblock(f, flags)) return -EAGAIN;
+        if (lxi_interrupted()) return -EINTR;
+        sched_sleep(1);
+    }
+}
+
+static int64_t inet_read(lx_file_t *f, char *ubuf, uint64_t count) {
+    return inet_recv(f, (inet_t *)f->obj, ubuf, count, 0, 0, 0);
+}
+
+static int64_t inet_write(lx_file_t *f, const char *ubuf, uint64_t count) {
+    return inet_send(f, (inet_t *)f->obj, ubuf, count, 0, 0, 0);
+}
+
+static const lx_fops_t inet_ops = {
+    "socket", inet_read, inet_write, inet_ready, inet_release, 0, 0, 0140000, 0
+};
+
+static int64_t inet_socket(int type) {
+    int t = type & 0xF;
+    inet_t *s;
+    lx_file_t *f;
+    int64_t h, fd;
+    if (t != SOCK_STREAM && t != SOCK_DGRAM) return -EPROTOTYPE;
+    h = sock_syscall(NET_OP_SOCKET, t == SOCK_STREAM ? SOCK_TCP : SOCK_UDP, 0, 0, 0, 0);
+    if (h < 0) return h;
+    s = (inet_t *)zalloc(sizeof(inet_t));
+    if (!s) {
+        (void)sock_syscall(NET_OP_CLOSE, (uint64_t)h, 0, 0, 0, 0);
+        return -ENOMEM;
+    }
+    s->h = h;
+    s->udp = t == SOCK_DGRAM;
+    f = lxi_file_new(&inet_ops, s, 2 | ((type & SOCK_NONBLOCK) ? LX_O_NONBLOCK : 0));
+    if (!f) {
+        inet_release(s);
+        return -ENOMEM;
+    }
+    fd = lxi_fd_install(f, (type & SOCK_CLOEXEC) != 0);
+    if (fd < 0) lxi_file_unref(f);
+    return fd;
+}
+
+/* sockaddr_in: family, port (network order), address (wire order) */
+static int64_t read_sin(const void *uaddr, uint64_t len, uint32_t *ip, uint16_t *port) {
+    uint8_t sa[16];
+    if (len < 8) return -EINVAL;
+    if (copy_from_user(sa, uaddr, 8) != 0) return -EFAULT;
+    if (*(uint16_t *)sa == 0) {                              /* AF_UNSPEC: dissolve the association */
+        *ip = 0;
+        *port = 0;
+        return 0;
+    }
+    if (*(uint16_t *)sa != 2) return -EAFNOSUPPORT;
+    *port = (uint16_t)((sa[2] << 8) | sa[3]);
+    *ip = *(uint32_t *)(sa + 4);
+    return 0;
+}
+
+static int64_t write_sin(void *uaddr, uint32_t *ulen, uint32_t ip, uint16_t port) {
+    uint8_t sa[16];
+    uint32_t have, n = 16;
+    if (!uaddr || !ulen) return 0;
+    if (copy_from_user(&have, ulen, 4) != 0) return -EFAULT;
+    for (int i = 0; i < 16; i++) sa[i] = 0;
+    *(uint16_t *)sa = 2;
+    sa[2] = (uint8_t)(port >> 8);
+    sa[3] = (uint8_t)port;
+    *(uint32_t *)(sa + 4) = ip;
+    if (copy_to_user(uaddr, sa, have < n ? have : n) != 0) return -EFAULT;
+    return copy_to_user(ulen, &n, 4) ? -EFAULT : 0;
+}
+
+static int64_t inet_connect(lx_file_t *f, inet_t *s, const void *uaddr, uint64_t len) {
+    uint32_t ip;
+    uint16_t port;
+    int64_t r = read_sin(uaddr, len, &ip, &port);
+    if (r < 0) return r;
+    if (s->udp) {
+        s->peer_ip = ip;
+        s->peer_port = port;
+        s->connected = port != 0;
+        return 0;
+    }
+    if (s->connected) {
+        int64_t st = sock_syscall(NET_OP_STATUS, (uint64_t)s->h, 0, 0, 0, 0);
+        return st == NET_ST_CONNECTING ? -EALREADY : st == NET_ST_OPEN ? -EISCONN : st < 0 ? st : -ECONNREFUSED;
+    }
+    r = sock_syscall(NET_OP_CONNECT, (uint64_t)s->h, ip, port, 0, 0);
+    if (r < 0) return r;
+    s->connected = 1;
+    s->peer_ip = ip;
+    s->peer_port = port;
+    if (f->flags & LX_O_NONBLOCK) return -EINPROGRESS;
+    for (;;) {
+        int64_t st = sock_syscall(NET_OP_STATUS, (uint64_t)s->h, 0, 0, 0, 0);
+        if (st == NET_ST_OPEN) return 0;
+        if (st != NET_ST_CONNECTING) return st < 0 ? st : -ECONNREFUSED;
+        if (lxi_interrupted()) return -EINTR;
+        sched_sleep(1);
+    }
+}
+
+static int64_t inet_sockopt(inet_t *s, int level, int opt, void *uval, uint32_t *ulen) {
+    uint32_t have, n = 4;
+    int32_t v = 0;
+    if (copy_from_user(&have, ulen, 4) != 0) return -EFAULT;
+    if (level == 1 && opt == 4) {                            /* SO_ERROR: how a connect went */
+        int64_t st = s->udp ? NET_ST_OPEN : sock_syscall(NET_OP_STATUS, (uint64_t)s->h, 0, 0, 0, 0);
+        v = st < 0 ? (int32_t)-st : st == NET_ST_CLOSED && s->connected ? ECONNREFUSED : 0;
+    } else if (level == 1 && opt == 3) {
+        v = s->udp ? SOCK_DGRAM : SOCK_STREAM;
+    } else if (level == 1 && (opt == 7 || opt == 8)) {
+        v = 65536;
+    } else if (level == 1 && opt == 39) {
+        v = 2;
+    }
+    if (have < n) n = have;
+    if (copy_to_user(uval, &v, n) || copy_to_user(ulen, &n, 4)) return -EFAULT;
+    return 0;
+}
+
+/* the socket calls on an AF_INET descriptor (*handled = 0 for other kinds) */
+static int64_t inet_dispatch(int op, int64_t fd, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, int *handled) {
+    lx_file_t *f;
+    inet_t *s = inet_of(fd, &f);
+    *handled = s != 0;
+    if (!s) return 0;
+    switch (op) {
+    case IN_CONNECT: return inet_connect(f, s, (const void *)a, b);
+    case IN_SENDTO: {
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        if (d) {
+            int64_t r = read_sin((const void *)d, e, &ip, &port);
+            if (r < 0) return r;
+        }
+        return inet_send(f, s, (const void *)a, b, (int)c, ip, port);
+    }
+    case IN_RECVFROM: {
+        uint32_t ip = 0, alen_dummy;
+        uint16_t port = 0;
+        int64_t r = inet_recv(f, s, (void *)a, b, (int)c, &ip, &port);
+        (void)alen_dummy;
+        if (r >= 0 && d && e) (void)write_sin((void *)d, (uint32_t *)e, ip, port);
+        return r;
+    }
+    case IN_SENDMSG: {
+        lx_msghdr_t m;
+        uint64_t iov[2 * IOV_MAX_K], total = 0;
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        if (copy_from_user(&m, (const void *)a, sizeof(m)) != 0) return -EFAULT;
+        if (m.iovlen > IOV_MAX_K) return -EMSGSIZE;
+        if (m.iovlen && copy_from_user(iov, (const void *)m.iov, m.iovlen * 16) != 0) return -EFAULT;
+        if (m.name && m.namelen) {
+            int64_t r = read_sin((const void *)m.name, m.namelen, &ip, &port);
+            if (r < 0) return r;
+        }
+        for (uint64_t i = 0; i < m.iovlen; i++) {
+            int64_t r;
+            if (!iov[2 * i + 1]) continue;
+            r = inet_send(f, s, (const void *)iov[2 * i], iov[2 * i + 1], (int)b, ip, port);
+            if (r < 0) return total ? (int64_t)total : r;
+            total += (uint64_t)r;
+            if ((uint64_t)r < iov[2 * i + 1] || s->udp) break;   /* a datagram is its first buffer */
+        }
+        return (int64_t)total;
+    }
+    case IN_RECVMSG: {
+        lx_msghdr_t m;
+        uint64_t iov[2];
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        int64_t r;
+        if (copy_from_user(&m, (const void *)a, sizeof(m)) != 0) return -EFAULT;
+        if (!m.iovlen || copy_from_user(iov, (const void *)m.iov, 16) != 0) return -EFAULT;
+        r = inet_recv(f, s, (void *)iov[0], iov[1], (int)b, &ip, &port);
+        if (r < 0) return r;
+        if (m.name && m.namelen) {
+            uint32_t nl = m.namelen;
+            uint8_t sa[16];
+            for (int i = 0; i < 16; i++) sa[i] = 0;
+            *(uint16_t *)sa = 2;
+            sa[2] = (uint8_t)(port >> 8);
+            sa[3] = (uint8_t)port;
+            *(uint32_t *)(sa + 4) = ip;
+            if (copy_to_user((void *)m.name, sa, nl < 16 ? nl : 16) != 0) return -EFAULT;
+            nl = 16;
+            (void)copy_to_user((uint8_t *)a + 8, &nl, 4);
+        }
+        {
+            uint64_t zero = 0;
+            int32_t fl = 0;
+            (void)copy_to_user((uint8_t *)a + 40, &zero, 8);
+            (void)copy_to_user((uint8_t *)a + 48, &fl, 4);
+        }
+        return r;
+    }
+    case IN_SHUTDOWN:
+        if (a == 1 || a == 2) s->shut_wr = 1;
+        return 0;
+    case IN_GETSOCKOPT: return inet_sockopt(s, (int)a, (int)b, (void *)c, (uint32_t *)d);
+    case IN_SETSOCKOPT: return 0;
+    case IN_GETNAME: {
+        uint16_t lport, rport;
+        uint32_t rip;
+        process_t *p = sched_current_process();
+        (void)p;
+        if (sock_k_names(s->h, &lport, &rip, &rport) < 0) return -EBADF;
+        if (c) {                                             /* peer */
+            if (!s->connected) return -107;
+            return write_sin((void *)a, (uint32_t *)b, s->peer_ip, s->peer_port);
+        }
+        return write_sin((void *)a, (uint32_t *)b, 0, lport);
+    }
+    case IN_BIND: return 0;                                  /* the stack picks the local port */
+    case IN_LISTEN: case IN_ACCEPT: return -EOPNOTSUPP;      /* no servers yet */
+    }
+    return -EINVAL;
 }

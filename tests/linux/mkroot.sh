@@ -11,32 +11,26 @@ apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
     -U --allow-untrusted --root $R --initdb add --no-scripts musl zlib busybox $PKGS >/dev/null
-# FAT has no symlinks: the root is copied with links resolved, except the
-# busybox applet links (one copy of busybox is enough)
 S=/tmp/stage/linux
 mkdir -p $S
-# libraries: development links (libx.so) go; a runtime link (libx.so.1 ->
-# libx.so.1.2.3) becomes the file itself, so each library is stored once
+# links: FAT has none, so they are listed in .symlinks (link, tab, target)
+# and ICDA follows them for Linux programs (kernel/linux/lx.c)
 # (inside the new root: its links are absolute)
 cat > $R/links.sh <<"EOS"
 find() { /bin/busybox find "$@"; }; rm() { /bin/busybox rm "$@"; }; cp() { /bin/busybox cp "$@"; }; mv() { /bin/busybox mv "$@"; }
 grep() { /bin/busybox grep "$@"; }; head() { /bin/busybox head "$@"; }; cut() { /bin/busybox cut "$@"; }; readlink() { /bin/busybox readlink "$@"; }
-find /lib /usr/lib -type l -name "*.so" -delete 2>/dev/null
 find /lib /usr /etc -type l | while read L; do echo "$L $(readlink -f "$L")"; done > /links
 while read L T; do
   [ -e "$T" ] || continue
-  case "$T" in /bin/*|/sbin/*) continue;; esac
+  case "$T" in /bin/busybox) continue;; esac
   rm -f "$L"
-  cp -r "$T" "$L"
-  [ -f "$T" ] && echo "$T" >> /targets
+  printf "%s\t%s\n" "$L" "$T" >> /.symlinks
 done < /links
-# versioned originals nobody asks for by name go, the loader stays
-cut -d" " -f1 /links > /names
-grep -vxF -f /names /targets 2>/dev/null | grep -v ld-musl | while read T; do rm -f "$T"; done
-rm -f /links /targets /names /links.sh
+rm -f /links /links.sh
 EOS
 chroot $R /bin/busybox sh /links.sh
 for d in lib usr etc; do [ -d $R/$d ] && cp -r $R/$d $S/ 2>/dev/null || true; done
+cp $R/.symlinks $S/.symlinks
 mkdir -p $S/bin && cp -L $R/bin/busybox $S/bin/busybox
 rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin

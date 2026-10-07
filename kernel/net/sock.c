@@ -842,3 +842,40 @@ void sock_proc_exit(struct process *proc) {
         }
     }
 }
+
+/* ---- for the Linux personality's AF_INET sockets (kernel/linux/lx_ipc.c) -- */
+
+int64_t sock_k_ready(int64_t h) {
+    rx_pump();
+    return ready_mask(sock_get(h));
+}
+
+/* recvfrom with the sender written to kernel memory */
+int64_t sock_k_recvfrom(int64_t h, uint8_t *ubuf, uint64_t cap, uint32_t *ip, uint16_t *port) {
+    sock_t *s = sock_get(h);
+    udp_dgram_t *d;
+    uint64_t n;
+    if (!s) return -EBADF_;
+    if (s->type != SOCK_UDP) return -EINVAL_;
+    rx_pump();
+    if (!s->qlen) return -EAGAIN_;
+    d = &s->q[s->qhead];
+    n = d->len < cap ? d->len : cap;
+    if (n && copy_to_user(ubuf, d->data, n) != 0) return -EFAULT_;
+    if (ip) *ip = d->ip;
+    if (port) *port = d->port;
+    kfree(d->data);
+    s->qhead = (s->qhead + 1) % UDP_QUEUE;
+    s->qlen--;
+    return (int64_t)n;
+}
+
+/* the local port and the connected peer (port 0 if none) */
+int64_t sock_k_names(int64_t h, uint16_t *lport, uint32_t *rip, uint16_t *rport) {
+    sock_t *s = sock_get(h);
+    if (!s) return -EBADF_;
+    *lport = s->lport;
+    *rip = s->rip;
+    *rport = s->rport;
+    return 0;
+}

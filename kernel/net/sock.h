@@ -55,6 +55,11 @@ int64_t sock_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d
 void    sock_tick(void);
 void    sock_proc_exit(struct process *proc);
 
+/* kernel-side helpers (Linux personality sockets) */
+int64_t sock_k_ready(int64_t h);
+int64_t sock_k_recvfrom(int64_t h, uint8_t *ubuf, uint64_t cap, uint32_t *ip, uint16_t *port);
+int64_t sock_k_names(int64_t h, uint16_t *lport, uint32_t *rip, uint16_t *rport);
+
 /* Shared receive path: frames the socket layer does not consume are kept
  * for the older blocking fetchers in net.c. */
 int     net_rx_frame(void *buf, uint16_t cap, uint16_t *len_out);

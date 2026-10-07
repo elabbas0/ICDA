@@ -17,6 +17,7 @@
 #include "../tty/pty.h"
 #include "lx_vm.h"
 #include "lx_internal.h"
+#include "../net/net.h"
 
 /* errno values (x86-64 Linux) */
 #define EPERM   1
@@ -663,17 +664,108 @@ static int has_prefix(const char *s, const char *p) {
     return 1;
 }
 
+/* Symbolic links of a Linux root kept where the disk cannot hold links
+ * (FAT): <root>/.symlinks, lines "link<TAB>target" with both absolute inside
+ * the root.  Parsed once per root into a table. */
+typedef struct { const char *from, *to; uint32_t from_len; } lx_link_t;
+typedef struct { const char *data; lx_link_t *links; uint32_t n; } lx_linktab_t;
+static lx_linktab_t linktabs[sizeof(overlay_roots) / sizeof(overlay_roots[0])];
+
+static lx_linktab_t *linktab(uint64_t ri) {
+    lx_linktab_t *t = &linktabs[ri];
+    char path[LX_PATH_MAX];
+    uint64_t size = 0, n = 0, cap = 0;
+    const char *d;
+    kstrcpy(path, overlay_roots[ri], LX_PATH_MAX);
+    kstrcpy(path + kstrlen(path), "/.symlinks", LX_PATH_MAX - kstrlen(path));
+    d = vfs_read(vfs_root(), path, &size);
+    if (!d) return t->n ? t : 0;
+    if (d == t->data) return t;
+    if (t->links) kfree(t->links);
+    t->links = 0;
+    t->n = 0;
+    t->data = d;
+    for (uint64_t i = 0; i < size; i++) if (d[i] == '\n') cap++;
+    if (!cap) return t;
+    t->links = (lx_link_t *)kmalloc(sizeof(lx_link_t) * cap);
+    if (!t->links) return 0;
+    /* the strings are copied once: the file's cached data is not ours to cut */
+    {
+        char *copy = (char *)kmalloc(size + 1);
+        if (!copy) return 0;
+        kcopy(copy, d, size);
+        copy[size] = 0;
+        for (char *line = copy; *line && n < cap;) {
+            char *tab = line, *end;
+            while (*tab && *tab != '\t' && *tab != '\n') tab++;
+            end = tab;
+            while (*end && *end != '\n') end++;
+            if (*tab == '\t') {
+                *tab = 0;
+                t->links[n].from = line;
+                t->links[n].from_len = (uint32_t)kstrlen(line);
+                t->links[n].to = tab + 1;
+                n++;
+            }
+            line = *end ? end + 1 : end;
+            *end = 0;
+        }
+    }
+    t->n = (uint32_t)n;
+    return t;
+}
+
+/* rel (a path inside the Linux root) with its first link followed; 0 if no link applies */
+static int follow_link(lx_linktab_t *t, char *rel) {
+    for (uint32_t i = 0; t && i < t->n; i++) {
+        const lx_link_t *l = &t->links[i];
+        char tmp[LX_PATH_MAX];
+        if (!has_prefix(rel, l->from) || (rel[l->from_len] && rel[l->from_len] != '/')) continue;
+        if (kstrlen(l->to) + kstrlen(rel + l->from_len) + 1 > LX_PATH_MAX) return 0;
+        kstrcpy(tmp, l->to, LX_PATH_MAX);
+        kstrcpy(tmp + kstrlen(tmp), rel + l->from_len, LX_PATH_MAX - kstrlen(tmp));
+        kstrcpy(rel, tmp, LX_PATH_MAX);
+        return 1;
+    }
+    return 0;
+}
+
+/* the root-relative path rel inside root ri, links followed; 1 if it exists */
+static int in_root(uint64_t ri, const char *rel_in, char *out) {
+    vfs_node_t *root = vfs_root();
+    char rel[LX_PATH_MAX];
+    uint64_t n = kstrlen(overlay_roots[ri]);
+    lx_linktab_t *t = 0;
+    kstrcpy(rel, rel_in, LX_PATH_MAX);
+    for (int hops = 0; hops < 8; hops++) {
+        if (n + kstrlen(rel) + 1 > LX_PATH_MAX) return 0;
+        kstrcpy(out, overlay_roots[ri], LX_PATH_MAX);
+        kstrcpy(out + n, rel, LX_PATH_MAX - n);
+        if (vfs_resolve(root, out)) return 1;
+        if (!t) t = linktab(ri);
+        if (!follow_link(t, rel)) return 0;
+    }
+    return 0;
+}
+
 int lx_overlay_path(char *path) {
     vfs_node_t *root = vfs_root();
     char alt[LX_PATH_MAX];
     if (path[0] != '/' || vfs_resolve(root, path)) return 0;
-    if (has_prefix(path, "/proc") || has_prefix(path, "/dev") || has_prefix(path, "/volumes")) return 0;
+    /* a path into a Linux root itself (a loader that found a library there) */
     for (uint64_t i = 0; i < sizeof(overlay_roots) / sizeof(overlay_roots[0]); i++) {
         uint64_t n = kstrlen(overlay_roots[i]);
-        if (n + kstrlen(path) + 1 > LX_PATH_MAX || !vfs_resolve(root, overlay_roots[i])) continue;
-        kstrcpy(alt, overlay_roots[i], LX_PATH_MAX);
-        kstrcpy(alt + n, path, LX_PATH_MAX - n);
-        if (vfs_resolve(root, alt)) {
+        if (!has_prefix(path, overlay_roots[i]) || (path[n] && path[n] != '/')) continue;
+        if (in_root(i, path + n, alt)) {
+            kstrcpy(path, alt, LX_PATH_MAX);
+            return 1;
+        }
+        return 0;
+    }
+    if (has_prefix(path, "/proc") || has_prefix(path, "/dev") || has_prefix(path, "/volumes")) return 0;
+    for (uint64_t i = 0; i < sizeof(overlay_roots) / sizeof(overlay_roots[0]); i++) {
+        if (!vfs_resolve(root, overlay_roots[i])) continue;
+        if (in_root(i, path, alt)) {
             kstrcpy(path, alt, LX_PATH_MAX);
             return 1;
         }
@@ -1100,6 +1192,37 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     int kind, fd;
     if (rc < 0) return ERR(-rc);
     if (!s) return ERR(ENOMEM);
+    /* network settings Linux programs read, made from ICDA's own (DHCP) */
+    if (kstreq(path, "/etc/resolv.conf") || kstreq(path, "/etc/hosts")) {
+        char *text = (char *)kmalloc(128);
+        uint64_t n = 0;
+        if (!text) return ERR(ENOMEM);
+        if (kstreq(path, "/etc/hosts")) {
+            const char *h = "127.0.0.1 localhost\n::1 localhost\n";
+            while (h[n]) { text[n] = h[n]; n++; }
+        } else {
+            const uint8_t *ip = (const uint8_t *)&net_state.dns;
+            const char *pre = "nameserver ";
+            while (pre[n]) { text[n] = pre[n]; n++; }
+            for (int i = 0; i < 4; i++) {
+                uint32_t v = ip[i];
+                if (v >= 100) text[n++] = (char)('0' + v / 100);
+                if (v >= 10) text[n++] = (char)('0' + (v / 10) % 10);
+                text[n++] = (char)('0' + v % 10);
+                text[n++] = i < 3 ? '.' : '\n';
+            }
+        }
+        f = file_new(LXF_MEM);
+        if (!f) {
+            kfree(text);
+            return ERR(ENOMEM);
+        }
+        f->mem = text;
+        f->mem_len = n;
+        fd = fd_alloc(s, 0, f, (flags & O_CLOEXEC) != 0);
+        if (fd < 0) file_put(f);
+        return (uint64_t)(int64_t)fd;
+    }
     kind = dev_kind(path);
     if (kind) {
         f = file_new(kind);
