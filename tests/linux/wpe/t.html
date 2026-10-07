@@ -1,0 +1,21 @@
+<!doctype html>
+<title>start</title>
+<body style="font: 16px sans-serif">
+<div id="log"></div>
+<svg width="40" height="40" viewBox="0 0 24 24"><path d="M20.87 20.17l-5.59-5.59C16.35 13.35 17 11.75 17 10c0-3.87-3.13-7-7-7s-7 3.13-7 7 3.13 7 7 7c1.75 0 3.35-.65 4.58-1.71l5.59 5.59.7-.71zM10 16c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg>
+<img id="lazy" loading="lazy" src="https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg" width="240">
+<img id="webp" src="https://i.ytimg.com/vi_webp/jNQXAC9IVRw/mqdefault.webp" width="240">
+<script>
+const out = document.getElementById('log');
+const log = (s) => { out.textContent += s + ' '; document.title = out.textContent; };
+requestAnimationFrame(() => log('raf'));
+setTimeout(() => log('timeout'), 100);
+new IntersectionObserver((e) => log('io:' + e[0].isIntersecting)).observe(document.getElementById('lazy'));
+document.getElementById('lazy').onload = () => log('lazy-img');
+document.getElementById('lazy').onerror = () => log('lazy-err');
+document.getElementById('webp').onload = () => log('webp-img');
+document.getElementById('webp').onerror = () => log('webp-err');
+fetch('https://yt3.ggpht.com/ytc/AIdro_kD9kXxH0mNSmAuSmjF0qRLkrBQ7bdN3rkUd1ld=s68-c-k-c0x00ffffff-no-rj')
+  .then((r) => log('avatar:' + r.status)).catch((e) => log('avatar-err:' + e));
+</script>
+</body>

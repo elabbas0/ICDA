@@ -250,6 +250,7 @@ int main(int argc, char **argv) {
     settings = webkit_settings_new();
     webkit_settings_set_user_agent(settings,
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15");
+    webkit_settings_set_enable_write_console_messages_to_stdout(settings, getenv("WPE_CONSOLE") != NULL);
     view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "settings", settings, NULL));
     wpe_view_backend_add_activity_state(view_backend, wpe_view_activity_state_visible | wpe_view_activity_state_focused |
                                                      wpe_view_activity_state_in_window);
