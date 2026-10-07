@@ -101,6 +101,7 @@ struct lx_state {
     int            term_sig;
     uint64_t       clear_tid;
     char           exe[128];
+    int            inotify_wd;
 };
 
 typedef struct {
@@ -2702,6 +2703,53 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 145: return 0;                           /* sched_getscheduler: SCHED_OTHER */
         case 146: case 147: return 0;                 /* sched_get_priority_max / min */
         case 324: return 0;                           /* membarrier: no commands (callers fall back) */
+        /* memory hints: everything is resident, nothing needs syncing */
+        case 26: return 0;                            /* msync */
+        case 27: {                                    /* mincore: ENOMEM for what is not mapped */
+            uint8_t vec[256];
+            uint64_t pages = (a1 + 4095) / 4096, done = 0;
+            if (a0 & 4095) return ERR(EINVAL);
+            while (done < pages) {
+                uint64_t n = pages - done < sizeof(vec) ? pages - done : sizeof(vec);
+                for (uint64_t i = 0; i < n; i++) {
+                    uint64_t va = a0 + (done + i) * 4096;
+                    int present = vmm_virt_to_phys(p->addr_space, va) != 0;
+                    if (!present && !lxvm_mapped(p, va)) return ERR(ENOMEM);
+                    vec[i] = (uint8_t)present;
+                }
+                if (copy_to_user((uint8_t *)a2 + done, vec, n) != 0) return ERR(EFAULT);
+                done += n;
+            }
+            return 0;
+        }
+        case 149: case 150: case 151: case 152: return 0;   /* mlock, munlock, mlockall, munlockall */
+        case 221: return 0;                           /* fadvise64 */
+        case 285: {                                   /* fallocate: grow to off + len */
+            lx_file_t *f = fd_get(p->lx, (int64_t)(int32_t)a0);
+            uint64_t want = a2 + a3;
+            if (!f) return ERR(EBADF);
+            if (a1 & ~1ULL) return ERR(95);           /* only plain allocation (and KEEP_SIZE) */
+            if (a1 & 1) return 0;
+            if (f->kind == LXF_OBJ && f->ops->size && f->ops->truncate) {
+                if (f->ops->size(f->obj) < want) f->ops->truncate(f->obj, want);
+                return 0;
+            }
+            if (f->kind == LXF_VFS && vfs_node_type(f->node) == VFS_NODE_FILE) {
+                if (vfs_node_size(f->node) < want && vfs_node_truncate(f->node, want) != 0) return ERR(EIO);
+                return 0;
+            }
+            return ERR(19);
+        }
+        /* extended attributes: none on these file systems */
+        case 188: case 189: case 190: case 197: case 198: case 199: return ERR(95);
+        case 191: case 192: case 193: return ERR(61);  /* getxattr: ENODATA */
+        case 194: case 195: case 196: return 0;        /* listxattr: empty */
+        /* inotify: watches that never report (GLib's file monitors work with that) */
+        case 253: return lx_res(lxi_eventfd(0, 0));    /* inotify_init */
+        case 255: return 0;                            /* inotify_rm_watch */
+        case 254: return ++p->lx->inotify_wd;          /* inotify_add_watch */
+        case 294: return lx_res(lxi_eventfd(0, (int)(a0 & (04000 | 02000000))));   /* inotify_init1 */
+        case 434: return ERR(ENOSYS);                  /* pidfd_open: callers fall back */
         default:
             log_hex("lx: unimplemented syscall ", nr);
             return ERR(ENOSYS);
