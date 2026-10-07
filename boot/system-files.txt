@@ -4,7 +4,7 @@
 apps/hello.app        userspace/hello.icx
 apps/pid.app          userspace/pid.icx
 apps/ticker.app       userspace/ticker.icx
-apps/audioplay.app    userspace/audioplay.app
+apps/media.app        userspace/media.app
 apps/editor.app       userspace/editor.app
 apps/diskman.app      userspace/diskman.app
 apps/curl.app         userspace/curl.app

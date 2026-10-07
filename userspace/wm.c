@@ -590,7 +590,7 @@ static int desk_last_click_icon = -1;
 static void desk_init_registry(void) {
     
 
-    static const char *const pinned[] = { "Explorer", "Terminal", "Browser", "Music" };
+    static const char *const pinned[] = { "Explorer", "Terminal", "Surfer", "Media" };
     int row = 0;
     desk_icon_count = 0;
     for (int i = 0; i < wm_app_count && desk_icon_count < DESK_MAX_ICONS; i++) {

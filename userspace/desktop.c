@@ -54,7 +54,7 @@ typedef struct {
     char     path[PATH_CAP];
     int      is_dir;
     int      is_app;
-    int      is_wav;
+    int      is_wav;      /* 1 audio, 2 video, 3 photo: opens in Media */
     uint64_t size;
     uint8_t  readonly;
 } ex_item_t;
@@ -307,6 +307,17 @@ static int has_suffix(const char *text, const char *suffix) {
     return 1;
 }
 
+/* files Media opens: 1 audio, 2 video, 3 photo */
+static int media_kind(const char *name) {
+    static const char *const audio[] = { ".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".aac" };
+    static const char *const video[] = { ".mp4", ".mov", ".m4v", ".webm", ".mkv" };
+    static const char *const photo[] = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg" };
+    for (unsigned i = 0; i < sizeof audio / sizeof audio[0]; i++) if (has_suffix(name, audio[i])) return 1;
+    for (unsigned i = 0; i < sizeof video / sizeof video[0]; i++) if (has_suffix(name, video[i])) return 2;
+    for (unsigned i = 0; i < sizeof photo / sizeof photo[0]; i++) if (has_suffix(name, photo[i])) return 3;
+    return 0;
+}
+
 static void ex_status(const char *text) {
     d_copy(ex.status, text, STATUS_CAP);
 }
@@ -399,7 +410,7 @@ static void refresh(void) {
         path_join(it->path, sizeof(it->path), ex.path, entry);
         it->is_dir = is_dir;
         it->is_app = has_suffix(entry, ".app") || has_suffix(entry, ".elf");
-        it->is_wav = has_suffix(entry, ".wav");
+        it->is_wav = media_kind(entry);
         it->size = 0;
         it->readonly = 0;
         {
@@ -467,14 +478,8 @@ static void open_item(int index) {
         return;
     }
     if (it->is_wav) {
-        icda_settings_t opt;
-        icda_settings_load(&opt);
-        if (!opt.audio) {
-            ex_status("Sound is off. Turn it on in Settings.");
-            return;
-        }
-        if ((long)icda_play_audio_file(it->path) < 0) ex_status("That track could not be played");
-        else ex_status("Playing");
+        if ((long)icda_spawn_args("/apps/media.app", it->path) < 0) ex_status("Media could not be launched");
+        else ex_status("Opened in Media");
         return;
     }
     if (it->is_app) {
@@ -683,7 +688,8 @@ static void draw_sidebar(ic_app_t *app, ic_canvas_t *c) {
 
 static ic_symbol_t item_symbol(const ex_item_t *it) {
     if (it->is_dir) return IC_SYM_FOLDER;
-    if (it->is_wav) return IC_SYM_MUSIC;
+    if (it->is_wav == 1) return IC_SYM_MUSIC;
+    if (it->is_wav == 2) return IC_SYM_PLAY;
     if (it->is_app) return IC_SYM_GRID;
     return IC_SYM_DOCUMENT;
 }
@@ -754,7 +760,8 @@ static void draw_list(ic_app_t *app, ic_canvas_t *c) {
                         text, IC_ALIGN_LEFT);
         ic_text_draw_in(c, meta, ic_rect_make(r.x + IC_SP_3 + 24 + name_w, r.y, 80, r.h),
                         it->is_dir ? "Folder" : (it->is_app ? "App"
-                                                : (it->is_wav ? "Audio" : "Text")),
+                                                : (it->is_wav == 1 ? "Audio" : it->is_wav == 2 ? "Video"
+                                                   : it->is_wav == 3 ? "Photo" : "Text")),
                         p->label_tertiary, IC_ALIGN_LEFT);
         if (it->is_dir) d_copy(sz, "-", sizeof(sz));
         else size_text(it->size, sz, sizeof(sz));

@@ -549,7 +549,22 @@ browser.o: userspace/browser.c userspace/gui.h userspace/gui_proto.h $(IC_HEADER
 	cp -f /tmp/icda-browser.o browser.o
 
 SURFER_ENGINE_OBJS = surfer_html.o surfer_css.o surfer_font.o surfer_layout.o surfer_paint.o surfer_image.o surfer_form.o surfer_download.o \
-                     surfer_js.o surfer_prelude.o $(QJS_OBJS) $(LIBM_OBJS)
+                     surfer_js.o surfer_prelude.o $(QJS_OBJS) $(LIBM_OBJS) $(WEBP_OBJS)
+
+# libwebp decoder (third_party/libwebp, BSD): lossy, lossless and animated
+# WebP for Surfer and Media.
+WEBP_DIR = userspace/surfer/third_party/libwebp
+WEBP_SRCS = $(wildcard $(WEBP_DIR)/src/*/*.c)
+WEBP_OBJS = $(patsubst %.c,webp_%.o,$(notdir $(WEBP_SRCS)))
+WEBP_CFLAGS = $(USR_CFLAGS) -Iuserspace/libc/include -Iuserspace/media/compat -I$(WEBP_DIR) -DNDEBUG -w
+vpath %.c $(WEBP_DIR)/src/dec $(WEBP_DIR)/src/dsp $(WEBP_DIR)/src/utils $(WEBP_DIR)/src/demux
+webp_%.o: %.c $(wildcard $(WEBP_DIR)/src/*/*.h)
+	$(CC) $(WEBP_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+surfer_image.o: userspace/surfer/image.c $(SURFER_HEADERS) $(wildcard $(WEBP_DIR)/src/webp/*.h)
+	$(CC) $(SURFER_CFLAGS) -I$(WEBP_DIR) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
 
 # QuickJS (third_party/quickjs, MIT).  -D__ICDA__ drops Atomics (no OS threads).
 QJS_OBJS = qjs_quickjs.o qjs_libregexp.o qjs_libunicode.o qjs_cutils.o qjs_dtoa.o
@@ -579,6 +594,360 @@ surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
 userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
 	cp -f /tmp/icda-browser.app userspace/browser.app
+
+# OpenH264 (third_party/openh264, BSD-2-Clause): H.264 decoding for Media.
+# C++ without exceptions or RTTI, ICDA's libc behind oh_prefix.h, threads off.
+OH_DIR = userspace/media/third_party/openh264/codec
+OH_CXXFLAGS = -ffreestanding -O2 -fno-pie -no-pie -mcmodel=large -fno-asynchronous-unwind-tables -fno-stack-protector \
+              -msse2 -mfpmath=sse -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -nostdinc++ \
+              -Iuserspace/media/compat_oh -Iuserspace/media/compat -Iuserspace/libc/include -Iuserspace -Iuserspace/media \
+              -I$(OH_DIR)/api/wels -I$(OH_DIR)/common/inc -I$(OH_DIR)/decoder/core/inc -I$(OH_DIR)/decoder/plus/inc \
+              -include userspace/media/compat_oh/oh_prefix.h -DNDEBUG -DX86_ASM -DHAVE_AVX2 -w
+OH_COMMON = common_tables copy_mb cpu crt_util_safe_x deblocking_common expand_pic intra_pred_common mc memory_align \
+            sad_common utils welsCodecTrace WelsThreadLib
+OH_DECODER = au_parser bit_stream cabac_decoder deblocking decode_mb_aux decode_slice decoder decoder_core \
+             decoder_data_tables error_concealment fmo get_intra_predictor manage_dec_ref memmgr_nal_unit mv_pred \
+             parse_mb_syn_cabac parse_mb_syn_cavlc pic_queue rec_mb wels_decoder_thread
+OH_ASM_COMMON = cpuid dct deblock expand_picture intra_pred_com mb_copy mc_chroma mc_luma satd_sad vaa
+OH_ASM_DECODER = dct intra_pred
+OH_OBJS = $(patsubst %,ohc_%.o,$(OH_COMMON)) $(patsubst %,ohd_%.o,$(OH_DECODER)) ohp_welsDecoderExt.o \
+          $(patsubst %,ohac_%.o,$(OH_ASM_COMMON)) $(patsubst %,ohad_%.o,$(OH_ASM_DECODER))
+OH_HEADERS = $(wildcard $(OH_DIR)/api/wels/*.h $(OH_DIR)/common/inc/*.h $(OH_DIR)/decoder/core/inc/*.h \
+             $(OH_DIR)/decoder/plus/inc/*.h userspace/media/compat_oh/*.h)
+
+ohc_%.o: $(OH_DIR)/common/src/%.cpp $(OH_HEADERS)
+	g++ $(OH_CXXFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+ohd_%.o: $(OH_DIR)/decoder/core/src/%.cpp $(OH_HEADERS)
+	g++ $(OH_CXXFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+ohp_%.o: $(OH_DIR)/decoder/plus/src/%.cpp $(OH_HEADERS)
+	g++ $(OH_CXXFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+ohac_%.o: $(OH_DIR)/common/x86/%.asm $(OH_DIR)/common/x86/asm_inc.asm
+	$(ASM) -f elf64 -DUNIX64 -DHAVE_AVX2 -I$(OH_DIR)/common/x86/ $< -o $@
+ohad_%.o: $(OH_DIR)/decoder/core/x86/%.asm $(OH_DIR)/common/x86/asm_inc.asm
+	$(ASM) -f elf64 -DUNIX64 -DHAVE_AVX2 -I$(OH_DIR)/common/x86/ $< -o $@
+media_h264.o: userspace/media/h264.cpp userspace/media/h264.h $(OH_HEADERS)
+	g++ $(OH_CXXFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+# libvpx (third_party/libvpx, BSD): VP8 / VP9 decoding.  gen/ holds what libvpx's
+# configure produced for x86_64 decoders only (runtime CPU detection, no threads).
+VPX_DIR = userspace/media/third_party/libvpx
+VPX_SRCS =
+VPX_SRCS += vp8/common/alloccommon.c
+VPX_SRCS += vp8/common/blockd.c
+VPX_SRCS += vp8/common/dequantize.c
+VPX_SRCS += vp8/common/entropy.c
+VPX_SRCS += vp8/common/entropymode.c
+VPX_SRCS += vp8/common/entropymv.c
+VPX_SRCS += vp8/common/extend.c
+VPX_SRCS += vp8/common/filter.c
+VPX_SRCS += vp8/common/findnearmv.c
+VPX_SRCS += vp8/common/generic/systemdependent.c
+VPX_SRCS += vp8/common/idct_blk.c
+VPX_SRCS += vp8/common/idctllm.c
+VPX_SRCS += vp8/common/loopfilter_filters.c
+VPX_SRCS += vp8/common/mbpitch.c
+VPX_SRCS += vp8/common/modecont.c
+VPX_SRCS += vp8/common/quant_common.c
+VPX_SRCS += vp8/common/reconinter.c
+VPX_SRCS += vp8/common/reconintra.c
+VPX_SRCS += vp8/common/reconintra4x4.c
+VPX_SRCS += vp8/common/rtcd.c
+VPX_SRCS += vp8/common/setupintrarecon.c
+VPX_SRCS += vp8/common/swapyv12buffer.c
+VPX_SRCS += vp8/common/treecoder.c
+VPX_SRCS += vp8/common/vp8_loopfilter.c
+VPX_SRCS += vp8/common/x86/bilinear_filter_sse2.c
+VPX_SRCS += vp8/common/x86/dequantize_mmx.asm
+VPX_SRCS += vp8/common/x86/idct_blk_mmx.c
+VPX_SRCS += vp8/common/x86/idct_blk_sse2.c
+VPX_SRCS += vp8/common/x86/idctllm_mmx.asm
+VPX_SRCS += vp8/common/x86/idctllm_sse2.asm
+VPX_SRCS += vp8/common/x86/iwalsh_sse2.asm
+VPX_SRCS += vp8/common/x86/loopfilter_block_sse2_x86_64.asm
+VPX_SRCS += vp8/common/x86/loopfilter_sse2.asm
+VPX_SRCS += vp8/common/x86/loopfilter_x86.c
+VPX_SRCS += vp8/common/x86/recon_mmx.asm
+VPX_SRCS += vp8/common/x86/recon_sse2.asm
+VPX_SRCS += vp8/common/x86/subpixel_mmx.asm
+VPX_SRCS += vp8/common/x86/subpixel_sse2.asm
+VPX_SRCS += vp8/common/x86/subpixel_ssse3.asm
+VPX_SRCS += vp8/common/x86/vp8_asm_stubs.c
+VPX_SRCS += vp8/decoder/dboolhuff.c
+VPX_SRCS += vp8/decoder/decodeframe.c
+VPX_SRCS += vp8/decoder/decodemv.c
+VPX_SRCS += vp8/decoder/detokenize.c
+VPX_SRCS += vp8/decoder/onyxd_if.c
+VPX_SRCS += vp8/vp8_dx_iface.c
+VPX_SRCS += vp9/common/vp9_alloccommon.c
+VPX_SRCS += vp9/common/vp9_blockd.c
+VPX_SRCS += vp9/common/vp9_common_data.c
+VPX_SRCS += vp9/common/vp9_entropy.c
+VPX_SRCS += vp9/common/vp9_entropymode.c
+VPX_SRCS += vp9/common/vp9_entropymv.c
+VPX_SRCS += vp9/common/vp9_filter.c
+VPX_SRCS += vp9/common/vp9_frame_buffers.c
+VPX_SRCS += vp9/common/vp9_idct.c
+VPX_SRCS += vp9/common/vp9_loopfilter.c
+VPX_SRCS += vp9/common/vp9_mvref_common.c
+VPX_SRCS += vp9/common/vp9_pred_common.c
+VPX_SRCS += vp9/common/vp9_quant_common.c
+VPX_SRCS += vp9/common/vp9_reconinter.c
+VPX_SRCS += vp9/common/vp9_reconintra.c
+VPX_SRCS += vp9/common/vp9_rtcd.c
+VPX_SRCS += vp9/common/vp9_scale.c
+VPX_SRCS += vp9/common/vp9_scan.c
+VPX_SRCS += vp9/common/vp9_seg_common.c
+VPX_SRCS += vp9/common/vp9_thread_common.c
+VPX_SRCS += vp9/common/vp9_tile_common.c
+VPX_SRCS += vp9/common/x86/vp9_idct_intrin_sse2.c
+VPX_SRCS += vp9/decoder/vp9_decodeframe.c
+VPX_SRCS += vp9/decoder/vp9_decodemv.c
+VPX_SRCS += vp9/decoder/vp9_decoder.c
+VPX_SRCS += vp9/decoder/vp9_detokenize.c
+VPX_SRCS += vp9/decoder/vp9_dsubexp.c
+VPX_SRCS += vp9/decoder/vp9_job_queue.c
+VPX_SRCS += vp9/vp9_dx_iface.c
+VPX_SRCS += vp9/vp9_iface_common.c
+VPX_SRCS += vpx/src/vpx_codec.c
+VPX_SRCS += vpx/src/vpx_decoder.c
+VPX_SRCS += vpx/src/vpx_image.c
+VPX_SRCS += vpx_dsp/bitreader.c
+VPX_SRCS += vpx_dsp/bitreader_buffer.c
+VPX_SRCS += vpx_dsp/intrapred.c
+VPX_SRCS += vpx_dsp/inv_txfm.c
+VPX_SRCS += vpx_dsp/loopfilter.c
+VPX_SRCS += vpx_dsp/prob.c
+VPX_SRCS += vpx_dsp/vpx_convolve.c
+VPX_SRCS += vpx_dsp/vpx_dsp_rtcd.c
+VPX_SRCS += vpx_dsp/x86/intrapred_sse2.asm
+VPX_SRCS += vpx_dsp/x86/intrapred_ssse3.asm
+VPX_SRCS += vpx_dsp/x86/inv_txfm_avx2.c
+VPX_SRCS += vpx_dsp/x86/inv_txfm_sse2.c
+VPX_SRCS += vpx_dsp/x86/inv_txfm_ssse3.c
+VPX_SRCS += vpx_dsp/x86/inv_wht_sse2.asm
+VPX_SRCS += vpx_dsp/x86/loopfilter_avx2.c
+VPX_SRCS += vpx_dsp/x86/loopfilter_sse2.c
+VPX_SRCS += vpx_dsp/x86/vpx_convolve_copy_sse2.asm
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_4t_intrin_sse2.c
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_8t_intrin_avx2.c
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_8t_intrin_ssse3.c
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_8t_sse2.asm
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_8t_ssse3.asm
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_bilinear_sse2.asm
+VPX_SRCS += vpx_dsp/x86/vpx_subpixel_bilinear_ssse3.asm
+VPX_SRCS += vpx_mem/vpx_mem.c
+VPX_SRCS += vpx_ports/emms_mmx.asm
+VPX_SRCS += vpx_scale/generic/gen_scalers.c
+VPX_SRCS += vpx_scale/generic/vpx_scale.c
+VPX_SRCS += vpx_scale/generic/yv12config.c
+VPX_SRCS += vpx_scale/generic/yv12extend.c
+VPX_SRCS += vpx_scale/vpx_scale_rtcd.c
+VPX_SRCS += vpx_util/vpx_thread.c
+VPX_SRCS += gen/vpx_config.c
+
+VPX_CFLAGS = $(USR_CFLAGS) -std=gnu99 -Iuserspace/media/compat_vpx -Iuserspace/media/compat -Iuserspace/libc/include \
+             -I$(VPX_DIR)/gen -I$(VPX_DIR) -DNDEBUG -w
+vpx_obj = vpx_$(subst /,_,$(basename $(1))).o
+vpx_simd = $(if $(findstring _ssse3,$(1)),-mssse3,$(if $(findstring _sse4,$(1)),-msse4.1,$(if $(findstring _avx2,$(1)),-mavx2,$(if $(findstring _avx,$(1)),-mavx,))))
+define VPX_RULE
+$(call vpx_obj,$(1)): $(VPX_DIR)/$(1)
+ifeq ($(suffix $(1)),.asm)
+	$$(ASM) -f elf64 -I$(VPX_DIR)/gen/ -I$(VPX_DIR)/ $$< -o $$@
+else
+	$$(CC) $$(VPX_CFLAGS) $(call vpx_simd,$(1)) -c $$< -o /tmp/icda-$$@
+	cp -f /tmp/icda-$$@ $$@
+endif
+endef
+$(foreach s,$(VPX_SRCS),$(eval $(call VPX_RULE,$(s))))
+VPX_OBJS = $(foreach s,$(VPX_SRCS),$(call vpx_obj,$(s)))
+libvpx_icda.a: $(VPX_OBJS)
+	rm -f $@ && ar rcs $@ $^
+
+# libopus (third_party/opus, BSD): Opus soundtracks (WebM, YouTube).
+OPUS_DIR = userspace/media/third_party/opus
+OPUS_SRCS =
+OPUS_SRCS += celt/bands.c
+OPUS_SRCS += celt/celt.c
+OPUS_SRCS += celt/celt_encoder.c
+OPUS_SRCS += celt/celt_decoder.c
+OPUS_SRCS += celt/cwrs.c
+OPUS_SRCS += celt/entcode.c
+OPUS_SRCS += celt/entdec.c
+OPUS_SRCS += celt/entenc.c
+OPUS_SRCS += celt/kiss_fft.c
+OPUS_SRCS += celt/laplace.c
+OPUS_SRCS += celt/mathops.c
+OPUS_SRCS += celt/mdct.c
+OPUS_SRCS += celt/modes.c
+OPUS_SRCS += celt/pitch.c
+OPUS_SRCS += celt/celt_lpc.c
+OPUS_SRCS += celt/quant_bands.c
+OPUS_SRCS += celt/rate.c
+OPUS_SRCS += celt/vq.c
+OPUS_SRCS += silk/CNG.c
+OPUS_SRCS += silk/code_signs.c
+OPUS_SRCS += silk/init_decoder.c
+OPUS_SRCS += silk/decode_core.c
+OPUS_SRCS += silk/decode_frame.c
+OPUS_SRCS += silk/decode_parameters.c
+OPUS_SRCS += silk/decode_indices.c
+OPUS_SRCS += silk/decode_pulses.c
+OPUS_SRCS += silk/decoder_set_fs.c
+OPUS_SRCS += silk/dec_API.c
+OPUS_SRCS += silk/enc_API.c
+OPUS_SRCS += silk/encode_indices.c
+OPUS_SRCS += silk/encode_pulses.c
+OPUS_SRCS += silk/gain_quant.c
+OPUS_SRCS += silk/interpolate.c
+OPUS_SRCS += silk/LP_variable_cutoff.c
+OPUS_SRCS += silk/NLSF_decode.c
+OPUS_SRCS += silk/NSQ.c
+OPUS_SRCS += silk/NSQ_del_dec.c
+OPUS_SRCS += silk/PLC.c
+OPUS_SRCS += silk/shell_coder.c
+OPUS_SRCS += silk/tables_gain.c
+OPUS_SRCS += silk/tables_LTP.c
+OPUS_SRCS += silk/tables_NLSF_CB_NB_MB.c
+OPUS_SRCS += silk/tables_NLSF_CB_WB.c
+OPUS_SRCS += silk/tables_other.c
+OPUS_SRCS += silk/tables_pitch_lag.c
+OPUS_SRCS += silk/tables_pulses_per_block.c
+OPUS_SRCS += silk/VAD.c
+OPUS_SRCS += silk/control_audio_bandwidth.c
+OPUS_SRCS += silk/quant_LTP_gains.c
+OPUS_SRCS += silk/VQ_WMat_EC.c
+OPUS_SRCS += silk/HP_variable_cutoff.c
+OPUS_SRCS += silk/NLSF_encode.c
+OPUS_SRCS += silk/NLSF_VQ.c
+OPUS_SRCS += silk/NLSF_unpack.c
+OPUS_SRCS += silk/NLSF_del_dec_quant.c
+OPUS_SRCS += silk/process_NLSFs.c
+OPUS_SRCS += silk/stereo_LR_to_MS.c
+OPUS_SRCS += silk/stereo_MS_to_LR.c
+OPUS_SRCS += silk/check_control_input.c
+OPUS_SRCS += silk/control_SNR.c
+OPUS_SRCS += silk/init_encoder.c
+OPUS_SRCS += silk/control_codec.c
+OPUS_SRCS += silk/A2NLSF.c
+OPUS_SRCS += silk/ana_filt_bank_1.c
+OPUS_SRCS += silk/biquad_alt.c
+OPUS_SRCS += silk/bwexpander_32.c
+OPUS_SRCS += silk/bwexpander.c
+OPUS_SRCS += silk/debug.c
+OPUS_SRCS += silk/decode_pitch.c
+OPUS_SRCS += silk/inner_prod_aligned.c
+OPUS_SRCS += silk/lin2log.c
+OPUS_SRCS += silk/log2lin.c
+OPUS_SRCS += silk/LPC_analysis_filter.c
+OPUS_SRCS += silk/LPC_inv_pred_gain.c
+OPUS_SRCS += silk/table_LSF_cos.c
+OPUS_SRCS += silk/NLSF2A.c
+OPUS_SRCS += silk/NLSF_stabilize.c
+OPUS_SRCS += silk/NLSF_VQ_weights_laroia.c
+OPUS_SRCS += silk/pitch_est_tables.c
+OPUS_SRCS += silk/resampler.c
+OPUS_SRCS += silk/resampler_down2_3.c
+OPUS_SRCS += silk/resampler_down2.c
+OPUS_SRCS += silk/resampler_private_AR2.c
+OPUS_SRCS += silk/resampler_private_down_FIR.c
+OPUS_SRCS += silk/resampler_private_IIR_FIR.c
+OPUS_SRCS += silk/resampler_private_up2_HQ.c
+OPUS_SRCS += silk/resampler_rom.c
+OPUS_SRCS += silk/sigm_Q15.c
+OPUS_SRCS += silk/sort.c
+OPUS_SRCS += silk/sum_sqr_shift.c
+OPUS_SRCS += silk/stereo_decode_pred.c
+OPUS_SRCS += silk/stereo_encode_pred.c
+OPUS_SRCS += silk/stereo_find_predictor.c
+OPUS_SRCS += silk/stereo_quant_pred.c
+OPUS_SRCS += silk/LPC_fit.c
+OPUS_SRCS += silk/float/apply_sine_window_FLP.c
+OPUS_SRCS += silk/float/corrMatrix_FLP.c
+OPUS_SRCS += silk/float/encode_frame_FLP.c
+OPUS_SRCS += silk/float/find_LPC_FLP.c
+OPUS_SRCS += silk/float/find_LTP_FLP.c
+OPUS_SRCS += silk/float/find_pitch_lags_FLP.c
+OPUS_SRCS += silk/float/find_pred_coefs_FLP.c
+OPUS_SRCS += silk/float/LPC_analysis_filter_FLP.c
+OPUS_SRCS += silk/float/LTP_analysis_filter_FLP.c
+OPUS_SRCS += silk/float/LTP_scale_ctrl_FLP.c
+OPUS_SRCS += silk/float/noise_shape_analysis_FLP.c
+OPUS_SRCS += silk/float/process_gains_FLP.c
+OPUS_SRCS += silk/float/regularize_correlations_FLP.c
+OPUS_SRCS += silk/float/residual_energy_FLP.c
+OPUS_SRCS += silk/float/warped_autocorrelation_FLP.c
+OPUS_SRCS += silk/float/wrappers_FLP.c
+OPUS_SRCS += silk/float/autocorrelation_FLP.c
+OPUS_SRCS += silk/float/burg_modified_FLP.c
+OPUS_SRCS += silk/float/bwexpander_FLP.c
+OPUS_SRCS += silk/float/energy_FLP.c
+OPUS_SRCS += silk/float/inner_product_FLP.c
+OPUS_SRCS += silk/float/k2a_FLP.c
+OPUS_SRCS += silk/float/LPC_inv_pred_gain_FLP.c
+OPUS_SRCS += silk/float/pitch_analysis_core_FLP.c
+OPUS_SRCS += silk/float/scale_copy_vector_FLP.c
+OPUS_SRCS += silk/float/scale_vector_FLP.c
+OPUS_SRCS += silk/float/schur_FLP.c
+OPUS_SRCS += silk/float/sort_FLP.c
+OPUS_SRCS += src/opus.c
+OPUS_SRCS += src/opus_decoder.c
+OPUS_SRCS += src/opus_encoder.c
+OPUS_SRCS += src/extensions.c
+OPUS_SRCS += src/opus_multistream.c
+OPUS_SRCS += src/opus_multistream_encoder.c
+OPUS_SRCS += src/opus_multistream_decoder.c
+OPUS_SRCS += src/repacketizer.c
+OPUS_SRCS += src/opus_projection_encoder.c
+OPUS_SRCS += src/opus_projection_decoder.c
+OPUS_SRCS += src/mapping_matrix.c
+OPUS_SRCS += src/analysis.c
+OPUS_SRCS += src/mlp.c
+OPUS_SRCS += src/mlp_data.c
+
+OPUS_CFLAGS = $(USR_CFLAGS) -Iuserspace/media/compat -Iuserspace/libc/include -I$(OPUS_DIR)/include -I$(OPUS_DIR)/celt \
+              -I$(OPUS_DIR)/silk -I$(OPUS_DIR)/silk/float -I$(OPUS_DIR) -DOPUS_BUILD -DUSE_ALLOCA -Dalloca=__builtin_alloca -DNDEBUG -w
+opus_obj = opus_$(subst /,_,$(basename $(1))).o
+define OPUS_RULE
+$(call opus_obj,$(1)): $(OPUS_DIR)/$(1)
+	$$(CC) $$(OPUS_CFLAGS) -c $$< -o /tmp/icda-$$@
+	cp -f /tmp/icda-$$@ $$@
+endef
+$(foreach s,$(OPUS_SRCS),$(eval $(call OPUS_RULE,$(s))))
+OPUS_OBJS = $(foreach s,$(OPUS_SRCS),$(call opus_obj,$(s)))
+libopus_icda.a: $(OPUS_OBJS)
+	rm -f $@ && ar rcs $@ $^
+
+media_setjmp.o: userspace/media/setjmp.asm
+	$(ASM) -f elf64 $< -o $@
+
+# Media: player and viewer (userspace/media).  The decoder libraries keep
+# their own translation units; their static names would clash otherwise.
+MEDIA_CFLAGS = $(USR_CFLAGS) -Iuserspace/libc/include -Iuserspace/media/compat -Iuserspace/media -Iuserspace/surfer \
+               -Ikernel/crypto -I$(VPX_DIR) -I$(OPUS_DIR)/include -Dalloca=__builtin_alloca -Wno-pedantic
+MEDIA_LIB_CFLAGS = $(MEDIA_CFLAGS) -w
+MEDIA_HEADERS = $(wildcard userspace/media/*.h) $(LIBC_HEADERS) $(IC_HEADERS) userspace/icda_sys.h userspace/surfer/image.h
+MEDIA_OBJS = media_media.o media_video.o media_youtube.o media_adec.o media_aac.o \
+             media_impl_drlibs.o media_impl_mp3.o media_impl_vorbis.o media_impl_mp4.o media_mp4demux.o media_mkvdemux.o \
+             media_vdec.o media_pdec.o media_cxxrt.o media_h264.o media_setjmp.o $(OH_OBJS)
+
+media_media.o media_video.o media_youtube.o media_aac.o media_mp4demux.o media_mkvdemux.o media_vdec.o media_pdec.o \
+           media_cxxrt.o: media_%.o: userspace/media/%.c $(MEDIA_HEADERS)
+	$(CC) $(MEDIA_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+media_adec.o media_impl_drlibs.o media_impl_mp3.o media_impl_vorbis.o media_impl_mp4.o: media_%.o: userspace/media/%.c $(MEDIA_HEADERS) \
+           $(wildcard userspace/media/third_party/*)
+	$(CC) $(MEDIA_LIB_CFLAGS) -c $< -o /tmp/icda-$@
+	cp -f /tmp/icda-$@ $@
+
+userspace/media.app: crt1.o $(MEDIA_OBJS) libvpx_icda.a libopus_icda.a surfer_image.o $(WEBP_OBJS) $(SURFER_NET_OBJS) $(LIBM_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-media.app crt1.o $(MEDIA_OBJS) surfer_image.o $(WEBP_OBJS) libvpx_icda.a libopus_icda.a $(SURFER_NET_OBJS) $(LIBM_OBJS) \
+	   gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
+	cp -f /tmp/icda-media.app userspace/media.app
 
 settings.o: userspace/settings.c userspace/settings_wifi.h userspace/settings_updates.h userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
            userspace/font.h userspace/ic_version.h version.h
@@ -796,7 +1165,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/audioplay.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)

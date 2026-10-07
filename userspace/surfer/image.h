@@ -16,4 +16,9 @@ void image_release(image_t *img);
 int  image_decode_svg(const char *text, size_t len, float scale, uint32_t color, image_t *out);
 int  image_is_svg(const uint8_t *data, size_t len);
 
+int  image_is_webp(const uint8_t *data, size_t len);
+int  image_decode_webp(const uint8_t *data, size_t len, image_t *out);
+/* every frame of an animated GIF or WebP and its delay in ms; caller frees */
+int  image_decode_gif_frames(const uint8_t *data, size_t len, image_t **frames, int **delays_ms, int *count);
+
 #endif

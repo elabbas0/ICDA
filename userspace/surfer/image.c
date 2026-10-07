@@ -24,6 +24,7 @@ int image_decode(const uint8_t *data, size_t len, image_t *out) {
     memset(out, 0, sizeof(*out));
     if (!data || len == 0 || len > 0x7FFFFFFF) return -1;
     if (image_is_svg(data, len)) return image_decode_svg((const char *)data, len, 2.0f, 0, out);
+    if (image_is_webp(data, len)) return image_decode_webp(data, len, out);
     if (!stbi_info_from_memory(data, (int)len, &w, &h, &n) || w <= 0 || h <= 0) return -1;
     if ((int64_t)w * h > 40LL * 1000 * 1000) return -1;
     rgba = stbi_load_from_memory(data, (int)len, &w, &h, &n, 4);
@@ -156,4 +157,128 @@ int image_decode_svg(const char *text, size_t len, float scale, uint32_t color, 
     }
     free(rgba);
     return 0;
+}
+
+/* ---- WebP (libwebp, BSD) and animated GIF / WebP ------------------------------- */
+
+#include "src/webp/decode.h"
+#include "src/webp/demux.h"
+
+int image_is_webp(const uint8_t *data, size_t len) {
+    return len >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WEBP", 4);
+}
+
+/* lossy and lossless; BGRA bytes are ARGB words on x86 */
+int image_decode_webp(const uint8_t *data, size_t len, image_t *out) {
+    WebPDecoderConfig cfg;
+    int f = 1;
+    memset(out, 0, sizeof(*out));
+    if (!WebPInitDecoderConfig(&cfg) || WebPGetFeatures(data, len, &cfg.input) != VP8_STATUS_OK) return -1;
+    while (cfg.input.width / f > IMAGE_MAX_SIDE || cfg.input.height / f > IMAGE_MAX_SIDE) f++;
+    out->w = cfg.input.width / f > 0 ? cfg.input.width / f : 1;
+    out->h = cfg.input.height / f > 0 ? cfg.input.height / f : 1;
+    if (f > 1) {
+        cfg.options.use_scaling = 1;
+        cfg.options.scaled_width = out->w;
+        cfg.options.scaled_height = out->h;
+    }
+    out->argb = malloc((size_t)out->w * (size_t)out->h * 4);
+    if (!out->argb) return -1;
+    cfg.output.colorspace = MODE_BGRA;
+    cfg.output.is_external_memory = 1;
+    cfg.output.u.RGBA.rgba = (uint8_t *)out->argb;
+    cfg.output.u.RGBA.stride = out->w * 4;
+    cfg.output.u.RGBA.size = (size_t)out->w * (size_t)out->h * 4;
+    if (WebPDecode(data, len, &cfg) != VP8_STATUS_OK) {
+        free(out->argb);
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+    return 0;
+}
+
+/* animated WebP: every frame composited on the canvas */
+static int webp_frames(const uint8_t *data, size_t len, image_t **frames, int **delays_ms, int *count) {
+    WebPData wd = { data, len };
+    WebPAnimDecoderOptions opt;
+    WebPAnimDecoder *dec;
+    WebPAnimInfo info;
+    int prev_ts = 0, cap = 0;
+    if (!WebPAnimDecoderOptionsInit(&opt)) return -1;
+    opt.color_mode = MODE_BGRA;
+    dec = WebPAnimDecoderNew(&wd, &opt);
+    if (!dec) return -1;
+    if (!WebPAnimDecoderGetInfo(dec, &info) || info.frame_count < 2 ||
+        (int64_t)info.canvas_width * info.canvas_height * info.frame_count > 200LL * 1000 * 1000) {
+        WebPAnimDecoderDelete(dec);
+        return -1;
+    }
+    cap = (int)info.frame_count;
+    *frames = (image_t *)calloc((size_t)cap, sizeof(image_t));
+    *delays_ms = (int *)calloc((size_t)cap, sizeof(int));
+    while (*frames && *delays_ms && *count < cap && WebPAnimDecoderHasMoreFrames(dec)) {
+        uint8_t *buf;
+        int ts;
+        image_t *im = &(*frames)[*count];
+        if (!WebPAnimDecoderGetNext(dec, &buf, &ts)) break;
+        im->w = (int)info.canvas_width;
+        im->h = (int)info.canvas_height;
+        im->argb = malloc((size_t)im->w * (size_t)im->h * 4);
+        if (!im->argb) break;
+        memcpy(im->argb, buf, (size_t)im->w * (size_t)im->h * 4);
+        (*delays_ms)[*count] = ts - prev_ts > 10 ? ts - prev_ts : 100;
+        prev_ts = ts;
+        (*count)++;
+    }
+    WebPAnimDecoderDelete(dec);
+    if (*count > 1) return 0;
+    for (int i = 0; i < *count; i++) image_release(&(*frames)[i]);
+    free(*frames);
+    free(*delays_ms);
+    *frames = 0;
+    *delays_ms = 0;
+    *count = 0;
+    return -1;
+}
+
+int image_decode_gif_frames(const uint8_t *data, size_t len, image_t **frames, int **delays_ms, int *count) {
+    int w, h, z, comp, *delays = 0;
+    unsigned char *all;
+    *frames = 0;
+    *delays_ms = 0;
+    *count = 0;
+    if (image_is_webp(data, len)) return webp_frames(data, len, frames, delays_ms, count);
+    if (len < 6 || memcmp(data, "GIF", 3) != 0) return -1;
+    all = stbi_load_gif_from_memory(data, (int)len, &delays, &w, &h, &z, &comp, 4);
+    if (!all || z <= 0) return -1;
+    if ((int64_t)w * h * z > 200LL * 1000 * 1000) {
+        stbi_image_free(all);
+        free(delays);
+        return -1;
+    }
+    *frames = (image_t *)calloc((size_t)z, sizeof(image_t));
+    *delays_ms = (int *)calloc((size_t)z, sizeof(int));
+    if (!*frames || !*delays_ms) {
+        free(*frames);
+        free(*delays_ms);
+        stbi_image_free(all);
+        free(delays);
+        return -1;
+    }
+    for (int k = 0; k < z; k++) {
+        const unsigned char *src = all + (size_t)k * (size_t)w * (size_t)h * 4;
+        image_t *im = &(*frames)[k];
+        im->w = w;
+        im->h = h;
+        im->argb = malloc((size_t)w * (size_t)h * 4);
+        if (!im->argb) break;
+        for (size_t i = 0; i < (size_t)w * (size_t)h; i++)
+            im->argb[i] = ((uint32_t)src[i * 4 + 3] << 24) | ((uint32_t)src[i * 4] << 16) |
+                          ((uint32_t)src[i * 4 + 1] << 8) | src[i * 4 + 2];
+        (*delays_ms)[k] = delays && delays[k] > 10 ? delays[k] : 100;
+        *count = k + 1;
+    }
+    stbi_image_free(all);
+    free(delays);
+    return *count > 0 ? 0 : -1;
 }

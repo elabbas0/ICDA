@@ -53,8 +53,8 @@ extern const char userprog_cacert_start[];
 extern const char userprog_cacert_end[];
 extern const char userprog_ticker_start[];
 extern const char userprog_ticker_end[];
-extern const char userprog_audioplay_start[];
-extern const char userprog_audioplay_end[];
+extern const char userprog_media_start[];
+extern const char userprog_media_end[];
 extern const char userprog_editor_start[];
 extern const char userprog_editor_end[];
 extern const char userprog_diskman_start[];
@@ -143,7 +143,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/pid.app", 0, 0 },
     { "/apps/ticker.app", 0, 0 },
     { "/apps/shell.app", 0, 0 },
-    { "/apps/audioplay.app", 0, 0 },
+    { "/apps/media.app", 0, 0 },
     { "/apps/editor.app", 0, 0 },
     { "/apps/diskman.app", 0, 0 },
     { "/apps/curl.app", 0, 0 },
@@ -198,7 +198,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_pid_start, userprog_pid_end);
     initramfs_seed_at(&n, userprog_ticker_start, userprog_ticker_end);
     initramfs_seed_at(&n, usershell_start, usershell_end);
-    initramfs_seed_at(&n, userprog_audioplay_start, userprog_audioplay_end);
+    initramfs_seed_at(&n, userprog_media_start, userprog_media_end);
     initramfs_seed_at(&n, userprog_editor_start, userprog_editor_end);
     initramfs_seed_at(&n, userprog_diskman_start, userprog_diskman_end);
     initramfs_seed_at(&n, userprog_curl_start, userprog_curl_end);

@@ -36,8 +36,8 @@ global userprog_cacert_start
 global userprog_cacert_end
 global userprog_ticker_start
 global userprog_ticker_end
-global userprog_audioplay_start
-global userprog_audioplay_end
+global userprog_media_start
+global userprog_media_end
 global userprog_editor_start
 global userprog_editor_end
 global userprog_diskman_start
@@ -135,11 +135,11 @@ userprog_ticker_start:
 %endif
 userprog_ticker_end:
 
-userprog_audioplay_start:
+userprog_media_start:
 %if SLIM == 0
-    incbin "userspace/audioplay.app"
+    incbin "userspace/media.app"
 %endif
-userprog_audioplay_end:
+userprog_media_end:
 
 userprog_editor_start:
 %if SLIM == 0
