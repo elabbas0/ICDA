@@ -9,10 +9,21 @@
 
 enum { U_AUTO = 0, U_PX, U_PCT, U_NONE };
 
+/* A length.  U_PCT is v percent of the reference plus px (calc(100% - 20px)),
+ * kept within lo / hi when bounds says so (min(100%, 640px), clamp()). */
 typedef struct {
     float   v;
     uint8_t unit;
+    uint8_t bounds;           /* 1: lo applies, 2: hi applies */
+    float   px, lo, hi;
 } css_len_t;
+
+static inline float css_pct(css_len_t l, float base) {
+    float v = base * l.v / 100 + l.px;
+    if ((l.bounds & 1) && v < l.lo) v = l.lo;
+    if ((l.bounds & 2) && v > l.hi) v = l.hi;
+    return v;
+}
 
 enum {
     D_INLINE = 0, D_BLOCK, D_INLINE_BLOCK, D_LIST_ITEM, D_NONE, D_TABLE, D_INLINE_TABLE, D_TABLE_ROW,

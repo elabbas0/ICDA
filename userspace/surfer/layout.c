@@ -3,6 +3,7 @@
  * replaced elements and list markers.  Works directly from the styled DOM and
  * produces boxes plus text fragments in document coordinates. */
 #include "layout.h"
+#include "media_el.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -55,7 +56,7 @@ typedef struct {
 
 static float res(css_len_t l, float base, float dflt) {
     if (l.unit == U_PX) return l.v;
-    if (l.unit == U_PCT) return base >= 0 ? base * l.v / 100 : dflt;
+    if (l.unit == U_PCT) return base >= 0 ? css_pct(l, base) : dflt;
     return dflt;
 }
 
@@ -237,6 +238,8 @@ static void replaced_size(lctx_t *c, dom_node_t *n, const css_style_t *st, float
         intrinsic(c, n, st, &mn, &mx);
         iw = (int)mx + 16;
         ih = (int)(st->line_height) + 6;
+    } else if (n->tag == T_VIDEO && media_el_size(media_el_for_node(n), &iw, &ih)) {
+        /* the picture size, once the stream says */
     } else if (n->tag == T_IFRAME || n->tag == T_VIDEO || n->tag == T_CANVAS || n->tag == T_EMBED || n->tag == T_OBJECT) {
         iw = 300;
         ih = 150;
@@ -856,7 +859,7 @@ static void layout_children(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, floa
             float fw, fh, fx, fy;
             box_t *fbx;
             float sy = clear_y(bfc, y, ks->clear);
-            float h = layout_block(c, b, k, ks, 0, sy, right - left, -1, 0, 1);
+            float h = layout_block(c, b, k, ks, 0, sy, right - left, c->pct_h, 0, 1);
             fbx = b->last;
             if (!fbx) continue;
             fw = fbx->w + fbx->ml + fbx->mr;
@@ -922,7 +925,7 @@ static void layout_children(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, floa
             /* sibling margins collapse to the larger one */
             by = y + (mt > prev_mb ? mt : prev_mb) - mt;
             if (!have_block) by = y;
-            h = layout_block(c, b, k, ks, left, by, right - left, -1, bfc, 0);
+            h = layout_block(c, b, k, ks, left, by, right - left, c->pct_h, bfc, 0);
             {
                 box_t *kb = b->last;
                 if (kb && kb->node == k) {
@@ -1060,7 +1063,7 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
     }
     /* percentage heights inside resolve against this box when its height is
      * known before its content: given, or fixed by top and bottom */
-    float saved_pct_h = c->pct_h;
+    float saved_pct_h = c->pct_h, inset_h = -1;
     {
         float known = -1;
         if (!is_auto(st->height) && !(st->height.unit == U_PCT && cb_h < 0)) {
@@ -1069,6 +1072,7 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
         } else if ((st->position == P_ABSOLUTE || st->position == P_FIXED) && cb_h >= 0 &&
                    !is_auto(st->inset[0]) && !is_auto(st->inset[2])) {
             known = cb_h - res(st->inset[0], cb_h, 0) - res(st->inset[2], cb_h, 0) - b->mt - b->mb - vframe(b);
+            inset_h = known;
         }
         c->pct_h = known;
     }
@@ -1088,6 +1092,8 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
         if (!is_auto(st->height) && !(st->height.unit == U_PCT && cb_h < 0)) {
             h = res(st->height, cb_h, content_h);
             if (st->box_sizing) h -= vframe(b);
+        } else if (inset_h >= 0) {
+            h = inset_h;          /* top and bottom set: the space between them */
         }
         {
             float mn = res(st->min_h, cb_h, 0), mx = res(st->max_h, cb_h, -1);
@@ -1246,7 +1252,7 @@ static void layout_flex(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, float *c
                 float x = left + (colw + gap_main) * (k - i);
                 float h;
                 if (items[k].anon) continue;
-                h = layout_block(c, b, items[k].node, items[k].st, x, y, colw, -1, 0, 0);
+                h = layout_block(c, b, items[k].node, items[k].st, x, y, colw, c->pct_h, 0, 0);
                 items[k].box = b->last;
                 if (h > rowh) rowh = h;
             }
@@ -1353,7 +1359,7 @@ static void layout_flex(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, float *c
                             css_style_t *copy = (css_style_t *)arena_alloc(&c->L->arena, sizeof(css_style_t));
                             if (!copy) continue;
                             *copy = tmp;
-                            h = layout_block(c, b, it->node, copy, 0, y, inner_w, -1, 0, 0);
+                            h = layout_block(c, b, it->node, copy, 0, y, inner_w, c->pct_h, 0, 0);
                             it->box = b->last;
                             if (it->box) it->box->st = it->st;
                         }
@@ -1437,7 +1443,7 @@ static void layout_flex(lctx_t *c, box_t *b, dom_node_t *n, bfc_t *bfc, float *c
                 h = anon->h;
             } else {
                 int center = (it->st->align_self != JC_AUTO ? it->st->align_self : st->align_items) == JC_CENTER;
-                h = layout_block(c, b, it->node, it->st, left, y, inner_w, -1, 0,
+                h = layout_block(c, b, it->node, it->st, left, y, inner_w, c->pct_h, 0,
                                  (st->align_items != JC_STRETCH && is_auto(it->st->width)) || center);
                 if (center && b->last) {
                     box_t *ib = b->last;

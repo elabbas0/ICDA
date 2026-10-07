@@ -19,6 +19,10 @@ mtrack_t *container_track(mfile_t *f, int kind) {
 }
 
 int container_add_sample(mtrack_t *t, uint64_t off, uint32_t size, int key, int64_t pts_us) {
+    return container_add_sample_dts(t, off, size, key, pts_us, pts_us);
+}
+
+int container_add_sample_dts(mtrack_t *t, uint64_t off, uint32_t size, int key, int64_t pts_us, int64_t dts_us) {
     if (t->n == t->cap) {
         int cap = t->cap ? t->cap * 2 : 1024;
         msample_t *s = (msample_t *)realloc(t->s, (size_t)cap * sizeof(msample_t));
@@ -30,6 +34,8 @@ int container_add_sample(mtrack_t *t, uint64_t off, uint32_t size, int key, int6
     t->s[t->n].size = size;
     t->s[t->n].key = (uint8_t)key;
     t->s[t->n].pts_us = pts_us;
+    t->s[t->n].dts_us = dts_us;
+    if (t->n > 0 && dts_us < t->s[t->n - 1].dts_us) t->unsorted = 1;
     t->n++;
     return 0;
 }
@@ -264,7 +270,8 @@ static void build_samples(mtrack_t *t, const box_t *stbl) {
                     while (stss_i < stss_n && rd32(stss.body + 8 + (size_t)stss_i * 4) < si + 1) stss_i++;
                     key = stss_i < stss_n && rd32(stss.body + 8 + (size_t)stss_i * 4) == si + 1;
                 }
-                container_add_sample(t, off, size, key, to_us(dts + cts - t->edit_offset, t->timescale));
+                container_add_sample_dts(t, off, size, key, to_us(dts + cts - t->edit_offset, t->timescale),
+                                         to_us(dts - t->edit_offset, t->timescale));
                 off += size;
                 if (stts_i < stts_n) {
                     dts += rd32(stts.body + 8 + (size_t)stts_i * 8 + 4);
@@ -427,7 +434,8 @@ static void parse_traf(mfile_t *f, const box_t *traf, uint64_t moof_off) {
                     p += 4;
                 }
                 if (i == 0 && have_first) sf = first_flags;
-                container_add_sample(t, off, ss, !(sf & 0x10000), to_us(t->next_dts + cts - t->edit_offset, t->timescale));
+                container_add_sample_dts(t, off, ss, !(sf & 0x10000), to_us(t->next_dts + cts - t->edit_offset, t->timescale),
+                                         to_us(t->next_dts - t->edit_offset, t->timescale));
                 off += ss;
                 t->next_dts += sd;
             }
@@ -468,4 +476,17 @@ int mp4_parse(mfile_t *f, const uint8_t *data, size_t len) {
         f->parsed += b.total;
     }
     return f->have_header || f->parsed < len ? 0 : -1;
+}
+
+static int cmp_dts(const void *a, const void *b) {
+    const msample_t *x = (const msample_t *)a, *y = (const msample_t *)b;
+    if (x->dts_us != y->dts_us) return x->dts_us < y->dts_us ? -1 : 1;
+    return x->off < y->off ? -1 : x->off > y->off ? 1 : 0;   /* stable: file order */
+}
+
+int container_sort(mtrack_t *t) {
+    if (!t->unsorted) return 0;
+    qsort(t->s, (size_t)t->n, sizeof(msample_t), cmp_dts);
+    t->unsorted = 0;
+    return 1;
 }

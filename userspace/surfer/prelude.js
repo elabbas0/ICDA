@@ -15,6 +15,23 @@ function val(obj, name, value) {
     Object.defineProperty(obj, name, { value, writable: true, configurable: true, enumerable: false });
 }
 
+/* An array that contains itself joins as '' where it repeats, as in
+ * browsers; QuickJS recursed until the stack ran out (YouTube's player
+ * stringifies such arrays). */
+{
+    const AP = Array.prototype, joining = new Set();
+    for (const name of ['join', 'toLocaleString']) {
+        const native = AP[name];
+        val(AP, name, {
+            [name](...args) {
+                if (joining.has(this)) return '';
+                joining.add(this);
+                try { return native.apply(this, args); } finally { joining.delete(this); }
+            }
+        }[name]);
+    }
+}
+
 G.window = G; G.self = G; G.top = G; G.parent = G; G.frames = G;
 G.frameElement = null;
 G.opener = null;
@@ -1274,10 +1291,170 @@ function parseHeaders(raw) {
 }
 const STATUS_TEXT = { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
     400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 429: 'Too Many Requests', 500: 'Internal Server Error', 503: 'Service Unavailable' };
+/* ---- streams: enough of ReadableStream for fetch bodies and the libraries
+ * that build their own (start / pull / cancel; one reader) --------------- */
+class ReadableStream {
+    constructor(source) {
+        source = source || {};
+        val(this, '_src', source); val(this, '_q', []); val(this, '_wait', []);
+        val(this, '_closed', false); val(this, '_err', null); val(this, '_pulling', false);
+        val(this, '_onClose', []);
+        this.locked = false;
+        const s = this;
+        val(this, '_ctl', {
+            get desiredSize() { return s._q.length ? 0 : 1; },
+            enqueue(c) { if (s._closed) return; if (s._wait.length) s._wait.shift().resolve({ value: c, done: false }); else s._q.push(c); },
+            close() { s._close(); },
+            error(e) { s._fail(e); }
+        });
+        try {
+            const r = source.start && source.start(this._ctl);
+            if (r && typeof r.then === 'function') r.then(null, (e) => this._fail(e));
+        } catch (e) { this._fail(e); }
+    }
+    _close() {
+        if (this._closed) return;
+        this._closed = true;
+        if (!this._q.length) while (this._wait.length) this._wait.shift().resolve({ value: undefined, done: true });
+        for (const f of this._onClose.splice(0)) f.resolve();
+    }
+    _fail(e) {
+        this._err = e || new TypeError('The stream is errored.');
+        while (this._wait.length) this._wait.shift().reject(this._err);
+        for (const f of this._onClose.splice(0)) f.reject(this._err);
+    }
+    _pull() {
+        if (!this._src.pull || this._closed || this._err || this._pulling) return;
+        this._pulling = true;
+        Promise.resolve().then(() => this._src.pull(this._ctl)).then(() => {
+            this._pulling = false;
+            if (this._wait.length && !this._q.length) this._pull();
+        }, (e) => { this._pulling = false; this._fail(e); });
+    }
+    _read() {
+        if (this._q.length) {
+            const value = this._q.shift();
+            if (this._closed && !this._q.length) Promise.resolve().then(() => { while (this._wait.length) this._wait.shift().resolve({ value: undefined, done: true }); });
+            return Promise.resolve({ value, done: false });
+        }
+        if (this._err) return Promise.reject(this._err);
+        if (this._closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise((resolve, reject) => { this._wait.push({ resolve, reject }); this._pull(); });
+    }
+    getReader() {
+        if (this.locked) throw new TypeError('ReadableStreamDefaultReader constructor can only accept readable streams that are not yet locked to a reader');
+        this.locked = true;
+        const s = this;
+        const closed = new Promise((resolve, reject) => {
+            if (s._err) reject(s._err); else if (s._closed && !s._q.length) resolve(); else s._onClose.push({ resolve, reject });
+        });
+        closed.catch(() => {});
+        return {
+            closed,
+            read: () => s._read(),
+            releaseLock: () => { s.locked = false; },
+            cancel: (r) => s._cancel(r)
+        };
+    }
+    _cancel(r) {
+        this._q.length = 0;
+        this._close();
+        try { if (this._src.cancel) this._src.cancel(r); } catch (e) {}
+        return Promise.resolve();
+    }
+    cancel(r) { return this.locked ? Promise.reject(new TypeError('Cannot cancel a locked stream')) : this._cancel(r); }
+    tee() {
+        const r = this.getReader(), outs = [], ctls = [];
+        const pump = () => r.read().then(({ value, done }) => {
+            if (done) { for (const c of ctls) c.close(); return; }
+            for (const c of ctls) c.enqueue(value);
+            return pump();
+        }, (e) => { for (const c of ctls) c.error(e); });
+        for (let i = 0; i < 2; i++) outs.push(new ReadableStream({ start(c) { ctls.push(c); } }));
+        pump();
+        return outs;
+    }
+    pipeTo(dest) {
+        const r = this.getReader(), w = dest.getWriter();
+        const step = () => r.read().then(({ value, done }) => done ? w.close() : Promise.resolve(w.write(value)).then(step));
+        return step();
+    }
+    pipeThrough(t) { this.pipeTo(t.writable); return t.readable; }
+    async *[Symbol.asyncIterator]() {
+        const r = this.getReader();
+        try {
+            for (;;) {
+                const { value, done } = await r.read();
+                if (done) return;
+                yield value;
+            }
+        } finally { r.releaseLock(); }
+    }
+    values() { return this[Symbol.asyncIterator](); }
+    static from(it) {
+        return new ReadableStream({
+            async start(c) { for await (const x of it) c.enqueue(x); c.close(); }
+        });
+    }
+}
+G.ReadableStream = ReadableStream;
+class WritableStream {
+    constructor(sink) {
+        sink = sink || {};
+        val(this, '_sink', sink);
+        this.locked = false;
+        if (sink.start) sink.start({ error() {} });
+    }
+    getWriter() {
+        const s = this._sink;
+        this.locked = true;
+        let chain = Promise.resolve();
+        return {
+            ready: Promise.resolve(),
+            closed: new Promise(() => {}),
+            desiredSize: 1,
+            write: (c) => (chain = chain.then(() => s.write && s.write(c, { error() {} }))),
+            close: () => (chain = chain.then(() => s.close && s.close())),
+            abort: (r) => Promise.resolve(s.abort && s.abort(r)),
+            releaseLock: () => { this.locked = false; }
+        };
+    }
+}
+G.WritableStream = WritableStream;
+class TransformStream {
+    constructor(t) {
+        t = t || {};
+        let ctl;
+        this.readable = new ReadableStream({ start(c) { ctl = c; } });
+        const tc = { enqueue: (x) => ctl.enqueue(x), error: (e) => ctl.error(e), terminate: () => ctl.close(), desiredSize: 1 };
+        if (t.start) t.start(tc);
+        this.writable = new WritableStream({
+            write: (chunk) => (t.transform ? t.transform(chunk, tc) : tc.enqueue(chunk)),
+            close: () => Promise.resolve(t.flush && t.flush(tc)).then(() => ctl.close())
+        });
+    }
+}
+G.TransformStream = TransformStream;
+G.TextDecoderStream = class TextDecoderStream extends TransformStream {
+    constructor(label) {
+        const d = new TextDecoder(label);
+        super({ transform(chunk, c) { const s = d.decode(chunk, { stream: true }); if (s) c.enqueue(s); } });
+    }
+};
+G.TextEncoderStream = class TextEncoderStream extends TransformStream {
+    constructor() {
+        const e = new TextEncoder();
+        super({ transform(chunk, c) { c.enqueue(e.encode(chunk)); } });
+    }
+};
+
 class Response {
     constructor(body, init) {
         init = init || {};
-        val(this, '_buf', body === undefined || body === null ? new ArrayBuffer(0) : body instanceof Blob ? body._buf : toArrayBuffer(body));
+        const stream = body instanceof ReadableStream ? body : null;
+        val(this, '_stream', stream);
+        val(this, '_null', body === undefined || body === null);
+        val(this, '_buf', stream || body === undefined || body === null ? new ArrayBuffer(0) : body instanceof Blob ? body._buf : toArrayBuffer(body));
         this.status = init.status === undefined ? 200 : init.status;
         this.statusText = init.statusText !== undefined ? init.statusText : STATUS_TEXT[this.status] || '';
         this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers);
@@ -1285,16 +1462,43 @@ class Response {
         this.redirected = !!init.redirected;
         this.type = 'basic';
         this.bodyUsed = false;
-        this.body = null;
     }
     get ok() { return this.status >= 200 && this.status < 300; }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(this._buf.slice(0)); }
-    bytes() { this.bodyUsed = true; return Promise.resolve(new Uint8Array(this._buf.slice(0))); }
-    text() { this.bodyUsed = true; return Promise.resolve(__utf8Decode(this._buf)); }
+    /* the body as a stream of one chunk (it has all arrived by now) */
+    get body() {
+        if (!this._stream) {
+            if (this._null) return null;
+            const buf = this._buf;
+            val(this, '_stream', new ReadableStream({ start(c) { if (buf.byteLength) c.enqueue(new Uint8Array(buf)); c.close(); } }));
+        }
+        return this._stream;
+    }
+    _all() {
+        this.bodyUsed = true;
+        if (!this._stream) return Promise.resolve(this._buf.slice(0));
+        const r = this._stream.getReader(), parts = [];
+        const step = () => r.read().then(({ value, done }) => {
+            if (!done) { parts.push(typeof value === 'string' ? new Uint8Array(__utf8Encode(value)) : new Uint8Array(toArrayBuffer(value))); return step(); }
+            let n = 0;
+            for (const p of parts) n += p.length;
+            const out = new Uint8Array(n);
+            n = 0;
+            for (const p of parts) { out.set(p, n); n += p.length; }
+            return out.buffer;
+        });
+        return step();
+    }
+    arrayBuffer() { return this._all(); }
+    bytes() { return this._all().then((b) => new Uint8Array(b)); }
+    text() { return this._all().then((b) => __utf8Decode(b)); }
     json() { return this.text().then((t) => JSON.parse(t)); }
-    blob() { this.bodyUsed = true; return Promise.resolve(new Blob([this._buf], { type: this.headers.get('content-type') || '' })); }
+    blob() { return this._all().then((b) => new Blob([b], { type: this.headers.get('content-type') || '' })); }
     formData() { return this.text().then((t) => { const f = new FormData(); new URLSearchParams(t).forEach((v, k) => f.append(k, v)); return f; }); }
-    clone() { return new Response(this._buf.slice(0), { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
+    clone() {
+        const init = { status: this.status, statusText: this.statusText, headers: new Headers(this.headers), url: this.url };
+        if (this._stream) { const [a, b] = this._stream.tee(); val(this, '_stream', a); return new Response(b, init); }
+        return new Response(this._null ? null : this._buf.slice(0), init);
+    }
     static json(data, init) { const h = new Headers((init && init.headers) || {}); h.set('content-type', 'application/json'); return new Response(JSON.stringify(data), Object.assign({}, init, { headers: h })); }
     static error() { return new Response(null, { status: 0 }); }
     static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: url } }); }
@@ -1545,7 +1749,6 @@ function ioCheck() {
     if (any) ioTimer = setTimeout(ioCheck, 250);
 }
 const ioWake = () => { if (!ioTimer) ioTimer = setTimeout(ioCheck, 0); };
-G.__ioDebug = () => ({ observers: ioAll.size, targets: Array.from(ioAll).reduce((n, o) => n + o._t.size, 0), timer: ioTimer, states: Array.from(ioAll).map((o) => Array.from(o._t.values()).map(String).join('')).join('|').slice(0, 200) });
 G.addEventListener('scroll', () => { if (ioTimer) { clearTimeout(ioTimer); ioTimer = 0; } ioWake(); });
 class IntersectionObserver {
     constructor(cb, opts) {
@@ -1570,19 +1773,68 @@ class IntersectionObserverEntry {
 for (const k of ['target', 'isIntersecting', 'intersectionRatio', 'boundingClientRect', 'intersectionRect', 'rootBounds', 'time', 'isVisible'])
     def(IntersectionObserverEntry.prototype, k, function () { return this._e[k]; });
 G.IntersectionObserverEntry = IntersectionObserverEntry;
-class ResizeObserver {
-    constructor(cb) { this._cb = cb; this._t = new Set(); }
-    observe(el) {
-        this._t.add(el);
-        setTimeout(() => {
-            if (!this._t.has(el)) return;
-            const r = el.getBoundingClientRect();
-            const size = [{ inlineSize: r.width, blockSize: r.height }];
-            try { this._cb([{ target: el, contentRect: r, borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size }], this); } catch (e) { reportError(e); }
-        }, 0);
+/* ResizeObserver: observed boxes are measured after layout (every 250 ms
+ * while anything is observed); a change, and the first measurement, call
+ * back with the content and border box sizes. */
+class DOMRectReadOnly {
+    constructor(x, y, width, height) { this.x = +x || 0; this.y = +y || 0; this.width = +width || 0; this.height = +height || 0; }
+    get left() { return Math.min(this.x, this.x + this.width); }
+    get right() { return Math.max(this.x, this.x + this.width); }
+    get top() { return Math.min(this.y, this.y + this.height); }
+    get bottom() { return Math.max(this.y, this.y + this.height); }
+    toJSON() { return { x: this.x, y: this.y, width: this.width, height: this.height, top: this.top, right: this.right, bottom: this.bottom, left: this.left }; }
+    static fromRect(r) { r = r || {}; return new this(r.x, r.y, r.width, r.height); }
+}
+class DOMRect extends DOMRectReadOnly {}
+G.DOMRectReadOnly = DOMRectReadOnly;
+G.DOMRect = DOMRect;
+const roAll = new Set();
+let roTimer = 0;
+class ResizeObserverEntry {
+    constructor(target) {
+        const r = target.getBoundingClientRect(), cs = getComputedStyle(target);
+        const px = (v) => parseFloat(v) || 0;
+        const padX = px(cs.paddingLeft) + px(cs.paddingRight) + px(cs.borderLeftWidth) + px(cs.borderRightWidth);
+        const padY = px(cs.paddingTop) + px(cs.paddingBottom) + px(cs.borderTopWidth) + px(cs.borderBottomWidth);
+        const cw = Math.max(0, r.width - padX), ch = Math.max(0, r.height - padY);
+        this.target = target;
+        this.contentRect = new DOMRectReadOnly(px(cs.paddingLeft), px(cs.paddingTop), cw, ch);
+        const box = (w, h) => { const a = [{ inlineSize: w, blockSize: h }]; return Object.freeze(a); };
+        this.contentBoxSize = box(cw, ch);
+        this.borderBoxSize = box(r.width, r.height);
+        this.devicePixelContentBoxSize = box(cw, ch);
     }
-    unobserve(el) { this._t.delete(el); }
-    disconnect() { this._t.clear(); }
+}
+G.ResizeObserverEntry = ResizeObserverEntry;
+function roCheck() {
+    roTimer = 0;
+    for (const ro of Array.from(roAll)) {
+        const changed = [];
+        for (const [el, last] of ro._t) {
+            const e = new ResizeObserverEntry(el);
+            const w = e.contentBoxSize[0].inlineSize, h = e.contentBoxSize[0].blockSize;
+            if (last && last[0] === w && last[1] === h) continue;
+            ro._t.set(el, [w, h]);
+            changed.push(e);
+        }
+        if (changed.length) { try { ro._cb.call(ro, changed, ro); } catch (e) { reportError(e); } }
+    }
+    if (roAll.size) roTimer = setTimeout(roCheck, 250);
+}
+class ResizeObserver {
+    constructor(cb) {
+        if (typeof cb !== 'function') throw new TypeError("Failed to construct 'ResizeObserver': parameter 1 is not of type 'Function'.");
+        this._cb = cb;
+        this._t = new Map();
+    }
+    observe(el) {
+        if (!this._t.has(el)) this._t.set(el, null);
+        roAll.add(this);
+        if (roTimer) clearTimeout(roTimer);
+        roTimer = setTimeout(roCheck, 0);
+    }
+    unobserve(el) { this._t.delete(el); if (!this._t.size) roAll.delete(this); }
+    disconnect() { this._t.clear(); roAll.delete(this); }
 }
 G.ResizeObserver = ResizeObserver;
 G.PerformanceObserver = class PerformanceObserver { constructor() {} observe() {} disconnect() {} static get supportedEntryTypes() { return []; } };
@@ -1883,6 +2135,442 @@ Object.defineProperty(DP, 'all', { get: () => NaN, configurable: true });
         }
         delete G.__stdElementProto;
     }
+}
+
+/* ---- audio and video: HTMLMediaElement, MediaSource, SourceBuffer ---------
+ * Playback is native (media_el.c, reached through __media*).  This layer
+ * gives it the web's interfaces and turns the player's state into media
+ * events, looked at every 100 ms while a player is open. */
+{
+    const VP = G.HTMLVideoElement.prototype, AP = G.HTMLAudioElement.prototype;
+    const MP = Object.create(Object.getPrototypeOf(VP));
+    Object.setPrototypeOf(VP, MP);
+    Object.setPrototypeOf(AP, MP);
+    const HTMLMediaElement = function HTMLMediaElement() { throw new TypeError('Illegal constructor'); };
+    HTMLMediaElement.prototype = MP;
+    val(MP, 'constructor', HTMLMediaElement);
+    const CONSTS = { NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3, HAVE_NOTHING: 0,
+        HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 };
+    for (const k in CONSTS) { HTMLMediaElement[k] = CONSTS[k]; val(MP, k, CONSTS[k]); }
+    G.HTMLMediaElement = HTMLMediaElement;
+
+    class TimeRanges {
+        constructor(list) { val(this, '_r', list || []); }
+        get length() { return this._r.length >> 1; }
+        start(i) { if (!(i >= 0 && i < this.length)) throw new DOMException('Index out of range', 'IndexSizeError'); return this._r[2 * i]; }
+        end(i) { if (!(i >= 0 && i < this.length)) throw new DOMException('Index out of range', 'IndexSizeError'); return this._r[2 * i + 1]; }
+    }
+    G.TimeRanges = TimeRanges;
+    class MediaError {
+        constructor(code, message) { this.code = code; this.message = message || ''; }
+    }
+    Object.assign(MediaError, { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 });
+    G.MediaError = MediaError;
+
+    /* what the decoders take: H.264, VP8 and 8-bit VP9 with AAC, Opus or
+     * Vorbis, in MP4 or WebM, up to 1080p */
+    function support(type) {
+        const m = /^\s*([^;\s]+)\s*(.*)$/.exec(String(type === undefined ? '' : type));
+        if (!m) return '';
+        const mime = m[1].toLowerCase(), params = {};
+        m[2].replace(/;\s*([\w-]+)\s*=\s*("([^"]*)"|[^;]*)/g, (_, k, v, q) => { params[k.toLowerCase()] = (q !== undefined ? q : v).trim(); return ''; });
+        const mp4 = /^(video|audio)\/(mp4|x-m4v|x-m4a)$/.test(mime), webm = /^(video|audio)\/webm$/.test(mime);
+        if (!mp4 && !webm) return '';
+        if ((params.width && +params.width > 1920) || (params.height && +params.height > 1080)) return '';
+        if (params.framerate && +params.framerate > 60) return '';
+        if (params.eotf && !/^bt709$/i.test(params.eotf)) return '';
+        if (params.channels && +params.channels > 2) return '';
+        if (!('codecs' in params)) return 'maybe';
+        for (let c of params.codecs.split(',')) {
+            c = c.trim().toLowerCase();
+            if (!c) continue;
+            const ok = mp4 ? /^avc[13](\.[0-9a-f]{6})?$/.test(c) || /^mp4a(\.40(\.(2|5|29))?)?$/.test(c)
+                           : /^vp0?8(\.0)?$/.test(c) || /^vp9(\.0)?$/.test(c) || /^vp09\.00(\.\d+\.08(\..*)?)?$/.test(c) ||
+                             c === 'opus' || c === 'vorbis';
+            if (!ok) return '';
+        }
+        return 'probably';
+    }
+    G.navigator.mediaCapabilities = {
+        decodingInfo(cfg) {
+            const v = cfg && cfg.video, a = cfg && cfg.audio;
+            let ok = !!(v || a);
+            if (v) ok = ok && support(v.contentType) !== '' && (v.width || 0) <= 1920 && (v.height || 0) <= 1080 && (v.framerate || 0) <= 60;
+            if (a) ok = ok && support(a.contentType) !== '';
+            return Promise.resolve({ supported: ok, smooth: ok && (!v || (v.height || 0) <= 720), powerEfficient: false, keySystemAccess: null, configuration: cfg });
+        },
+        encodingInfo(cfg) { return Promise.resolve({ supported: false, smooth: false, powerEfficient: false, configuration: cfg }); }
+    };
+
+    const MS_URLS = new Map();
+    const ST = new WeakMap();
+    function st(el) {
+        let s = ST.get(el);
+        if (!s) {
+            s = { h: -1, src: '', ms: null, timer: 0, last: null, ready: 0, paused: true, seeking: false, volume: 1,
+                  muted: el.hasAttribute('muted'), rate: 1, ended: false, error: null, dur: NaN, network: 0,
+                  lastUpdate: 0, lastProgress: 0, playingFired: false };
+            ST.set(el, s);
+        }
+        return s;
+    }
+    const fire = (t, type) => t.dispatchEvent(new Event(type));
+    const queue = (t, type) => setTimeout(() => fire(t, type), 0);
+
+    function currentURL(el) {
+        const a = el.getAttribute('src');
+        if (a) return a;
+        for (const c of el.children) {
+            if (c.localName !== 'source' || !c.getAttribute('src')) continue;
+            if (!c.getAttribute('type') || support(c.getAttribute('type'))) return c.getAttribute('src');
+        }
+        return '';
+    }
+    function release(s) {
+        if (s.timer) { clearInterval(s.timer); s.timer = 0; }
+        if (s.ms) { const ms = s.ms; s.ms = null; ms._detach(); }
+        if (s.h >= 0) { __mediaCmd(s.h, 'close'); s.h = -1; }
+    }
+    function load(el) {
+        const s = st(el);
+        const had = s.h >= 0 || s.ready > 0;
+        release(s);
+        Object.assign(s, { ready: 0, ended: false, error: null, dur: NaN, seeking: false, playingFired: false, last: null });
+        if (had) queue(el, 'emptied');
+        const url = currentURL(el);
+        s.src = url ? (/^blob:/.test(url) ? url : new URL(url, doc.baseURI).href) : '';
+        if (!url) { s.network = 0; s.paused = true; return; }
+        s.network = 2;
+        const ms = MS_URLS.get(url);
+        s.h = __mediaOpen(ms ? null : s.src);
+        if (s.h < 0) {
+            s.network = 3;
+            s.error = new MediaError(4, 'MEDIA_ELEMENT_ERROR: Format error');
+            queue(el, 'error');
+            return;
+        }
+        __mediaCmd(s.h, 'bind', el);
+        __mediaCmd(s.h, 'volume', s.volume, s.muted ? 1 : 0);
+        queue(el, 'loadstart');
+        if (ms) { s.ms = ms; ms._attach(el, s.h); }
+        s.timer = setInterval(() => poll(el, s), 100);
+        if (!s.paused || el.hasAttribute('autoplay')) {
+            s.paused = false;
+            __mediaCmd(s.h, 'play');
+            if (el.hasAttribute('autoplay')) queue(el, 'play');
+        }
+    }
+    function poll(el, s) {
+        if (s.h < 0) return;
+        const a = __mediaState(s.h);
+        if (!a) return;
+        const prev = s.last || [0, NaN, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        s.last = a;
+        const time = a[0], ready = a[3], ended = a[5], waiting = a[6], error = a[7], now = performance.now();
+        if (error && !s.error) {
+            s.error = new MediaError(error, error === 4 ? 'MEDIA_ELEMENT_ERROR: Format error' : error === 3 ? 'PIPELINE_ERROR_DECODE' : 'MEDIA_ELEMENT_ERROR: Network error');
+            s.network = 3;
+            fire(el, 'error');
+            return;
+        }
+        if (!el.isConnected && !s.paused) MP.pause.call(el);
+        const dur = s.ms ? s.ms._duration : a[1] > 0 ? a[1] : NaN;
+        if (ready >= 1 && s.ready < 1) {
+            s.ready = 1;
+            s.dur = dur;
+            if (!isNaN(dur)) fire(el, 'durationchange');
+            if (a[8]) fire(el, 'resize');
+            fire(el, 'loadedmetadata');
+        } else if (s.ready >= 1 && !(dur === s.dur || (isNaN(dur) && isNaN(s.dur)))) {
+            s.dur = dur;
+            fire(el, 'durationchange');
+        }
+        if (s.ready >= 1 && prev[8] && (a[8] !== prev[8] || a[9] !== prev[9])) fire(el, 'resize');
+        if (ready >= 2 && s.ready < 2) { s.ready = 2; fire(el, 'loadeddata'); }
+        if (ready >= 3 && s.ready < 3) {
+            s.ready = 3;
+            fire(el, 'canplay');
+            if (!s.paused && !waiting) { s.playingFired = true; fire(el, 'playing'); }
+        }
+        if (ready >= 4 && s.ready < 4) { s.ready = 4; fire(el, 'canplaythrough'); }
+        if (ready < s.ready && ready >= 1) s.ready = ready;
+        if (s.seeking && ready >= 2) {
+            s.seeking = false;
+            fire(el, 'timeupdate');
+            fire(el, 'seeked');
+        }
+        if (!s.paused) {
+            if (waiting && !prev[6]) { s.playingFired = false; fire(el, 'waiting'); }
+            else if (!waiting && !s.playingFired && ready >= 3) { s.playingFired = true; fire(el, 'playing'); }
+            if (time !== prev[0] && now - s.lastUpdate >= 250) { s.lastUpdate = now; fire(el, 'timeupdate'); }
+        }
+        if (a[2] !== prev[2] && now - s.lastProgress >= 350) { s.lastProgress = now; fire(el, 'progress'); }
+        if (ended && !s.ended) {
+            if (el.hasAttribute('loop')) { __mediaCmd(s.h, 'seek', 0); __mediaCmd(s.h, 'play'); return; }
+            s.ended = true;
+            s.paused = true;
+            fire(el, 'timeupdate');
+            fire(el, 'pause');
+            fire(el, 'ended');
+        }
+    }
+
+    val(MP, 'load', function () { load(this); });
+    val(MP, 'canPlayType', function (t) { return support(t); });
+    val(MP, 'play', function () {
+        const s = st(this);
+        if (s.h < 0 && !s.error) { s.paused = false; load(this); }
+        if (s.h < 0) return Promise.reject(new DOMException('The element has no supported sources.', 'NotSupportedError'));
+        if (s.ended) { s.ended = false; s.seeking = true; __mediaCmd(s.h, 'seek', 0); }
+        if (s.paused) {
+            s.paused = false;
+            queue(this, 'play');
+            if (s.ready >= 3) { s.playingFired = true; queue(this, 'playing'); }
+        }
+        __mediaCmd(s.h, 'play');
+        return Promise.resolve();
+    });
+    val(MP, 'pause', function () {
+        const s = st(this);
+        if (s.h < 0 && !s.src && currentURL(this)) load(this);
+        if (!s.paused) {
+            s.paused = true;
+            s.playingFired = false;
+            if (s.h >= 0) __mediaCmd(s.h, 'pause');
+            queue(this, 'timeupdate');
+            queue(this, 'pause');
+        }
+    });
+    val(MP, 'fastSeek', function (t) { this.currentTime = t; });
+    val(MP, 'getVideoPlaybackQuality', function () {
+        const a = st(this).last;
+        return { creationTime: performance.now(), totalVideoFrames: a ? a[10] + a[11] : 0, droppedVideoFrames: a ? a[11] : 0, corruptedVideoFrames: 0 };
+    });
+    val(MP, 'addTextTrack', function (kind, label, lang) { return { kind, label: label || '', language: lang || '', mode: 'hidden', cues: [], activeCues: [], addCue() {}, removeCue() {}, addEventListener() {}, removeEventListener() {} }; });
+    val(MP, 'setSinkId', function () { return Promise.resolve(); });
+    val(MP, 'setMediaKeys', function (k) { return k ? Promise.reject(new DOMException('Not supported', 'NotSupportedError')) : Promise.resolve(); });
+    val(MP, 'requestPictureInPicture', function () { return Promise.reject(new DOMException('Not supported', 'NotSupportedError')); });
+    def(MP, 'src', function () { const v = this.getAttribute('src'); return v ? (/^blob:/.test(v) ? v : new URL(v, doc.baseURI).href) : ''; },
+        function (v) { this.setAttribute('src', String(v)); load(this); });
+    def(MP, 'srcObject', function () { return st(this).obj || null; }, function (v) {
+        const s = st(this);
+        s.obj = v || null;
+        if (v instanceof MediaSource) this.setAttribute('src', URL.createObjectURL(v));
+        else this.removeAttribute('src');
+        load(this);
+    });
+    def(MP, 'currentSrc', function () { return st(this).src; });
+    def(MP, 'currentTime', function () {
+        const s = st(this);
+        if (s.h < 0) return s.pending || 0;
+        const a = __mediaState(s.h);
+        return a ? a[0] : 0;
+    }, function (v) {
+        const s = st(this);
+        v = +v;
+        if (!isFinite(v)) throw new TypeError("Failed to set the 'currentTime' property: The provided double value is non-finite.");
+        if (s.h < 0) { s.pending = v; return; }
+        s.ended = false;
+        s.seeking = true;
+        s.playingFired = false;
+        __mediaCmd(s.h, 'seek', Math.max(0, v));
+        queue(this, 'seeking');
+    });
+    def(MP, 'duration', function () { const s = st(this); return s.h < 0 || s.ready < 1 ? NaN : s.dur; });
+    def(MP, 'paused', function () { return st(this).paused; });
+    def(MP, 'ended', function () { return st(this).ended; });
+    def(MP, 'seeking', function () { return st(this).seeking; });
+    def(MP, 'readyState', function () { return st(this).ready; });
+    def(MP, 'networkState', function () { return st(this).network; });
+    def(MP, 'error', function () { return st(this).error; });
+    def(MP, 'buffered', function () { const s = st(this); return new TimeRanges(s.h >= 0 ? __mediaBuffered(s.h, -1) : []); });
+    def(MP, 'seekable', function () { const s = st(this); return new TimeRanges(s.h >= 0 && s.dur > 0 ? [0, s.dur] : []); });
+    def(MP, 'played', function () { return new TimeRanges([]); });
+    def(MP, 'volume', function () { return st(this).volume; }, function (v) {
+        const s = st(this);
+        v = +v;
+        if (!(v >= 0 && v <= 1)) throw new DOMException('The volume provided is outside the range [0, 1].', 'IndexSizeError');
+        if (v === s.volume) return;
+        s.volume = v;
+        if (s.h >= 0) __mediaCmd(s.h, 'volume', s.volume, s.muted ? 1 : 0);
+        queue(this, 'volumechange');
+    });
+    def(MP, 'muted', function () { return st(this).muted; }, function (v) {
+        const s = st(this);
+        v = !!v;
+        if (v === s.muted) return;
+        s.muted = v;
+        if (s.h >= 0) __mediaCmd(s.h, 'volume', s.volume, s.muted ? 1 : 0);
+        queue(this, 'volumechange');
+    });
+    def(MP, 'defaultMuted', function () { return this.hasAttribute('muted'); }, function (v) { if (v) this.setAttribute('muted', ''); else this.removeAttribute('muted'); });
+    def(MP, 'playbackRate', function () { return st(this).rate; }, function (v) { const s = st(this); if (+v !== s.rate) { s.rate = +v; queue(this, 'ratechange'); } });
+    def(MP, 'defaultPlaybackRate', function () { return 1; }, () => {});
+    def(MP, 'preservesPitch', function () { return true; }, () => {});
+    def(MP, 'sinkId', function () { return ''; });
+    def(MP, 'mediaKeys', function () { return null; });
+    def(MP, 'textTracks', function () {
+        const s = st(this);
+        if (!s.tracks) s.tracks = Object.assign([], { addEventListener() {}, removeEventListener() {}, getTrackById: () => null, onchange: null, onaddtrack: null, onremovetrack: null });
+        return s.tracks;
+    });
+    def(MP, 'disableRemotePlayback', function () { return true; }, () => {});
+    def(VP, 'videoWidth', function () { const a = st(this).last; return a && st(this).ready >= 1 ? a[8] : 0; });
+    def(VP, 'videoHeight', function () { const a = st(this).last; return a && st(this).ready >= 1 ? a[9] : 0; });
+    def(VP, 'webkitDecodedFrameCount', function () { const a = st(this).last; return a ? a[10] + a[11] : 0; });
+    def(VP, 'webkitDroppedFrameCount', function () { const a = st(this).last; return a ? a[11] : 0; });
+    def(VP, 'disablePictureInPicture', function () { return true; }, () => {});
+    G.Audio = function Audio(src) { const a = doc.createElement('audio'); if (src !== undefined) a.src = src; return a; };
+    G.Audio.prototype = AP;
+
+    /* ---- Media Source Extensions ---- */
+    const invalid = (m) => new DOMException(m, 'InvalidStateError');
+    const GONE = 'This SourceBuffer has been removed from the parent media source.';
+    const NOT_OPEN = "The MediaSource's readyState is not 'open'.";
+    class SourceBufferList extends G.EventTarget {
+        constructor() { super(); val(this, '_l', []); this.onaddsourcebuffer = this.onremovesourcebuffer = null; }
+        get length() { return this._l.length; }
+        _sync() { for (let i = 0; i < 8; i++) { if (i < this._l.length) val(this, i, this._l[i]); else delete this[i]; } }
+        [Symbol.iterator]() { return this._l[Symbol.iterator](); }
+    }
+    G.SourceBufferList = SourceBufferList;
+    class SourceBuffer extends G.EventTarget {
+        constructor(ms, id, type) {
+            super();
+            val(this, '_ms', ms); val(this, '_id', id); val(this, '_type', type); val(this, '_tmr', 0);
+            this.updating = false;
+            this.mode = 'segments';
+            this.timestampOffset = 0;
+            this.appendWindowStart = 0;
+            this.appendWindowEnd = Infinity;
+            this.onupdatestart = this.onupdate = this.onupdateend = this.onerror = this.onabort = null;
+        }
+        get buffered() {
+            const ms = this._ms;
+            if (!ms || ms._h < 0) throw invalid(GONE);
+            return new TimeRanges(__mediaBuffered(ms._h, this._id));
+        }
+        _begin() {
+            const ms = this._ms;
+            if (!ms || ms._h < 0) throw invalid(GONE);
+            if (this.updating) throw invalid("This SourceBuffer is still processing an 'appendBuffer' or 'remove' operation.");
+            if (ms.readyState === 'ended') { ms.readyState = 'open'; ms._fire('sourceopen'); }
+            this.updating = true;
+        }
+        _finish(ok) {
+            this._tmr = 0;
+            if (!this.updating) return;
+            this.updating = false;
+            this._fire(ok ? 'update' : 'error');
+            this._fire('updateend');
+        }
+        appendBuffer(data) {
+            this._begin();
+            const bytes = ArrayBuffer.isView(data) ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data.slice(0);
+            this._tmr = setTimeout(() => {
+                this._fire('updatestart');
+                const ms = this._ms;
+                this._finish(!!ms && ms._h >= 0 && __mediaAppend(ms._h, this._id, bytes) === 0);
+            }, 0);
+        }
+        remove(start, end) {
+            this._begin();
+            this._tmr = setTimeout(() => { this._fire('updatestart'); this._finish(true); }, 0);
+        }
+        abort() {
+            if (!this.updating) return;
+            clearTimeout(this._tmr);
+            this.updating = false;
+            this._fire('abort');
+            this._fire('updateend');
+        }
+        changeType(type) { if (!support(type)) throw new DOMException('Unsupported type', 'NotSupportedError'); this._type = type; }
+        _fire(type) { this.dispatchEvent(new Event(type)); }
+    }
+    G.SourceBuffer = SourceBuffer;
+    class MediaSource extends G.EventTarget {
+        constructor() {
+            super();
+            this.readyState = 'closed';
+            val(this, '_h', -1); val(this, '_el', null); val(this, '_duration', NaN);
+            this.sourceBuffers = new SourceBufferList();
+            this.activeSourceBuffers = this.sourceBuffers;
+            this.onsourceopen = this.onsourceended = this.onsourceclose = null;
+        }
+        static isTypeSupported(t) { return support(t) !== ''; }
+        get duration() { return this.readyState === 'closed' ? NaN : this._duration; }
+        set duration(v) {
+            v = +v;
+            if (isNaN(v) || v < 0) throw new TypeError('The value provided is not a valid duration.');
+            if (this.readyState !== 'open') throw invalid(NOT_OPEN);
+            if (this.sourceBuffers._l.some((b) => b.updating)) throw invalid('A SourceBuffer is updating.');
+            this._duration = v;
+            if (this._h >= 0) __mediaCmd(this._h, 'duration', v);
+        }
+        addSourceBuffer(type) {
+            if (!support(type)) throw new DOMException("The type provided ('" + type + "') is unsupported.", 'NotSupportedError');
+            if (this.readyState !== 'open' || this._h < 0) throw invalid(NOT_OPEN);
+            const id = __mediaCmd(this._h, 'addSource');
+            if (id < 0) throw new DOMException('This MediaSource has reached the limit of SourceBuffer objects it can handle.', 'QuotaExceededError');
+            const sb = new SourceBuffer(this, id, type);
+            this.sourceBuffers._l.push(sb);
+            this.sourceBuffers._sync();
+            queue(this.sourceBuffers, 'addsourcebuffer');
+            return sb;
+        }
+        removeSourceBuffer(sb) {
+            const l = this.sourceBuffers._l, i = l.indexOf(sb);
+            if (i < 0) throw new DOMException('The SourceBuffer provided is not contained in this MediaSource.', 'NotFoundError');
+            sb.abort();
+            l.splice(i, 1);
+            this.sourceBuffers._sync();
+            sb._ms = null;
+            queue(this.sourceBuffers, 'removesourcebuffer');
+        }
+        endOfStream(err) {
+            if (this.readyState !== 'open') throw invalid(NOT_OPEN);
+            this.readyState = 'ended';
+            if (!err && this._h >= 0) {
+                __mediaCmd(this._h, 'eos');
+                if (isNaN(this._duration)) {
+                    const r = __mediaBuffered(this._h, -1);
+                    if (r.length) { this._duration = r[r.length - 1]; __mediaCmd(this._h, 'duration', this._duration); }
+                }
+            }
+            this._fire('sourceended');
+        }
+        setLiveSeekableRange() {}
+        clearLiveSeekableRange() {}
+        _attach(el, h) {
+            this._el = el;
+            this._h = h;
+            this.readyState = 'open';
+            queue(this, 'sourceopen');
+        }
+        _detach() {
+            if (this.readyState === 'closed') return;
+            this.readyState = 'closed';
+            this._h = -1;
+            this._el = null;
+            this._duration = NaN;
+            for (const sb of this.sourceBuffers._l) { sb.abort(); sb._ms = null; }
+            this.sourceBuffers._l.length = 0;
+            this.sourceBuffers._sync();
+            queue(this, 'sourceclose');
+        }
+        _fire(type) { this.dispatchEvent(new Event(type)); }
+    }
+    MediaSource.canConstructInDedicatedWorker = false;
+    G.MediaSource = MediaSource;
+    const createURL = URL.createObjectURL;
+    URL.createObjectURL = function (obj) {
+        if (obj instanceof MediaSource) {
+            const id = 'blob:' + G.location.origin + '/' + crypto.randomUUID();
+            MS_URLS.set(id, obj);
+            return id;
+        }
+        return createURL.call(this, obj);
+    };
 }
 
 /* ---- DOM change notifications: custom elements and MutationObserver ------

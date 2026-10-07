@@ -590,11 +590,6 @@ surfer_surfer.o: userspace/surfer/surfer.c $(SURFER_HEADERS) $(IC_HEADERS)
 	$(CC) $(SURFER_CFLAGS) -Iuserspace -c $< -o /tmp/icda-$@
 	cp -f /tmp/icda-$@ $@
 
-# /apps/browser.app is Surfer.
-userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
-	cp -f /tmp/icda-browser.app userspace/browser.app
-
 # OpenH264 (third_party/openh264, BSD-2-Clause): H.264 decoding for Media.
 # C++ without exceptions or RTTI, ICDA's libc behind oh_prefix.h, threads off.
 OH_DIR = userspace/media/third_party/openh264/codec
@@ -948,6 +943,18 @@ userspace/media.app: crt1.o $(MEDIA_OBJS) libvpx_icda.a libopus_icda.a surfer_im
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-media.app crt1.o $(MEDIA_OBJS) surfer_image.o $(WEBP_OBJS) libvpx_icda.a libopus_icda.a $(SURFER_NET_OBJS) $(LIBM_OBJS) \
 	   gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
 	cp -f /tmp/icda-media.app userspace/media.app
+
+# /apps/browser.app is Surfer.  <video> uses Media's demuxers and decoders
+# (see userspace/surfer/media_el.c).
+SURFER_MEDIA_OBJS = surfer_media_el.o media_mp4demux.o media_mkvdemux.o media_vdec.o media_pdec.o media_aac.o media_cxxrt.o
+SURFER_MEDIA_OBJS += media_h264.o media_setjmp.o media_impl_vorbis.o $(OH_OBJS)
+surfer_media_el.o: SURFER_CFLAGS += -Iuserspace/media
+surfer_media_el.o: $(wildcard userspace/media/*.h)
+
+userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_MEDIA_OBJS) libvpx_icda.a libopus_icda.a $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-browser.app crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_MEDIA_OBJS) libvpx_icda.a libopus_icda.a $(SURFER_NET_OBJS) gui.o libicda.o libc_core.o $(shell $(CC) -print-libgcc-file-name)
+	cp -f /tmp/icda-browser.app userspace/browser.app
+
 
 settings.o: userspace/settings.c userspace/settings_wifi.h userspace/settings_updates.h userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
            userspace/font.h userspace/ic_version.h version.h

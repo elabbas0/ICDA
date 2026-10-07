@@ -19,6 +19,7 @@
 #include "form.h"
 #include "js.h"
 #include "download.h"
+#include "media_el.h"
 
 #define WIN_W        1024
 #define WIN_H        720
@@ -492,7 +493,17 @@ static int images_busy(void) {
 
 /* ---- page loading ------------------------------------------------------- */
 
+/* <video> / <audio> sound goes to the system mixer */
+static long snd_open(uint32_t rate, uint32_t ch) { return icda_audio_stream_open(rate, ch); }
+static long snd_write(long id, const int16_t *pcm, uint64_t bytes) { return icda_audio_stream_write(id, pcm, bytes); }
+static long snd_position(long id) { return icda_audio_stream_position(id); }
+static long snd_queued(long id) { return icda_audio_stream_queued(id); }
+static void snd_control(long id, int paused, uint32_t volume) { (void)icda_audio_stream_control(id, paused, volume); }
+static void snd_close(long id) { (void)icda_audio_stream_close(id); }
+static const media_audio_t media_sink = { snd_open, snd_write, snd_position, snd_queued, snd_control, snd_close };
+
 static void page_clear(void) {
+    media_el_close_all();
     if (sf.js) {
         js_page_free(sf.js);
         sf.js = 0;
@@ -1734,6 +1745,12 @@ static void tick(ic_app_t *app) {
         sf.js_dirty |= JS_DIRTY_STYLE;
         restyle(app);
     }
+    if (media_el_active()) {
+        int mf = media_el_tick_all();
+        if (mf & MEDIA_SIZE_KNOWN) sf.need_layout = 1;
+        if (mf & MEDIA_NEW_FRAME) ic_app_invalidate(app);
+        ic_app_animate(app);
+    }
     if (sf.nimgs && images_pump()) sf.need_layout = 1;
     if (sf.need_layout && (!images_busy() || now_ms() - sf.last_layout_ms > 400)) {
         relayout(app);
@@ -2007,6 +2024,7 @@ static void init(ic_app_t *app) {
 int main(int argc, char **argv) {
     static const ic_app_desc_t desc = { "Surfer", WIN_W, WIN_H, init, draw, event, tick };
     const char *arg = argc > 1 && argv ? argv[1] : 0;
+    media_set_audio(&media_sink);
     if (ic_app_run(&desc, (void *)arg) != 0) {
         icda_write("surfer requires the desktop (Ctrl+Alt+F1)\n");
         return 1;

@@ -16,6 +16,7 @@
 #include "http.h"
 #include "css.h"
 #include "form.h"
+#include "media_el.h"
 
 extern const char     surfer_prelude_js[];
 extern const unsigned surfer_prelude_js_len;
@@ -965,7 +966,7 @@ static JSValue el_computed(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         char key[32];
         float pad[4], bor[4];
         for (int i = 0; i < 4; i++) {
-            pad[i] = s->padding[i].unit == U_PX ? s->padding[i].v : s->padding[i].unit == U_PCT && bw > 0 ? bw * s->padding[i].v / 100 : 0;
+            pad[i] = s->padding[i].unit == U_PX ? s->padding[i].v : s->padding[i].unit == U_PCT && bw > 0 ? css_pct(s->padding[i], bw) : 0;
             bor[i] = s->border_w[i];
             snprintf(key, sizeof key, "padding%s", sides[i]);
             snprintf(buf, sizeof buf, "%gpx", (double)pad[i]);
@@ -1596,8 +1597,9 @@ static void run_script(js_page_t *p, dom_node_t *el) {
     ptr_push(&p->ran, &p->nran, &p->capran, el);
     src = script_source(p, el, &len, url, sizeof url);
     /* big bundles (YouTube's app is 10 MB) need time just to compile: the
-     * budget grows by 4 s per MB.  Stop and Escape still end it at once. */
-    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS + (double)(len >> 20) * 4000.0;
+     * budget grows by 12 s per MB (slow machines and emulators need it all).
+     * Stop and Escape still end it at once. */
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS + (double)(len >> 20) * 12000.0;
     if (!src) {
         if (dom_attr(el, "src")) fire_simple(p, el, "error");
         return;
@@ -1747,10 +1749,132 @@ static const JSCFunctionListEntry fragment_funcs[] = {
     JS_CFUNC_DEF("getElementById", 1, doc_get_by_id),
 };
 
+/* ---- <video> / Media Source Extensions (see media_el.h; prelude.js builds
+ * HTMLMediaElement, MediaSource and SourceBuffer on these) ----------------- */
+
+static media_el_t *arg_media(JSContext *ctx, JSValueConst v) {
+    int32_t h = -1;
+    if (JS_ToInt32(ctx, &h, v) != 0) return 0;
+    return media_el_get(h);
+}
+
+/* __mediaOpen(url) plays a URL; __mediaOpen(null) makes a MediaSource player */
+static JSValue g_media_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    js_page_t *p = page_of(ctx);
+    media_el_t *m;
+    (void)this_val;
+    if (argc > 0 && JS_IsString(argv[0])) {
+        char abs[URL_CAP];
+        const char *s = JS_ToCString(ctx, argv[0]);
+        if (!s) return JS_EXCEPTION;
+        if (url_resolve(p->doc->base_url, s, abs, sizeof abs) != 0) snprintf(abs, sizeof abs, "%s", s);
+        JS_FreeCString(ctx, s);
+        logf_(p, "[js] media %s", abs);
+        m = media_el_open(abs);
+    } else {
+        m = media_el_open_mse();
+    }
+    return JS_NewInt32(ctx, m ? media_el_id(m) : -1);
+}
+
+/* __mediaCmd(handle, command, a, b) */
+static JSValue g_media_cmd(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    media_el_t *m;
+    const char *cmd;
+    double a = 0, b = 0;
+    JSValue ret = JS_UNDEFINED;
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    m = arg_media(ctx, argv[0]);
+    if (!m) return JS_UNDEFINED;
+    cmd = JS_ToCString(ctx, argv[1]);
+    if (!cmd) return JS_EXCEPTION;
+    if (argc > 2 && JS_IsNumber(argv[2])) JS_ToFloat64(ctx, &a, argv[2]);
+    if (argc > 3 && JS_IsNumber(argv[3])) JS_ToFloat64(ctx, &b, argv[3]);
+    if (!strcmp(cmd, "play")) media_el_play(m);
+    else if (!strcmp(cmd, "pause")) media_el_pause(m);
+    else if (!strcmp(cmd, "seek")) media_el_seek(m, a);
+    else if (!strcmp(cmd, "volume")) media_el_volume(m, a, b != 0);
+    else if (!strcmp(cmd, "duration")) media_el_set_duration(m, a);
+    else if (!strcmp(cmd, "eos")) media_el_end_of_stream(m);
+    else if (!strcmp(cmd, "addSource")) ret = JS_NewInt32(ctx, media_el_add_source(m));
+    else if (!strcmp(cmd, "close")) media_el_close(m);
+    else if (!strcmp(cmd, "bind")) media_el_bind(m, argc > 2 ? unwrap(ctx, argv[2]) : 0);
+    JS_FreeCString(ctx, cmd);
+    return ret;
+}
+
+/* __mediaAppend(handle, source, bytes): 0, or -1 if the data was refused */
+static JSValue g_media_append(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    media_el_t *m;
+    int32_t src = -1;
+    size_t len = 0, off = 0, bpe = 0;
+    uint8_t *data;
+    JSValue buf = JS_UNDEFINED;
+    int r;
+    (void)this_val;
+    if (argc < 3 || !(m = arg_media(ctx, argv[0])) || JS_ToInt32(ctx, &src, argv[1]) != 0) return JS_NewInt32(ctx, -1);
+    data = JS_GetArrayBuffer(ctx, &len, argv[2]);
+    if (!data) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        buf = JS_GetTypedArrayBuffer(ctx, argv[2], &off, &len, &bpe);
+        if (JS_IsException(buf)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            return JS_NewInt32(ctx, -1);
+        }
+        {
+            size_t total;
+            uint8_t *base = JS_GetArrayBuffer(ctx, &total, buf);
+            data = base && off + len <= total ? base + off : 0;
+        }
+    }
+    r = data ? media_el_append(m, src, data, len) : -1;
+    JS_FreeValue(ctx, buf);
+    return JS_NewInt32(ctx, r);
+}
+
+/* __mediaBuffered(handle, source) -> [start, end, start, end ...] */
+static JSValue g_media_buffered(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    media_el_t *m;
+    int32_t src = -1;
+    double r[64];
+    int n;
+    JSValue arr = JS_NewArray(ctx);
+    (void)this_val;
+    if (argc < 1 || !(m = arg_media(ctx, argv[0]))) return arr;
+    if (argc > 1) JS_ToInt32(ctx, &src, argv[1]);
+    n = media_el_buffered(m, src, r, 32);
+    for (int i = 0; i < 2 * n; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewFloat64(ctx, r[i]));
+    return arr;
+}
+
+/* __mediaState(handle) -> [time, duration, bufferedEnd, readyState, paused, ended,
+ *                          waiting, error, width, height, framesShown, framesDropped] */
+static JSValue g_media_state(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    media_el_t *m;
+    media_el_state_t s;
+    double v[12];
+    JSValue arr;
+    (void)this_val;
+    if (argc < 1 || !(m = arg_media(ctx, argv[0]))) return JS_NULL;
+    media_el_state(m, &s);
+    v[0] = s.time; v[1] = s.duration; v[2] = s.buffered_end; v[3] = s.ready_state;
+    v[4] = s.paused; v[5] = s.ended; v[6] = s.waiting; v[7] = s.error;
+    v[8] = s.width; v[9] = s.height; v[10] = s.frames_shown; v[11] = s.frames_dropped;
+    arr = JS_NewArray(ctx);
+    for (int i = 0; i < 12; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewFloat64(ctx, v[i]));
+    return arr;
+}
+
 static const JSCFunctionListEntry global_funcs[] = {
     JS_CFUNC_DEF("__setTimer", 4, g_set_timer),
     JS_CFUNC_DEF("__clearTimer", 1, g_clear_timer),
     JS_CFUNC_DEF("__fetch", 5, g_fetch),
+    JS_CFUNC_DEF("__mediaOpen", 1, g_media_open),
+    JS_CFUNC_DEF("__mediaCmd", 4, g_media_cmd),
+    JS_CFUNC_DEF("__mediaAppend", 3, g_media_append),
+    JS_CFUNC_DEF("__mediaBuffered", 2, g_media_buffered),
+    JS_CFUNC_DEF("__mediaState", 1, g_media_state),
     JS_CFUNC_DEF("__log", 1, g_log),
     JS_CFUNC_DEF("__now", 0, g_now),
     JS_CFUNC_DEF("__navigate", 2, g_navigate),
@@ -2048,6 +2172,7 @@ static int interrupt_cb(JSRuntime *rt, void *opaque) {
     js_page_t *p = (js_page_t *)opaque;
     (void)rt;
     if (p->abort) return 1;
+    media_el_pump();          /* <video> keeps decoding during long scripts */
     if (p->deadline_ms > 0 && now_ms() > p->deadline_ms) {
         logf_(p, "script stopped after %d s without finishing", SCRIPT_BUDGET_MS / 1000);
         return 1;

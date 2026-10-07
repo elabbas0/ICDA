@@ -1,4 +1,4 @@
-param([string]$Iso = "kernel.iso", [int]$Wait = 25, [string]$Disk = ".verify/disk.img", [int]$Smp = 4)
+param([string]$Iso = "kernel.iso", [int]$Wait = 25, [string]$Disk = ".verify/disk.img", [int]$Smp = 4, [string]$Accel = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -9,6 +9,7 @@ $args = @("-machine", "q35", "-smp", "$Smp", "-m", "4G", "-cdrom", $Iso, "-boot"
           "-nic", "user,model=e1000",
           "-display", "none", "-monitor", "none", "-serial", "file:.verify/serial.log",
           "-qmp", "tcp:127.0.0.1:4444,server,nowait", "-no-reboot")
+if ($Accel) { $args += @("-accel", $Accel) }
 Start-Process -FilePath "C:\Users\elabbas\tools\qemu\qemu-system-x86_64.exe" -ArgumentList $args -WindowStyle Hidden
 Start-Sleep -Seconds $Wait
 "900 700" | Set-Content -Encoding ascii (Join-Path $root "gui-cursor.txt")

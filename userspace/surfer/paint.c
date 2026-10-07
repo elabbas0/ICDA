@@ -2,6 +2,7 @@
  * resolution, only touching the visible part of the page. */
 #include "paint.h"
 #include "form.h"
+#include "media_el.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -159,6 +160,24 @@ static float hframe_get(const box_t *b) {
 static float vframe_get(const box_t *b) {
     return b->bt + b->bb + b->pt + b->pb;
 }
+/* a playing <video>: black bars, the picture fitted inside (object-fit: contain) */
+static void paint_video(pctx_t *c, const box_t *b, float x, float y) {
+    media_el_t *m = media_el_for_node(b->node);
+    const image_t *img = media_el_frame(m);
+    float cx = x + b->bl + b->pl, cy = y + b->bt + b->pt;
+    float cw = b->w - hframe_get(b), ch = b->h - vframe_get(b), w, h;
+    if (!m || cw <= 0 || ch <= 0) return;
+    fill_round(c, cx, cy, cw, ch, 0, 0xFF000000u);
+    if (!img || img->w <= 0 || img->h <= 0) return;
+    w = cw;
+    h = cw * (float)img->h / (float)img->w;
+    if (h > ch) {
+        h = ch;
+        w = ch * (float)img->w / (float)img->h;
+    }
+    draw_image(c, img, cx + (cw - w) / 2, cy + (ch - h) / 2, w, h);
+}
+
 
 static void defer(box_t *b, float ox, float oy) {
     if (ndeferred == capdeferred) {
@@ -374,7 +393,7 @@ static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred);
 
 static float bg_len(css_len_t l, float ref, float fallback) {
     if (l.unit == U_PX) return l.v;
-    if (l.unit == U_PCT) return ref * l.v / 100.0f;
+    if (l.unit == U_PCT) return css_pct(l, ref);
     return fallback;
 }
 
@@ -491,6 +510,7 @@ static void paint_box(pctx_t *c, box_t *b, float ox, float oy, int in_deferred) 
         if (b->image && b->kind == BX_REPLACED) {
             draw_image(c, (const image_t *)b->image, x + b->bl + b->pl, y + b->bt + b->pt, b->w - hframe_get(b), b->h - vframe_get(b));
         }
+        if (b->kind == BX_REPLACED && b->node && b->node->tag == T_VIDEO) paint_video(c, b, x, y);
         paint_borders(c, b, x, y);
         if (b->kind == BX_REPLACED && b->node && (b->node->tag == T_INPUT || b->node->tag == T_SELECT ||
                                                   b->node->tag == T_TEXTAREA)) {

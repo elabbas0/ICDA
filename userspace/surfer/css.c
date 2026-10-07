@@ -1095,11 +1095,228 @@ uint32_t css_parse_color(const char *s, size_t n, int *ok) {
     return 0;
 }
 
+/* ---- calc() ------------------------------------------------------------------
+ * Expressions over lengths, percentages and numbers: + - * / and brackets,
+ * nested calc(), min(), max() and clamp().  A length comes out as a
+ * percentage plus pixels; min / max / clamp between a percentage and fixed
+ * pixel bounds keep the bounds (resolved with the reference at layout time).
+ * Anything mixed further is approximated with the viewport width. */
+typedef struct {
+    int   kind;              /* 0 number, 1 length */
+    float num, px, pct;
+    int   has_pct, bounds;   /* bounds: 1 lo, 2 hi */
+    float lo, hi;
+} cval_t;
+
+static int parse_len(const char *s, const char *end, float font_size, const ctx_t *c, css_len_t *out);
+static int calc_expr(const char **pp, const char *end, float fs, const ctx_t *c, cval_t *out, int depth);
+
+static void cskip(const char **p, const char *end) {
+    while (*p < end && is_ws(**p)) (*p)++;
+}
+
+/* a guess at the value, for comparing terms that mix units */
+static float cval_est(const cval_t *v, const ctx_t *c) {
+    float x = v->kind == 0 ? v->num : v->px + v->pct * c->vw / 100;
+    if ((v->bounds & 1) && x < v->lo) x = v->lo;
+    if ((v->bounds & 2) && x > v->hi) x = v->hi;
+    return x;
+}
+
+/* min (is_max 0) or max (1) of n values */
+static void calc_pick(cval_t *a, int n, int is_max, const ctx_t *c, cval_t *out) {
+    int lin = -1, mixed = 0, have_bound = 0;
+    float bound = 0;
+    for (int i = 0; i < n; i++) {
+        if (a[i].kind == 1 && a[i].has_pct) {
+            if (lin >= 0) mixed = 1;
+            lin = i;
+        } else {
+            float x = a[i].kind == 0 ? a[i].num : a[i].px;
+            if (!have_bound || (is_max ? x > bound : x < bound)) bound = x;
+            have_bound = 1;
+        }
+    }
+    if (lin < 0 || mixed) {
+        int best = 0;
+        for (int i = 1; i < n; i++) {
+            float x = cval_est(&a[i], c), b = cval_est(&a[best], c);
+            if (is_max ? x > b : x < b) best = i;
+        }
+        *out = a[best];
+        if (mixed) {
+            out->px = cval_est(&a[best], c);
+            out->pct = 0;
+            out->has_pct = 0;
+            out->bounds = 0;
+        }
+        return;
+    }
+    *out = a[lin];
+    if (!have_bound) return;
+    if (is_max) {
+        if (!(out->bounds & 1) || bound > out->lo) out->lo = bound;
+        out->bounds |= 1;
+        if ((out->bounds & 2) && out->hi < out->lo) out->hi = out->lo;
+    } else {
+        if (!(out->bounds & 2) || bound < out->hi) out->hi = bound;
+        out->bounds |= 2;
+        if ((out->bounds & 1) && out->lo > out->hi) out->lo = out->hi;
+    }
+}
+
+/* arguments of min( / max( / clamp( up to and including the ')' */
+static int calc_args(const char **pp, const char *end, float fs, const ctx_t *c, cval_t *a, int max, int depth) {
+    const char *p = *pp;
+    int n = 0;
+    for (;;) {
+        cval_t v;
+        if (!calc_expr(&p, end, fs, c, &v, depth + 1)) return 0;
+        if (n < max) a[n++] = v;
+        cskip(&p, end);
+        if (p < end && *p == ',') { p++; continue; }
+        if (p < end && *p == ')') { p++; break; }
+        return 0;
+    }
+    *pp = p;
+    return n;
+}
+
+static int calc_factor(const char **pp, const char *end, float fs, const ctx_t *c, cval_t *out, int depth) {
+    const char *p = *pp, *te;
+    size_t left;
+    memset(out, 0, sizeof *out);
+    cskip(&p, end);
+    if (p >= end || depth > 32) return 0;
+    left = (size_t)(end - p);
+    if (*p == '(' || (left > 5 && ieq(p, 5, "calc(")) || (left > 13 && ieq(p, 13, "-webkit-calc("))) {
+        p = (const char *)memchr(p, '(', left) + 1;
+        if (!calc_expr(&p, end, fs, c, out, depth + 1)) return 0;
+        cskip(&p, end);
+        if (p < end && *p == ')') p++;
+        *pp = p;
+        return 1;
+    }
+    if (left > 4 && (ieq(p, 4, "min(") || ieq(p, 4, "max("))) {
+        cval_t a[8];
+        int is_max = (p[1] | 32) == 'a', n;
+        p += 4;
+        n = calc_args(&p, end, fs, c, a, 8, depth);
+        if (n <= 0) return 0;
+        calc_pick(a, n, is_max, c, out);
+        *pp = p;
+        return 1;
+    }
+    if (left > 6 && ieq(p, 6, "clamp(")) {
+        cval_t a[3], two[2], mid;
+        p += 6;
+        if (calc_args(&p, end, fs, c, a, 3, depth) != 3) return 0;
+        two[0] = a[1];
+        two[1] = a[2];
+        calc_pick(two, 2, 0, c, &mid);        /* min(value, max) */
+        two[0] = a[0];
+        two[1] = mid;
+        calc_pick(two, 2, 1, c, out);         /* max(min, that) */
+        *pp = p;
+        return 1;
+    }
+    /* a number, with its unit if it has one */
+    te = p;
+    if (te < end && (*te == '+' || *te == '-')) te++;
+    while (te < end && ((*te >= '0' && *te <= '9') || *te == '.')) te++;
+    if (te < end && (*te == 'e' || *te == 'E') && te + 1 < end &&
+        ((te[1] >= '0' && te[1] <= '9') || ((te[1] == '-' || te[1] == '+') && te + 2 < end && te[2] >= '0' && te[2] <= '9'))) {
+        te += 2;
+        while (te < end && *te >= '0' && *te <= '9') te++;
+    }
+    if (te == p || (te == p + 1 && (*p == '+' || *p == '-'))) return 0;
+    {
+        const char *num_end = te;
+        while (te < end && (((*te | 32) >= 'a' && (*te | 32) <= 'z') || *te == '%')) te++;
+        if (te == num_end) {
+            out->kind = 0;
+            out->num = (float)strtod(p, 0);
+        } else {
+            css_len_t t;
+            if (!parse_len(p, te, fs, c, &t)) return 0;
+            out->kind = 1;
+            if (t.unit == U_PX) out->px = t.v;
+            else if (t.unit == U_PCT) {
+                out->pct = t.v;
+                out->has_pct = 1;
+            } else return 0;
+        }
+    }
+    *pp = te;
+    return 1;
+}
+
+static int calc_term(const char **pp, const char *end, float fs, const ctx_t *c, cval_t *out, int depth) {
+    if (!calc_factor(pp, end, fs, c, out, depth)) return 0;
+    for (;;) {
+        const char *p = *pp;
+        cval_t r;
+        char op;
+        cskip(&p, end);
+        if (p >= end || (*p != '*' && *p != '/')) return 1;
+        op = *p++;
+        if (!calc_factor(&p, end, fs, c, &r, depth)) return 0;
+        if (op == '*') {
+            if (out->kind == 0 && r.kind == 0) out->num *= r.num;
+            else if (out->kind == 0 || r.kind == 0) {
+                float k = out->kind == 0 ? out->num : r.num;
+                if (out->kind == 0) *out = r;
+                out->px *= k;
+                out->pct *= k;
+                out->bounds = 0;
+            } else return 0;
+        } else {
+            if (r.kind != 0 || r.num == 0) return 0;
+            if (out->kind == 0) out->num /= r.num;
+            else {
+                out->px /= r.num;
+                out->pct /= r.num;
+                out->bounds = 0;
+            }
+        }
+        *pp = p;
+    }
+}
+
+static int calc_expr(const char **pp, const char *end, float fs, const ctx_t *c, cval_t *out, int depth) {
+    if (!calc_term(pp, end, fs, c, out, depth)) return 0;
+    for (;;) {
+        const char *p = *pp;
+        cval_t r;
+        float sign;
+        cskip(&p, end);
+        if (p >= end || (*p != '+' && *p != '-')) return 1;
+        sign = *p == '-' ? -1.0f : 1.0f;
+        p++;
+        if (!calc_term(&p, end, fs, c, &r, depth)) return 0;
+        if (out->kind == 0 && r.kind == 0) out->num += sign * r.num;
+        else {
+            if (out->kind == 0) {
+                out->kind = 1;
+                out->px = out->num;
+            }
+            if (r.kind == 0) r.px = r.num;
+            out->px += sign * r.px;
+            out->pct += sign * r.pct;
+            out->has_pct |= r.has_pct;
+            out->bounds = 0;
+        }
+        *pp = p;
+    }
+}
+
 /* Parses a length; returns 0 if s is not a length. font_size is the
  * element's font size (for em). */
 static int parse_len(const char *s, const char *end, float font_size, const ctx_t *c, css_len_t *out) {
     char *e;
     float v;
+    out->px = 0;
+    out->bounds = 0;
     while (s < end && is_ws(*s)) s++;
     if (s >= end) return 0;
     if (ieq(s, (size_t)(end - s), "auto")) {
@@ -1112,64 +1329,24 @@ static int parse_len(const char *s, const char *end, float font_size, const ctx_
         out->v = 0;
         return 1;
     }
-    if ((size_t)(end - s) > 5 && (ieq(s, 5, "calc(") || ieq(s, 4, "min(") || ieq(s, 4, "max(") || ieq(s, 6, "clamp("))) {
-        /* evaluate the simple forms: sums/differences of lengths, min/max/clamp pick a term */
-        const char *p = memchr(s, '(', (size_t)(end - s)) + 1;
-        float px = 0, pct = 0, sign = 1;
-        int terms = 0, minmax = (s[0] | 32) != 'c' || (s[1] | 32) == 'l';
-        int is_max = (s[1] | 32) == 'a';
-        float best = 0;
-        int have_best = 0;
-        while (p < end && *p != ')') {
-            css_len_t t;
-            const char *te;
-            int depth = 0;
-            while (p < end && is_ws(*p)) p++;
-            if (*p == '+' && minmax == 0) { sign = 1; p++; continue; }
-            if (*p == '-' && p + 1 < end && is_ws(p[1])) { sign = -1; p++; continue; }
-            if (*p == ',') { p++; continue; }
-            te = p;
-            while (te < end && (depth > 0 || (!is_ws(*te) && *te != ',' && *te != ')'))) {
-                if (*te == '(') depth++;
-                if (*te == ')') depth--;
-                te++;
-            }
-            if (*p == '*' || *p == '/') {
-                float f = (float)strtod(p + 1, 0);
-                if (*p == '*') { px *= f; pct *= f; }
-                else if (f != 0) { px /= f; pct /= f; }
-                p = te;
-                continue;
-            }
-            if (parse_len(p, te, font_size, c, &t)) {
-                if (minmax) {
-                    float val = t.unit == U_PX ? t.v : t.v * c->vw / 100;
-                    if (!have_best || (is_max ? val > best : val < best)) best = val;
-                    if ((s[0] | 32) == 'c' && (s[1] | 32) == 'l' && terms == 1) {
-                        best = val;      /* clamp: the preferred value */
-                    }
-                    have_best = 1;
-                } else if (t.unit == U_PX) px += sign * t.v;
-                else if (t.unit == U_PCT) pct += sign * t.v;
-                terms++;
-            } else {
-                float f = (float)strtod(p, &e);
-                if (e != p) px += sign * f;
-            }
-            sign = 1;
-            p = te;
-        }
-        if (minmax) {
+    if ((size_t)(end - s) > 4 && (ieq(s, 5, "calc(") || ieq(s, 4, "min(") || ieq(s, 4, "max(") || ieq(s, 6, "clamp(") ||
+                                  ieq(s, 13, "-webkit-calc("))) {
+        const char *p = s;
+        cval_t r;
+        if (!calc_factor(&p, end, font_size, c, &r, 0)) return 0;
+        if (r.kind == 0) {
             out->unit = U_PX;
-            out->v = best;
-            return have_best;
-        }
-        if (pct != 0 && px == 0) {
+            out->v = r.num;
+        } else if (r.has_pct) {
             out->unit = U_PCT;
-            out->v = pct;
+            out->v = r.pct;
+            out->px = r.px;
+            out->bounds = (uint8_t)r.bounds;
+            out->lo = r.lo;
+            out->hi = r.hi;
         } else {
             out->unit = U_PX;
-            out->v = px + pct * c->vw / 100 * 0;   /* percentage part unknown here: dropped */
+            out->v = r.px;
         }
         return 1;
     }
