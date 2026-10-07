@@ -27,7 +27,7 @@ enum {
     PR_FLEX_GROW, PR_FLEX_SHRINK, PR_FLEX_BASIS, PR_JUSTIFY_CONTENT, PR_ALIGN_ITEMS, PR_ALIGN_SELF,
     PR_ALIGN_CONTENT, PR_ORDER, PR_GAP, PR_ROW_GAP, PR_COLUMN_GAP, PR_GRID_TEMPLATE_COLUMNS, PR_CONTENT,
     PR_TABLE_LAYOUT, PR_BORDER_COLLAPSE, PR_CURSOR, PR_BACKGROUND_SIZE, PR_BACKGROUND_REPEAT,
-    PR_BACKGROUND_POSITION, PR_COUNT
+    PR_BACKGROUND_POSITION, PR_LINE_CLAMP, PR_WEBKIT_LINE_CLAMP, PR_TEXT_OVERFLOW, PR_COUNT
 };
 
 static const char *const prop_names[PR_COUNT] = {
@@ -49,7 +49,7 @@ static const char *const prop_names[PR_COUNT] = {
     "flex-grow", "flex-shrink", "flex-basis", "justify-content", "align-items", "align-self",
     "align-content", "order", "gap", "row-gap", "column-gap", "grid-template-columns", "content",
     "table-layout", "border-collapse", "cursor", "background-size", "background-repeat",
-    "background-position"
+    "background-position", "line-clamp", "-webkit-line-clamp", "text-overflow"
 };
 
 #define PR_CUSTOM 0xFFFF
@@ -1517,8 +1517,17 @@ static void copy_prop(css_style_t *st, const css_style_t *f, int prop) {
     case PR_TABLE_LAYOUT: st->table_layout_fixed = f->table_layout_fixed; break;
     case PR_BORDER_COLLAPSE: st->border_collapse = f->border_collapse; break;
     case PR_CURSOR: st->cursor_pointer = f->cursor_pointer; break;
+    case PR_LINE_CLAMP: case PR_WEBKIT_LINE_CLAMP: st->line_clamp = f->line_clamp; break;
+    case PR_TEXT_OVERFLOW: st->text_ellipsis = f->text_ellipsis; break;
     default: break;
     }
+}
+
+/* a CSS number starts here; anything else (undefined, NaN, typos) is an
+ * invalid value, which browsers drop */
+static int num_ok(const char *v) {
+    if (*v == '+' || *v == '-') v++;
+    return (*v >= '0' && *v <= '9') || (*v == '.' && v[1] >= '0' && v[1] <= '9');
 }
 
 /* properties that inherit by default (what unset does) */
@@ -1561,6 +1570,8 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
         else if (strstr(v, "flex")) st->display = D_FLEX;
         else if (strstr(v, "grid")) st->display = D_GRID;
         else if (strstr(v, "block")) st->display = D_BLOCK;
+        else if (strstr(v, "inline-box")) st->display = D_INLINE_BLOCK;   /* -webkit-inline-box */
+        else if (strstr(v, "box")) st->display = D_BLOCK;                 /* -webkit-box, for line clamping */
         break;
     }
     case PR_POSITION: {
@@ -1843,14 +1854,16 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
         break;
     }
     case PR_OPACITY: {
-        float o = (float)strtod(v, 0);
+        char *end;
+        float o = (float)strtod(v, &end);
+        if (end == v) break;            /* invalid ("undefined" ...): ignored, as browsers do */
         if (strchr(v, '%')) o /= 100;
         st->opacity = o < 0 ? 0 : o > 1 ? 1 : o;
         break;
     }
     case PR_Z_INDEX:
         if (ieq(v, vl, "auto")) st->z_auto = 1;
-        else {
+        else if (num_ok(v)) {
             st->z_auto = 0;
             st->z_index = atoi(v);
         }
@@ -1906,8 +1919,8 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
         }
         break;
     }
-    case PR_FLEX_GROW: st->flex_grow = (float)strtod(v, 0); break;
-    case PR_FLEX_SHRINK: st->flex_shrink = (float)strtod(v, 0); break;
+    case PR_FLEX_GROW: if (num_ok(v)) st->flex_grow = (float)strtod(v, 0); break;
+    case PR_FLEX_SHRINK: if (num_ok(v)) st->flex_shrink = (float)strtod(v, 0); break;
     case PR_FLEX_BASIS:
         if (ieq(v, vl, "content")) st->flex_basis.unit = U_AUTO;
         else parse_len(v, v + vl, st->font_size, c, &st->flex_basis);
@@ -1916,7 +1929,7 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
     case PR_ALIGN_ITEMS: st->align_items = align_kw(v); if (ieq(v, vl, "normal")) st->align_items = JC_STRETCH; break;
     case PR_ALIGN_SELF: st->align_self = align_kw(v); break;
     case PR_ALIGN_CONTENT: st->align_content = align_kw(v); break;
-    case PR_ORDER: st->order = atoi(v); break;
+    case PR_ORDER: if (num_ok(v)) st->order = atoi(v); break;
     case PR_GAP: case PR_ROW_GAP: case PR_COLUMN_GAP: {
         const char *tok[2];
         size_t len[2];
@@ -1954,6 +1967,12 @@ static void apply(css_style_t *st, int prop, const char *v, const ctx_t *c, aren
     case PR_TABLE_LAYOUT: st->table_layout_fixed = ieq(v, vl, "fixed"); break;
     case PR_BORDER_COLLAPSE: st->border_collapse = ieq(v, vl, "collapse"); break;
     case PR_CURSOR: st->cursor_pointer = ieq(v, vl, "pointer"); break;
+    case PR_LINE_CLAMP: case PR_WEBKIT_LINE_CLAMP: {
+        int k = atoi(v);
+        st->line_clamp = (uint8_t)(k > 0 ? (k > 255 ? 255 : k) : 0);
+        break;
+    }
+    case PR_TEXT_OVERFLOW: st->text_ellipsis = strstr(v, "ellipsis") != 0; break;
     case PR_BACKGROUND_SIZE: bg_size(st, v, vl, c); break;
     case PR_BACKGROUND_REPEAT: (void)bg_repeat(st, v, vl); break;
     case PR_BACKGROUND_POSITION: bg_position(st, v, vl, c); break;

@@ -931,9 +931,13 @@ static JSValue el_computed(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     const css_style_t *s;
     JSValue o;
     char buf[64];
+    float bx = 0, by = 0, bw = 0, bh = 0;
+    int has_box = 0;
     THIS_NODE(n);
     (void)argc; (void)argv;
     o = JS_NewObject(ctx);
+    /* like a browser, bring style and layout up to date before answering */
+    if (p->host.box) has_box = p->host.box(p->host.ctx, n, &bx, &by, &bw, &bh);
     s = n->style;
     if (!s) {
         JS_SetPropertyStr(ctx, o, "display", JS_NewString(ctx, "none"));
@@ -953,6 +957,74 @@ static JSValue el_computed(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     snprintf(buf, sizeof buf, "%g", (double)s->opacity);
     JS_SetPropertyStr(ctx, o, "opacity", JS_NewString(ctx, buf));
     JS_SetPropertyStr(ctx, o, "fontFamily", JS_NewString(ctx, s->font_family ? s->font_family : "sans-serif"));
+    {
+        static const char *const sides[4] = { "Top", "Right", "Bottom", "Left" };
+        static const char *const insets[4] = { "top", "right", "bottom", "left" };
+        static const char *const overflows[] = { "visible", "hidden", "scroll", "auto", "clip" };
+        static const char *const aligns[] = { "left", "right", "center", "justify", "start", "end" };
+        char key[32];
+        float pad[4], bor[4];
+        for (int i = 0; i < 4; i++) {
+            pad[i] = s->padding[i].unit == U_PX ? s->padding[i].v : s->padding[i].unit == U_PCT && bw > 0 ? bw * s->padding[i].v / 100 : 0;
+            bor[i] = s->border_w[i];
+            snprintf(key, sizeof key, "padding%s", sides[i]);
+            snprintf(buf, sizeof buf, "%gpx", (double)pad[i]);
+            JS_SetPropertyStr(ctx, o, key, JS_NewString(ctx, buf));
+            snprintf(key, sizeof key, "margin%s", sides[i]);
+            if (s->margin[i].unit == U_AUTO) snprintf(buf, sizeof buf, "auto");
+            else snprintf(buf, sizeof buf, s->margin[i].unit == U_PCT ? "%g%%" : "%gpx", (double)s->margin[i].v);
+            JS_SetPropertyStr(ctx, o, key, JS_NewString(ctx, buf));
+            snprintf(key, sizeof key, "border%sWidth", sides[i]);
+            snprintf(buf, sizeof buf, "%gpx", (double)bor[i]);
+            JS_SetPropertyStr(ctx, o, key, JS_NewString(ctx, buf));
+            if (s->inset[i].unit == U_AUTO) snprintf(buf, sizeof buf, "auto");
+            else snprintf(buf, sizeof buf, s->inset[i].unit == U_PCT ? "%g%%" : "%gpx", (double)s->inset[i].v);
+            JS_SetPropertyStr(ctx, o, insets[i], JS_NewString(ctx, buf));
+        }
+        /* used content-box size, as browsers report for rendered elements */
+        if (has_box && s->display != D_INLINE) {
+            float cw = bw - pad[1] - pad[3] - bor[1] - bor[3], ch = bh - pad[0] - pad[2] - bor[0] - bor[2];
+            if (s->box_sizing) {
+                cw = bw;
+                ch = bh;
+            }
+            snprintf(buf, sizeof buf, "%gpx", (double)(cw > 0 ? cw : 0));
+            JS_SetPropertyStr(ctx, o, "width", JS_NewString(ctx, buf));
+            snprintf(buf, sizeof buf, "%gpx", (double)(ch > 0 ? ch : 0));
+            JS_SetPropertyStr(ctx, o, "height", JS_NewString(ctx, buf));
+        } else {
+            JS_SetPropertyStr(ctx, o, "width", JS_NewString(ctx, "auto"));
+            JS_SetPropertyStr(ctx, o, "height", JS_NewString(ctx, "auto"));
+        }
+        JS_SetPropertyStr(ctx, o, "boxSizing", JS_NewString(ctx, s->box_sizing ? "border-box" : "content-box"));
+        JS_SetPropertyStr(ctx, o, "overflow", JS_NewString(ctx, s->overflow < 5 ? overflows[s->overflow] : "visible"));
+        JS_SetPropertyStr(ctx, o, "overflowX", JS_NewString(ctx, s->overflow < 5 ? overflows[s->overflow] : "visible"));
+        JS_SetPropertyStr(ctx, o, "overflowY", JS_NewString(ctx, s->overflow < 5 ? overflows[s->overflow] : "visible"));
+        if (s->z_auto) JS_SetPropertyStr(ctx, o, "zIndex", JS_NewString(ctx, "auto"));
+        else {
+            snprintf(buf, sizeof buf, "%d", s->z_index);
+            JS_SetPropertyStr(ctx, o, "zIndex", JS_NewString(ctx, buf));
+        }
+        snprintf(buf, sizeof buf, "%gpx", (double)s->line_height);
+        JS_SetPropertyStr(ctx, o, "lineHeight", JS_NewString(ctx, buf));
+        JS_SetPropertyStr(ctx, o, "textAlign", JS_NewString(ctx, s->text_align < 6 ? aligns[s->text_align] : "start"));
+        JS_SetPropertyStr(ctx, o, "whiteSpace", JS_NewString(ctx, s->white_space == WS_PRE ? "pre" : s->white_space == WS_NOWRAP ? "nowrap" : s->white_space == WS_PRE_WRAP ? "pre-wrap" : s->white_space == WS_PRE_LINE ? "pre-line" : "normal"));
+        JS_SetPropertyStr(ctx, o, "float", JS_NewString(ctx, s->float_ == 1 ? "left" : s->float_ == 2 ? "right" : "none"));
+        JS_SetPropertyStr(ctx, o, "cssFloat", JS_NewString(ctx, s->float_ == 1 ? "left" : s->float_ == 2 ? "right" : "none"));
+        JS_SetPropertyStr(ctx, o, "textOverflow", JS_NewString(ctx, s->text_ellipsis ? "ellipsis" : "clip"));
+        JS_SetPropertyStr(ctx, o, "cursor", JS_NewString(ctx, s->cursor_pointer ? "pointer" : "auto"));
+        snprintf(buf, sizeof buf, "%g", (double)s->flex_grow);
+        JS_SetPropertyStr(ctx, o, "flexGrow", JS_NewString(ctx, buf));
+        snprintf(buf, sizeof buf, "%g", (double)s->flex_shrink);
+        JS_SetPropertyStr(ctx, o, "flexShrink", JS_NewString(ctx, buf));
+        snprintf(buf, sizeof buf, "%d", s->order);
+        JS_SetPropertyStr(ctx, o, "order", JS_NewString(ctx, buf));
+        snprintf(buf, sizeof buf, "%gpx", (double)s->radius);
+        JS_SetPropertyStr(ctx, o, "borderRadius", JS_NewString(ctx, buf));
+        JS_SetPropertyStr(ctx, o, "fontStyle", JS_NewString(ctx, s->font_italic ? "italic" : "normal"));
+        JS_SetPropertyStr(ctx, o, "pointerEvents", JS_NewString(ctx, "auto"));
+        JS_SetPropertyStr(ctx, o, "transform", JS_NewString(ctx, "none"));
+    }
     return o;
 }
 

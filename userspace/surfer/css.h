@@ -44,6 +44,8 @@ typedef struct css_style {
     uint8_t  text_align, text_transform, font_italic, list_style, list_inside, vertical_align;
     uint8_t  decoration, flex_dir, flex_wrap, justify, align_items, align_self, align_content;
     uint8_t  lh_type, z_auto, border_style[4], table_layout_fixed, border_collapse, cursor_pointer;
+    uint8_t  line_clamp;                /* -webkit-line-clamp: lines shown, 0 none */
+    uint8_t  text_ellipsis;             /* text-overflow: ellipsis */
     uint16_t font_weight;
     float    font_size, line_height, letter_spacing, word_spacing, opacity;
     float    lh_value;                  /* specified line-height: multiplier or px */

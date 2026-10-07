@@ -953,7 +953,7 @@ static box_t *layout_atomic(lctx_t *c, dom_node_t *n, const css_style_t *st, flo
     box_t tmp_parent;
     box_t *b;
     memset(&tmp_parent, 0, sizeof(tmp_parent));
-    if (is_replaced(n)) {
+    if (is_replaced(n) && n->tag != T_BUTTON) {   /* a button lays out its content */
         float w, h;
         b = new_box(c, n, st, BX_REPLACED);
         if (!b) return 0;
@@ -1097,6 +1097,10 @@ static float layout_block(lctx_t *c, box_t *parent, dom_node_t *n, const css_sty
             }
             h = clampf(h, mn > 0 ? mn : 0, mx);
         }
+        /* -webkit-line-clamp: N lines tall; overflow: hidden (which clamping
+         * sites set) hides the rest */
+        if (st->line_clamp && st->line_height > 0 && h > st->line_clamp * st->line_height)
+            h = st->line_clamp * st->line_height;
         if (b->kind == BX_ROOT && h < c->L->viewport_h - vframe(b)) h = c->L->viewport_h - vframe(b);
         b->h = h + vframe(b);
         /* absolutely positioned descendants whose containing block is this box */

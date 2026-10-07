@@ -426,10 +426,28 @@ static void paint_background(pctx_t *c, box_t *b, float x, float y) {
 }
 
 static void paint_children(pctx_t *c, box_t *b, float ox, float oy) {
+    /* text-overflow: ellipsis on a clipping box: text running past the
+     * content edge ends in "..." where it is cut */
+    int ellipsis = b->st && b->st->text_ellipsis && b->st->overflow != OV_VISIBLE;
+    float edge = b->x + ox + b->w - b->br - b->pr;
     for (box_t *k = b->first; k; k = k->next) paint_box(c, k, ox, oy, 0);
     for (frag_t *f = b->frags; f; f = f->next) {
         float fy = f->y + oy;
         if (fy > c->view_bottom || fy + f->h < c->view_top) continue;
+        if (ellipsis && f->x + ox + f->w > edge + 0.5f && f->x + ox < edge) {
+            static const char dots[] = "\xE2\x80\xA6";
+            float room = edge - (f->x + ox) - font_text_width(&f->font, dots, 3);
+            size_t n = 0;
+            while (n < (size_t)f->len) {
+                size_t step = 1;
+                while (n + step < (size_t)f->len && ((unsigned char)f->text[n + step] & 0xC0) == 0x80) step++;
+                if (font_text_width(&f->font, f->text, n + step) > room) break;
+                n += step;
+            }
+            draw_text(c, &f->font, f->x + ox, f->baseline + oy, f->text, n, f->color);
+            draw_text(c, &f->font, f->x + ox + font_text_width(&f->font, f->text, n), f->baseline + oy, dots, 3, f->color);
+            continue;
+        }
         if (f->inline_bg && (f->inline_bg->bg_color >> 24)) {
             float pad = f->inline_bg->padding[1].unit == U_PX ? f->inline_bg->padding[1].v : 0;
             fill_round(c, f->x + ox - pad * 0.5f, fy - 1, f->w + pad, f->h + 2, f->inline_bg->radius > 0 ? f->inline_bg->radius : 0,
