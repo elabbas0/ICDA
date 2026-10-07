@@ -386,14 +386,15 @@ static void audio_playback_worker(void) {
                 output_service();
                 continue;
             }
-            sched_sleep(5);
+            sched_sleep(1);             /* a new sound starts within a tick */
         }
     }
 }
 
-/* Called right after a sound is queued so it starts within one mix period. */
+/* Called right after a sound is queued.  Starting the controller (codec
+ * commands, stream reset) is left to the worker: done here it would run in
+ * the caller's system call, and the window manager would stall on it. */
 static void kick(void) {
-    if (!out_running && output_start() == 0) output_service();
 }
 
 /* ---- music (one track) ------------------------------------------------------ */

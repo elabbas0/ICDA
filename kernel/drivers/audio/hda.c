@@ -4,6 +4,7 @@
 #include "../console/console.h"
 #include "../serial/serial.h"
 #include "../../memory/vmm.h"
+#include "../../cpu/tsc.h"
 
 #define HDA_CLASS_CODE         0x04
 #define HDA_SUBCLASS           0x03
@@ -102,6 +103,7 @@ static uint8_t hda_afg = 0;
 static uint8_t hda_pin = 0;
 static uint8_t hda_dac = 0;
 static int hda_present = 0;
+static uint16_t hda_configured_rate = 0;   /* codec path set up for this rate */
 static int hda_error = 0;
 static int hda_generic_fallback = 0;
 
@@ -197,18 +199,22 @@ static int hda_exec_verb(uint8_t codec, uint8_t nid, uint16_t verb, uint16_t par
         return -1;
     }
 
-    if (wait_mask16(HDA_REG_ICIS, HDA_ICIS_ICB, 0) != 0) {
-        return -1;
+    {
+        uint64_t deadline = tsc_us() + 2000;
+        while (mmio_read16(HDA_REG_ICIS) & HDA_ICIS_ICB) {
+            if (tsc_us() >= deadline) return -1;
+            cpu_relax();
+        }
     }
 
     mmio_write16(HDA_REG_ICIS, HDA_ICIS_IRV);
     mmio_write32(HDA_REG_ICOI, hda_build_cmd(codec, nid, verb, parm));
     mmio_write16(HDA_REG_ICIS, HDA_ICIS_ICB);
 
-    
-
-
-    for (uint32_t i = 0; i < 200000U; i++) {
+    /* codecs answer within microseconds; one that does not gets 2 ms, so a
+     * silent codec costs milliseconds, not the seconds of a fixed spin count
+     * on hardware where every register read is slow */
+    for (uint64_t deadline = tsc_us() + 2000; tsc_us() < deadline;) {
         status = mmio_read16(HDA_REG_ICIS);
         if ((status & HDA_ICIS_ICB) == 0 && (status & HDA_ICIS_IRV) != 0) {
             if (resp_out) {
@@ -320,7 +326,6 @@ static int hda_find_dac_path_from(uint8_t nid, uint8_t *visited, hda_path_t *pat
 
     visited[nid] = 1;
     if (hda_widget_type(nid, &type) != 0) {
-        visited[nid] = 0;
         return -1;
     }
 
@@ -342,8 +347,10 @@ static int hda_find_dac_path_from(uint8_t nid, uint8_t *visited, hda_path_t *pat
         }
     }
 
+    /* nodes stay visited: one that cannot reach a DAC never will, and
+     * revisiting through other routes makes the search exponential on real
+     * codecs (every step is a codec command) */
     path->length--;
-    visited[nid] = 0;
     return -1;
 }
 
@@ -436,10 +443,11 @@ static int hda_find_output_path(hda_path_t *out_path) {
         return -1;
     }
 
-    if (hda_exec_verb(hda_codec, hda_afg, HDA_VERB_AFG_RESET, 0, 0) != 0) {
+    /* no function group reset: a real codec does not answer while it resets,
+     * and the firmware has initialised it already */
+    if (hda_exec_verb(hda_codec, hda_afg, HDA_VERB_SET_POWER_STATE, 0, 0) != 0) {
         return -1;
     }
-    (void)hda_exec_verb(hda_codec, hda_afg, HDA_VERB_SET_POWER_STATE, 0, 0);
 
     if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) {
         return -1;
@@ -839,8 +847,13 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
         return hda_fail(9, "hda: bad stream buffer length\n");
     }
 
-    if (hda_configure_codec_path(sample_rate) != 0) {
-        return hda_fail(10, "hda: codec configure failed, playback disabled\n");
+    if (hda_configured_rate != sample_rate) {
+        if (hda_configure_codec_path(sample_rate) != 0) {
+            hda_present = 0;            /* do not retry on every sound */
+            return hda_fail(10, "hda: codec configure failed, playback disabled\n");
+        }
+        hda_configured_rate = sample_rate;
+        serial_write("hda: codec path ready\n");
     }
 
     hda_buffer_len = buffer_len;
