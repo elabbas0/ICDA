@@ -1,5 +1,9 @@
 #include "user.h"
 #include "../linux/lx_vm.h"
+#include "../linux/lx.h"
+
+/* dynamic loaders of Linux programs go here, above where mmap places things */
+#define LX_INTERP_BASE 0x00007F0000000000ULL
 #include "elf.h"
 
 #include "sched.h"
@@ -216,7 +220,7 @@ static int build_stack(process_t *proc, uint64_t *rsp_out, uint64_t argc, char *
         AUX(4, 56);
         AUX(5, proc->lx_phnum);
         AUX(6, PAGE_SIZE_4K);
-        AUX(7, 0);
+        AUX(7, proc->lx_interp_base);
         AUX(8, 0);
         AUX(9, proc->lx_entry);
         AUX(11, 0);
@@ -443,8 +447,12 @@ uint64_t user_last_exit_code(void) {
     return user_exit_code;
 }
 
+/* Loads an ELF image.  base: where an ET_DYN image goes (0: USER_TEXT_BASE).
+ * is_interp: the dynamic loader of a Linux program, which relocates itself
+ * and the program (so the kernel applies no relocations then), and whose
+ * entry is where the process starts. */
 static int user_load_elf(process_t *user_proc, const void *image, uint64_t image_size,
-                          uint64_t *entry_rip_out, uint64_t *interp_vaddr,
+                          uint64_t *entry_rip_out, uint64_t base, int is_interp,
                           char *interp_path, uint64_t interp_cap) {
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
     const elf64_phdr_t *ph;
@@ -463,7 +471,6 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
     if ((uint64_t)eh->e_phnum > (image_size - eh->e_phoff) / sizeof(elf64_phdr_t)) return -1;
 
     if (interp_path) interp_path[0] = 0;
-    if (interp_vaddr) *interp_vaddr = 0;
 
     ph = (const elf64_phdr_t *)((const char *)image + eh->e_phoff);
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
@@ -486,7 +493,7 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
         }
         
 
-        load_bias = USER_TEXT_BASE - min_vaddr;
+        load_bias = (base ? base : USER_TEXT_BASE) - (min_vaddr & ~0xFFFULL);
         if (max_vaddr > 0 && (load_bias + max_vaddr) >= USER_STACK_LIMIT) {
             return -1;
         }
@@ -504,6 +511,9 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
                              vaddr, ph[i].p_offset, ph[i].p_filesz, ph[i].p_memsz, ph[i].p_flags) != 0) {
             return -1;
         }
+        if (user_proc->linux_personality)
+            (void)lxvm_reserve(user_proc, vaddr, vaddr + ph[i].p_memsz,
+                               (uint32_t)(((ph[i].p_flags & 4) ? 1 : 0) | ((ph[i].p_flags & 2) ? 2 : 0) | ((ph[i].p_flags & 1) ? 4 : 0)));
         has_load = 1;
     }
 
@@ -513,7 +523,7 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
 
 
 
-    if (eh->e_type == ET_DYN) {
+    if (eh->e_type == ET_DYN && !is_interp && !(interp_path && interp_path[0])) {
         uint64_t rel_off = 0;
         uint64_t rel_sz = 0;
         uint64_t rel_ent = 0;
@@ -559,17 +569,19 @@ static int user_load_elf(process_t *user_proc, const void *image, uint64_t image
         }
     }
 
-    user_proc->lx_entry = eh->e_entry + load_bias;
-    user_proc->lx_phnum = eh->e_phnum;
-    user_proc->lx_phdr = 0;
-    for (uint16_t i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type == 6) {
-            user_proc->lx_phdr = ph[i].p_vaddr + load_bias;
-            break;
-        }
-        if (ph[i].p_type == PT_LOAD && eh->e_phoff >= ph[i].p_offset &&
-            eh->e_phoff < ph[i].p_offset + ph[i].p_filesz && !user_proc->lx_phdr) {
-            user_proc->lx_phdr = ph[i].p_vaddr + (eh->e_phoff - ph[i].p_offset) + load_bias;
+    if (!is_interp) {
+        user_proc->lx_entry = eh->e_entry + load_bias;
+        user_proc->lx_phnum = eh->e_phnum;
+        user_proc->lx_phdr = 0;
+        for (uint16_t i = 0; i < eh->e_phnum; i++) {
+            if (ph[i].p_type == 6) {
+                user_proc->lx_phdr = ph[i].p_vaddr + load_bias;
+                break;
+            }
+            if (ph[i].p_type == PT_LOAD && eh->e_phoff >= ph[i].p_offset &&
+                eh->e_phoff < ph[i].p_offset + ph[i].p_filesz && !user_proc->lx_phdr) {
+                user_proc->lx_phdr = ph[i].p_vaddr + (eh->e_phoff - ph[i].p_offset) + load_bias;
+            }
         }
     }
     *entry_rip_out = eh->e_entry + load_bias;
@@ -604,9 +616,28 @@ static int user_load_image(process_t *user_proc, const void *image, uint64_t ima
         const elf64_ehdr_t *eh = (const elf64_ehdr_t *)image;
         if (eh->e_ident[0] == ELF_MAGIC0 && eh->e_ident[1] == ELF_MAGIC1 &&
             eh->e_ident[2] == ELF_MAGIC2 && eh->e_ident[3] == ELF_MAGIC3) {
-            if (user_load_elf(user_proc, image, image_size, entry_rip_out,
-                              NULL, NULL, 0) != 0) {
+            char interp[128];
+            if (user_load_elf(user_proc, image, image_size, entry_rip_out, 0, 0, interp, sizeof(interp)) != 0) {
                 return -1;
+            }
+            user_proc->lx_interp_base = 0;
+            if (interp[0] && user_proc->linux_personality) {
+                /* a dynamically linked Linux program: its loader (ld-musl,
+                 * ld-linux) goes high up and starts first */
+                uint64_t isize = 0;
+                const char *iimg;
+                char ipath[512];
+                copy_bytes(ipath, interp, cstr_len(interp) + 1);
+                (void)lx_overlay_path(ipath);
+                iimg = vfs_read(vfs_root(), ipath, &isize);
+                if (!iimg) {
+                    console_write("user_load_image: dynamic loader not found: ", CONSOLE_STYLE_ERROR);
+                    console_write(interp, CONSOLE_STYLE_ERROR);
+                    console_write("\n", CONSOLE_STYLE_ERROR);
+                    return -1;
+                }
+                if (user_load_elf(user_proc, iimg, isize, entry_rip_out, LX_INTERP_BASE, 1, 0, 0) != 0) return -1;
+                user_proc->lx_interp_base = LX_INTERP_BASE;
             }
             return 0;
         }

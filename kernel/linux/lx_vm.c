@@ -366,3 +366,27 @@ uint64_t lxvm_maps(process_t *p, char *buf, uint64_t cap) {
     }
     return n;
 }
+
+/* The loader's segments (program, dynamic loader): already mapped; recorded
+ * so mmap places nothing on top of them. */
+int lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot) {
+    lx_vma_t *v;
+    start &= PAGE_MASK;
+    end = (end + PAGE - 1) & PAGE_MASK;
+    if (end <= start) return 0;
+    v = new_vma(start, end, prot, LXVM_PRIVATE | LXVM_ANON, 0, 0);
+    if (!v) return -1;
+    insert(p, v);
+    return 0;
+}
+
+/* frees a region list taken off a process (execve keeps the old one until
+ * the new image has loaded) */
+void lxvm_free_list(void *list) {
+    lx_vma_t *v = (lx_vma_t *)list;
+    while (v) {
+        lx_vma_t *n = v->next;
+        kfree(v);
+        v = n;
+    }
+}

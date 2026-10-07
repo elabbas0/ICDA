@@ -14,5 +14,7 @@ void     lx_proc_exit(process_t *proc);
 int      lx_signal(process_t *proc, int sig);
 void     lx_mark_signaled(process_t *proc, int sig);
 void     lx_init(void);
+/* a path ICDA lacks, redirected into the Linux root if it is there (1) */
+int      lx_overlay_path(char *path);
 
 #endif

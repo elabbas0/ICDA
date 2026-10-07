@@ -92,6 +92,7 @@ typedef struct process {
     struct thread   *on_cpu;
     int              nthreads;     /* live threads */
     void            *lx_vmas;      /* Linux personality: mmap regions (linux/lx_vm.c) */
+    uint64_t         lx_interp_base; /* where the dynamic loader was put (AT_BASE), 0 if none */
     char             name[64];
 } process_t;
 

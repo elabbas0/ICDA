@@ -31,5 +31,7 @@ int      lxvm_fault_current(uint64_t addr, int write);
 
 int      lxvm_fork(process_t *parent, process_t *child);
 void     lxvm_free(process_t *p);
+int      lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot);
+void     lxvm_free_list(void *list);
 
 #endif

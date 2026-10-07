@@ -632,6 +632,38 @@ static int64_t copy_path(const char *upath, char *out) {
 }
 
 /* Turns (dirfd, user path) into an absolute kernel path. */
+/* Linux programs see ICDA's tree with a Linux root filling the gaps: a path
+ * ICDA lacks (/lib/..., /usr/..., /etc/fonts/...) is looked up under /linux,
+ * or under a "linux" folder at the top of a mounted volume.  ICDA's own
+ * paths (/home, /volumes, /dev) keep priority. */
+static const char *const overlay_roots[] = {
+    "/linux", "/volumes/fat32-1/linux", "/volumes/fat32-2/linux", "/volumes/fat32-3/linux", "/volumes/fat32-4/linux",
+    "/volumes/exfat-1/linux", "/volumes/exfat-2/linux", "/volumes/ntfs-1/linux", "/volumes/ntfs-2/linux",
+};
+
+static int has_prefix(const char *s, const char *p) {
+    while (*p) if (*s++ != *p++) return 0;
+    return 1;
+}
+
+int lx_overlay_path(char *path) {
+    vfs_node_t *root = vfs_root();
+    char alt[LX_PATH_MAX];
+    if (path[0] != '/' || vfs_resolve(root, path)) return 0;
+    if (has_prefix(path, "/proc") || has_prefix(path, "/dev") || has_prefix(path, "/volumes")) return 0;
+    for (uint64_t i = 0; i < sizeof(overlay_roots) / sizeof(overlay_roots[0]); i++) {
+        uint64_t n = kstrlen(overlay_roots[i]);
+        if (n + kstrlen(path) + 1 > LX_PATH_MAX || !vfs_resolve(root, overlay_roots[i])) continue;
+        kstrcpy(alt, overlay_roots[i], LX_PATH_MAX);
+        kstrcpy(alt + n, path, LX_PATH_MAX - n);
+        if (vfs_resolve(root, alt)) {
+            kstrcpy(path, alt, LX_PATH_MAX);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int64_t at_path(int64_t dirfd, const char *upath, char *out) {
     char rel[LX_PATH_MAX];
     int64_t rc = copy_path(upath, rel);
@@ -640,6 +672,7 @@ static int64_t at_path(int64_t dirfd, const char *upath, char *out) {
     if (rc < 0) return rc;
     if (rel[0] == '/') {
         kstrcpy(out, rel, LX_PATH_MAX);
+        (void)lx_overlay_path(out);
         return 0;
     }
     if ((int32_t)dirfd == LX_AT_FDCWD) {
@@ -656,6 +689,7 @@ static int64_t at_path(int64_t dirfd, const char *upath, char *out) {
     if (n + 1 + kstrlen(rel) + 1 > LX_PATH_MAX) return -ENAMETOOLONG;
     if (n > 1) out[n++] = '/';
     kstrcpy(out + n, rel, LX_PATH_MAX - n);
+    (void)lx_overlay_path(out);
     return 0;
 }
 
@@ -2103,6 +2137,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     const char *image = 0;
     addr_space_t *old_as;
     int old_pers;
+    void *old_vmas;
     if (!path || !buf || !argv || !envp) {
         rc = -ENOMEM;
         goto out;
@@ -2180,11 +2215,15 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     }
     old_as = p->addr_space;
     old_pers = p->linux_personality;
+    old_vmas = p->lx_vmas;
+    p->lx_vmas = 0;
     p->linux_personality = !(size > 7 && (uint8_t)image[7] == 0xFF);
     if (user_exec_image(p, image, size, (uint64_t)argc, argv, (uint64_t)envc, envp, path, &rip, &rsp) != 0) {
         if (p->addr_space && p->addr_space != old_as) vmm_destroy_address_space(p->addr_space);
         p->addr_space = old_as;
         p->linux_personality = old_pers;
+        lxvm_free(p);
+        p->lx_vmas = old_vmas;
         rc = -ENOEXEC;
         goto out;
     }
@@ -2197,7 +2236,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     if (old_as) vmm_destroy_address_space(old_as);
     p->linux_brk_pos = 0;
     p->linux_mmap_next = 0;
-    lxvm_free(p);
+    lxvm_free_list(old_vmas);
     {
         const char *base = path;
         for (const char *c = path; *c; c++) {
