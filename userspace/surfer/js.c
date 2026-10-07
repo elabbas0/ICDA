@@ -1514,6 +1514,9 @@ static void run_script(js_page_t *p, dom_node_t *el) {
     if (!kind || ptr_in(p->ran, p->nran, el)) return;
     ptr_push(&p->ran, &p->nran, &p->capran, el);
     src = script_source(p, el, &len, url, sizeof url);
+    /* big bundles (YouTube's app is 10 MB) need time just to compile: the
+     * budget grows by 4 s per MB.  Stop and Escape still end it at once. */
+    p->deadline_ms = now_ms() + SCRIPT_BUDGET_MS + (double)(len >> 20) * 4000.0;
     if (!src) {
         if (dom_attr(el, "src")) fire_simple(p, el, "error");
         return;
@@ -1756,6 +1759,13 @@ js_page_t *js_page_new(dom_doc_t *doc, const char *url, const js_host_t *host) {
     JS_SetPropertyFunctionList(ctx, p->proto_chardata, chardata_funcs, sizeof chardata_funcs / sizeof chardata_funcs[0]);
     p->proto_text = make_interface(ctx, global, "Text", p->proto_chardata);
     p->proto_comment = make_interface(ctx, global, "Comment", p->proto_chardata);
+    {
+        /* never created by the parser, but polyfills (ShadyDOM) patch their prototypes */
+        JSValue cdata = make_interface(ctx, global, "CDATASection", p->proto_text);
+        JSValue pi = make_interface(ctx, global, "ProcessingInstruction", p->proto_chardata);
+        JS_FreeValue(ctx, cdata);
+        JS_FreeValue(ctx, pi);
+    }
     elproto = make_interface(ctx, global, "Element", p->proto_node);
     JS_SetPropertyFunctionList(ctx, elproto, element_funcs, sizeof element_funcs / sizeof element_funcs[0]);
     p->proto_element = make_interface(ctx, global, "HTMLElement", elproto);

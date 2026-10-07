@@ -480,16 +480,25 @@ def(EP, 'scrollTop', function () { return this === doc.documentElement || this =
     function (v) { if (this === doc.documentElement || this === doc.body) __scrollTo(0, +v); });
 def(EP, 'scrollLeft', () => 0, () => {});
 
-/* reflected attributes */
-const reflectStr = (proto, prop, attr) => def(proto, prop, function () { const v = this.getAttribute(attr || prop.toLowerCase()); return v === null ? '' : v; },
-    function (v) { this.setAttribute(attr || prop.toLowerCase(), v); });
-const reflectBool = (proto, prop, attr) => def(proto, prop, function () { return this.hasAttribute(attr || prop.toLowerCase()); },
-    function (v) { this.toggleAttribute(attr || prop.toLowerCase(), !!v); });
+/* reflected attributes.  They sit on every element (browsers spread them
+ * over the HTML*Element interfaces), so a component class assigning
+ * `MyElement.prototype.async = function () {}` lands on one: on anything
+ * that is not a DOM node the setter makes a plain property and the getter
+ * gives the default. */
+const notNode = (o) => { try { return typeof o.nodeType !== 'number'; } catch (e) { return true; } };
+const ownProp = (o, prop, v) => Object.defineProperty(o, prop, { value: v, writable: true, enumerable: true, configurable: true });
+const reflectStr = (proto, prop, attr) => def(proto, prop, function () {
+    if (notNode(this)) return '';
+    const v = this.getAttribute(attr || prop.toLowerCase()); return v === null ? '' : v;
+}, function (v) { if (notNode(this)) ownProp(this, prop, v); else this.setAttribute(attr || prop.toLowerCase(), v); });
+const reflectBool = (proto, prop, attr) => def(proto, prop, function () { return notNode(this) ? false : this.hasAttribute(attr || prop.toLowerCase()); },
+    function (v) { if (notNode(this)) ownProp(this, prop, v); else this.toggleAttribute(attr || prop.toLowerCase(), !!v); });
 const reflectUrl = (proto, prop) => def(proto, prop, function () {
+    if (notNode(this)) return '';
     const v = this.getAttribute(prop);
     if (v === null) return '';
     return __resolve(doc.baseURI, v) || v;
-}, function (v) { this.setAttribute(prop, v); });
+}, function (v) { if (notNode(this)) ownProp(this, prop, v); else this.setAttribute(prop, v); });
 for (const p of ['title', 'lang', 'dir', 'name', 'type', 'alt', 'placeholder', 'rel', 'target', 'download', 'accept', 'autocomplete',
     'enctype', 'inputMode', 'role', 'slot', 'pattern', 'min', 'max', 'step', 'crossOrigin', 'referrerPolicy', 'loading', 'decoding',
     'media', 'sizes', 'srcset', 'width', 'height', 'label', 'nonce', 'integrity', 'as', 'charset', 'content', 'httpEquiv']) {
@@ -1744,6 +1753,324 @@ if (!G.Intl) {
     Date.prototype.toLocaleTimeString = function (l, o) { return new DateTimeFormat(l, Object.assign({ hour: 'numeric', minute: '2-digit', second: '2-digit' }, o)).format(this); };
     Date.prototype.toLocaleString = function (l, o) { return new DateTimeFormat(l, o || { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(this); };
     String.prototype.localeCompare = function (b, l, o) { return new Collator(l, o).compare(this, b); };
+}
+
+/* ---- DOM change notifications: custom elements and MutationObserver ------
+ * The tree changes only through a few native primitives (appendChild,
+ * insertBefore, removeChild, replaceChild, __remove, the innerHTML family,
+ * textContent, setAttribute / removeAttribute, data); the conveniences above
+ * all go through them.  They are wrapped once here and report each change to
+ * the custom element registry and to MutationObservers.  With no custom
+ * element defined and nothing observed the wrappers only test two sizes. */
+{
+    const NP = Node.prototype, EP2 = Element.prototype;
+    const ceDefs = new Map(), ceByCtor = new Map(), ceWaiting = new Map();
+    const ceState = new WeakMap();          /* element -> 'custom' | 'pending' | 'failed' */
+    const ceUpgrading = [];                 /* construction stack for upgrades */
+    const moRegs = new Map();               /* node -> [{ observer, options }] */
+    const moPending = new Set();
+    let moScheduled = false;
+    const watching = () => ceDefs.size > 0 || moRegs.size > 0;
+    const nativeCreate = Document.prototype.createElement;
+
+    const ceCall = (el, name, ...args) => {
+        const f = el[name];
+        if (typeof f === 'function') { try { f.apply(el, args); } catch (e) { reportError(e); } }
+    };
+    function ceUpgrade(el) {
+        if (ceState.has(el)) return;
+        const def = ceDefs.get(el.localName);
+        if (!def) return;
+        ceState.set(el, 'pending');
+        ceUpgrading.push(el);
+        try {
+            new def.ctor();
+        } catch (e) {
+            ceUpgrading.pop();
+            ceState.set(el, 'failed');
+            reportError(e);
+            return;
+        }
+        ceUpgrading.pop();
+        ceState.set(el, 'custom');
+        if (def.attrs.size)
+            for (const a of def.attrs) { const v = el.getAttribute(a); if (v !== null) ceCall(el, 'attributeChangedCallback', a, null, v, null); }
+        if (el.isConnected) ceCall(el, 'connectedCallback');
+    }
+    const elementsIn = (n) => {
+        if (!n || (n.nodeType !== 1 && n.nodeType !== 11 && n.nodeType !== 9)) return [];
+        const list = n.nodeType === 1 ? [n] : [];
+        if (n.firstChild) for (const e of n.querySelectorAll('*')) list.push(e);
+        return list;
+    };
+    function ceConnected(nodes) {
+        if (!ceDefs.size) return;
+        for (const n of nodes) for (const el of elementsIn(n)) {
+            const s = ceState.get(el);
+            if (s === undefined) { if (el.isConnected) ceUpgrade(el); }
+            else if (s === 'custom' && el.isConnected) ceCall(el, 'connectedCallback');
+        }
+    }
+    function ceDisconnected(nodes) {
+        if (!ceDefs.size) return;
+        for (const n of nodes) for (const el of elementsIn(n)) if (ceState.get(el) === 'custom') ceCall(el, 'disconnectedCallback');
+    }
+
+    /* `class X extends HTMLElement`: super() hands back a real element */
+    const NativeHTMLElement = G.HTMLElement, HEP = NativeHTMLElement.prototype;
+    function HTMLElement() {
+        const def = new.target && ceByCtor.get(new.target);
+        if (!def) throw new TypeError('Illegal constructor');
+        let el = ceUpgrading.length ? ceUpgrading[ceUpgrading.length - 1] : null;
+        if (el) ceUpgrading[ceUpgrading.length - 1] = null;
+        else el = nativeCreate.call(doc, def.name);
+        Object.setPrototypeOf(el, new.target.prototype);
+        if (!ceState.has(el) || ceState.get(el) === 'pending') ceState.set(el, 'custom');
+        return el;
+    }
+    HTMLElement.prototype = HEP;
+    Object.defineProperty(HEP, 'constructor', { value: HTMLElement, writable: true, configurable: true });
+    Object.setPrototypeOf(HTMLElement, Object.getPrototypeOf(NativeHTMLElement));
+    G.HTMLElement = HTMLElement;
+
+    G.CustomElementRegistry = function CustomElementRegistry() {};
+    G.customElements = Object.create(G.CustomElementRegistry.prototype);
+    Object.assign(G.customElements, {
+        define(name, ctor, opts) {
+            name = String(name);
+            if (typeof ctor !== 'function') throw new TypeError('constructor expected');
+            if (ceDefs.has(name) || ceByCtor.has(ctor)) throw new DOMException('"' + name + '" has already been defined', 'NotSupportedError');
+            if (opts && opts.extends) return;            /* customized built-ins: not supported */
+            const def = { name, ctor, attrs: new Set([].concat(ctor.observedAttributes || []).map(String)) };
+            ceDefs.set(name, def);
+            ceByCtor.set(ctor, def);
+            for (const el of Array.from(doc.querySelectorAll(name))) ceUpgrade(el);
+            const w = ceWaiting.get(name);
+            if (w) { ceWaiting.delete(name); w.resolve(ctor); }
+        },
+        get(name) { const d = ceDefs.get(String(name)); return d ? d.ctor : undefined; },
+        getName(ctor) { const d = ceByCtor.get(ctor); return d ? d.name : null; },
+        whenDefined(name) {
+            name = String(name);
+            const d = ceDefs.get(name);
+            if (d) return Promise.resolve(d.ctor);
+            let w = ceWaiting.get(name);
+            if (!w) { w = {}; w.promise = new Promise((r) => { w.resolve = r; }); ceWaiting.set(name, w); }
+            return w.promise;
+        },
+        upgrade(root) { for (const el of elementsIn(root)) ceUpgrade(el); }
+    });
+    Object.defineProperty(Document.prototype, 'createElement', {
+        value: function (name, opts) {
+            const d = ceDefs.get(String(name).toLowerCase());
+            if (d && this === doc) { try { return new d.ctor(); } catch (e) { reportError(e); } }
+            return nativeCreate.apply(this, arguments);
+        }, writable: true, configurable: true
+    });
+
+    /* MutationObserver */
+    class MutationRecord {
+        constructor(type, target, f) {
+            this.type = type; this.target = target;
+            this.addedNodes = f.added || []; this.removedNodes = f.removed || [];
+            this.previousSibling = f.prev || null; this.nextSibling = f.next || null;
+            this.attributeName = f.name || null; this.attributeNamespace = null;
+            this.oldValue = f.old === undefined ? null : f.old;
+        }
+    }
+    class MutationObserver {
+        constructor(cb) {
+            if (typeof cb !== 'function') throw new TypeError('MutationObserver needs a callback');
+            this._cb = cb; this._records = []; this._targets = new Set();
+        }
+        observe(target, options) {
+            const o = Object.assign({}, options);
+            if (o.attributeOldValue || o.attributeFilter) o.attributes = o.attributes !== false;
+            if (o.characterDataOldValue) o.characterData = o.characterData !== false;
+            if (!o.childList && !o.attributes && !o.characterData) throw new TypeError('observe() needs childList, attributes or characterData');
+            let list = moRegs.get(target);
+            if (!list) moRegs.set(target, list = []);
+            const r = list.find((x) => x.observer === this);
+            if (r) r.options = o; else list.push({ observer: this, options: o });
+            this._targets.add(target);
+        }
+        disconnect() {
+            for (const t of this._targets) {
+                const l = moRegs.get(t);
+                if (!l) continue;
+                const i = l.findIndex((x) => x.observer === this);
+                if (i >= 0) l.splice(i, 1);
+                if (!l.length) moRegs.delete(t);
+            }
+            this._targets.clear();
+            this._records = [];
+        }
+        takeRecords() { const r = this._records; this._records = []; return r; }
+    }
+    function moDeliver() {
+        moScheduled = false;
+        const list = Array.from(moPending);
+        moPending.clear();
+        for (const obs of list) {
+            const recs = obs.takeRecords();
+            if (recs.length) { try { obs._cb.call(obs, recs, obs); } catch (e) { reportError(e); } }
+        }
+    }
+    function moQueue(type, target, f) {
+        if (!moRegs.size || !target) return;
+        const hit = new Map();
+        for (let n = target; n; n = n.parentNode || (n.nodeType === 11 && n.host) || null) {
+            const l = moRegs.get(n);
+            if (l) for (const r of l) {
+                const o = r.options;
+                if (n !== target && !o.subtree) continue;
+                if (type === 'childList' && !o.childList) continue;
+                if (type === 'attributes' && (!o.attributes || (o.attributeFilter && !o.attributeFilter.includes(f.name)))) continue;
+                if (type === 'characterData' && !o.characterData) continue;
+                if (!hit.has(r.observer)) hit.set(r.observer, o);
+            }
+        }
+        for (const [obs, o] of hit) {
+            const keepOld = type === 'attributes' ? o.attributeOldValue : type === 'characterData' ? o.characterDataOldValue : false;
+            obs._records.push(new MutationRecord(type, target, keepOld ? f : Object.assign({}, f, { old: undefined })));
+            moPending.add(obs);
+        }
+        if (hit.size && !moScheduled) { moScheduled = true; Promise.resolve().then(moDeliver); }
+    }
+    G.MutationObserver = G.WebKitMutationObserver = MutationObserver;
+    G.MutationRecord = MutationRecord;
+
+    /* ---- the wrapped primitives ---------------------------------------- */
+    const PROTOS = [NP, EP2, HEP, CharacterData.prototype, Document.prototype, DocumentFragment.prototype];
+    const owner = (name) => PROTOS.find((p) => Object.prototype.hasOwnProperty.call(p, name));
+    function wrapFn(name, fn) {
+        const p = owner(name);
+        if (!p) return;
+        const orig = p[name];
+        if (typeof orig !== 'function') return;
+        Object.defineProperty(p, name, { value: function (...a) { return watching() ? fn.call(this, orig, a) : orig.apply(this, a); }, writable: true, configurable: true });
+    }
+    function wrapSet(name, fn) {
+        const p = owner(name);
+        if (!p) return;
+        const d = Object.getOwnPropertyDescriptor(p, name);
+        if (!d || !d.set) return;
+        Object.defineProperty(p, name, {
+            get: d.get, enumerable: d.enumerable, configurable: true,
+            set(v) { if (watching()) fn.call(this, d.set, v); else d.set.call(this, v); }
+        });
+    }
+    const kids = (n) => (n && n.childNodes ? Array.from(n.childNodes) : []);
+    function inserted(parent, nodes) {
+        if (!nodes.length || !parent) return;
+        const first = nodes[0], last = nodes[nodes.length - 1];
+        moQueue('childList', parent, { added: nodes, prev: first.previousSibling, next: last.nextSibling });
+        if (parent.isConnected) ceConnected(nodes);
+    }
+    function removed(parent, nodes, wasConnected, prev, next) {
+        if (!nodes.length || !parent) return;
+        moQueue('childList', parent, { removed: nodes, prev, next });
+        if (wasConnected) ceDisconnected(nodes);
+    }
+    /* a node being inserted leaves its old parent first */
+    function detachFirst(node) {
+        if (!node || node.nodeType === 11 || !node.parentNode) return null;
+        return { parent: node.parentNode, conn: node.isConnected, prev: node.previousSibling, next: node.nextSibling };
+    }
+    const toInsert = (node) => (node && node.nodeType === 11 ? kids(node) : node ? [node] : []);
+
+    wrapFn('appendChild', function (orig, [c]) {
+        const from = detachFirst(c), nodes = toInsert(c);
+        const r = orig.call(this, c);
+        if (from) removed(from.parent, [c], from.conn, from.prev, from.next);
+        inserted(this, nodes);
+        return r;
+    });
+    wrapFn('insertBefore', function (orig, [c, ref]) {
+        const from = detachFirst(c), nodes = toInsert(c);
+        const r = orig.call(this, c, ref);
+        if (from) removed(from.parent, [c], from.conn, from.prev, from.next);
+        inserted(this, nodes);
+        return r;
+    });
+    wrapFn('removeChild', function (orig, [c]) {
+        const conn = c && c.isConnected, prev = c && c.previousSibling, next = c && c.nextSibling;
+        const r = orig.call(this, c);
+        removed(this, [c], conn, prev, next);
+        return r;
+    });
+    wrapFn('replaceChild', function (orig, [c, old]) {
+        const from = detachFirst(c), nodes = toInsert(c);
+        const conn = old && old.isConnected, prev = old && old.previousSibling, next = old && old.nextSibling;
+        const r = orig.call(this, c, old);
+        if (from) removed(from.parent, [c], from.conn, from.prev, from.next);
+        removed(this, [old], conn, prev, next);
+        inserted(this, nodes);
+        return r;
+    });
+    wrapFn('__remove', function (orig, a) {
+        const parent = this.parentNode, conn = this.isConnected, prev = this.previousSibling, next = this.nextSibling;
+        const r = orig.apply(this, a);
+        removed(parent, [this], conn, prev, next);
+        return r;
+    });
+    /* setters and calls that replace a run of children: compare before / after */
+    function diffChildren(parent, run) {
+        if (!parent) { run(); return; }
+        const before = kids(parent), conn = parent.isConnected;
+        run();
+        const after = kids(parent), was = new Set(before), now = new Set(after);
+        removed(parent, before.filter((n) => !now.has(n)), conn, null, null);
+        inserted(parent, after.filter((n) => !was.has(n)));
+    }
+    wrapSet('innerHTML', function (set, v) { diffChildren(this, () => set.call(this, v)); });
+    wrapSet('outerHTML', function (set, v) { diffChildren(this.parentNode, () => set.call(this, v)); });
+    wrapFn('insertAdjacentHTML', function (orig, a) {
+        const pos = String(a[0]).toLowerCase();
+        const parent = pos === 'beforebegin' || pos === 'afterend' ? this.parentNode : this;
+        let r;
+        diffChildren(parent, () => { r = orig.apply(this, a); });
+        return r;
+    });
+    wrapSet('textContent', function (set, v) {
+        if (this.nodeType === 3 || this.nodeType === 8) {
+            const old = this.data;
+            set.call(this, v);
+            moQueue('characterData', this, { old });
+        } else diffChildren(this, () => set.call(this, v));
+    });
+    wrapSet('data', function (set, v) {
+        const old = this.data;
+        set.call(this, v);
+        moQueue('characterData', this, { old });
+    });
+    function attrChanged(el, name, old) {
+        const now = el.getAttribute(name);
+        moQueue('attributes', el, { name, old });
+        if (ceState.get(el) === 'custom') {
+            const def = ceDefs.get(el.localName);
+            if (def && def.attrs.has(name)) ceCall(el, 'attributeChangedCallback', name, old, now, null);
+        }
+    }
+    wrapFn('setAttribute', function (orig, [n, v]) {
+        const name = String(n).toLowerCase(), old = this.getAttribute(name);
+        const r = orig.call(this, n, v);
+        attrChanged(this, name, old);
+        return r;
+    });
+    wrapFn('removeAttribute', function (orig, [n]) {
+        const name = String(n).toLowerCase(), old = this.getAttribute(name);
+        const r = orig.call(this, n);
+        if (old !== null) attrChanged(this, name, old);
+        return r;
+    });
+
+    /* window's own EventTarget methods where ShadyDOM and others look for them */
+    G.Window.prototype = Object.create(EventTarget.prototype);
+    for (const m of ['addEventListener', 'removeEventListener', 'dispatchEvent'])
+        Object.defineProperty(G.Window.prototype, m, { value: G[m], writable: true, configurable: true });
+    Object.defineProperty(G.Window.prototype, 'constructor', { value: G.Window, writable: true, configurable: true });
+    try { Object.setPrototypeOf(G, G.Window.prototype); } catch (e) { /* the global keeps Object.prototype */ }
 }
 
 /* `window.foo` lookups of element ids are not provided (named access). */
