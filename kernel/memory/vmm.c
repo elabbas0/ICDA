@@ -482,3 +482,37 @@ int vmm_init(uint64_t fb_phys, uint64_t fb_size) {
     fb_remap(PHYSICAL_BASE);
     return 0;
 }
+
+/* Calls fn for each present 4 KB user page in [start, end), skipping empty
+ * table levels (sparse reservations of gigabytes cost nothing).  fn gets the
+ * page's entry and may change or clear it; the TLB entry is flushed after. */
+void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
+                   void (*fn)(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx), void *ctx) {
+    pte_t *pml4;
+    uint64_t va = start & ~0xFFFULL;
+    if (end > 0x0000800000000000ULL) end = 0x0000800000000000ULL;
+    if (!as) return;
+    pml4 = pt_ptr(as->pml4_phys);
+    while (va < end) {
+        uint64_t i4 = VA_PML4_IDX(va), i3, i2, i1;
+        pte_t *pdpt, *pd, *pt;
+        if (!(pml4[i4] & PTE_PRESENT)) { va = (va | ((1ULL << 39) - 1)) + 1; continue; }
+        pdpt = pt_ptr(PTE_FRAME(pml4[i4]));
+        i3 = VA_PDPT_IDX(va);
+        if (!(pdpt[i3] & PTE_PRESENT) || (pdpt[i3] & PTE_HUGE)) { va = (va | ((1ULL << 30) - 1)) + 1; continue; }
+        pd = pt_ptr(PTE_FRAME(pdpt[i3]));
+        i2 = VA_PD_IDX(va);
+        if (!(pd[i2] & PTE_PRESENT) || (pd[i2] & PTE_HUGE)) { va = (va | ((1ULL << 21) - 1)) + 1; continue; }
+        pt = pt_ptr(PTE_FRAME(pd[i2]));
+        for (i1 = VA_PT_IDX(va); i1 < 512 && va < end; i1++, va += PAGE_SIZE_4K) {
+            if (!(pt[i1] & PTE_PRESENT)) continue;
+            fn(as, va, &pt[i1], ctx);
+            vmm_invlpg(va);
+        }
+    }
+}
+
+/* Bookkeeping for a page entry the walker cleared */
+void vmm_note_unmapped(addr_space_t *as) {
+    if (as && as->mapped_pages > 0) as->mapped_pages--;
+}

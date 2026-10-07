@@ -30,6 +30,7 @@
 #include "../proc/sched.h"
 
 
+int lxvm_fault_current(uint64_t addr, int write);
 #define USER_HALF_END 0x0000800000000000ULL
 
 
@@ -58,7 +59,7 @@ static inline int user_page_ready(addr_space_t *as, uint64_t page_va,
         return vmm_page_writable(as, page_va) || vmm_cow_break(as, page_va) == 0;
     }
     if (page_va < USER_STACK_LIMIT || page_va >= USER_STACK_TOP) {
-        return 0;
+        return lxvm_fault_current(page_va, for_write);   /* Linux mmap regions */
     }
     phys = pmm_alloc();
     if (!phys) {

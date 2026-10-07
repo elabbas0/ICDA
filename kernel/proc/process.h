@@ -91,6 +91,7 @@ typedef struct process {
      * kernel state they share free of cross-CPU races */
     struct thread   *on_cpu;
     int              nthreads;     /* live threads */
+    void            *lx_vmas;      /* Linux personality: mmap regions (linux/lx_vm.c) */
     char             name[64];
 } process_t;
 

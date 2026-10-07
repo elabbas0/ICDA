@@ -1,4 +1,5 @@
 #include "user.h"
+#include "../linux/lx_vm.h"
 #include "elf.h"
 
 #include "sched.h"
@@ -831,6 +832,7 @@ __attribute__((noreturn)) void user_thread_finish(void) {
     if (proc && proc->linux_personality && proc->addr_space) {
         vmm_destroy_address_space(proc->addr_space);
         proc->addr_space = 0;
+        lxvm_free(proc);
     }
 
     user_exit_code = proc ? proc->exit_code : (uint64_t)-1;

@@ -109,6 +109,9 @@ addr_space_t *vmm_create_address_space(void);
 void vmm_destroy_address_space(addr_space_t *as);
 addr_space_t *vmm_clone_user(addr_space_t *src);
 int vmm_cow_break(addr_space_t *as, uint64_t virt);
+void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
+                   void (*fn)(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx), void *ctx);
+void vmm_note_unmapped(addr_space_t *as);
 
 
 void vmm_switch_address_space(addr_space_t *as);

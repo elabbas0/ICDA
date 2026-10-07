@@ -14,6 +14,7 @@
 #include "../proc/user.h"
 #include "../syscall/uaccess.h"
 #include "../tty/pty.h"
+#include "lx_vm.h"
 
 /* errno values (x86-64 Linux) */
 #define EPERM   1
@@ -1459,62 +1460,29 @@ static int map_zero(process_t *p, uint64_t addr, uint64_t len, uint64_t flags) {
     return 0;
 }
 
+static uint64_t lx_res(int64_t r) {
+    return r < 0 ? ERR(-r) : (uint64_t)r;
+}
+
 static uint64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int64_t fd, uint64_t off) {
     process_t *p = sched_current_process();
-    uint64_t size = (len + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
-    uint64_t vflags = (prot & 2) ? VMM_FLAGS_USER_RW : VMM_FLAGS_USER_RO;
-    lx_file_t *f = 0;
-    if (len == 0 || (off & 0xFFFULL)) return ERR(EINVAL);
+    vfs_node_t *node = 0;
     if (!(flags & 0x20)) { /* not MAP_ANONYMOUS */
-        f = fd_get(lx_get(p), fd);
+        lx_file_t *f = fd_get(lx_get(p), fd);
         if (!f) return ERR(EBADF);
-        if (f->kind != LXF_VFS) return ERR(19);
+        if (f->kind == LXF_ZERO) flags |= 0x20;      /* /dev/zero: anonymous memory */
+        else if (f->kind != LXF_VFS) return ERR(19);
+        else node = f->node;
     }
-    if (flags & 0x10) { /* MAP_FIXED */
-        if ((addr & 0xFFFULL) || addr + size < addr || addr + size > USER_STACK_LIMIT) return ERR(EINVAL);
-    } else {
-        if (!p->linux_mmap_next) p->linux_mmap_next = LX_MMAP_BASE;
-        addr = p->linux_mmap_next;
-        if (addr + size > LX_MMAP_END) return ERR(ENOMEM);
-        p->linux_mmap_next += size;
-    }
-    if (map_zero(p, addr, size, vflags) != 0) {
-        unmap_range(p, addr, size);
-        return ERR(ENOMEM);
-    }
-    if (f) {
-        uint64_t fsize = vfs_node_size(f->node), done = 0;
-        while (done < len && off + done < fsize) {
-            uint64_t phys = vmm_virt_to_phys(p->addr_space, addr + done);
-            uint64_t take = PAGE_SIZE_4K;
-            if (take > len - done) take = len - done;
-            if (!phys || vfs_node_read_at(f->node, off + done, (char *)PHYS_TO_VIRT(phys), take) < 0) break;
-            done += take;
-        }
-    }
-    return addr;
+    return lx_res(lxvm_mmap(p, addr, len, (uint32_t)(prot & 7), (uint32_t)flags, node, off));
 }
 
 static uint64_t sys_munmap(uint64_t addr, uint64_t len) {
-    process_t *p = sched_current_process();
-    if ((addr & 0xFFFULL) || len == 0 || addr + len > USER_STACK_LIMIT) return ERR(EINVAL);
-    unmap_range(p, addr, (len + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1));
-    return 0;
+    return lx_res(lxvm_munmap(sched_current_process(), addr, len));
 }
 
 static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot) {
-    process_t *p = sched_current_process();
-    uint64_t vflags = (prot & 2) ? VMM_FLAGS_USER_RW : VMM_FLAGS_USER_RO;
-    if (addr & 0xFFFULL) return ERR(EINVAL);
-    for (uint64_t page = addr; page < addr + len; page += PAGE_SIZE_4K) {
-        uint64_t phys = vmm_virt_to_phys(p->addr_space, page);
-        if (phys) {
-            uint64_t fl = vflags;
-            if ((prot & 2) && pmm_refcount(phys & ~0xFFFULL) > 1) fl = VMM_FLAGS_USER_RO | VMM_COW;
-            vmm_map_page(p->addr_space, page, phys & ~0xFFFULL, fl);
-        }
-    }
-    return 0;
+    return lx_res(lxvm_mprotect(sched_current_process(), addr, len, (uint32_t)(prot & 7)));
 }
 
 static uint64_t sys_brk(uint64_t want) {
@@ -2067,6 +2035,7 @@ static uint64_t sys_fork(struct registers *regs, uint64_t flags, uint64_t new_sp
     child->pty = parent->pty;
     child->linux_brk_pos = parent->linux_brk_pos;
     child->linux_mmap_next = parent->linux_mmap_next;
+    if (lxvm_fork(parent, child) != 0) return ERR(ENOMEM);
     child->lx_phdr = parent->lx_phdr;
     child->lx_phnum = parent->lx_phnum;
     child->lx_entry = parent->lx_entry;
@@ -2228,6 +2197,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     if (old_as) vmm_destroy_address_space(old_as);
     p->linux_brk_pos = 0;
     p->linux_mmap_next = 0;
+    lxvm_free(p);
     {
         const char *base = path;
         for (const char *c = path; *c; c++) {
@@ -2333,8 +2303,8 @@ uint64_t lx_syscall(struct registers *regs) {
         case 22: return sys_pipe2((int32_t *)a0, 0);
         case 23: return do_select(a0, (uint8_t *)a1, (uint8_t *)a2, (uint8_t *)a3, ts_ticks((const uint64_t *)a4, 1));
         case 24: sched_yield(); return 0;
-        case 25: return ERR(ENOMEM);
-        case 28: return 0;
+        case 25: return lx_res(lxvm_mremap(p, a0, a1, a2, (uint32_t)a3, a4));
+        case 28: return lx_res(lxvm_madvise(p, a0, a1, (int)a2));
         case 32: return sys_fcntl((int64_t)a0, 0, 0);
         case 33: return sys_dup3((int64_t)a0, (int64_t)a1, 0, 1);
         case 34: while (!signal_pending(p->lx)) sched_sleep(1); return ERR(EINTR);

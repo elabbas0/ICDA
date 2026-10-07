@@ -8,6 +8,7 @@
 #include "../drivers/serial/serial.h"
 #include "../proc/sched.h"
 #include "../proc/process.h"
+#include "../linux/lx_vm.h"
 #include "../fs/fd.h"
 #include "../linux/lx.h"
 #include "../cpu/smp.h"
@@ -214,6 +215,12 @@ static void page_fault_handler(struct registers *regs) {
     if ((regs->err_code & PF_PRESENT) && (regs->err_code & PF_WRITE) && cr2 < 0x0000800000000000ULL &&
         vmm_cow_break(active_as(), cr2) == 0) {
         return;
+    }
+
+    /* Linux programs: a page of an mmap region touched for the first time */
+    if (cr2 < 0x0000800000000000ULL) {
+        process_t *lp = sched_current_process();
+        if (lp && lp->linux_personality && lxvm_fault(lp, cr2, (regs->err_code & PF_WRITE) != 0)) return;
     }
 
     if (is_stack_growth(regs, cr2)) {
