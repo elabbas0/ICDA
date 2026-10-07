@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+/* Linux programs reach these calls through the kernel's gateway: build
+ * them with -DICDA_SYS_BASE=0x1C000 */
+#ifndef ICDA_SYS_BASE
+#define ICDA_SYS_BASE 0
+#endif
+
 enum {
     SYS_CONSOLE_WRITE = 0,
     SYS_GET_PID       = 1,
@@ -122,32 +128,32 @@ typedef struct {
 
 static inline uint64_t sys_call0(uint64_t n) {
     uint64_t ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE) : "rcx", "r11", "memory");
     return ret;
 }
 
 static inline uint64_t sys_call1(uint64_t n, uint64_t a0) {
     uint64_t ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0) : "rcx", "r11", "memory");
     return ret;
 }
 
 static inline uint64_t sys_call2(uint64_t n, uint64_t a0, uint64_t a1) {
     uint64_t ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0), "S"(a1) : "rcx", "r11", "memory");
     return ret;
 }
 
 static inline uint64_t sys_call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2) {
     uint64_t ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0), "S"(a1), "d"(a2) : "rcx", "r11", "memory");
     return ret;
 }
 
 static inline uint64_t sys_call4(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     uint64_t ret;
     register uint64_t r10 __asm__("r10") = a3;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0), "S"(a1), "d"(a2), "r"(r10) : "rcx", "r11", "memory");
     return ret;
 }
 
@@ -155,7 +161,7 @@ static inline uint64_t sys_call5(uint64_t n, uint64_t a0, uint64_t a1, uint64_t 
     uint64_t ret;
     register uint64_t r10 __asm__("r10") = a3;
     register uint64_t r8 __asm__("r8") = a4;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
     return ret;
 }
 
@@ -164,7 +170,7 @@ static inline uint64_t sys_call6(uint64_t n, uint64_t a0, uint64_t a1, uint64_t 
     register uint64_t r10 __asm__("r10") = a3;
     register uint64_t r8 __asm__("r8") = a4;
     register uint64_t r9 __asm__("r9") = a5;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n + ICDA_SYS_BASE), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
     return ret;
 }
 

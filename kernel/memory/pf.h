@@ -36,4 +36,9 @@ void pf_set_current_as(addr_space_t *as);
 
 void pf_init(void);
 
+
+/* ends the current user process after a fault it does not handle (sig: the
+ * signal Linux would report) */
+__attribute__((noreturn)) void user_fault_kill(int sig);
+
 #endif

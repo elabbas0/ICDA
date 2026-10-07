@@ -1674,6 +1674,12 @@ uint64_t syscall_dispatch(struct registers *regs) {
     process_t *proc = sched_current_process();
     (void)vfs_flush(0);
     if (proc && proc->linux_personality) {
+        /* the gateway to ICDA's own calls (windows, shared memory, input) for
+         * Linux programs that draw on ICDA's desktop: native number + 0x1C000 */
+        if (regs->rax >= 0x1C000 && regs->rax < 0x1C000 + 1024) {
+            regs->rax -= 0x1C000;
+            return syscall_dispatch_native(regs);
+        }
         return lx_syscall(regs);
     }
     return syscall_dispatch_native(regs);

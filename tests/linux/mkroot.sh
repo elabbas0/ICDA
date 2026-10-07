@@ -10,7 +10,7 @@ set -e
 apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-    -U --allow-untrusted --root $R --initdb add --no-scripts musl zlib busybox $PKGS >/dev/null
+    -U --allow-untrusted --root $R --initdb add musl zlib busybox $PKGS >/dev/null
 S=/tmp/stage/linux
 mkdir -p $S
 # links: FAT has none, so they are listed in .symlinks (link, tab, target)
@@ -28,6 +28,10 @@ while read L T; do
 done < /links
 rm -f /links /links.sh
 EOS
+# what package scripts would have done if they could not run
+[ -x $R/usr/bin/glib-compile-schemas ] && chroot $R /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas || true
+[ -x $R/usr/bin/gio-querymodules ] && chroot $R /usr/bin/gio-querymodules /usr/lib/gio/modules || true
+[ -x $R/usr/bin/fc-cache ] && chroot $R /usr/bin/fc-cache -s || true
 chroot $R /bin/busybox sh /links.sh
 for d in lib usr etc; do [ -d $R/$d ] && cp -r $R/$d $S/ 2>/dev/null || true; done
 cp $R/.symlinks $S/.symlinks
@@ -45,5 +49,9 @@ echo "2048,,c" | sfdisk -q $IMG
 mkfs.vfat -F 32 -S 512 --offset 2048 -n LINUXROOT $IMG >/dev/null
 mcopy -s -i $IMG@@1048576 /tmp/stage/linux ::/linux
 mcopy -i $IMG@@1048576 /tmp/stage/dyntest ::/dyntest
+[ -f tests/linux/out/wpe-icda ] && mcopy -i $IMG@@1048576 tests/linux/out/wpe-icda ::/wpe-icda
+mcopy -i $IMG@@1048576 tests/linux/wpe/run.sh ::/wpe.sh
+mcopy -i $IMG@@1048576 tests/linux/wpe/dbg.sh ::/dbg.sh
+mcopy -i $IMG@@1048576 tests/linux/cog.sh ::/cog.sh
 mdir -i $IMG@@1048576 ::/
 '

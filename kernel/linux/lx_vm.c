@@ -38,6 +38,9 @@
  * heap, below the stack */
 #define AREA_START  0x70000000ULL
 #define AREA_END    0x00007F0000000000ULL
+/* ICDA's own shared memory windows (ipc/shm.h) live here; mmap stays out */
+#define SHM_WIN_START 0x0000010000000000ULL
+#define SHM_WIN_END   (SHM_WIN_START + 32ULL * 16ULL * 1024ULL * 1024ULL)
 
 typedef struct lx_vma {
     uint64_t        start, end;
@@ -150,6 +153,101 @@ static void move_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
     vmm_map_page(m->as, va - m->from + m->to, PTE_FRAME(e), e & ~PTE_ADDR_MASK & ~PTE_PRESENT);
 }
 
+/* ---- file page cache --------------------------------------------------------
+ * Mapped files (programs' libraries) are read in 256 KB chunks into frames
+ * the cache keeps; mappings use those frames copy-on-write, so every
+ * process running a library shares one copy of its code.  Reading a file at
+ * an offset can be slow (FAT walks the cluster chain for each read), which
+ * a page-at-a-time loader made quadratic.  An entry is valid while the
+ * file's size and modification time stay what they were. */
+#define PC_BUCKETS  16384
+#define PC_CHUNK    64                   /* pages read at once */
+#define PC_MAX      (192ULL * 1024)      /* frames kept: 768 MB */
+
+typedef struct pcent {
+    vfs_node_t   *node;
+    uint64_t      idx, size, mtime, phys;
+    struct pcent *next;
+} pcent_t;
+
+static pcent_t *pc_tab[PC_BUCKETS];
+static uint64_t pc_pages;
+
+static uint64_t pc_hash(const vfs_node_t *n, uint64_t idx) {
+    uint64_t h = ((uint64_t)(uintptr_t)n >> 4) * 0x9E3779B97F4A7C15ULL ^ idx * 0xC2B2AE3D27D4EB4FULL;
+    return (h >> 20) % PC_BUCKETS;
+}
+
+static pcent_t *pc_find(vfs_node_t *n, uint64_t idx, uint64_t size, uint64_t mtime) {
+    pcent_t **pp = &pc_tab[pc_hash(n, idx)];
+    while (*pp) {
+        pcent_t *e = *pp;
+        if (e->node == n && e->idx == idx) {
+            if (e->size == size && e->mtime == mtime) return e;
+            *pp = e->next;                       /* the file changed: drop the old page */
+            pmm_free(e->phys);
+            kfree(e);
+            pc_pages--;
+            return 0;
+        }
+        pp = &e->next;
+    }
+    return 0;
+}
+
+/* the cached frame for page idx of a file (one reference for the caller), 0 if none */
+static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
+    uint64_t size = vfs_node_size(n), mtime = vfs_node_modified(n), pages = (size + PAGE - 1) / PAGE;
+    uint64_t first, count;
+    pcent_t *e;
+    char *buf;
+    if (idx >= pages) return 0;
+    e = pc_find(n, idx, size, mtime);
+    if (e) {
+        pmm_ref(e->phys);
+        return e->phys;
+    }
+    if (pc_pages + PC_CHUNK > PC_MAX) return 0;
+    first = idx & ~(uint64_t)(PC_CHUNK - 1);
+    count = pages - first < PC_CHUNK ? pages - first : PC_CHUNK;
+    buf = (char *)kmalloc(count * PAGE);
+    if (!buf) return 0;
+    {
+        uint64_t want = count * PAGE;
+        if (first * PAGE + want > size) want = size - first * PAGE;
+        if (vfs_node_read_at(n, first * PAGE, buf, want) < 0) {
+            kfree(buf);
+            return 0;
+        }
+        for (uint64_t i = want; i < count * PAGE; i++) buf[i] = 0;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t phys;
+        pcent_t *ne;
+        if (pc_find(n, first + i, size, mtime)) continue;
+        phys = pmm_alloc();
+        ne = phys ? (pcent_t *)kmalloc(sizeof(pcent_t)) : 0;
+        if (!ne) {
+            if (phys) pmm_free(phys);
+            break;
+        }
+        for (uint64_t k = 0; k < PAGE / 8; k++) ((uint64_t *)PHYS_TO_VIRT(phys))[k] = ((uint64_t *)(buf + i * PAGE))[k];
+        ne->node = n;
+        ne->idx = first + i;
+        ne->size = size;
+        ne->mtime = mtime;
+        ne->phys = phys;
+        ne->next = pc_tab[pc_hash(n, first + i)];
+        pc_tab[pc_hash(n, first + i)] = ne;
+        pc_pages++;
+    }
+    kfree(buf);
+    e = pc_find(n, idx, size, mtime);
+    if (!e) return 0;
+    pmm_ref(e->phys);
+    return e->phys;
+}
+
 /* gives the page at va its memory (zeroes or the file's bytes) */
 static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
     uint64_t phys, src = 0;
@@ -162,6 +260,18 @@ static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
             pmm_ref(src);
             if (vmm_map_page(p->addr_space, va, src, pte_flags(v->prot)) != 0) {
                 pmm_free(src);
+                return -1;
+            }
+            return 0;
+        }
+    }
+    if (v->node) {
+        /* a file: the page cache's frame, copied only when written */
+        uint64_t cached = pc_frame(v->node, (v->off + (va - v->start)) / PAGE);
+        if (cached) {
+            uint64_t fl = (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
+            if (vmm_map_page(p->addr_space, va, cached, fl) != 0) {
+                pmm_free(cached);
                 return -1;
             }
             return 0;
@@ -206,6 +316,7 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
 static int range_free(process_t *p, uint64_t start, uint64_t end) {
     lx_vma_t *v;
     if (start < AREA_START || end > AREA_END || end <= start) return 0;   /* below: the program and its brk heap */
+    if (start < SHM_WIN_END && end > SHM_WIN_START) return 0;
     for (v = (lx_vma_t *)p->lx_vmas; v && v->start < end; v = v->next)
         if (v->end > start) return 0;
     return 1;
@@ -213,13 +324,18 @@ static int range_free(process_t *p, uint64_t start, uint64_t end) {
 
 static uint64_t find_hole(process_t *p, uint64_t len, uint64_t align) {
     uint64_t at = AREA_START;
+    lx_vma_t *v = (lx_vma_t *)p->lx_vmas;
     if (align < PAGE) align = PAGE;
-    for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; ; v = v->next) {
-        uint64_t limit = v ? v->start : AREA_END;
+    for (;;) {
         at = (at + align - 1) & ~(align - 1);
-        if (at + len >= at && at + len <= limit && limit >= AREA_START) return at;
-        if (!v) return 0;
-        if (v->end > at) at = v->end;
+        if (at + len < at || at + len > AREA_END) return 0;
+        if (at < SHM_WIN_END && at + len > SHM_WIN_START) {
+            at = SHM_WIN_END;
+            continue;
+        }
+        while (v && v->end <= at) v = v->next;          /* regions wholly before */
+        if (!v || at + len <= v->start) return at;
+        at = v->end;                                     /* overlaps v: try after it */
     }
 }
 
@@ -453,4 +569,23 @@ void lxvm_free_list(void *list) {
         vma_free(v);
         v = n;
     }
+}
+
+/* "name+0xoffset" for an address in a mapped file (crash reports) */
+void lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap) {
+    static const char hex[] = "0123456789abcdef";
+    lx_vma_t *v = p ? find(p, addr) : 0;
+    const char *name = v && v->node ? vfs_node_name(v->node) : v ? "(anonymous)" : "(not mapped)";
+    uint64_t off = v ? (v->node ? v->off : 0) + (addr - v->start) : addr, n = 0;
+    char num[20];
+    int k = 0;
+    while (*name && n + 1 < cap) out[n++] = *name++;
+    if (n + 4 < cap) {
+        out[n++] = '+';
+        out[n++] = '0';
+        out[n++] = 'x';
+    }
+    do { num[k++] = hex[off & 15]; off >>= 4; } while (off && k < 16);
+    while (k && n + 1 < cap) out[n++] = num[--k];
+    out[n] = 0;
 }

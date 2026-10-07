@@ -3,6 +3,7 @@
 #include "../diag/bootstage.h"
 #include "../syscall/syscall.h"
 #include "../linux/lx.h"
+#include "../memory/pf.h"
 #include "smp.h"
 #include "lapic.h"
 #include "../proc/sched.h"
@@ -121,6 +122,17 @@ void isr_handler(struct registers* regs) {
         isr_handlers[num](regs);
         if (took) bkl_exit();
         return;
+    }
+
+    /* user programs: the signal Linux would send, or the program ends */
+    if ((regs->cs & 3) == 3 && sched_current_process() && sched_current_process()->kind == PROCESS_USER) {
+        int sig = num == 0 || num == 16 || num == 19 ? 8 : num == 1 || num == 3 ? 5 : num == 6 ? 4 : num == 17 ? 7 : 11;
+        if (num == 13 && regs->err_code == 0x1A) sig = 5;   /* int3 reached through the IDT: a breakpoint */
+        if (lx_fault_signal(regs, sig, 0)) {
+            if (took) bkl_exit();
+            return;
+        }
+        user_fault_kill(sig);
     }
 
     speaker_stop();

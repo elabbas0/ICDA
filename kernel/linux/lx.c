@@ -1183,6 +1183,8 @@ static int proc_dirent(lx_file_t *f, uint64_t idx, const char **name, char *numb
 
 /* ---- open/read/write ---------------------------------------------------- */
 
+static void lx_dump(void);
+
 static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     char path[LX_PATH_MAX];
     struct lx_state *s = lx_get(sched_current_process());
@@ -1192,6 +1194,10 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     int kind, fd;
     if (rc < 0) return ERR(-rc);
     if (!s) return ERR(ENOMEM);
+    if (kstreq(path, "/dev/lxdump")) {
+        lx_dump();
+        return ERR(ENOENT);
+    }
     /* network settings Linux programs read, made from ICDA's own (DHCP) */
     if (kstreq(path, "/etc/resolv.conf") || kstreq(path, "/etc/hosts")) {
         char *text = (char *)kmalloc(128);
@@ -2430,6 +2436,9 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
         kstrcpy(p->name, base, sizeof(p->name));
     }
     kstrcpy(s->exe, path, sizeof(s->exe));
+    serial_write("lx: exec ");
+    serial_write(path);
+    serial_write("\n");
     for (int i = 0; i < LX_FD_MAX; i++) {
         if (s->fd[i] && s->cloexec[i]) fd_close(s, i);
     }
@@ -2495,7 +2504,8 @@ static uint64_t sys_setpgid(int64_t pid, int64_t pgid) {
 
 /* ---- dispatch ----------------------------------------------------------- */
 
-uint64_t lx_syscall(struct registers *regs) {
+
+static uint64_t lx_syscall_inner(struct registers *regs) {
     process_t *p = sched_current_process();
     uint64_t nr = regs->rax;
     uint64_t a0 = regs->rdi, a1 = regs->rsi, a2 = regs->rdx;
@@ -2735,4 +2745,101 @@ void lx_init(void) {
 /* Records that proc died from sig, for wait4 status. */
 void lx_mark_signaled(process_t *proc, int sig) {
     if (proc && proc->lx) proc->lx->term_sig = sig;
+}
+
+/* Every Linux call goes through here: each thread keeps the call it is in
+ * and its last 16 (results clipped to 16 bits) for /dev/lxdump. */
+uint64_t lx_syscall(struct registers *regs) {
+    thread_t *t = sched_current_thread();
+    uint64_t nr = regs->rax, r;
+    if (t) t->lx_cur_nr = (int32_t)nr;
+    r = lx_syscall_inner(regs);
+    if (t) {
+        int64_t v = (int64_t)r;
+        t->lx_last_nr[t->lx_last_pos] = (uint16_t)nr;
+        t->lx_last_ret[t->lx_last_pos] = (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+        t->lx_last_pos = (uint8_t)((t->lx_last_pos + 1) & 15);
+        t->lx_cur_nr = -1;
+    }
+    return r;
+}
+
+/* /dev/lxdump: every Linux thread, its state, the call it is in and its
+ * recent calls, to the serial port */
+static void dump_num(int64_t v) {
+    char b[24];
+    int n = 0;
+    uint64_t u = v < 0 ? (uint64_t)-v : (uint64_t)v;
+    if (v < 0) serial_write("-");
+    do { b[n++] = (char)('0' + u % 10); u /= 10; } while (u);
+    while (n) {
+        char c[2] = { b[--n], 0 };
+        serial_write(c);
+    }
+}
+
+static void lx_dump(void) {
+    thread_t *start = sched_current_thread(), *t = start;
+    static const char *const st[] = { "ready", "running", "blocked", "stopped", "zombie" };
+    serial_write("lxdump:\n");
+    do {
+        process_t *p = t->owner;
+        if (p && p->linux_personality && t->state != THREAD_ZOMBIE) {
+            serial_write("  pid ");
+            dump_num((int64_t)p->pid);
+            serial_write(" tid ");
+            dump_num((int64_t)t->tid);
+            serial_write(" ");
+            serial_write(p->name);
+            serial_write(" ");
+            serial_write(t->state < 5 ? st[t->state] : "?");
+            if (t->state == THREAD_BLOCKED) {
+                serial_write(" why ");
+                dump_num((int64_t)t->block_reason);
+            }
+            serial_write(" in ");
+            dump_num(t->lx_cur_nr);
+            serial_write(" last");
+            for (int i = 0; i < 16; i++) {
+                int k = (t->lx_last_pos + i) & 15;
+                if (!t->lx_last_nr[k] && !t->lx_last_ret[k]) continue;
+                serial_write(" ");
+                dump_num(t->lx_last_nr[k]);
+                serial_write("=");
+                dump_num(t->lx_last_ret[k]);
+            }
+            serial_write("\n");
+        }
+        t = t->next;
+    } while (t && t != start);
+}
+
+/* A CPU exception in a Linux program (bad memory access, int3 from a failed
+ * assertion, an invalid instruction ...): reported on the serial port with
+ * where it happened; the program's handler for the signal runs if it has one. */
+int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
+    process_t *p = sched_current_process();
+    struct lx_state *s;
+    lx_sigaction_t *sa;
+    char where[128];
+    (void)addr;
+    if (!p) return 0;
+    lxvm_describe(p, regs->rip, where, sizeof(where));
+    serial_write("lx: ");
+    serial_write(p->name);
+    serial_write(" pid ");
+    dump_num((int64_t)p->pid);
+    serial_write(" signal ");
+    dump_num(sig);
+    serial_write(" at ");
+    serial_write(where);
+    serial_write("\n");
+    if (!p->linux_personality || !(s = p->lx)) return 0;
+    sa = &s->sa[sig];
+    if (sa->handler <= 1 || (s->sigmask & (1ULL << (sig - 1)))) return 0;
+    if (build_sigframe(regs, sig, sa, s->sigmask) != 0) return 0;
+    s->sigmask |= sa->mask;
+    if (!(sa->flags & SA_NODEFER)) s->sigmask |= 1ULL << (sig - 1);
+    if (sa->flags & SA_RESETHAND) sa->handler = 0;
+    return 1;
 }

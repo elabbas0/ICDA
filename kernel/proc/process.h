@@ -128,6 +128,11 @@ typedef struct thread {
     uint64_t         futex_addr;    /* THREAD_BLOCK_FUTEX: waiting on this user address */
     int              futex_woken;   /* set by a futex wake (not a timeout) */
     int              sibling;       /* a thread besides the main one */
+    /* Linux personality diagnostics (/dev/lxdump): the call in progress and the last ones */
+    int32_t          lx_cur_nr;     /* -1 when not in a call */
+    uint16_t         lx_last_nr[16];
+    int16_t          lx_last_ret[16];
+    uint8_t          lx_last_pos;
 } thread_t;
 
 #endif

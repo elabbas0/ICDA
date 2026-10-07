@@ -259,40 +259,44 @@ static void page_fault_handler(struct registers *regs) {
         process_t *proc = sched_current_process();
         thread_t *thread = sched_current_thread();
         if (proc && proc->kind == PROCESS_USER && thread) {
-            sched_stop_threads(proc, thread);
-            fd_proc_exit(proc);
-            shm_proc_exit(proc);
-            pty_proc_exit(proc);
             pf_serial_dump(regs, cr2);
-            serial_write("  user process killed\n");
-            lx_mark_signaled(proc, 11);
-            proc->state = PROCESS_EXITED;
-            
-
-            proc->exit_code = (uint64_t)-11;
-            thread->state = THREAD_ZOMBIE;
-            thread->block_reason = THREAD_BLOCK_NONE;
-            thread->wake_tick = 0;
-            if (proc->parent && proc->parent->main_thread &&
-                proc->parent->main_thread->state == THREAD_BLOCKED) {
-                proc->parent->main_thread->state = THREAD_READY;
-                proc->parent->main_thread->block_reason = THREAD_BLOCK_NONE;
-                proc->parent->main_thread->wake_tick = 0;
-                if (proc->parent->state == PROCESS_BLOCKED) {
-                    proc->parent->state = PROCESS_READY;
-                }
-            }
-            
-
-            sched_yield();
-            for (;;) {
-                __asm__ volatile("hlt");
-            }
+            if (lx_fault_signal(regs, 11, cr2)) return;      /* the program handles SIGSEGV */
+            user_fault_kill(11);
         }
     }
 
-    
     pf_panic(regs, cr2);
+}
+
+/* Ends the current user process after a fault it does not handle; sig is
+ * the signal Linux would report (its parent sees the process killed by it). */
+__attribute__((noreturn)) void user_fault_kill(int sig) {
+    process_t *proc = sched_current_process();
+    thread_t *thread = sched_current_thread();
+    sched_stop_threads(proc, thread);
+    fd_proc_exit(proc);
+    shm_proc_exit(proc);
+    pty_proc_exit(proc);
+    serial_write("  user process killed\n");
+    lx_mark_signaled(proc, sig);
+    proc->state = PROCESS_EXITED;
+    proc->exit_code = (uint64_t)-(int64_t)sig;
+    thread->state = THREAD_ZOMBIE;
+    thread->block_reason = THREAD_BLOCK_NONE;
+    thread->wake_tick = 0;
+    if (proc->parent && proc->parent->main_thread &&
+        proc->parent->main_thread->state == THREAD_BLOCKED) {
+        proc->parent->main_thread->state = THREAD_READY;
+        proc->parent->main_thread->block_reason = THREAD_BLOCK_NONE;
+        proc->parent->main_thread->wake_tick = 0;
+        if (proc->parent->state == PROCESS_BLOCKED) {
+            proc->parent->state = PROCESS_READY;
+        }
+    }
+    sched_yield();
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
 }
 
 
