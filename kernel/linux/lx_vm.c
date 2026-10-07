@@ -15,6 +15,7 @@
  * are not regions here; munmap / mprotect / mremap fall back to acting on
  * their pages directly. */
 #include "lx_vm.h"
+#include "lx_internal.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
 #include "../memory/pf.h"
@@ -44,6 +45,7 @@ typedef struct lx_vma {
     uint32_t        flags;      /* LXVM_* */
     vfs_node_t     *node;       /* file behind it, or 0 */
     uint64_t        off;        /* file offset of start */
+    lx_file_t      *file;       /* memory object behind it (memfd, shared anonymous); a reference */
     struct lx_vma  *next;
 } lx_vma_t;
 
@@ -56,8 +58,24 @@ static lx_vma_t *new_vma(uint64_t start, uint64_t end, uint32_t prot, uint32_t f
     v->flags = flags;
     v->node = node;
     v->off = off;
+    v->file = 0;
     v->next = 0;
     return v;
+}
+
+/* a copy of v covering [start, end) */
+static lx_vma_t *vma_part(const lx_vma_t *v, uint64_t start, uint64_t end) {
+    lx_vma_t *n = new_vma(start, end, v->prot, v->flags, v->node, (v->node || v->file) ? v->off + (start - v->start) : 0);
+    if (n && v->file) {
+        n->file = v->file;
+        lxi_file_ref(n->file);
+    }
+    return n;
+}
+
+static void vma_free(lx_vma_t *v) {
+    if (v->file) lxi_file_unref(v->file);
+    kfree(v);
 }
 
 static lx_vma_t *find(process_t *p, uint64_t addr) {
@@ -77,7 +95,7 @@ static void insert(process_t *p, lx_vma_t *n) {
 static int split(lx_vma_t *v, uint64_t at) {
     lx_vma_t *b;
     if (at <= v->start || at >= v->end) return 0;
-    b = new_vma(at, v->end, v->prot, v->flags, v->node, v->node ? v->off + (at - v->start) : 0);
+    b = vma_part(v, at, v->end);
     if (!b) return -1;
     v->end = at;
     b->next = v->next;
@@ -108,11 +126,16 @@ static void drop_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
     vmm_note_unmapped(as);
 }
 
+typedef struct { uint32_t prot; int shared; } prot_ctx_t;
+
+/* shared pages stay shared when writable; private ones that other mappings
+ * still use (fork) become copy-on-write */
 static void reprotect_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
-    uint32_t prot = *(uint32_t *)ctx;
+    prot_ctx_t *c = (prot_ctx_t *)ctx;
+    uint32_t prot = c->prot;
     uint64_t phys = PTE_FRAME(*pte), fl = pte_flags(prot);
     (void)as; (void)va;
-    if ((prot & PROT_WRITE) && ((*pte & VMM_COW) || pmm_refcount(phys) > 1)) fl = VMM_FLAGS_USER_RO | VMM_COW;
+    if ((prot & PROT_WRITE) && !c->shared && ((*pte & VMM_COW) || pmm_refcount(phys) > 1)) fl = VMM_FLAGS_USER_RO | VMM_COW;
     *pte = phys | fl | (*pte & VMM_NOFREE) | VMM_PRESENT;
 }
 
@@ -129,11 +152,25 @@ static void move_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
 
 /* gives the page at va its memory (zeroes or the file's bytes) */
 static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
-    uint64_t phys = pmm_alloc();
+    uint64_t phys, src = 0;
     char *mem;
+    if (v->file) {
+        /* a memory object: shared mappings use its frame, private ones a copy */
+        src = v->file->ops->frame ? v->file->ops->frame(v->file->obj, v->off + (va - v->start)) : 0;
+        if (!src) return -1;
+        if (v->flags & LXVM_SHARED) {
+            pmm_ref(src);
+            if (vmm_map_page(p->addr_space, va, src, pte_flags(v->prot)) != 0) {
+                pmm_free(src);
+                return -1;
+            }
+            return 0;
+        }
+    }
+    phys = pmm_alloc();
     if (!phys) return -1;
     mem = (char *)PHYS_TO_VIRT(phys);
-    for (int i = 0; i < (int)(PAGE / 8); i++) ((uint64_t *)mem)[i] = 0;
+    for (int i = 0; i < (int)(PAGE / 8); i++) ((uint64_t *)mem)[i] = src ? ((uint64_t *)PHYS_TO_VIRT(src))[i] : 0;
     if (v->node) {
         uint64_t off = v->off + (va - v->start), size = vfs_node_size(v->node);
         if (off < size) (void)vfs_node_read_at(v->node, off, mem, size - off < PAGE ? size - off : PAGE);
@@ -157,8 +194,8 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
     if (!phys) return populate(p, v, va) == 0;
     /* present: protection changed since it was mapped, or copy-on-write */
     {
-        uint32_t prot = v->prot;
-        vmm_walk_user(p->addr_space, va, va + PAGE, reprotect_page, &prot);
+        prot_ctx_t c = { v->prot, (v->flags & LXVM_SHARED) != 0 };
+        vmm_walk_user(p->addr_space, va, va + PAGE, reprotect_page, &c);
     }
     if (write && !vmm_page_writable(p->addr_space, va) && vmm_cow_break(p->addr_space, va) != 0) return 0;
     return 1;
@@ -193,7 +230,7 @@ static void clear_range(process_t *p, uint64_t start, uint64_t end, int free_pag
         lx_vma_t *v = *pp;
         if (v->start >= start && v->end <= end) {
             *pp = v->next;
-            kfree(v);
+            vma_free(v);
             continue;
         }
         pp = &v->next;
@@ -201,7 +238,8 @@ static void clear_range(process_t *p, uint64_t start, uint64_t end, int free_pag
     if (free_pages) vmm_walk_user(p->addr_space, start, end, drop_page, 0);
 }
 
-int64_t lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint32_t flags, vfs_node_t *node, uint64_t off) {
+int64_t lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint32_t flags, vfs_node_t *node,
+                  lx_file_t *file, uint64_t off) {
     uint64_t size = (len + PAGE - 1) & PAGE_MASK, start;
     lx_vma_t *v;
     if (!len || !size || (off & (PAGE - 1))) return -E_INVAL;
@@ -218,6 +256,10 @@ int64_t lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint
     }
     v = new_vma(start, start + size, prot, flags & (LXVM_SHARED | LXVM_PRIVATE | LXVM_ANON), node, off);
     if (!v) return -E_NOMEM;
+    if (file) {
+        v->file = file;
+        lxi_file_ref(file);
+    }
     insert(p, v);
     if ((flags & LXVM_POPULATE) && prot)
         for (uint64_t va = start; va < start + size; va += PAGE)
@@ -237,9 +279,18 @@ int lxvm_mprotect(process_t *p, uint64_t addr, uint64_t len, uint32_t prot) {
     if (addr & (PAGE - 1)) return -E_INVAL;
     if (end <= addr) return 0;
     if (carve(p, addr, end) != 0) return -E_NOMEM;
-    for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v && v->start < end; v = v->next)
-        if (v->start >= addr && v->end <= end) v->prot = prot;
-    vmm_walk_user(p->addr_space, addr, end, reprotect_page, &prot);
+    {
+        prot_ctx_t c = { prot, 0 };
+        vmm_walk_user(p->addr_space, addr, end, reprotect_page, &c);
+    }
+    for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v && v->start < end; v = v->next) {
+        if (v->start < addr || v->end > end) continue;
+        v->prot = prot;
+        if (v->flags & LXVM_SHARED) {          /* shared pages stay writable, not copy-on-write */
+            prot_ctx_t c = { prot, 1 };
+            vmm_walk_user(p->addr_space, v->start, v->end, reprotect_page, &c);
+        }
+    }
     return 0;
 }
 
@@ -280,7 +331,11 @@ int64_t lxvm_mremap(process_t *p, uint64_t old, uint64_t old_len, uint64_t new_l
             to = find_hole(p, news, PAGE);
             if (!to) return -E_NOMEM;
         }
-        n = new_vma(to, to + news, v->prot, v->flags, v->node, v->node ? v->off + (old - v->start) : 0);
+        n = vma_part(v, old, old + olds);
+        if (n) {
+            n->start = to;
+            n->end = to + news;
+        }
         if (!n) return -E_NOMEM;
         m.from = old;
         m.to = to;
@@ -316,10 +371,19 @@ int lxvm_fork(process_t *parent, process_t *child) {
     lx_vma_t **tail = (lx_vma_t **)&child->lx_vmas;
     child->lx_vmas = 0;
     for (lx_vma_t *v = (lx_vma_t *)parent->lx_vmas; v; v = v->next) {
-        lx_vma_t *n = new_vma(v->start, v->end, v->prot, v->flags, v->node, v->off);
+        lx_vma_t *n = vma_part(v, v->start, v->end);
         if (!n) return -1;
         *tail = n;
         tail = &n->next;
+    }
+    /* the copy made every writable page copy-on-write; shared regions are
+     * shared again in both */
+    for (lx_vma_t *v = (lx_vma_t *)parent->lx_vmas; v; v = v->next) {
+        if ((v->flags & LXVM_SHARED) && (v->prot & PROT_WRITE)) {
+            prot_ctx_t c = { v->prot, 1 };
+            vmm_walk_user(parent->addr_space, v->start, v->end, reprotect_page, &c);
+            vmm_walk_user(child->addr_space, v->start, v->end, reprotect_page, &c);
+        }
     }
     return 0;
 }
@@ -329,7 +393,7 @@ void lxvm_free(process_t *p) {
     p->lx_vmas = 0;
     while (v) {
         lx_vma_t *n = v->next;
-        kfree(v);
+        vma_free(v);
         v = n;
     }
 }
@@ -386,7 +450,7 @@ void lxvm_free_list(void *list) {
     lx_vma_t *v = (lx_vma_t *)list;
     while (v) {
         lx_vma_t *n = v->next;
-        kfree(v);
+        vma_free(v);
         v = n;
     }
 }

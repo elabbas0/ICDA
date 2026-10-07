@@ -2,6 +2,7 @@
 #include "../cpu/isr.h"
 #include "../cpu/gdt.h"
 #include "../cpu/smp.h"
+#include "../cpu/tsc.h"
 #include "../dev/devops.h"
 #include "../drivers/rtc/rtc.h"
 #include "../drivers/serial/serial.h"
@@ -15,6 +16,7 @@
 #include "../syscall/uaccess.h"
 #include "../tty/pty.h"
 #include "lx_vm.h"
+#include "lx_internal.h"
 
 /* errno values (x86-64 Linux) */
 #define EPERM   1
@@ -46,7 +48,7 @@
 
 #define ERR(e) ((uint64_t)-(int64_t)(e))
 
-#define LX_FD_MAX    128
+#define LX_FD_MAX    512
 #define LX_PIPE_CAP  65536U
 #define LX_NSIG      65
 #define LX_PATH_MAX  512
@@ -80,28 +82,6 @@
 #define SA_NODEFER   0x40000000ULL
 #define SA_RESETHAND 0x80000000ULL
 
-enum { LXF_TTY = 1, LXF_VFS, LXF_PIPE, LXF_NULL, LXF_ZERO, LXF_RANDOM, LXF_MEM, LXF_PROCDIR };
-
-typedef struct lx_pipe {
-    char    *buf;
-    uint32_t head;
-    uint32_t len;
-    int      readers;
-    int      writers;
-} lx_pipe_t;
-
-typedef struct lx_file {
-    int         refs;
-    int         kind;
-    int         write_end;
-    uint64_t    flags;
-    uint64_t    off;
-    vfs_node_t *node;
-    lx_pipe_t  *pipe;
-    char       *mem;
-    uint64_t    mem_len;
-    uint64_t    proc_pid;
-} lx_file_t;
 
 typedef struct {
     uint64_t handler;
@@ -232,6 +212,7 @@ static void file_put(lx_file_t *f) {
     }
     if (--f->refs > 0) return;
     if (f->mem) kfree(f->mem);
+    if (f->kind == LXF_OBJ && f->ops && f->ops->release) f->ops->release(f->obj);
     if (f->kind == LXF_PIPE && f->pipe->readers <= 0 && f->pipe->writers <= 0) {
         kfree(f->pipe->buf);
         kfree(f->pipe);
@@ -285,6 +266,42 @@ static int fd_close(struct lx_state *s, int64_t fd) {
     return 0;
 }
 
+
+/* ---- for the other modules (lx_internal.h) ------------------------------ */
+
+static int signal_pending(struct lx_state *s);
+static uint64_t lx_mono_ns(void);
+static uint64_t lx_realtime_ns(void);
+
+lx_file_t *lxi_file_new(const lx_fops_t *ops, void *obj, uint64_t flags) {
+    lx_file_t *f = file_new(LXF_OBJ);
+    if (!f) return 0;
+    f->ops = ops;
+    f->obj = obj;
+    f->flags = flags;
+    return f;
+}
+
+void lxi_file_ref(lx_file_t *f) { file_get(f); }
+void lxi_file_unref(lx_file_t *f) { file_put(f); }
+
+lx_file_t *lxi_fd_file(int64_t fd) {
+    return fd_get(lx_get(sched_current_process()), fd);
+}
+
+int64_t lxi_fd_install(lx_file_t *f, int cloexec) {
+    return fd_alloc(lx_get(sched_current_process()), 0, f, cloexec);
+}
+
+int lxi_interrupted(void) {
+    return signal_pending(lx_get(sched_current_process()));
+}
+
+static int file_ready(lx_file_t *f, int want_write);
+int lxi_file_ready(lx_file_t *f, int want_write) { return file_ready(f, want_write); }
+
+uint64_t lxi_now_ns(void) { return lx_mono_ns(); }
+uint64_t lxi_realtime_ns(void) { return lx_realtime_ns(); }
 void lx_proc_exit(process_t *proc) {
     struct lx_state *s = proc ? proc->lx : 0;
     if (!s) return;
@@ -800,6 +817,12 @@ static uint64_t sys_fstat(int64_t fd, lx_stat_t *ust) {
     lx_stat_t st;
     if (!f) return ERR(EBADF);
     fill_stat(&st, f->kind, f->node);
+    if (f->kind == LXF_OBJ) {
+        st.mode = (f->ops->mode ? f->ops->mode : 0) | 0600;
+        st.size = f->ops->size ? (int64_t)f->ops->size(f->obj) : 0;
+        st.ino = ((uint64_t)(uintptr_t)f->obj >> 4) & 0xFFFFFFFFFFULL;
+        st.nlink = 1;
+    }
     return copy_to_user(ust, &st, sizeof(st)) ? ERR(EFAULT) : 0;
 }
 
@@ -1131,6 +1154,10 @@ static uint64_t file_read(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *of
     if (count == 0) return 0;
     if (!user_range_prepare_cur_w(ubuf, count)) return ERR(EFAULT);
     switch (f->kind) {
+        case LXF_OBJ: {
+            int64_t r = f->ops->read ? f->ops->read(f, ubuf, count) : -EINVAL;
+            return r < 0 ? ERR(-r) : (uint64_t)r;
+        }
         case LXF_TTY: return tty_read(f, ubuf, count);
         case LXF_PIPE: return f->write_end ? ERR(EBADF) : pipe_read(f, ubuf, count);
         case LXF_PROCDIR: return ERR(EISDIR);
@@ -1186,6 +1213,10 @@ static uint64_t file_write(lx_file_t *f, const char *ubuf, uint64_t count, uint6
     if (count == 0) return 0;
     if (!user_range_prepare_cur(ubuf, count)) return ERR(EFAULT);
     switch (f->kind) {
+        case LXF_OBJ: {
+            int64_t r = f->ops->write ? f->ops->write(f, ubuf, count) : -EINVAL;
+            return r < 0 ? ERR(-r) : (uint64_t)r;
+        }
         case LXF_TTY: return tty_write(ubuf, count);
         case LXF_PIPE: return f->write_end ? pipe_write(f, ubuf, count) : ERR(EBADF);
         case LXF_NULL:
@@ -1248,6 +1279,15 @@ static uint64_t sys_lseek(int64_t fd, int64_t off, uint64_t whence) {
     int64_t base;
     if (!f) return ERR(EBADF);
     if (f->kind == LXF_PIPE || f->kind == LXF_TTY) return ERR(ESPIPE);
+    if (f->kind == LXF_OBJ) {
+        int64_t size;
+        if (!f->ops->size) return ERR(ESPIPE);
+        size = (int64_t)f->ops->size(f->obj);
+        base = whence == 0 ? 0 : whence == 1 ? (int64_t)f->off : whence == 2 ? size : -1;
+        if (base < 0 || base + off < 0) return ERR(EINVAL);
+        f->off = (uint64_t)(base + off);
+        return f->off;
+    }
     if (f->kind != LXF_VFS && f->kind != LXF_MEM && f->kind != LXF_PROCDIR) return 0;
     if (whence == 0) base = 0;
     else if (whence == 1) base = (int64_t)f->off;
@@ -1305,6 +1345,10 @@ static uint64_t sys_getdents64(int64_t fd, uint8_t *ubuf, uint64_t count) {
 static uint64_t sys_ftruncate(int64_t fd, uint64_t len) {
     lx_file_t *f = fd_get(lx_get(sched_current_process()), fd);
     if (!f) return ERR(EBADF);
+    if (f->kind == LXF_OBJ) {
+        int64_t r = f->ops->truncate ? f->ops->truncate(f->obj, len) : -EINVAL;
+        return r < 0 ? ERR(-r) : 0;
+    }
     if (f->kind != LXF_VFS || vfs_node_type(f->node) != VFS_NODE_FILE) return ERR(EINVAL);
     return vfs_node_truncate(f->node, len) == 0 ? 0 : ERR(EIO);
 }
@@ -1501,14 +1545,27 @@ static uint64_t lx_res(int64_t r) {
 static uint64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int64_t fd, uint64_t off) {
     process_t *p = sched_current_process();
     vfs_node_t *node = 0;
+    lx_file_t *obj = 0;
+    int64_t r;
     if (!(flags & 0x20)) { /* not MAP_ANONYMOUS */
         lx_file_t *f = fd_get(lx_get(p), fd);
         if (!f) return ERR(EBADF);
         if (f->kind == LXF_ZERO) flags |= 0x20;      /* /dev/zero: anonymous memory */
+        else if (f->kind == LXF_OBJ && f->ops->frame) obj = f;   /* memfd */
         else if (f->kind != LXF_VFS) return ERR(19);
         else node = f->node;
+        if (obj) {
+            r = lxvm_mmap(p, addr, len, (uint32_t)(prot & 7), (uint32_t)flags, 0, obj, off);
+            return lx_res(r);
+        }
+    } else if ((flags & 3) == 1) {                    /* MAP_SHARED | MAP_ANONYMOUS: shared with fork children */
+        obj = lxi_shared_anon(len);
+        if (!obj) return ERR(ENOMEM);
+        r = lxvm_mmap(p, addr, len, (uint32_t)(prot & 7), (uint32_t)flags, 0, obj, 0);
+        file_put(obj);                                /* the mapping holds its own reference */
+        return lx_res(r);
     }
-    return lx_res(lxvm_mmap(p, addr, len, (uint32_t)(prot & 7), (uint32_t)flags, node, off));
+    return lx_res(lxvm_mmap(p, addr, len, (uint32_t)(prot & 7), (uint32_t)flags, node, 0, off));
 }
 
 static uint64_t sys_munmap(uint64_t addr, uint64_t len) {
@@ -1540,15 +1597,19 @@ static uint64_t sys_brk(uint64_t want) {
 
 /* ---- time and system info ---------------------------------------------- */
 
+/* clocks for Linux programs: from the TSC (microseconds), the 10 ms tick
+ * when the TSC rate is unknown */
+static uint64_t lx_mono_ns(void) {
+    return tsc_hz() ? tsc_us() * 1000ULL : sched_ticks() * 10000000ULL;
+}
+
+static uint64_t lx_realtime_ns(void) {
+    return (now_epoch() - sched_ticks() / 100) * 1000000000ULL + lx_mono_ns();
+}
+
 static uint64_t sys_clock_gettime(uint64_t clk, uint64_t *uts) {
-    uint64_t ts[2], ticks = sched_ticks();
-    if (clk == 0 || clk == 5 || clk == 8) {
-        ts[0] = now_epoch();
-        ts[1] = (ticks % 100) * 10000000ULL;
-    } else {
-        ts[0] = ticks / 100;
-        ts[1] = (ticks % 100) * 10000000ULL;
-    }
+    uint64_t ns = (clk == 0 || clk == 5 || clk == 8 || clk == 11) ? lx_realtime_ns() : lx_mono_ns();
+    uint64_t ts[2] = { ns / 1000000000ULL, ns % 1000000000ULL };
     return copy_to_user(uts, ts, sizeof(ts)) ? ERR(EFAULT) : 0;
 }
 
@@ -1639,6 +1700,7 @@ static uint64_t zero_user(void *u, uint64_t n) {
 static int file_ready(lx_file_t *f, int want_write) {
     if (!f) return 0x20;
     switch (f->kind) {
+        case LXF_OBJ: return f->ops->ready ? f->ops->ready(f, want_write) : 0;
         case LXF_TTY:
             if (want_write) return 4;
             return (tty_has_input(cur_pty()) || !pty_alive(cur_pty())) ? 1 : 0;
@@ -1686,7 +1748,7 @@ static uint64_t do_select(uint64_t nfds, uint8_t *ur, uint8_t *uw, uint8_t *ue, 
     struct lx_state *s = lx_get(sched_current_process());
     uint8_t in_r[16], in_w[16], out_r[16], out_w[16];
     uint64_t start = sched_ticks(), bytes;
-    if (nfds > LX_FD_MAX) nfds = LX_FD_MAX;
+    if (nfds > 128) nfds = 128;                  /* the fd_set bitmaps below hold 128 */
     bytes = (nfds + 7) / 8;
     kzero(in_r, sizeof(in_r));
     kzero(in_w, sizeof(in_w));
@@ -2440,7 +2502,7 @@ uint64_t lx_syscall(struct registers *regs) {
         case 218: sched_current_thread()->clear_tid = a0; return (uint64_t)lx_tid(sched_current_thread());
         case 228: return sys_clock_gettime(a0, (uint64_t *)a1);
         case 229: {
-            uint64_t res[2] = { 0, 10000000ULL };
+            uint64_t res[2] = { 0, 1000ULL };
             if (a1 && copy_to_user((void *)a1, res, sizeof(res)) != 0) return ERR(EFAULT);
             return 0;
         }
@@ -2463,6 +2525,50 @@ uint64_t lx_syscall(struct registers *regs) {
         case 302: return sys_prlimit(a1, (const uint64_t *)a2, (uint64_t *)a3);
         case 318: return sys_getrandom((uint8_t *)a0, a1);
         case 40: case 332: case 334: case 435: return ERR(ENOSYS);
+        /* sockets (AF_UNIX), event files, memory files: linux/lx_ipc.c */
+        case 41: return lx_res(lxi_socket((int)a0, (int)a1, (int)a2));
+        case 42: return lx_res(lxi_connect((int64_t)(int32_t)a0, (const void *)a1, a2));
+        case 43: return lx_res(lxi_accept((int64_t)(int32_t)a0, (void *)a1, (uint32_t *)a2, 0));
+        case 288: return lx_res(lxi_accept((int64_t)(int32_t)a0, (void *)a1, (uint32_t *)a2, (int)a3));
+        case 44: return lx_res(lxi_sendto((int64_t)(int32_t)a0, (const void *)a1, a2, (int)a3, (const void *)a4, a5));
+        case 45: return lx_res(lxi_recvfrom((int64_t)(int32_t)a0, (void *)a1, a2, (int)a3, (void *)a4, (uint32_t *)a5));
+        case 46: return lx_res(lxi_sendmsg((int64_t)(int32_t)a0, (const void *)a1, (int)a2));
+        case 47: return lx_res(lxi_recvmsg((int64_t)(int32_t)a0, (void *)a1, (int)a2));
+        case 48: return lx_res(lxi_shutdown((int64_t)(int32_t)a0, (int)a1));
+        case 49: return lx_res(lxi_bind((int64_t)(int32_t)a0, (const void *)a1, a2));
+        case 50: return lx_res(lxi_listen((int64_t)(int32_t)a0, (int)a1));
+        case 51: return lx_res(lxi_getsockname((int64_t)(int32_t)a0, (void *)a1, (uint32_t *)a2, 0));
+        case 52: return lx_res(lxi_getsockname((int64_t)(int32_t)a0, (void *)a1, (uint32_t *)a2, 1));
+        case 53: return lx_res(lxi_socketpair((int)a0, (int)a1, (int)a2, (int32_t *)a3));
+        case 54: return lx_res(lxi_setsockopt((int64_t)(int32_t)a0, (int)a1, (int)a2, (const void *)a3, a4));
+        case 55: return lx_res(lxi_getsockopt((int64_t)(int32_t)a0, (int)a1, (int)a2, (void *)a3, (uint32_t *)a4));
+        case 284: return lx_res(lxi_eventfd(a0, 0));
+        case 290: return lx_res(lxi_eventfd(a0, (int)a1));
+        case 213: return lx_res(lxi_epoll_create(0));
+        case 291: return lx_res(lxi_epoll_create((int)a0));
+        case 233: return lx_res(lxi_epoll_ctl((int64_t)(int32_t)a0, (int)a1, (int64_t)(int32_t)a2, (const void *)a3));
+        case 232: case 281: return lx_res(lxi_epoll_wait((int64_t)(int32_t)a0, (void *)a1, (int)a2, (int64_t)(int32_t)a3));
+        case 283: return lx_res(lxi_timerfd_create((int)a0, (int)a1));
+        case 286: return lx_res(lxi_timerfd_settime((int64_t)(int32_t)a0, (int)a1, (const void *)a2, (void *)a3));
+        case 287: return lx_res(lxi_timerfd_gettime((int64_t)(int32_t)a0, (void *)a1));
+        case 319: return lx_res(lxi_memfd_create((const char *)a0, (unsigned)a1));
+        /* scheduling: one policy, every CPU */
+        case 204: {                                   /* sched_getaffinity */
+            uint8_t mask[128];
+            uint32_t n = smp_cpu_count();
+            uint64_t bytes = a1 < sizeof(mask) ? a1 : sizeof(mask);
+            if (!n) n = 1;
+            if (bytes < 8) return ERR(EINVAL);
+            kzero(mask, sizeof(mask));
+            for (uint32_t i = 0; i < n && i < bytes * 8; i++) mask[i / 8] |= (uint8_t)(1u << (i % 8));
+            if (copy_to_user((void *)a2, mask, 8) != 0) return ERR(EFAULT);
+            return 8;
+        }
+        case 203: case 142: case 144: return 0;       /* sched_setaffinity / setparam / setscheduler */
+        case 143: return a1 ? zero_user((void *)a1, 4) : 0;   /* sched_getparam */
+        case 145: return 0;                           /* sched_getscheduler: SCHED_OTHER */
+        case 146: case 147: return 0;                 /* sched_get_priority_max / min */
+        case 324: return 0;                           /* membarrier: no commands (callers fall back) */
         default:
             log_hex("lx: unimplemented syscall ", nr);
             return ERR(ENOSYS);

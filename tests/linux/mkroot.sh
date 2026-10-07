@@ -15,7 +15,28 @@ apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpine
 # busybox applet links (one copy of busybox is enough)
 S=/tmp/stage/linux
 mkdir -p $S
-for d in lib usr etc; do [ -d $R/$d ] && cp -rL $R/$d $S/ 2>/dev/null || true; done
+# libraries: development links (libx.so) go; a runtime link (libx.so.1 ->
+# libx.so.1.2.3) becomes the file itself, so each library is stored once
+# (inside the new root: its links are absolute)
+cat > $R/links.sh <<"EOS"
+find() { /bin/busybox find "$@"; }; rm() { /bin/busybox rm "$@"; }; cp() { /bin/busybox cp "$@"; }; mv() { /bin/busybox mv "$@"; }
+grep() { /bin/busybox grep "$@"; }; head() { /bin/busybox head "$@"; }; cut() { /bin/busybox cut "$@"; }; readlink() { /bin/busybox readlink "$@"; }
+find /lib /usr/lib -type l -name "*.so" -delete 2>/dev/null
+find /lib /usr /etc -type l | while read L; do echo "$L $(readlink -f "$L")"; done > /links
+while read L T; do
+  [ -e "$T" ] || continue
+  case "$T" in /bin/*|/sbin/*) continue;; esac
+  rm -f "$L"
+  cp -r "$T" "$L"
+  [ -f "$T" ] && echo "$T" >> /targets
+done < /links
+# versioned originals nobody asks for by name go, the loader stays
+cut -d" " -f1 /links > /names
+grep -vxF -f /names /targets 2>/dev/null | grep -v ld-musl | while read T; do rm -f "$T"; done
+rm -f /links /targets /names /links.sh
+EOS
+chroot $R /bin/busybox sh /links.sh
+for d in lib usr etc; do [ -d $R/$d ] && cp -r $R/$d $S/ 2>/dev/null || true; done
 mkdir -p $S/bin && cp -L $R/bin/busybox $S/bin/busybox
 rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin

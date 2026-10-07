@@ -17,7 +17,11 @@ struct vfs_node;
 #define LXVM_MREMAP_FIXED   2
 
 /* results: an address / 0, or minus a Linux errno */
-int64_t  lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint32_t flags, struct vfs_node *node, uint64_t off);
+struct lx_file;
+/* node: a file read into private pages; file: a memory object (memfd) whose
+ * frames a MAP_SHARED mapping uses directly */
+int64_t  lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint32_t flags, struct vfs_node *node,
+                   struct lx_file *file, uint64_t off);
 int      lxvm_munmap(process_t *p, uint64_t addr, uint64_t len);
 int      lxvm_mprotect(process_t *p, uint64_t addr, uint64_t len, uint32_t prot);
 int64_t  lxvm_mremap(process_t *p, uint64_t old, uint64_t old_len, uint64_t new_len, uint32_t flags, uint64_t new_addr);
