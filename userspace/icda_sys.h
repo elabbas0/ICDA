@@ -91,7 +91,8 @@ enum {
     SYS_VFS_TRUNCATE      = 78,
     SYS_VFS_RENAME        = 79,
     SYS_NET               = 80,
-    SYS_AUDIO_MIX         = 81
+    SYS_AUDIO_MIX         = 81,
+    SYS_SYS_STATS         = 82
 };
 
 typedef struct {
@@ -289,6 +290,14 @@ typedef struct {
     char     name[64];
 } icda_proc_stats_t;
 
+typedef struct {
+    uint64_t mem_total;      /* bytes of usable RAM */
+    uint64_t mem_free;
+    uint64_t cpus;           /* processors running */
+    uint64_t idle_ticks;     /* 10 ms ticks the processors spent idle, all added up */
+    uint64_t uptime_ticks;
+} icda_sys_stats_t;
+
 
 static inline uint64_t icda_gpu_query(icda_gpu_info_t *out) { return sys_call1(SYS_GPU_QUERY, (uint64_t)(uintptr_t)out); }
 
@@ -302,6 +311,7 @@ static inline uint64_t icda_power(uint64_t action) { return sys_call1(SYS_POWER,
 
 
 static inline uint64_t icda_proc_stats(uint64_t pid, icda_proc_stats_t *out) { return sys_call2(SYS_PROC_STATS, pid, (uint64_t)(uintptr_t)out); }
+static inline uint64_t icda_sys_stats(icda_sys_stats_t *out) { return sys_call1(SYS_SYS_STATS, (uint64_t)(uintptr_t)out); }
 
 #define ICDA_PTY_READ   0
 #define ICDA_PTY_WRITE  1

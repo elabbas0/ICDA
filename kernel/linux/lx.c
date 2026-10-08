@@ -1060,7 +1060,7 @@ static uint64_t proc_mem_kb(process_t *q) {
 }
 
 static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
-    uint64_t total = pmm_total_frames() * 4, free = pmm_free_frames() * 4, t = sched_ticks();
+    uint64_t total = pmm_usable_frames() * 4, free = pmm_free_frames() * 4, t = sched_ticks();
     if (pid) {
         process_t *q = sched_find_process(pid);
         char st[2] = { proc_state_char(q), 0 };

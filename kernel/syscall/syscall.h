@@ -110,7 +110,8 @@ typedef enum {
     SYS_VFS_TRUNCATE      = 78,
     SYS_VFS_RENAME        = 79,
     SYS_NET               = 80,
-    SYS_AUDIO_MIX         = 81
+    SYS_AUDIO_MIX         = 81,
+    SYS_SYS_STATS         = 82
 } syscall_number_t;
 
 /* SYS_AUDIO_MIX operations (rdi) */
@@ -173,6 +174,15 @@ typedef struct {
     uint64_t mem_bytes;  
     char     name[64];   
 } syscall_proc_stats_t;
+
+/* SYS_SYS_STATS: the machine as a whole (Activity) */
+typedef struct {
+    uint64_t mem_total;      /* bytes of usable RAM */
+    uint64_t mem_free;
+    uint64_t cpus;           /* processors running */
+    uint64_t idle_ticks;     /* 10 ms ticks the processors spent idle, all added up */
+    uint64_t uptime_ticks;
+} syscall_sys_stats_t;
 
 typedef struct {
     int32_t  abs_x;

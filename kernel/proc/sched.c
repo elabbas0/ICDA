@@ -258,6 +258,10 @@ void sched_init(void) {
     idle_proc->addr_space = vmm_kernel_address_space();
     idle_proc->main_thread = idle_thread;
     idle_proc->cwd = vfs_root();
+    {
+        static const char nm[] = "idle";   /* Activity counts it as free CPU */
+        for (uint64_t i = 0; i < sizeof(nm); i++) idle_proc->name[i] = nm[i];
+    }
     register_process(idle_proc);
 
     idle_thread->tid = next_tid++;
@@ -862,4 +866,9 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
         }
         p = p->next_all;
     }
+}
+
+/* ticks the processors spent in their idle threads, all CPUs added up */
+uint64_t sched_idle_ticks(void) {
+    return idle_process ? idle_process->cpu_ticks : 0;
 }

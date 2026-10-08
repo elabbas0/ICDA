@@ -26,6 +26,7 @@
 #include "../net/net.h"
 #include "../net/sock.h"
 #include "../memory/pmm.h"
+#include "../cpu/smp.h"
 #include "../memory/vmm.h"
 #include "../fs/fd.h"
 #include "../cpu/gdt.h"
@@ -45,14 +46,15 @@
 
 
 
-_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v9: first number moved");
-_Static_assert(SYS_VM_FREE == 75, "native ABI v9: v4 numbers moved");
-_Static_assert(SYS_DISK_EDIT == 76, "native ABI v9: v5 numbers moved");
-_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v9: v6 numbers moved");
-_Static_assert(SYS_VFS_RENAME == 79, "native ABI v9: v7 numbers moved");
-_Static_assert(SYS_NET == 80, "native ABI v9: v8 numbers moved");
-_Static_assert(SYS_AUDIO_MIX == 81, "native ABI v9: last number moved");
-_Static_assert(ICDA_NATIVE_SYS_MAX == 82, "native ABI v9: count changed");
+_Static_assert(SYS_CONSOLE_WRITE == 0, "native ABI v10: first number moved");
+_Static_assert(SYS_VM_FREE == 75, "native ABI v10: v4 numbers moved");
+_Static_assert(SYS_DISK_EDIT == 76, "native ABI v10: v5 numbers moved");
+_Static_assert(SYS_VFS_TRUNCATE == 78, "native ABI v10: v6 numbers moved");
+_Static_assert(SYS_VFS_RENAME == 79, "native ABI v10: v7 numbers moved");
+_Static_assert(SYS_NET == 80, "native ABI v10: v8 numbers moved");
+_Static_assert(SYS_AUDIO_MIX == 81, "native ABI v10: v9 numbers moved");
+_Static_assert(SYS_SYS_STATS == 82, "native ABI v10: last number moved");
+_Static_assert(ICDA_NATIVE_SYS_MAX == 83, "native ABI v10: count changed");
 
 
 
@@ -976,6 +978,17 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
         }
         out->name[i] = 0;
     }
+    return 0;
+}
+
+/* the machine as a whole: memory, processors and their idle time */
+static uint64_t sys_sys_stats(syscall_sys_stats_t *out) {
+    if (!out || !user_range_prepare_cur_w(out, sizeof(*out))) return (uint64_t)-U_EFAULT;
+    out->mem_total = pmm_usable_frames() * PAGE_SIZE_4K;
+    out->mem_free = pmm_free_frames() * PAGE_SIZE_4K;
+    out->cpus = smp_cpu_count() ? smp_cpu_count() : 1;
+    out->idle_ticks = sched_idle_ticks();
+    out->uptime_ticks = sched_ticks();
     return 0;
 }
 
@@ -1946,6 +1959,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             return (uint64_t)sock_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
         case SYS_AUDIO_MIX:
             return sys_audio_mix(regs->rdi, regs->rsi, regs->rdx, regs->r10);
+        case SYS_SYS_STATS:
+            return sys_sys_stats((syscall_sys_stats_t *)(uintptr_t)regs->rdi);
         case SYS_PROC_STATS:
             return sys_proc_stats(regs->rdi,
                                   (syscall_proc_stats_t *)(uintptr_t)regs->rsi);

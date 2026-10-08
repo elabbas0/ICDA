@@ -41,6 +41,8 @@ static uint64_t align_up_u64(uint64_t value, uint64_t align) {
     return (value + align - 1) & ~(align - 1);
 }
 
+static uint64_t usable_frames;          /* RAM the firmware reported usable */
+
 static void mark_used(uint64_t addr, uint64_t size) {
     uint64_t first = ADDR_TO_FRAME(addr);
     uint64_t last  = ADDR_TO_FRAME(addr + size + PAGE_SIZE - 1);
@@ -191,8 +193,10 @@ void pmm_init(void *multiboot_info) {
             while (ep < end) {
                 struct multiboot_mmap_entry *e = (struct multiboot_mmap_entry *)ep;
 
-                if (e->type == MULTIBOOT_MEMORY_AVAILABLE)
+                if (e->type == MULTIBOOT_MEMORY_AVAILABLE) {
                     mark_free(e->addr, e->len);
+                    usable_frames += e->len / PAGE_SIZE;
+                }
 
                 ep += mmap->entry_size;
             }
@@ -369,6 +373,7 @@ void pmm_free_range(uint64_t addr, uint64_t count) {
 
 uint64_t pmm_free_frames()  { return total_frames - used_frames; }
 uint64_t pmm_total_frames() { return total_frames; }
+uint64_t pmm_usable_frames() { return usable_frames ? usable_frames : total_frames; }
 uint64_t pmm_next_free_frame() { return next_free; }
 
 void pmm_print_stats() {
