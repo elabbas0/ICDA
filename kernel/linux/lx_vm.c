@@ -23,6 +23,9 @@
 #include "../memory/vmm.h"
 #include "../proc/sched.h"
 
+#include "../cpu/tsc.h"
+lxvm_stat_t lxvm_stat;
+
 #define PAGE        PAGE_SIZE_4K
 #define PAGE_MASK   (~(PAGE - 1))
 #define PROT_READ   1
@@ -52,6 +55,8 @@ typedef struct lx_vma {
     struct lx_vma  *next;
 } lx_vma_t;
 
+static uint64_t vma_epoch = 1;          /* bumped when a region is freed (see find) */
+
 static lx_vma_t *new_vma(uint64_t start, uint64_t end, uint32_t prot, uint32_t flags, vfs_node_t *node, uint64_t off) {
     lx_vma_t *v = (lx_vma_t *)kmalloc(sizeof(lx_vma_t));
     if (!v) return 0;
@@ -77,13 +82,32 @@ static lx_vma_t *vma_part(const lx_vma_t *v, uint64_t start, uint64_t end) {
 }
 
 static void vma_free(lx_vma_t *v) {
+    vma_epoch++;
     if (v->file) lxi_file_unref(v->file);
     kfree(v);
 }
 
+/* The region list is sorted but long (a browser has thousands of regions)
+ * and faults come in runs at nearby addresses: the last region found for a
+ * few processes is remembered.  A remembered region is trusted only while
+ * no region has been freed or a list swapped since (vma_epoch). */
+static struct { process_t *p; lx_vma_t *v; uint64_t epoch; } find_hint[8];
+
+void lxvm_forget_hints(void) {
+    vma_epoch++;
+}
+
 static lx_vma_t *find(process_t *p, uint64_t addr) {
+    uint32_t h = (uint32_t)(((uintptr_t)p >> 6) & 7);
+    lx_vma_t *hv = find_hint[h].v;
+    if (find_hint[h].p == p && find_hint[h].epoch == vma_epoch && addr >= hv->start && addr < hv->end) return hv;
     for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v && v->start <= addr; v = v->next)
-        if (addr < v->end) return v;
+        if (addr < v->end) {
+            find_hint[h].p = p;
+            find_hint[h].v = v;
+            find_hint[h].epoch = vma_epoch;
+            return v;
+        }
     return 0;
 }
 
@@ -208,6 +232,7 @@ static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
         return e->phys;
     }
     if (pc_pages + PC_CHUNK > PC_MAX) return 0;
+    lxvm_stat.miss_reads++;
     first = idx & ~(uint64_t)(PC_CHUNK - 1);
     count = pages - first < PC_CHUNK ? pages - first : PC_CHUNK;
     buf = (char *)kmalloc(count * PAGE);
@@ -215,10 +240,12 @@ static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
     {
         uint64_t want = count * PAGE;
         if (first * PAGE + want > size) want = size - first * PAGE;
+        uint64_t r0 = tsc_read();
         if (vfs_node_read_at(n, first * PAGE, buf, want) < 0) {
             kfree(buf);
             return 0;
         }
+        lxvm_stat.miss_cycles += tsc_read() - r0;
         for (uint64_t i = want; i < count * PAGE; i++) buf[i] = 0;
     }
     for (uint64_t i = 0; i < count; i++) {
@@ -298,14 +325,39 @@ static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
 
 /* ---- faults ------------------------------------------------------------------ */
 
+/* Pages are touched in runs (a heap growing, a library's code, a frame
+ * being painted), so a fault fills the page's neighbours in the same region
+ * too: an aligned group of FAULT_AROUND pages, those not mapped yet.  Each
+ * fault costs a trip through the kernel (and its lock); this makes a run of
+ * sixteen pages cost one. */
+#define FAULT_AROUND 16ULL
+
 int lxvm_fault(process_t *p, uint64_t addr, int write) {
     lx_vma_t *v;
-    uint64_t va = addr & PAGE_MASK, phys;
+    uint64_t va = addr & PAGE_MASK, phys, t0 = tsc_read(), t1;
+    int r;
     if (!p || !p->linux_personality || !p->addr_space) return 0;
     v = find(p, addr);
+    t1 = tsc_read();
+    lxvm_stat.faults++;
+    lxvm_stat.find_cycles += t1 - t0;
+    t0 = t1;
     if (!v || !v->prot || (write && !(v->prot & PROT_WRITE)) || !(v->prot & (PROT_READ | PROT_WRITE | PROT_EXEC))) return 0;
     phys = vmm_virt_to_phys(p->addr_space, va);
-    if (!phys) return populate(p, v, va) == 0;
+    if (!phys) {
+        r = populate(p, v, va) == 0;
+        if (r) {
+            uint64_t from = va & ~(FAULT_AROUND * PAGE - 1), to = from + FAULT_AROUND * PAGE;
+            if (from < v->start) from = v->start;
+            if (to > v->end) to = v->end;
+            for (uint64_t a = from; a < to; a += PAGE)
+                if (a != va && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
+        }
+        lxvm_stat.populate_cycles += tsc_read() - t0;
+        if (v->node) lxvm_stat.file_faults++;
+        return r;
+    }
+    lxvm_stat.present_faults++;
     /* present: protection changed since it was mapped, or copy-on-write */
     {
         prot_ctx_t c = { v->prot, (v->flags & LXVM_SHARED) != 0 };
@@ -599,4 +651,13 @@ void lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap) {
 int lxvm_is_code(process_t *p, uint64_t addr) {
     lx_vma_t *v = p ? find(p, addr) : 0;
     return v && v->node && (v->prot & PROT_EXEC);
+}
+
+/* the file and offset an address maps (the profiler); 0 if not in a mapping */
+int lxvm_lookup(process_t *p, uint64_t addr, struct vfs_node **node, uint64_t *off) {
+    lx_vma_t *v = p ? find(p, addr) : 0;
+    if (!v) return 0;
+    *node = v->node;
+    *off = (v->node ? v->off : 0) + (addr - v->start);
+    return 1;
 }

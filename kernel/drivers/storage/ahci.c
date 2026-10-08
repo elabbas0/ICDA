@@ -15,8 +15,9 @@
 
 #define AHCI_MAX_DEVICES   8
 #define AHCI_SECTOR_SIZE   512U
-#define AHCI_DMA_PAGES     4U
-#define AHCI_DMA_SECTORS   ((AHCI_DMA_PAGES * PAGE_SIZE) / AHCI_SECTOR_SIZE)
+#define AHCI_DMA_PAGES     64U           /* 256 KB per command (4 pages if memory is short) */
+#define AHCI_DMA_PAGES_MIN 4U
+#define AHCI_DMA_SECTORS   (dev->dma_sectors)
 
 #define SATA_SIG_ATA       0x00000101U
 
@@ -129,6 +130,7 @@ typedef struct {
     uint64_t cmdtbl_phys;
     uint64_t dma_phys;
     uint8_t *dma_virt;
+    uint32_t dma_sectors;
     uint64_t sector_count;
     block_device_t block;
 } ahci_device_t;
@@ -137,7 +139,11 @@ static ahci_device_t ahci_devices[AHCI_MAX_DEVICES];
 static uint32_t ahci_count = 0;
 
 static void mem_zero(uint8_t *dst, uint64_t size) {
-    for (uint64_t i = 0; i < size; i++) dst[i] = 0;
+    __asm__ volatile("rep stosb" : "+D"(dst), "+c"(size) : "a"(0) : "memory");
+}
+
+static void mem_copy(void *dst, const void *src, uint64_t size) {
+    __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(size) : : "memory");
 }
 
 static int wait_clear(volatile uint32_t *reg, uint32_t mask, uint32_t limit) {
@@ -277,7 +283,7 @@ static int ahci_block_read(void *context, uint64_t lba, uint32_t count, void *bu
         uint16_t chunk = (count > AHCI_DMA_SECTORS) ? AHCI_DMA_SECTORS : (uint16_t)count;
         uint32_t bytes = (uint32_t)chunk * AHCI_SECTOR_SIZE;
         if (ahci_issue(dev, ATA_CMD_READ_DMA_EXT, lba, chunk, 0) != 0) return -1;
-        for (uint32_t i = 0; i < bytes; i++) out[i] = dev->dma_virt[i];
+        mem_copy(out, dev->dma_virt, bytes);
         out += bytes;
         lba += chunk;
         count -= chunk;
@@ -295,7 +301,7 @@ static int ahci_block_write(void *context, uint64_t lba, uint32_t count, const v
     while (count) {
         uint16_t chunk = (count > AHCI_DMA_SECTORS) ? AHCI_DMA_SECTORS : (uint16_t)count;
         uint32_t bytes = (uint32_t)chunk * AHCI_SECTOR_SIZE;
-        for (uint32_t i = 0; i < bytes; i++) dev->dma_virt[i] = in[i];
+        mem_copy(dev->dma_virt, in, bytes);
         if (ahci_issue(dev, ATA_CMD_WRITE_DMA_EXT, lba, chunk, 1) != 0) return -1;
         in += bytes;
         lba += chunk;
@@ -316,10 +322,18 @@ static int ahci_setup_device(const pci_device_t *pci_dev, hba_mem_t *abar, uint8
     if (port->sig != SATA_SIG_ATA) return -1;
 
     dev = &ahci_devices[ahci_count];
-    region_phys = pmm_alloc_contiguous(3 + AHCI_DMA_PAGES);
-    if (!region_phys) return -1;
-    region = (uint8_t *)PHYS_TO_VIRT(region_phys);
-    mem_zero(region, (3 + AHCI_DMA_PAGES) * PAGE_SIZE);
+    {
+        uint32_t pages = AHCI_DMA_PAGES;
+        region_phys = pmm_alloc_contiguous(3 + pages);
+        if (!region_phys) {
+            pages = AHCI_DMA_PAGES_MIN;
+            region_phys = pmm_alloc_contiguous(3 + pages);
+        }
+        if (!region_phys) return -1;
+        dev->dma_sectors = (pages * PAGE_SIZE) / AHCI_SECTOR_SIZE;
+        region = (uint8_t *)PHYS_TO_VIRT(region_phys);
+        mem_zero(region, (3 + pages) * PAGE_SIZE);
+    }
 
     dev->present = 1;
     dev->port_no = port_no;

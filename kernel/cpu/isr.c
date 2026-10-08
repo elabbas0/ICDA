@@ -117,6 +117,7 @@ void irq_register(int irq, irq_handler_t handler) {
 void isr_handler(struct registers* regs) {
     uint64_t num = regs->int_no;
     int took = bkl_enter();
+    if (took) bkl_why((int)num);
 
     if (num < 32 && isr_handlers[num]) {
         isr_handlers[num](regs);
@@ -156,6 +157,8 @@ void irq_handler(struct registers* regs) {
 
     if (irq == 0 || bsp_lapic_tick(irq)) sched_tick();
     took = bkl_enter();
+    if (took) bkl_why(32 + irq);
+    if (irq == 0 || irq == 16) lx_prof_tick(regs);
     irq_dispatch(regs, irq);
     if (took) bkl_exit();
 }
@@ -195,6 +198,12 @@ static void irq_dispatch(struct registers* regs, int irq) {
 void syscall_handler(struct registers* regs) {
     int took = bkl_enter();
     thread_t *t;
+    if (took) {
+        process_t *p = sched_current_process();
+        uint64_t nr = regs->rax;
+        if (p && p->linux_personality && nr < 0x1C000) bkl_why(1000 + (int)(nr & 1023));
+        else bkl_why(2000 + (int)((nr >= 0x1C000 ? nr - 0x1C000 : nr) & 511));
+    }
     regs->rax = syscall_dispatch(regs);
     lx_after_syscall(regs);
     t = sched_current_thread();

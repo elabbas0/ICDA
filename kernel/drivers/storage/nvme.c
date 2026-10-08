@@ -12,6 +12,7 @@
 #define NVME_PROGIF_NVME    0x02
 
 #define NVME_MAX_DEVICES    8
+#define NVME_DMA_PAGES      32      /* 128 KB per command, if the controller allows */
 #define NVME_ADMIN_Q_DEPTH  16
 #define NVME_IO_Q_DEPTH     16
 
@@ -117,6 +118,8 @@ typedef struct {
     uint64_t dma_phys;
     uint8_t *dma_virt;
     uint32_t dma_bytes;
+    uint32_t dma_pages;            /* pages one command may move */
+    uint64_t prp_list_phys;        /* PRP list for commands over two pages */
     uint32_t lba_size;
     uint64_t sector_count;
     uint32_t namespace_id;
@@ -150,7 +153,11 @@ static void nvme_trace_hex16(uint16_t value) {
 }
 
 static void mem_zero(uint8_t *dst, uint64_t size) {
-    for (uint64_t i = 0; i < size; i++) dst[i] = 0;
+    __asm__ volatile("rep stosb" : "+D"(dst), "+c"(size) : "a"(0) : "memory");
+}
+
+static void mem_copy(void *dst, const void *src, uint64_t size) {
+    __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(size) : : "memory");
 }
 
 static inline uint32_t nvme_reg32(nvme_device_t *dev, uint32_t off) {
@@ -299,7 +306,7 @@ static int nvme_rw(nvme_device_t *dev, uint64_t lba, uint32_t count, void *buffe
     uint32_t max_count;
 
     if (!dev || !buffer || count == 0 || dev->lba_size == 0) return -1;
-    max_count = PAGE_SIZE / dev->lba_size;
+    max_count = dev->dma_pages * PAGE_SIZE / dev->lba_size;
     if (max_count == 0) return -1;
 
     while (count) {
@@ -309,19 +316,21 @@ static int nvme_rw(nvme_device_t *dev, uint64_t lba, uint32_t count, void *buffe
 
         mem_zero((uint8_t *)&cmd, sizeof(cmd));
         if (write) {
-            for (uint32_t i = 0; i < bytes; i++) dev->dma_virt[i] = ptr[i];
+            mem_copy(dev->dma_virt, ptr, bytes);
         }
 
         cmd.opcode = write ? NVME_NVM_OP_WRITE : NVME_NVM_OP_READ;
         cmd.nsid = dev->namespace_id;
         cmd.prp1 = dev->dma_phys;
+        if (bytes > 2 * PAGE_SIZE) cmd.prp2 = dev->prp_list_phys;
+        else if (bytes > PAGE_SIZE) cmd.prp2 = dev->dma_phys + PAGE_SIZE;
         cmd.cdw10 = (uint32_t)lba;
         cmd.cdw11 = (uint32_t)(lba >> 32);
         cmd.cdw12 = chunk - 1U;
 
         if (nvme_io_submit(dev, &cmd) != 0) return -1;
         if (!write) {
-            for (uint32_t i = 0; i < bytes; i++) ptr[i] = dev->dma_virt[i];
+            mem_copy(ptr, dev->dma_virt, bytes);
         }
 
         ptr += bytes;
@@ -397,14 +406,27 @@ static int nvme_setup_device(const pci_device_t *pci, uint32_t index) {
     dev->io_cq_phys = region_phys + (3 * PAGE_SIZE);
     dev->identify_phys = region_phys + (4 * PAGE_SIZE);
 
-    region_phys = pmm_alloc_contiguous(1);
+    /* the bounce buffer: NVME_DMA_PAGES pages (one if memory is short) and
+     * a PRP list naming its pages after the first */
+    dev->dma_pages = NVME_DMA_PAGES;
+    region_phys = pmm_alloc_contiguous(NVME_DMA_PAGES + 1);
+    if (!region_phys) {
+        dev->dma_pages = 1;
+        region_phys = pmm_alloc_contiguous(1);
+    }
     if (!region_phys) {
         nvme_trace("dma alloc failed");
         return -1;
     }
     dev->dma_phys = region_phys;
     dev->dma_virt = (uint8_t *)PHYS_TO_VIRT(region_phys);
-    dev->dma_bytes = PAGE_SIZE;
+    dev->dma_bytes = dev->dma_pages * PAGE_SIZE;
+    if (dev->dma_pages > 1) {
+        uint64_t *list = (uint64_t *)PHYS_TO_VIRT(region_phys + (uint64_t)NVME_DMA_PAGES * PAGE_SIZE);
+        dev->prp_list_phys = region_phys + (uint64_t)NVME_DMA_PAGES * PAGE_SIZE;
+        for (uint32_t i = 0; i < PAGE_SIZE / 8; i++) list[i] = 0;
+        for (uint32_t i = 1; i < NVME_DMA_PAGES; i++) list[i - 1] = region_phys + (uint64_t)i * PAGE_SIZE;
+    }
     dev->identify_virt = (uint8_t *)PHYS_TO_VIRT(dev->identify_phys);
 
     nvme_reg32_write(dev, NVME_REG_AQA, ((NVME_ADMIN_Q_DEPTH - 1U) << 16) | (NVME_ADMIN_Q_DEPTH - 1U));
@@ -421,6 +443,23 @@ static int nvme_setup_device(const pci_device_t *pci, uint32_t index) {
     if (nvme_setup_io_queues(dev) != 0) {
         nvme_trace("io queue setup failed");
         return -1;
+    }
+    /* the controller's largest transfer (MDTS, in minimum-page units: 4 KB
+     * as configured); larger commands would fail */
+    if (dev->dma_pages > 1) {
+        nvme_cmd_t cmd;
+        mem_zero((uint8_t *)&cmd, sizeof(cmd));
+        mem_zero(dev->identify_virt, PAGE_SIZE);
+        cmd.opcode = NVME_ADMIN_OP_IDENTIFY;
+        cmd.cdw10 = 1;
+        if (nvme_admin_submit(dev, &cmd) != 0) {
+            dev->dma_pages = 1;
+        } else {
+            uint8_t mdts = dev->identify_virt[77];
+            uint32_t mpsmin = (uint32_t)((nvme_reg64(dev, NVME_REG_CAP) >> 48) & 0xF);
+            if (mpsmin != 0) dev->dma_pages = 1;
+            else if (mdts && mdts < 6 && (1U << mdts) < dev->dma_pages) dev->dma_pages = 1U << mdts;
+        }
     }
     if (nvme_identify_namespace(dev, 1, &ns) != 0) {
         nvme_trace("identify ns failed");

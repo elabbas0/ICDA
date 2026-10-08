@@ -89,11 +89,248 @@ static int rel_path(uint8_t id, const char *path, volume_t **out, const char **r
     return 0;
 }
 
+/* ---- FAT32 file reads ---------------------------------------------------------
+ * Reading a file at an offset used to mount the volume, look the path up
+ * directory by directory, walk the cluster chain from the file's start and
+ * read one cluster per disk command.  Programs' libraries are read this way
+ * (the page cache asks for 256 KB at a time, all over files of tens of MB),
+ * so a file's cluster chain is remembered here as runs of contiguous
+ * clusters: a read is then one disk command per run.  Any write to a volume
+ * forgets what is remembered about it. */
+#define RC_FILES   64
+#define RC_FAT_BUF 64U                   /* FAT sectors read at once */
+
+typedef struct { uint32_t cluster, count; } rc_run_t;
+
+typedef struct {
+    uint8_t   id;
+    uint32_t  gen;
+    uint64_t  use;
+    uint32_t  size;
+    uint32_t  nruns;
+    rc_run_t *runs;
+    char      path[VOL_PATH_CAP];
+} rc_file_t;
+
+static rc_file_t rc_files[RC_FILES];
+static uint32_t  rc_gen[VOL_MAX];
+static uint64_t  rc_clock;
+static struct {
+    uint32_t gen;
+    int      ok;
+    fatfs_t  v;
+} rc_vol[VOL_MAX];
+
+static void rc_forget(uint8_t id) {
+    if (id >= 1 && id <= VOL_MAX) rc_gen[id - 1]++;
+}
+
+/* the volume's geometry, read once per generation */
+static fatfs_t *rc_volume(uint8_t id, volume_t *m) {
+    uint32_t i = id - 1u;
+    if (!rc_vol[i].ok || rc_vol[i].gen != rc_gen[i]) {
+        rc_vol[i].ok = fatfs_mount(&rc_vol[i].v, m->dev, m->start, m->sectors) == 0;
+        rc_vol[i].gen = rc_gen[i];
+    }
+    return rc_vol[i].ok ? &rc_vol[i].v : 0;
+}
+
+/* the cluster runs of a file, from its first cluster (FAT read in batches) */
+static int rc_build(fatfs_t *v, uint32_t first, uint32_t size, rc_file_t *f) {
+    uint64_t clusters = ((uint64_t)size + v->cluster_bytes - 1) / v->cluster_bytes;
+    uint32_t cap = 16, n = 0, c = first;
+    uint64_t have = 0, buf_first = ~0ULL;
+    uint8_t *fat = (uint8_t *)kmalloc(RC_FAT_BUF * 512U);
+    rc_run_t *runs = (rc_run_t *)kmalloc(cap * sizeof(rc_run_t));
+    if (!fat || !runs) {
+        kfree(fat);
+        kfree(runs);
+        return -1;
+    }
+    while (have < clusters && c >= 2 && c < v->cluster_count + 2) {
+        uint64_t sec = ((uint64_t)c * 4U) / 512U, at;
+        if (n && runs[n - 1].cluster + runs[n - 1].count == c) {
+            runs[n - 1].count++;
+        } else {
+            if (n == cap) {
+                rc_run_t *bigger = (rc_run_t *)kmalloc(cap * 2 * sizeof(rc_run_t));
+                if (!bigger) break;
+                for (uint32_t k = 0; k < n; k++) bigger[k] = runs[k];
+                kfree(runs);
+                runs = bigger;
+                cap *= 2;
+            }
+            runs[n].cluster = c;
+            runs[n].count = 1;
+            n++;
+        }
+        have++;
+        if (have == clusters) break;
+        if (buf_first == ~0ULL || sec < buf_first || sec >= buf_first + RC_FAT_BUF) {
+            uint32_t count = RC_FAT_BUF;
+            if (sec + count > v->fat_sectors) count = (uint32_t)(v->fat_sectors - sec);
+            if (!count || v->dev->read(v->dev->context, v->base_lba + v->fat_lba + sec, count, fat) != 0) break;
+            buf_first = sec;
+        }
+        at = ((uint64_t)c * 4U) - buf_first * 512U;
+        c = ((uint32_t)fat[at] | (uint32_t)fat[at + 1] << 8 | (uint32_t)fat[at + 2] << 16 | (uint32_t)fat[at + 3] << 24) &
+            0x0FFFFFFFU;
+    }
+    kfree(fat);
+    if (have != clusters) {
+        kfree(runs);
+        return -1;
+    }
+    f->runs = runs;
+    f->nruns = n;
+    f->size = size;
+    return 0;
+}
+
+static rc_file_t *rc_find(uint8_t id, volume_t *m, const char *path, const char *rel, fatfs_t *v) {
+    rc_file_t *slot = 0;
+    fatfs_entry_t *e;
+    for (uint32_t i = 0; i < RC_FILES; i++) {
+        rc_file_t *f = &rc_files[i];
+        int stale = !f->runs || f->gen != rc_gen[f->id - 1];
+        if (!stale && f->id == id && same_text(f->path, path)) {
+            f->use = ++rc_clock;
+            return f;
+        }
+        if (stale) f->use = 0;           /* reused first */
+        if (!slot || f->use < slot->use) slot = f;
+    }
+    (void)m;
+    e = (fatfs_entry_t *)kmalloc(sizeof(fatfs_entry_t));
+    if (!e) return 0;
+    if (fatfs_lookup(v, rel, e) != 0 || (e->attr & FATFS_ATTR_DIR)) {
+        kfree(e);
+        return 0;
+    }
+    if (slot->runs) {
+        kfree(slot->runs);
+        slot->runs = 0;
+    }
+    if (e->size && rc_build(v, e->cluster, e->size, slot) != 0) {
+        kfree(e);
+        return 0;
+    }
+    if (!e->size) {                      /* empty: no clusters, nothing to read */
+        slot->runs = (rc_run_t *)kmalloc(sizeof(rc_run_t));
+        if (!slot->runs) {
+            kfree(e);
+            return 0;
+        }
+        slot->nruns = 0;
+        slot->size = 0;
+    }
+    kfree(e);
+    slot->id = id;
+    slot->gen = rc_gen[id - 1];
+    slot->use = ++rc_clock;
+    copy_text(slot->path, path, sizeof(slot->path));
+    return slot;
+}
+
+/* Small reads (programs reading files a few KB at a time) go through a cache
+ * of 64 KB disk blocks, so they cost a copy instead of a disk command.  Big
+ * reads (the page cache's 256 KB chunks) go straight to the disk. */
+#define BC_BLOCKS  256
+#define BC_SECTORS 128U                  /* 64 KB */
+
+static struct {
+    uint8_t  id;
+    uint32_t gen;
+    uint64_t lba;                        /* first sector, BC_SECTORS aligned */
+    uint64_t use;
+    uint8_t *data;
+} bc[BC_BLOCKS];
+
+static int bc_read(uint8_t id, fatfs_t *v, uint64_t lba, uint32_t count, uint8_t *out) {
+    while (count) {
+        uint64_t base = lba & ~(uint64_t)(BC_SECTORS - 1), in = lba - base;
+        uint32_t take = (uint32_t)(BC_SECTORS - in), slot = 0;
+        int hit = -1;
+        if (take > count) take = count;
+        for (uint32_t i = 0; i < BC_BLOCKS; i++) {
+            if (bc[i].data && bc[i].id == id && bc[i].lba == base && bc[i].gen == rc_gen[id - 1]) {
+                hit = (int)i;
+                break;
+            }
+            if (!bc[i].data || bc[i].use < bc[slot].use) slot = i;
+        }
+        if (hit < 0) {
+            uint64_t end = v->base_lba + v->sectors, n = BC_SECTORS;
+            if (base + n > end) n = end > base ? end - base : 0;
+            if (!bc[slot].data) bc[slot].data = (uint8_t *)kmalloc(BC_SECTORS * 512U);
+            if (!bc[slot].data || n < in + take) return v->dev->read(v->dev->context, lba, count, out);
+            bc[slot].lba = ~0ULL;
+            if (v->dev->read(v->dev->context, base, (uint32_t)n, bc[slot].data) != 0) return -1;
+            bc[slot].id = id;
+            bc[slot].gen = rc_gen[id - 1];
+            bc[slot].lba = base;
+            hit = (int)slot;
+        }
+        bc[hit].use = ++rc_clock;
+        {
+            const uint8_t *src = bc[hit].data + in * 512U;
+            uint64_t bytes = (uint64_t)take * 512U;
+            uint8_t *dst = out;
+            __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(bytes) : : "memory");
+        }
+        out += (uint64_t)take * 512U;
+        lba += take;
+        count -= take;
+    }
+    return 0;
+}
+
+/* reads [off, off + len) of a cached file: whole sectors straight into buf,
+ * partial ones through a sector buffer */
+static int64_t rc_read(uint8_t id, fatfs_t *v, rc_file_t *f, uint64_t off, char *buf, uint64_t len) {
+    int small = len < 65536;
+    uint64_t done = 0, run_start = 0;   /* byte offset where the current run begins */
+    uint32_t r = 0;
+    uint8_t sec[512];
+    if (off >= f->size) return 0;
+    if (len > f->size - off) len = f->size - off;
+    while (r < f->nruns && run_start + (uint64_t)f->runs[r].count * v->cluster_bytes <= off) {
+        run_start += (uint64_t)f->runs[r].count * v->cluster_bytes;
+        r++;
+    }
+    while (done < len && r < f->nruns) {
+        uint64_t run_bytes = (uint64_t)f->runs[r].count * v->cluster_bytes;
+        uint64_t in = off + done - run_start;               /* offset inside the run */
+        uint64_t lba = v->base_lba + v->data_lba + (uint64_t)(f->runs[r].cluster - 2) * v->sectors_per_cluster + in / 512U;
+        uint64_t avail = run_bytes - in, want = len - done;
+        if (want > avail) want = avail;
+        if (in % 512U || want < 512U) {                     /* a partial sector */
+            uint64_t skip = in % 512U, take = 512U - skip;
+            if (take > want) take = want;
+            if ((small ? bc_read(id, v, lba, 1, sec) : v->dev->read(v->dev->context, lba, 1, sec)) != 0) break;
+            for (uint64_t i = 0; i < take; i++) buf[done + i] = (char)sec[skip + i];
+            done += take;
+        } else {
+            uint64_t sectors = want / 512U;
+            if (sectors > 2048U) sectors = 2048U;           /* 1 MB per command */
+            if ((small ? bc_read(id, v, lba, (uint32_t)sectors, (uint8_t *)buf + done)
+                       : v->dev->read(v->dev->context, lba, (uint32_t)sectors, buf + done)) != 0) break;
+            done += sectors * 512U;
+        }
+        if (off + done - run_start >= run_bytes) {
+            run_start += run_bytes;
+            r++;
+        }
+    }
+    return done ? (int64_t)done : -1;
+}
+
 static int volume_external(int op, uint8_t id, const char *path, const char *data, uint64_t size, uint64_t off) {
     volume_t *m;
     const char *rel, *dst_rel = 0;
     int rc = -1;
     if (id == 0 || id > VOL_MAX || !volumes[id - 1].used) return 0;
+    rc_forget(id);
     if (rel_path(id, path, &m, &rel) != 0 || !m->writable) return -1;
     if (op == VFS_EXT_RENAME) {
         volume_t *m2;
@@ -141,6 +378,11 @@ static int64_t volume_loader(uint8_t id, const char *path, uint64_t ref, uint64_
         ex_hint.cluster = 0;
         hint_mount = id;
         copy_text(hint_path, path, sizeof(hint_path));
+    }
+    if (m->fs == VOLUME_FAT32) {
+        fatfs_t *cv = rc_volume(id, m);
+        rc_file_t *f = cv ? rc_find(id, m, path, rel, cv) : 0;
+        if (f) return rc_read(id, cv, f, off, buf, len);
     }
     if (m->fs == VOLUME_FAT32) {
         fatfs_t *v = (fatfs_t *)kmalloc(sizeof(fatfs_t));

@@ -29,6 +29,7 @@
 #define EBADF   9
 #define ECHILD  10
 #define EAGAIN  11
+#define EDEADLK 35
 #define ENOMEM  12
 #define EACCES  13
 #define EFAULT  14
@@ -1211,6 +1212,11 @@ static int proc_dirent(lx_file_t *f, uint64_t idx, const char **name, char *numb
 /* ---- open/read/write ---------------------------------------------------- */
 
 static void lx_dump(void);
+static void dump_num(int64_t v);
+static void lx_report_stack(process_t *p, uint64_t rsp);
+static void lx_prof_report(void);
+
+static int lx_trace_opens;
 
 static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     char path[LX_PATH_MAX];
@@ -1224,6 +1230,21 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     if (kstreq(path, "/dev/lxdump")) {
         lx_dump();
         return ERR(ENOENT);
+    }
+    if (kstreq(path, "/dev/lxprof")) {     /* first open starts the profiler, later ones report */
+        lx_prof_report();
+        return ERR(ENOENT);
+    }
+    if (kstreq(path, "/dev/lxtrace")) {    /* turns the open trace on and off */
+        lx_trace_opens = !lx_trace_opens;
+        return ERR(ENOENT);
+    }
+    if (lx_trace_opens) {
+        serial_write("lx open: ");
+        serial_write(sched_current_process()->name);
+        serial_write(" ");
+        serial_write(path);
+        serial_write("\n");
     }
     /* network settings Linux programs read, made from ICDA's own (DHCP) */
     if (kstreq(path, "/etc/resolv.conf") || kstreq(path, "/etc/hosts")) {
@@ -1551,7 +1572,15 @@ static uint64_t sys_fcntl(int64_t fd, uint64_t cmd, uint64_t arg) {
         case 4:
             f->flags = (f->flags & ~(uint64_t)(O_APPEND | O_NONBLOCK)) | (arg & (O_APPEND | O_NONBLOCK));
             return 0;
-        case 5: case 6: case 7: return 0;
+        case 5: case 36: {          /* F_GETLK, F_OFD_GETLK */
+            /* record locks only matter between processes, and the programs
+             * that use them (SQLite) keep a database in one process: no lock
+             * is ever held against the caller.  The answer must say so -
+             * SQLite reads l_type and takes anything but F_UNLCK as busy. */
+            int16_t unlocked = 2;
+            return copy_to_user((void *)arg, &unlocked, sizeof(unlocked)) ? ERR(EFAULT) : 0;
+        }
+        case 6: case 7: case 37: case 38: return 0;   /* F_SETLK(W), F_OFD_SETLK(W): granted */
         default: return ERR(EINVAL);
     }
 }
@@ -2060,6 +2089,19 @@ void lx_after_syscall(struct registers *regs) {
         if (sa->handler == 0) {
             if (default_ignored(sig)) continue;
             s->term_sig = sig;
+            {   /* say where: an abort() from a failed check shows up here */
+                char where[128];
+                process_t *p = sched_current_process();
+                serial_write("lx: ");
+                serial_write(p ? p->name : "?");
+                serial_write(" ended by signal ");
+                dump_num(sig);
+                lxvm_describe(p, regs->rip, where, sizeof(where));
+                serial_write(" at ");
+                serial_write(where);
+                serial_write("\n");
+                lx_report_stack(p, regs->rsp);
+            }
             user_request_exit_to_kernel(128 + (uint64_t)sig);
             return;
         }
@@ -2191,6 +2233,33 @@ static void lx_thread_exit(uint64_t code) {
 }
 
 /* timespec -> ticks from now (rounded up); abs: against the given clock */
+/* futex words other CPUs may be changing: read and compare-and-swap them
+ * atomically through the kernel's view of the page (made present and
+ * writable first, as a user write would) */
+static uint32_t *futex_word(uint64_t uaddr) {
+    process_t *p = sched_current_process();
+    uint64_t phys;
+    uint32_t v;
+    if (!p || !p->addr_space || copy_from_user(&v, (const void *)uaddr, 4) != 0) return 0;
+    if (!vmm_page_writable(p->addr_space, uaddr) && !lxvm_fault_current(uaddr, 1)) return 0;
+    phys = vmm_virt_to_phys(p->addr_space, uaddr);
+    return phys ? (uint32_t *)PHYS_TO_VIRT(phys) : 0;
+}
+
+static int futex_load(uint64_t uaddr, uint32_t *out) {
+    uint32_t *w = futex_word(uaddr);
+    if (!w) return -1;
+    *out = __atomic_load_n(w, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+static int futex_cas(uint64_t uaddr, uint32_t old, uint32_t nv, uint32_t *seen) {
+    uint32_t *w = futex_word(uaddr);
+    if (!w) return -1;
+    *seen = __sync_val_compare_and_swap(w, old, nv);
+    return 0;
+}
+
 static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out) {
     uint64_t ts[2], now_ns, when_ns;
     if (copy_from_user(ts, (const void *)uts, sizeof(ts)) != 0) return ERR(EFAULT);
@@ -2255,8 +2324,54 @@ static uint64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t ut
         if (ok) n += sched_futex_wake(uaddr2, (int)(utime > 0x7FFFFFFF ? 0x7FFFFFFF : utime));
         return (uint64_t)n;
     }
+    case 6:     /* FUTEX_LOCK_PI */
+    case 8: {   /* FUTEX_TRYLOCK_PI */
+        /* the word holds the owner's tid, and FUTEX_WAITERS when someone
+         * sleeps on it (the owner's unlock then comes here).  No priority
+         * inheritance: waiters sleep until an unlock wakes them, then race
+         * for the lock again.  musl's PTHREAD_PRIO_INHERIT mutexes use this
+         * (PulseAudio's do; a failing lock is an assertion there). */
+        uint32_t tid = (uint32_t)lx_tid(sched_current_thread()) & 0x3FFFFFFFU;
+        uint64_t ticks = 0;
+        if (cmd == 6 && utime) {
+            int64_t r = futex_ticks(utime, 1, 1, &ticks);
+            if (r < 0) return (uint64_t)r;
+            if (!ticks) ticks = 1;
+        }
+        for (;;) {
+            uint32_t cur, seen;
+            if (futex_load(uaddr, &cur) != 0) return ERR(EFAULT);
+            if (!(cur & 0x3FFFFFFFU)) {
+                /* free (perhaps with waiters still marked): take it */
+                if (futex_cas(uaddr, cur, tid | (cur & 0x80000000U), &seen) != 0) return ERR(EFAULT);
+                if (seen == cur) return 0;
+                continue;
+            }
+            if ((cur & 0x3FFFFFFFU) == tid) return ERR(EDEADLK);
+            if (cmd == 8) return ERR(EAGAIN);
+            if (!(cur & 0x80000000U)) {
+                if (futex_cas(uaddr, cur, cur | 0x80000000U, &seen) != 0) return ERR(EFAULT);
+                if (seen != cur) continue;
+            }
+            if (signal_pending(s)) return ERR(EINTR);
+            if (!sched_futex_wait(uaddr, ticks) && utime) return ERR(ETIMEDOUT);
+        }
+    }
+    case 7: {   /* FUTEX_UNLOCK_PI */
+        uint32_t tid = (uint32_t)lx_tid(sched_current_thread()) & 0x3FFFFFFFU, cur, seen;
+        for (;;) {
+            if (futex_load(uaddr, &cur) != 0) return ERR(EFAULT);
+            if ((cur & 0x3FFFFFFFU) != tid) return ERR(EPERM);
+            if (futex_cas(uaddr, cur, 0, &seen) != 0) return ERR(EFAULT);
+            if (seen == cur) break;
+        }
+        /* every waiter retries (and marks the word again if it must sleep) */
+        sched_futex_wake(uaddr, 0x7FFFFFFF);
+        return 0;
+    }
     default:
-        return ERR(ENOSYS);  /* priority-inheritance futexes */
+        return ERR(ENOSYS);
+
     }
 }
 
@@ -2435,6 +2550,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     old_pers = p->linux_personality;
     old_vmas = p->lx_vmas;
     p->lx_vmas = 0;
+    lxvm_forget_hints();
     p->linux_personality = !(size > 7 && (uint8_t)image[7] == 0xFF);
     if (user_exec_image(p, image, size, (uint64_t)argc, argv, (uint64_t)envc, envp, path, &rip, &rsp) != 0) {
         if (p->addr_space && p->addr_space != old_as) vmm_destroy_address_space(p->addr_space);
@@ -2442,6 +2558,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
         p->linux_personality = old_pers;
         lxvm_free(p);
         p->lx_vmas = old_vmas;
+        lxvm_forget_hints();
         rc = -ENOEXEC;
         goto out;
     }
@@ -2579,6 +2696,13 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 59: return sys_execve(regs, (const char *)a0, (const uint64_t *)a1, (const uint64_t *)a2);
         case 60: lx_thread_exit(a0 & 0xFF); return 0;
         case 231:
+            if (a0 & 0xFF) {
+                serial_write("lx: ");
+                serial_write(sched_current_process()->name);
+                serial_write(" exit status ");
+                dump_num((int64_t)(a0 & 0xFF));
+                serial_write("\n");
+            }
             user_request_exit_to_kernel(a0 & 0xFF);
             return 0;
         case 61: return sys_wait4((int64_t)(int32_t)a0, (int32_t *)a1, a2);
@@ -2908,20 +3032,7 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     serial_write(" at ");
     serial_write(where);
     serial_write("\n");
-    {   /* likely return addresses on the stack: a rough backtrace */
-        uint64_t words[96];
-        int shown = 0;
-        if (copy_from_user(words, (const void *)regs->rsp, sizeof(words)) == 0) {
-            for (int i = 0; i < 96 && shown < 10; i++) {
-                if (!lxvm_is_code(p, words[i])) continue;
-                lxvm_describe(p, words[i], where, sizeof(where));
-                serial_write("    from ");
-                serial_write(where);
-                serial_write("\n");
-                shown++;
-            }
-        }
-    }
+    lx_report_stack(p, regs->rsp);
     if (!p->linux_personality || !(s = p->lx)) return 0;
     sa = &s->sa[sig];
     if (sa->handler <= 1 || (s->sigmask & (1ULL << (sig - 1)))) return 0;
@@ -2930,4 +3041,275 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     if (!(sa->flags & SA_NODEFER)) s->sigmask |= 1ULL << (sig - 1);
     if (sa->flags & SA_RESETHAND) sa->handler = 0;
     return 1;
+}
+
+/* ---- sampling profiler ------------------------------------------------------
+ * Every timer tick on every CPU records what that CPU was doing: idle, kernel
+ * code (with the Linux call in progress), or a Linux program's instruction
+ * (as file + offset, looked up now while the mapping exists).  Opening
+ * /dev/lxprof prints the totals to the serial port and starts over. */
+
+#define PROF_N 32768
+typedef struct {
+    uint32_t pid;
+    int16_t  nr;          /* Linux call in progress (kernel samples), or -1 */
+    uint8_t  kind;        /* 0 idle, 1 kernel, 2 user (file), 3 user (anonymous / JIT), 4 musl */
+    uint8_t  cpu;
+    uint64_t at;          /* kernel rip, or offset in the file */
+    vfs_node_t *node;
+} prof_sample_t;
+static prof_sample_t *prof;
+static uint32_t prof_n;
+static uint64_t prof_tsc0;
+extern uint64_t bkl_spin_cycles[SMP_MAX_CPUS];
+
+void lx_prof_tick(struct registers *regs) {
+    thread_t *t = sched_current_thread();
+    process_t *p = t ? t->owner : 0;
+    prof_sample_t *s;
+    if (!prof || prof_n >= PROF_N) return;
+    s = &prof[prof_n++];
+    s->cpu = (uint8_t)this_cpu()->index;
+    s->pid = p ? (uint32_t)p->pid : 0;
+    s->nr = -1;
+    s->node = 0;
+    if ((regs->cs & 3) == 3 && p) {
+        uint64_t off = regs->rip;
+        vfs_node_t *node = 0;
+        if (p->linux_personality && lxvm_lookup(p, regs->rip, &node, &off) && node) {
+            s->kind = 2;
+            s->node = node;
+            s->at = off;
+        } else if (p->lx_interp_base && regs->rip >= p->lx_interp_base && regs->rip < p->lx_interp_base + 0x200000) {
+            s->kind = 4;             /* the dynamic loader: musl's libc */
+            s->at = regs->rip - p->lx_interp_base;
+        } else {
+            s->kind = 3;
+            s->at = regs->rip;
+        }
+        return;
+    }
+    s->kind = t && t == this_cpu()->idle ? 0 : 1;
+    if (t && t->owner && t->owner->linux_personality) s->nr = (int16_t)t->lx_cur_nr;
+    s->at = regs->rip;
+}
+
+static void prof_line(const char *what, uint64_t n, uint64_t total) {
+    serial_write("  ");
+    dump_num((int64_t)n);
+    serial_write(" (");
+    dump_num((int64_t)(total ? n * 1000 / total : 0));
+    serial_write("/1000) ");
+    serial_write(what);
+    serial_write("\n");
+}
+
+static void prof_hex(uint64_t v) {
+    static const char hex[] = "0123456789abcdef";
+    char b[20];
+    int n = 0;
+    do { b[n++] = hex[v & 15]; v >>= 4; } while (v);
+    serial_write("0x");
+    while (n) {
+        char c[2] = { b[--n], 0 };
+        serial_write(c);
+    }
+}
+
+/* the top `keep` (key, count) pairs of an unsorted list, by count */
+typedef struct { vfs_node_t *node; uint64_t key; uint32_t n; int16_t nr; uint8_t kind; } prof_bucket_t;
+
+static void prof_report_top(prof_bucket_t *b, uint32_t nb, uint32_t keep, uint64_t total, int with_off) {
+    for (uint32_t k = 0; k < keep && k < nb; k++) {
+        uint32_t best = k;
+        prof_bucket_t tmp;
+        for (uint32_t i = k + 1; i < nb; i++)
+            if (b[i].n > b[best].n) best = i;
+        tmp = b[k]; b[k] = b[best]; b[best] = tmp;
+        if (!b[k].n) break;
+        serial_write("  ");
+        dump_num(b[k].n);
+        serial_write(" (");
+        dump_num((int64_t)(total ? (uint64_t)b[k].n * 1000 / total : 0));
+        serial_write("/1000) ");
+        if (b[k].kind == 2) serial_write(b[k].node ? vfs_node_name(b[k].node) : "?");
+        else if (b[k].kind == 3) serial_write("[anonymous/jit]");
+        else if (b[k].kind == 4) serial_write("[musl libc]");
+        else if (b[k].kind == 1) serial_write("[kernel]");
+        else serial_write("[idle]");
+        if (with_off) {
+            serial_write(" ");
+            prof_hex(b[k].key);
+        }
+        if (b[k].nr >= 0) {
+            serial_write(" call ");
+            dump_num(b[k].nr);
+        }
+        serial_write("\n");
+    }
+}
+
+static uint32_t prof_add(prof_bucket_t *b, uint32_t nb, uint32_t cap, uint8_t kind, vfs_node_t *node, uint64_t key, int16_t nr) {
+    for (uint32_t i = 0; i < nb; i++)
+        if (b[i].kind == kind && b[i].node == node && b[i].key == key && b[i].nr == nr) {
+            b[i].n++;
+            return nb;
+        }
+    if (nb >= cap) return nb;
+    b[nb].kind = kind;
+    b[nb].node = node;
+    b[nb].key = key;
+    b[nb].nr = nr;
+    b[nb].n = 1;
+    return nb + 1;
+}
+
+static void lx_prof_report(void) {
+    uint32_t cap = 4096, nb;
+    prof_bucket_t *b;
+    uint64_t total = prof_n, idle = 0, kern = 0, user = 0, anon = 0;
+    uint64_t ms = (tsc_read() - prof_tsc0) / (tsc_hz() / 1000 ? tsc_hz() / 1000 : 1);
+    if (!prof) {
+        prof = (prof_sample_t *)kmalloc(sizeof(prof_sample_t) * PROF_N);
+        prof_n = 0;
+        prof_tsc0 = tsc_read();
+        for (int i = 0; i < SMP_MAX_CPUS; i++) bkl_spin_cycles[i] = 0;
+        serial_write("lxprof: started\n");
+        return;
+    }
+    b = (prof_bucket_t *)kmalloc(sizeof(prof_bucket_t) * cap);
+    serial_write("lxprof: ");
+    dump_num((int64_t)total);
+    serial_write(" samples over ");
+    dump_num((int64_t)ms);
+    serial_write(" ms on ");
+    dump_num(smp_cpu_count());
+    serial_write(" cpus\n");
+    for (uint32_t i = 0; i < prof_n; i++) {
+        if (prof[i].kind == 0) idle++;
+        else if (prof[i].kind == 1) kern++;
+        else if (prof[i].kind == 2 || prof[i].kind == 4) user++;
+        else anon++;
+    }
+    prof_line("idle", idle, total);
+    prof_line("kernel", kern, total);
+    prof_line("user code in files", user, total);
+    prof_line("user code anonymous (JIT)", anon, total);
+    for (uint32_t c = 0; c < smp_cpu_count(); c++) {
+        serial_write("  cpu ");
+        dump_num(c);
+        serial_write(" waited for the kernel lock ");
+        dump_num((int64_t)(bkl_spin_cycles[c] / (tsc_hz() / 1000 ? tsc_hz() / 1000 : 1)));
+        serial_write(" ms\n");
+    }
+    if (b) {
+        serial_write("lxprof by process:\n");
+        nb = 0;
+        for (uint32_t i = 0; i < prof_n; i++)
+            if (prof[i].kind) nb = prof_add(b, nb, cap, 1, 0, prof[i].pid, -1);
+        for (uint32_t i = 0; i < nb && i < 12; i++) {
+            process_t *p;
+            uint32_t best = i;
+            prof_bucket_t tmp;
+            for (uint32_t j = i + 1; j < nb; j++) if (b[j].n > b[best].n) best = j;
+            tmp = b[i]; b[i] = b[best]; b[best] = tmp;
+            p = sched_find_process((uint64_t)b[i].key);
+            prof_line(p ? p->name : "(gone)", b[i].n, total);
+        }
+        serial_write("lxprof by file:\n");
+        nb = 0;
+        for (uint32_t i = 0; i < prof_n; i++)
+            if (prof[i].kind >= 2) nb = prof_add(b, nb, cap, prof[i].kind, prof[i].node, 0, -1);
+        prof_report_top(b, nb, 20, total, 0);
+        serial_write("lxprof by function area (256 bytes):\n");
+        nb = 0;
+        for (uint32_t i = 0; i < prof_n; i++)
+            if (prof[i].kind == 2 || prof[i].kind == 4) nb = prof_add(b, nb, cap, prof[i].kind, prof[i].node, prof[i].at & ~0xFFULL, -1);
+        prof_report_top(b, nb, 40, total, 1);
+        serial_write("lxprof kernel by call:\n");
+        nb = 0;
+        for (uint32_t i = 0; i < prof_n; i++)
+            if (prof[i].kind == 1) nb = prof_add(b, nb, cap, 1, 0, 0, prof[i].nr);
+        prof_report_top(b, nb, 20, total, 0);
+        serial_write("lxprof kernel by address (64 bytes):\n");
+        nb = 0;
+        for (uint32_t i = 0; i < prof_n; i++)
+            if (prof[i].kind == 1) nb = prof_add(b, nb, cap, 1, 0, prof[i].at & ~0x3FULL, -1);
+        prof_report_top(b, nb, 40, total, 1);
+        kfree(b);
+    }
+    {   /* who held the kernel lock, and how long */
+        uint64_t per_us = tsc_hz() / 1000000 ? tsc_hz() / 1000000 : 1;
+        static uint8_t shown[BKL_WHY_MAX];
+        for (int i = 0; i < BKL_WHY_MAX; i++) shown[i] = 0;
+        serial_write("lxprof kernel lock held by (reason: times, total us, longest us):\n");
+        for (int k = 0; k < 30; k++) {
+            int best = -1;
+            for (int i = 0; i < BKL_WHY_MAX; i++)
+                if (!shown[i] && bkl_stats[i].n && (best < 0 || bkl_stats[i].cycles > bkl_stats[best].cycles)) best = i;
+            if (best < 0) break;
+            shown[best] = 1;
+            serial_write("  ");
+            if (best < 32) { serial_write("exception "); dump_num(best); }
+            else if (best < 64) { serial_write("irq "); dump_num(best - 32); }
+            else if (best >= 2000) { serial_write("icda call "); dump_num(best - 2000); }
+            else if (best >= 1000) { serial_write("linux call "); dump_num(best - 1000); }
+            else { serial_write("other "); dump_num(best); }
+            serial_write(": ");
+            dump_num((int64_t)bkl_stats[best].n);
+            serial_write(", ");
+            dump_num((int64_t)(bkl_stats[best].cycles / per_us));
+            serial_write(", ");
+            dump_num((int64_t)(bkl_stats[best].max / per_us));
+            if (bkl_stats[best].max_pid) {
+                process_t *mp = sched_find_process(bkl_stats[best].max_pid);
+                serial_write(" in ");
+                serial_write(mp ? mp->name : "?");
+            }
+            serial_write("\n");
+        }
+        for (int i = 0; i < BKL_WHY_MAX; i++) bkl_stats[i].n = bkl_stats[i].cycles = bkl_stats[i].max = bkl_stats[i].max_pid = 0;
+        serial_write("lxprof faults: ");
+        dump_num((int64_t)lxvm_stat.faults);
+        serial_write(" (file ");
+        dump_num((int64_t)lxvm_stat.file_faults);
+        serial_write(", present ");
+        dump_num((int64_t)lxvm_stat.present_faults);
+        serial_write("), regions per process avg ");
+        dump_num((int64_t)(lxvm_stat.faults ? lxvm_stat.vmas / lxvm_stat.faults : 0));
+        serial_write(", find us ");
+        dump_num((int64_t)(lxvm_stat.find_cycles / per_us));
+        serial_write(", populate us ");
+        dump_num((int64_t)(lxvm_stat.populate_cycles / per_us));
+        serial_write(", cache misses ");
+        dump_num((int64_t)lxvm_stat.miss_reads);
+        serial_write(" reading us ");
+        dump_num((int64_t)(lxvm_stat.miss_cycles / per_us));
+        serial_write("\n");
+        {
+            lxvm_stat_t zero = { 0 };
+            lxvm_stat = zero;
+        }
+    }
+    serial_write("lxprof: end\n");
+    prof_n = 0;
+    prof_tsc0 = tsc_read();
+    for (int i = 0; i < SMP_MAX_CPUS; i++) bkl_spin_cycles[i] = 0;
+}
+
+/* likely return addresses on a user stack (code in mapped files): a rough
+ * backtrace for crash reports */
+static void lx_report_stack(process_t *p, uint64_t rsp) {
+    uint64_t words[160];
+    char where[128];
+    int shown = 0;
+    if (copy_from_user(words, (const void *)rsp, sizeof(words)) != 0) return;
+    for (int i = 0; i < 160 && shown < 14; i++) {
+        if (!lxvm_is_code(p, words[i])) continue;
+        lxvm_describe(p, words[i], where, sizeof(where));
+        serial_write("    from ");
+        serial_write(where);
+        serial_write("\n");
+        shown++;
+    }
 }

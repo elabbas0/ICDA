@@ -46,5 +46,10 @@ extern volatile int smp_bsp_lapic_tick;
  * entry takes it if this CPU does not hold it yet (returns 1 if it did). */
 int      bkl_enter(void);
 void     bkl_exit(void);
+/* profiler: why this CPU holds the lock, and the time held per reason */
+#define BKL_WHY_MAX 2600
+typedef struct { uint64_t n, cycles, max, max_pid; } bkl_stat_t;
+extern bkl_stat_t bkl_stats[BKL_WHY_MAX];
+void     bkl_why(int why);
 
 #endif

@@ -113,6 +113,34 @@ static void trace(const char *what, const sock_t *s, uint32_t a, uint32_t b) {
     serial_write(buf);
 }
 
+/* connection timeline on the serial port: "[net] <tick> <what> <ip>:<port> <n>" */
+static void ntrace(const char *what, uint32_t ip_be, uint16_t port, uint64_t n) {
+    char buf[96];
+    int k = 0;
+    uint64_t t = sched_ticks();
+    const uint8_t *ip = (const uint8_t *)&ip_be;
+    char num[24];
+    int m;
+    const char *w = "[net] ";
+    while (*w) buf[k++] = *w++;
+#define NT_NUM(v) do { uint64_t _v = (v); m = 0; do { num[m++] = (char)('0' + _v % 10); _v /= 10; } while (_v); while (m) buf[k++] = num[--m]; } while (0)
+    NT_NUM(t);
+    buf[k++] = ' ';
+    while (*what && k < 50) buf[k++] = *what++;
+    buf[k++] = ' ';
+    for (int i = 0; i < 4; i++) {
+        NT_NUM(ip[i]);
+        buf[k++] = i < 3 ? '.' : ':';
+    }
+    NT_NUM(port);
+    buf[k++] = ' ';
+    NT_NUM(n);
+#undef NT_NUM
+    buf[k++] = 10;
+    buf[k] = 0;
+    serial_write(buf);
+}
+
 static uint32_t rd32be(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
@@ -326,6 +354,7 @@ static void sock_release(sock_t *s) {
 }
 
 static void tcp_fail(sock_t *s, int err) {
+    ntrace("failed", s->rip, s->rport, (uint64_t)err);
     s->state = T_CLOSED;
     s->err = err;
     if (s->user_closed) sock_release(s);
@@ -353,6 +382,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
             s->snd_wnd = ((uint32_t)t[14] << 8) | t[15];
             s->state = T_ESTABLISHED;
             s->retries = 0;
+            ntrace("connected", s->rip, s->rport, s->lport);
             s->rto = TCP_RTO_MIN * 2;
             tcp_ack(s);
             tcp_output(s);
@@ -409,6 +439,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
 
 static void udp_input(sock_t *s, uint32_t src, uint16_t sport, const uint8_t *data, uint16_t len) {
     udp_dgram_t *d;
+    if (sport == 53 && len >= 4) ntrace("dns answer", src, (uint16_t)(data[0] << 8 | data[1]), len);
     if (s->qlen >= UDP_QUEUE) return;
     d = &s->q[(s->qhead + s->qlen) % UDP_QUEUE];
     d->data = (uint8_t *)kmalloc(len ? len : 1);
@@ -620,12 +651,14 @@ static int64_t op_socket(uint64_t type) {
         }
         return i + 1;
     }
+    ntrace("no free socket", 0, 0, type);
     return -EMFILE_;
 }
 
 static int64_t op_connect(sock_t *s, uint32_t ip, uint16_t port) {
     if (s->type != SOCK_TCP || s->rport) return -EINVAL_;
     if (!net_ready()) return -EHOSTUNREACH_;
+    ntrace("connect", ip, port, s->lport);
     s->rip = ip;
     s->rport = port;
     s->iss = rand32();
@@ -756,6 +789,7 @@ static int64_t op_sendto(sock_t *s, const uint8_t *ubuf, uint64_t len, uint32_t 
     uint8_t data[1472], h[8];
     if (s->type != SOCK_UDP || len > sizeof(data)) return -EINVAL_;
     if (copy_from_user(data, ubuf, len) != 0) return -EFAULT_;
+    if (port == 53 && len >= 4) ntrace("dns query", ip, (uint16_t)(data[0] << 8 | data[1]), (uint64_t)(len > 12 ? data[len - 3] : 0));
     s->rip = ip;
     if (!arp_lookup(next_hop(ip), s->mac)) {
         uint64_t deadline = now() + 100;

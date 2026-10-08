@@ -37,7 +37,14 @@ int      lxvm_fork(process_t *parent, process_t *child);
 void     lxvm_free(process_t *p);
 int      lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot);
 void     lxvm_free_list(void *list);
+/* region lists were swapped (execve): forget remembered lookups */
+void     lxvm_forget_hints(void);
 void     lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap);
 int      lxvm_is_code(process_t *p, uint64_t addr);
+int      lxvm_lookup(process_t *p, uint64_t addr, struct vfs_node **node, uint64_t *off);
+
+/* profiler counters */
+typedef struct { uint64_t faults, file_faults, present_faults, vmas, find_cycles, populate_cycles, miss_reads, miss_cycles; } lxvm_stat_t;
+extern lxvm_stat_t lxvm_stat;
 
 #endif

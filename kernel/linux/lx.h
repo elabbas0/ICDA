@@ -19,5 +19,7 @@ int      lx_overlay_path(char *path);
 /* a CPU exception in a Linux program: logged; 1 if the program has a
  * handler for sig, which then runs (otherwise the caller ends the process) */
 int      lx_fault_signal(struct registers *regs, int sig, uint64_t addr);
+/* sampling profiler: every timer tick on every CPU (/dev/lxprof reports) */
+void     lx_prof_tick(struct registers *regs);
 
 #endif

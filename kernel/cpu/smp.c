@@ -35,6 +35,18 @@ uint32_t smp_cpu_count(void) {
     return cpu_count;
 }
 
+uint64_t bkl_spin_cycles[SMP_MAX_CPUS];   /* time spent waiting for the lock (profiler) */
+/* how long the lock was held, by why it was taken (bkl_why): 0-31 exceptions,
+ * 32-63 interrupts, 1000+n Linux call n, 2000+n ICDA call n */
+bkl_stat_t bkl_stats[BKL_WHY_MAX];
+static uint64_t bkl_t0[SMP_MAX_CPUS];
+static uint16_t bkl_reason[SMP_MAX_CPUS];
+
+void bkl_why(int why) {
+    uint32_t i = this_cpu()->index;
+    bkl_reason[i] = (uint16_t)(why >= 0 && why < BKL_WHY_MAX ? why : 0);
+}
+
 int bkl_enter(void) {
     cpu_t *c = this_cpu();
     if (c->bkl_held) return 0;
@@ -42,15 +54,31 @@ int bkl_enter(void) {
         /* Ticket lock: CPUs get the kernel in arrival order, so a CPU busy
          * with syscalls cannot starve the one handling device interrupts. */
         uint32_t ticket = __sync_fetch_and_add(&bkl_next, 1);
-        while (bkl_serving != ticket) __asm__ volatile("pause");
+        if (bkl_serving != ticket) {
+            uint64_t t0 = tsc_read();
+            while (bkl_serving != ticket) __asm__ volatile("pause");
+            bkl_spin_cycles[c->index] += tsc_read() - t0;
+        }
     }
     c->bkl_held = 1;
+    bkl_t0[c->index] = tsc_read();
+    bkl_reason[c->index] = 0;
     return 1;
 }
 
 void bkl_exit(void) {
     cpu_t *c = this_cpu();
     if (!c->bkl_held) return;
+    {
+        bkl_stat_t *s = &bkl_stats[bkl_reason[c->index]];
+        uint64_t d = tsc_read() - bkl_t0[c->index];
+        s->n++;
+        s->cycles += d;
+        if (d > s->max) {
+            s->max = d;
+            s->max_pid = c->current && c->current->owner ? c->current->owner->pid : 0;
+        }
+    }
     c->bkl_held = 0;
     __sync_synchronize();
     bkl_serving = bkl_serving + 1;

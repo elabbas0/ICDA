@@ -308,6 +308,7 @@ static void on_title(WebKitWebView *v, GParamSpec *ps, gpointer d) {
         return;
     }
     snprintf(t->title, sizeof t->title, "%s", s ? s : "");
+    if (getenv("WPE_CONSOLE")) fprintf(stderr, "icda-webkit title: %s\n", t->title);
     redraw_pending = 1;
 }
 
@@ -318,6 +319,7 @@ static void on_uri(WebKitWebView *v, GParamSpec *ps, gpointer d) {
     if (!t) return;
     snprintf(t->uri, sizeof t->uri, "%s", s ? s : "");
     sync_addr();
+    if (getenv("WPE_CONSOLE")) fprintf(stderr, "icda-webkit uri: %s\n", t->uri);
     redraw_pending = 1;
 }
 
@@ -336,6 +338,17 @@ static gboolean on_fail(WebKitWebView *v, WebKitLoadEvent ev, char *uri, GError 
     snprintf(msg, sizeof msg, "Could not load the page: %s", err ? err->message : "error");
     set_status(msg, 6000);
     return FALSE;
+}
+
+/* the page's web process ended: say so instead of leaving a blank page */
+static void on_terminated(WebKitWebView *v, WebKitWebProcessTerminationReason reason, gpointer d) {
+    const char *why = reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "used too much memory"
+                    : reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" : "was stopped";
+    char msg[160];
+    (void)v; (void)d;
+    fprintf(stderr, "icda-webkit: web process %s (reason %d)\n", why, (int)reason);
+    snprintf(msg, sizeof msg, "The page %s. Press F5 to load it again.", why);
+    set_status(msg, 0);
 }
 
 static void on_hover(WebKitWebView *v, WebKitHitTestResult *hit, guint mods, gpointer d) {
@@ -387,6 +400,7 @@ static int add_tab(const char *url, WebKitWebView *related) {
     g_signal_connect(t->view, "load-failed", G_CALLBACK(on_fail), NULL);
     g_signal_connect(t->view, "mouse-target-changed", G_CALLBACK(on_hover), NULL);
     g_signal_connect(t->view, "create", G_CALLBACK(on_create), NULL);
+    g_signal_connect(t->view, "web-process-terminated", G_CALLBACK(on_terminated), NULL);
     ntabs++;
     select_tab(ntabs - 1);
     if (url) {
@@ -794,8 +808,7 @@ static gboolean eval_tick(gpointer d) {
     const char *js = getenv("WPE_EVAL");
     (void)d;
     if (js && ntabs) {
-        /* the result comes back as the page title (printed by on_title) */
-        char *wrapped = g_strdup_printf("document.title = \"probe:\" + String(%s); 0", js);
+        char *wrapped = g_strdup_printf("String(%s)", js);
         webkit_web_view_evaluate_javascript(tabs[active]->view, wrapped, -1, NULL, NULL, NULL, eval_done, NULL);
         g_free(wrapped);
     }
@@ -821,6 +834,9 @@ int main(int argc, char **argv) {
     env_default("GALLIUM_DRIVER", "llvmpipe");
     env_default("EGL_PLATFORM", "wayland");
     env_default("GSETTINGS_BACKEND", "memory");
+    /* no PulseAudio server here: sound goes through icdasink, and probing
+     * for PulseAudio devices only costs time */
+    env_default("GST_PLUGIN_FEATURE_RANK", "pulsesink:NONE,pulsesrc:NONE,pulsedeviceprovider:NONE");
 
     if (gui_open_window("Surfer", 1100, 720) != 0) {
         fprintf(stderr, "icda-webkit: no desktop window\n");
