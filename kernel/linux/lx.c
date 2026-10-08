@@ -211,6 +211,7 @@ static void file_put(lx_file_t *f) {
     if (f->kind == LXF_PIPE) {
         if (f->write_end) f->pipe->writers--;
         else f->pipe->readers--;
+        sched_event_wake_key(f->pipe);      /* the other end sees the close */
         sched_wake_input_waiters();
     }
     if (--f->refs > 0) return;
@@ -306,6 +307,7 @@ int lxi_file_ready(lx_file_t *f, int want_write) { return file_ready(f, want_wri
 uint64_t lxi_now_ns(void) { return lx_mono_ns(); }
 uint64_t lxi_realtime_ns(void) { return lx_realtime_ns(); }
 void lx_proc_exit(process_t *proc) {
+    sched_event_wake();                     /* its pipes and sockets are closing */
     struct lx_state *s = proc ? proc->lx : 0;
     if (!s) return;
     for (int i = 0; i < LX_FD_MAX; i++) {
@@ -453,7 +455,7 @@ static uint64_t tty_read(lx_file_t *f, char *ubuf, uint64_t count) {
             if (!pty_alive(pty)) return 0;
             if (f->flags & O_NONBLOCK) return ERR(EAGAIN);
             if (signal_pending(s)) return ERR(EINTR);
-            sched_sleep(1);
+            sched_event_wait();
         }
         if (t->eof && t->len == 0) {
             t->eof = 0;
@@ -488,7 +490,7 @@ static uint64_t tty_read(lx_file_t *f, char *ubuf, uint64_t count) {
             if (f->flags & O_NONBLOCK) return ERR(EAGAIN);
             if (vmin == 0 && (vtime == 0 || sched_ticks() - start >= vtime * 10)) return 0;
             if (signal_pending(s)) return ERR(EINTR);
-            sched_sleep(1);
+            sched_event_wait();
         }
         if (copy_to_user(ubuf, kbuf, got) != 0) return ERR(EFAULT);
         t->ready = 0;
@@ -555,7 +557,8 @@ static uint64_t pipe_read(lx_file_t *f, char *ubuf, uint64_t count) {
         if (p->writers <= 0) return 0;
         if (f->flags & O_NONBLOCK) return ERR(EAGAIN);
         if (signal_pending(s)) return ERR(EINTR);
-        sched_sleep(1);
+        sched_wait_on(p);
+        sched_event_wait();
     }
     while (got < count && p->len) {
         uint64_t n = 0;
@@ -567,6 +570,7 @@ static uint64_t pipe_read(lx_file_t *f, char *ubuf, uint64_t count) {
         if (copy_to_user(ubuf + got, kbuf, n) != 0) return got ? got : ERR(EFAULT);
         got += n;
     }
+    if (got) sched_event_wake_key(p);       /* writers waiting for room */
     return got;
 }
 
@@ -585,7 +589,8 @@ static uint64_t pipe_write(lx_file_t *f, const char *ubuf, uint64_t count) {
         if (room == 0) {
             if (f->flags & O_NONBLOCK) return done ? done : ERR(EAGAIN);
             if (signal_pending(s)) return done ? done : ERR(EINTR);
-            sched_sleep(1);
+            sched_wait_on(p);
+            sched_event_wait();
             continue;
         }
         if (chunk > room) chunk = room;
@@ -597,6 +602,7 @@ static uint64_t pipe_write(lx_file_t *f, const char *ubuf, uint64_t count) {
         }
         done += chunk;
     }
+    if (done) sched_event_wake_key(p);      /* data for the readers */
     return done;
 }
 
@@ -1215,8 +1221,11 @@ static void lx_dump(void);
 static void dump_num(int64_t v);
 static void lx_report_stack(process_t *p, uint64_t rsp);
 static void lx_prof_report(void);
+static void prof_hex(uint64_t v);
 
 static int lx_trace_opens;
+static int lx_dump_timed;      /* /dev/lxdumparm: the timer dumps every 5 s */
+static uint64_t touch_list;
 
 static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     char path[LX_PATH_MAX];
@@ -1227,12 +1236,38 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     int kind, fd;
     if (rc < 0) return ERR(-rc);
     if (!s) return ERR(ENOMEM);
+    if (kstreq(path, "/dev/lxdumparm")) {
+        lx_dump_timed = 1;
+        return ERR(ENOENT);
+    }
     if (kstreq(path, "/dev/lxdump")) {
         lx_dump();
         return ERR(ENOENT);
     }
     if (kstreq(path, "/dev/lxprof")) {     /* first open starts the profiler, later ones report */
         lx_prof_report();
+        return ERR(ENOENT);
+    }
+    if (kstreq(path, "/dev/lxtouch")) {    /* test: write every free frame once (VMs map guest pages on first touch) */
+        uint64_t n = 0;
+        while (pmm_free_frames() > 16384) {     /* leaves 64 MB for everything else */
+            uint64_t f = pmm_alloc();
+            if (!f) break;
+            ((volatile uint64_t *)PHYS_TO_VIRT(f))[0] = 0;
+            ((volatile uint64_t *)PHYS_TO_VIRT(f))[511] = 0;
+            *(uint64_t *)PHYS_TO_VIRT(f) = touch_list;
+            touch_list = f;
+            n++;
+        }
+        while (touch_list) {
+            uint64_t next = *(uint64_t *)PHYS_TO_VIRT(touch_list);
+            kzero(PHYS_TO_VIRT(touch_list), 8);
+            pmm_free(touch_list);
+            touch_list = next;
+        }
+        serial_write("lxtouch: frames touched ");
+        dump_num((int64_t)n);
+        serial_write("\n");
         return ERR(ENOENT);
     }
     if (kstreq(path, "/dev/lxtrace")) {    /* turns the open trace on and off */
@@ -1420,8 +1455,29 @@ static uint64_t file_write(lx_file_t *f, const char *ubuf, uint64_t count, uint6
 
 static uint64_t sys_rw(int64_t fd, char *ubuf, uint64_t count, int write) {
     lx_file_t *f = fd_get(lx_get(sched_current_process()), fd);
+    uint64_t t0, r;
     if (!f) return ERR(EBADF);
-    return write ? file_write(f, ubuf, count, &f->off) : file_read(f, ubuf, count, &f->off);
+    if (!lx_trace_opens) return write ? file_write(f, ubuf, count, &f->off) : file_read(f, ubuf, count, &f->off);
+    /* tracing: reads and writes over 1 ms, with what they were on */
+    t0 = tsc_us();
+    r = write ? file_write(f, ubuf, count, &f->off) : file_read(f, ubuf, count, &f->off);
+    if (tsc_us() - t0 > 1000) {
+        serial_write("lx slow ");
+        serial_write(write ? "write " : "read ");
+        serial_write(sched_current_process()->name);
+        serial_write(" kind ");
+        dump_num(f->kind);
+        serial_write(" ");
+        serial_write(f->kind == LXF_VFS && f->node ? vfs_node_name(f->node) : "-");
+        serial_write(" count ");
+        dump_num((int64_t)count);
+        serial_write(" result ");
+        dump_num((int64_t)r);
+        serial_write(" us ");
+        dump_num((int64_t)(tsc_us() - t0));
+        serial_write("\n");
+    }
+    return r;
 }
 
 static uint64_t sys_prw(int64_t fd, char *ubuf, uint64_t count, uint64_t off, int write) {
@@ -1925,7 +1981,11 @@ static uint64_t do_poll(uint8_t *ufds, uint64_t nfds, int64_t timeout_ticks) {
             return ready;
         }
         if (signal_pending(s)) return ERR(EINTR);
-        sched_sleep(1);
+        for (uint64_t i = 0; i < nfds; i++) {
+            int32_t fd = *(int32_t *)(kfds + i * 8);
+            if (fd >= 0) lxi_wait_on_file(fd_get(s, fd));
+        }
+        sched_event_wait();
     }
 }
 
@@ -1961,7 +2021,9 @@ static uint64_t do_select(uint64_t nfds, uint8_t *ur, uint8_t *uw, uint8_t *ue, 
             return ready;
         }
         if (signal_pending(s)) return ERR(EINTR);
-        sched_sleep(1);
+        for (uint64_t fd = 0; fd < nfds; fd++)
+            if ((in_r[fd / 8] | in_w[fd / 8]) & (1U << (fd & 7))) lxi_wait_on_file(fd_get(s, (int64_t)fd));
+        sched_event_wait();
     }
 }
 
@@ -2582,6 +2644,8 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     kstrcpy(s->exe, path, sizeof(s->exe));
     serial_write("lx: exec ");
     serial_write(path);
+    serial_write(" at ms ");
+    dump_num((int64_t)(tsc_us() / 1000));
     serial_write("\n");
     for (int i = 0; i < LX_FD_MAX; i++) {
         if (s->fd[i] && s->cloexec[i]) fd_close(s, i);
@@ -2634,7 +2698,7 @@ static uint64_t sys_wait4(int64_t pid, int32_t *ustatus, uint64_t options) {
         if (!found) return ERR(ECHILD);
         if (options & 1) return 0;
         if (signal_pending(s)) return ERR(EINTR);
-        sched_sleep(1);
+        sched_event_wait();
     }
 }
 
@@ -2648,6 +2712,28 @@ static uint64_t sys_setpgid(int64_t pid, int64_t pgid) {
 
 /* ---- dispatch ----------------------------------------------------------- */
 
+
+/* profiler: mmap calls by process, length and flags (/dev/lxprof) */
+typedef struct { process_t *p; uint64_t len; uint32_t prot, flags; int file; uint32_t n; } mmap_hist_t;
+static mmap_hist_t mmap_hist[128];
+static int mmap_hist_on;               /* set while the profiler runs */
+
+static void mmap_hist_add(process_t *p, uint64_t len, uint32_t prot, uint32_t flags, int32_t fd) {
+    int file = fd >= 0, slot = -1;
+    if (!mmap_hist_on) return;
+    for (int i = 0; i < 128; i++) {
+        mmap_hist_t *h = &mmap_hist[i];
+        if (h->n && h->p == p && h->len == len && h->prot == prot && h->flags == flags && h->file == file) {
+            h->n++;
+            return;
+        }
+        if (!h->n && slot < 0) slot = i;
+    }
+    if (slot >= 0) {
+        mmap_hist_t *h = &mmap_hist[slot];
+        h->p = p; h->len = len; h->prot = prot; h->flags = flags; h->file = file; h->n = 1;
+    }
+}
 
 static uint64_t lx_syscall_inner(struct registers *regs) {
     process_t *p = sched_current_process();
@@ -2665,7 +2751,11 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 5: return sys_fstat((int64_t)a0, (lx_stat_t *)a1);
         case 7: return do_poll((uint8_t *)a0, a1, (int64_t)(int32_t)a2 < 0 ? -1 : (int64_t)((a2 + 9) / 10));
         case 8: return sys_lseek((int64_t)a0, (int64_t)a1, a2);
-        case 9: return sys_mmap(a0, a1, a2, a3, (int64_t)(int32_t)a4, a5);
+        case 9: {
+            uint64_t r = sys_mmap(a0, a1, a2, a3, (int64_t)(int32_t)a4, a5);
+            mmap_hist_add(p, a1, (uint32_t)a2, (uint32_t)a3, (int32_t)a4);
+            return r;
+        }
         case 10: return sys_mprotect(a0, a1, a2);
         case 11: return sys_munmap(a0, a1);
         case 12: return sys_brk(a0);
@@ -2681,7 +2771,27 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 22: return sys_pipe2((int32_t *)a0, 0);
         case 23: return do_select(a0, (uint8_t *)a1, (uint8_t *)a2, (uint8_t *)a3, ts_ticks((const uint64_t *)a4, 1));
         case 24: sched_yield(); return 0;
-        case 25: return lx_res(lxvm_mremap(p, a0, a1, a2, (uint32_t)a3, a4));
+        case 25: {
+            uint64_t r = lx_res(lxvm_mremap(p, a0, a1, a2, (uint32_t)a3, a4));
+            static uint32_t shown;
+            if (lx_trace_opens && shown < 40) {     /* what mremap is asked (tracing) */
+                shown++;
+                serial_write("lx mremap ");
+                serial_write(p->name);
+                serial_write(" old ");
+                prof_hex(a0);
+                serial_write(" ");
+                dump_num((int64_t)a1);
+                serial_write(" -> ");
+                dump_num((int64_t)a2);
+                serial_write(" flags ");
+                dump_num((int64_t)a3);
+                serial_write(" = ");
+                prof_hex(r);
+                serial_write("\n");
+            }
+            return r;
+        }
         case 28: return lx_res(lxvm_madvise(p, a0, a1, (int)a2));
         case 32: return sys_fcntl((int64_t)a0, 0, 0);
         case 33: return sys_dup3((int64_t)a0, (int64_t)a1, 0, 1);
@@ -2924,6 +3034,7 @@ void lx_init(void) {
     static const char stub[] = "#!/bin/busybox\n";
     char path[64];
     vfs_node_t *root = vfs_root();
+    lxvm_init_reclaim();
     if (!vfs_resolve(root, "/bin/busybox")) return;
     for (uint64_t i = 0; i < sizeof(bb_applets) / sizeof(bb_applets[0]); i++) {
         kstrcpy(path, "/bin/", sizeof(path));
@@ -2979,7 +3090,9 @@ static void dump_num(int64_t v) {
 static void lx_dump(void) {
     thread_t *start = sched_current_thread(), *t = start;
     static const char *const st[] = { "ready", "running", "blocked", "stopped", "zombie" };
-    serial_write("lxdump:\n");
+    serial_write("lxdump: at ms ");
+    dump_num((int64_t)(tsc_us() / 1000));
+    serial_write("\n");
     do {
         process_t *p = t->owner;
         if (p && p->linux_personality && t->state != THREAD_ZOMBIE) {
@@ -2994,6 +3107,9 @@ static void lx_dump(void) {
             if (t->state == THREAD_BLOCKED) {
                 serial_write(" why ");
                 dump_num((int64_t)t->block_reason);
+                if (t->wake_tick) { serial_write(" wake+"); dump_num((int64_t)(t->wake_tick - sched_ticks())); }
+                if (t->event_wait) { serial_write(" ev"); dump_num(t->nwait_keys); }
+                if (t->block_reason == THREAD_BLOCK_FUTEX) { serial_write(" fx"); dump_num((int64_t)(t->futex_addr & 0xFFFFFF)); }
             }
             serial_write(" in ");
             dump_num(t->lx_cur_nr);
@@ -3067,6 +3183,13 @@ void lx_prof_tick(struct registers *regs) {
     thread_t *t = sched_current_thread();
     process_t *p = t ? t->owner : 0;
     prof_sample_t *s;
+    {   /* tracing: every 10 s, /dev/lxdumparm: every 5 s */
+        static uint64_t next_dump;
+        if ((lx_trace_opens || lx_dump_timed) && this_cpu()->index == 0 && sched_ticks() >= next_dump) {
+            next_dump = sched_ticks() + (lx_dump_timed ? 500 : 1000);
+            lx_dump();
+        }
+    }   /* tracing: every 10 s */
     if (!prof || prof_n >= PROF_N) return;
     s = &prof[prof_n++];
     s->cpu = (uint8_t)this_cpu()->index;
@@ -3175,7 +3298,30 @@ static void lx_prof_report(void) {
         prof_tsc0 = tsc_read();
         for (int i = 0; i < SMP_MAX_CPUS; i++) bkl_spin_cycles[i] = 0;
         serial_write("lxprof: started\n");
+        mmap_hist_on = 1;
         return;
+    }
+    {   /* the most frequent mmap calls since the last report */
+        serial_write("lxprof mmap calls (count process length prot flags file):\n");
+        for (int k = 0; k < 12; k++) {
+            int best = -1;
+            for (int i = 0; i < 128; i++)
+                if (mmap_hist[i].n && (best < 0 || mmap_hist[i].n > mmap_hist[best].n)) best = i;
+            if (best < 0) break;
+            serial_write("  ");
+            dump_num(mmap_hist[best].n);
+            serial_write(" ");
+            serial_write(mmap_hist[best].p ? mmap_hist[best].p->name : "?");
+            serial_write(" ");
+            dump_num((int64_t)mmap_hist[best].len);
+            serial_write(" ");
+            dump_num(mmap_hist[best].prot);
+            serial_write(" ");
+            prof_hex(mmap_hist[best].flags);
+            serial_write(mmap_hist[best].file ? " file\n" : " anon\n");
+            mmap_hist[best].n = 0;
+        }
+        for (int i = 0; i < 128; i++) mmap_hist[i].n = 0;
     }
     b = (prof_bucket_t *)kmalloc(sizeof(prof_bucket_t) * cap);
     serial_write("lxprof: ");
@@ -3287,6 +3433,25 @@ static void lx_prof_report(void) {
         dump_num((int64_t)(lxvm_stat.miss_cycles / per_us));
         serial_write("\n");
         {
+            static const char *const kind[3] = { "anonymous", "file", "memory object" };
+            for (int k = 0; k < 3; k++) {
+                serial_write("lxprof pages ");
+                serial_write(kind[k]);
+                serial_write(": ");
+                dump_num((int64_t)lxvm_stat.pages[k]);
+                serial_write(", us ");
+                dump_num((int64_t)(lxvm_stat.kind_cycles[k] / per_us));
+                serial_write("\n");
+            }
+        }
+        serial_write("lxprof anonymous page steps us: allocate ");
+        dump_num((int64_t)(lxvm_stat.step_cycles[0] / per_us));
+        serial_write(", zero ");
+        dump_num((int64_t)(lxvm_stat.step_cycles[1] / per_us));
+        serial_write(", map ");
+        dump_num((int64_t)(lxvm_stat.step_cycles[2] / per_us));
+        serial_write("\n");
+        {
             lxvm_stat_t zero = { 0 };
             lxvm_stat = zero;
         }
@@ -3312,4 +3477,41 @@ static void lx_report_stack(process_t *p, uint64_t rsp) {
         serial_write("\n");
         shown++;
     }
+}
+
+/* ---- vDSO -----------------------------------------------------------------
+ * kernel/linux/vdso: clock_gettime in user space.  One data page (vvar:
+ * the TSC rate and the boot time, read only) and the library's page are
+ * shared by every Linux process, mapped at LX_VDSO_BASE (vvar) and one page
+ * above it (the library, named in AT_SYSINFO_EHDR). */
+#define LX_VDSO_BASE 0x00007FF000000000ULL
+extern const char lx_vdso_start[], lx_vdso_end[];
+static uint64_t vdso_vvar_phys, vdso_code_phys;
+
+typedef struct { uint64_t per_us, real_offset_ns; } lx_vvar_t;
+
+/* maps the vDSO into p's address space; returns the library's address, 0 if none */
+uint64_t lx_vdso_map(process_t *p) {
+    uint64_t size = (uint64_t)(lx_vdso_end - lx_vdso_start);
+    if (!p || !p->addr_space || !size || size > PAGE_SIZE_4K) return 0;
+    if (!vdso_code_phys) {
+        lx_vvar_t *vv;
+        char *code;
+        vdso_vvar_phys = pmm_alloc();
+        vdso_code_phys = pmm_alloc();
+        if (!vdso_vvar_phys || !vdso_code_phys) return 0;
+        kzero(PHYS_TO_VIRT(vdso_vvar_phys), PAGE_SIZE_4K);
+        kzero(PHYS_TO_VIRT(vdso_code_phys), PAGE_SIZE_4K);
+        code = (char *)PHYS_TO_VIRT(vdso_code_phys);
+        kcopy(code, lx_vdso_start, size);
+        vv = (lx_vvar_t *)PHYS_TO_VIRT(vdso_vvar_phys);
+        /* the same clock as lx_mono_ns / lx_realtime_ns */
+        vv->real_offset_ns = (now_epoch() - sched_ticks() / 100) * 1000000000ULL;
+        vv->per_us = tsc_hz() ? tsc_hz() / 1000000ULL : 0;
+    }
+    if (vmm_map_page(p->addr_space, LX_VDSO_BASE, vdso_vvar_phys, VMM_FLAGS_USER_RO | VMM_NOFREE) != 0 ||
+        vmm_map_page(p->addr_space, LX_VDSO_BASE + PAGE_SIZE_4K, vdso_code_phys, VMM_FLAGS_USER_RO | VMM_NOFREE) != 0)
+        return 0;
+    (void)lxvm_reserve(p, LX_VDSO_BASE, LX_VDSO_BASE + 2 * PAGE_SIZE_4K, 5);   /* read + exec: mmap stays away */
+    return LX_VDSO_BASE + PAGE_SIZE_4K;
 }

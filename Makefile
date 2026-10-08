@@ -17,7 +17,7 @@ SERIAL_SHELL_MIRROR ?= 0
 AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody.wav userspace/hava_clip.wav)
 ICON_ICOS := $(wildcard resources/icons/*.ico)
 
-CFLAGS = -ffreestanding -O0 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -fno-asynchronous-unwind-tables -Ikernel -I. -fno-stack-protector \
          -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -mno-red-zone \
          -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR) \
@@ -105,6 +105,16 @@ wifi.o: $(IWM_DIR)/wifi.c $(IWM_HEADERS) kernel/net/net.h kernel/fs/vfs.h Makefi
 
 wifi_fw_assets.o: kernel/proc/wifi_fw_assets.asm resources/firmware/iwlwifi-8000C-36.ucode
 	$(ASM) -f elf64 kernel/proc/wifi_fw_assets.asm -o wifi_fw_assets.o
+
+# vDSO of the Linux personality (clock_gettime without a system call)
+kernel/linux/vdso/vdso.so: kernel/linux/vdso/vdso.c kernel/linux/vdso/vdso.lds
+	$(CC) -O2 -fPIC -nostdlib -shared -fno-asynchronous-unwind-tables -fno-stack-protector -fno-builtin \
+	      -Wl,-T,kernel/linux/vdso/vdso.lds -Wl,--hash-style=sysv -Wl,-soname=linux-vdso.so.1 -Wl,--no-undefined \
+	      -o /tmp/icda-vdso.so kernel/linux/vdso/vdso.c
+	cp -f /tmp/icda-vdso.so $@
+
+vdso_blob.o: kernel/linux/vdso/vdso_blob.asm kernel/linux/vdso/vdso.so
+	$(ASM) -f elf64 kernel/linux/vdso/vdso_blob.asm -o vdso_blob.o
 
 # Host unit test for the WPA2 crypto and handshake (802.11i test vectors)
 wifi-crypto-test:
@@ -1194,21 +1204,21 @@ user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS)
+            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o gdt_flush.o isr_asm.o \
-	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc
 
 kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
-            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS)
+            sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
 	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
-	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) -lgcc
+	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc
 
 kernel.iso: kernel.bin
 	mkdir -p isodir/boot/grub

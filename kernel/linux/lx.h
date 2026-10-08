@@ -21,5 +21,7 @@ int      lx_overlay_path(char *path);
 int      lx_fault_signal(struct registers *regs, int sig, uint64_t addr);
 /* sampling profiler: every timer tick on every CPU (/dev/lxprof reports) */
 void     lx_prof_tick(struct registers *regs);
+/* maps the vDSO into a Linux program; the address for AT_SYSINFO_EHDR, 0 if none */
+uint64_t lx_vdso_map(process_t *p);
 
 #endif

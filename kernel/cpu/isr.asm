@@ -86,6 +86,7 @@ IRQ 13, 45
 IRQ 14, 46    
 IRQ 15, 47    
 IRQ 16, 48
+IRQ 17, 49            ; TLB shootdown (smp.c)
 SYSCALL syscall128, 128
 
 %define GDT_KERNEL_DATA 0x10

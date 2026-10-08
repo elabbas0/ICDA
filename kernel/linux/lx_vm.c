@@ -91,14 +91,15 @@ static void vma_free(lx_vma_t *v) {
  * and faults come in runs at nearby addresses: the last region found for a
  * few processes is remembered.  A remembered region is trusted only while
  * no region has been freed or a list swapped since (vma_epoch). */
-static struct { process_t *p; lx_vma_t *v; uint64_t epoch; } find_hint[8];
+static struct { process_t *p; lx_vma_t *v; uint64_t epoch; } find_hint[64];
 
 void lxvm_forget_hints(void) {
     vma_epoch++;
 }
 
 static lx_vma_t *find(process_t *p, uint64_t addr) {
-    uint32_t h = (uint32_t)(((uintptr_t)p >> 6) & 7);
+    /* by process and 2 MB area: threads faulting in different places keep their own */
+    uint32_t h = (uint32_t)((((uintptr_t)p >> 6) ^ (addr >> 21)) & 63);
     lx_vma_t *hv = find_hint[h].v;
     if (find_hint[h].p == p && find_hint[h].epoch == vma_epoch && addr >= hv->start && addr < hv->end) return hv;
     for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v && v->start <= addr; v = v->next)
@@ -276,7 +277,18 @@ static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
 }
 
 /* gives the page at va its memory (zeroes or the file's bytes) */
+static int populate_page(process_t *p, lx_vma_t *v, uint64_t va);
+
+/* profiler: time per kind of page */
 static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
+    uint64_t t0 = tsc_read();
+    int k = v->file ? 2 : v->node ? 1 : 0, r = populate_page(p, v, va);
+    lxvm_stat.pages[k]++;
+    lxvm_stat.kind_cycles[k] += tsc_read() - t0;
+    return r;
+}
+
+static int populate_page(process_t *p, lx_vma_t *v, uint64_t va) {
     uint64_t phys, src = 0;
     char *mem;
     if (v->file) {
@@ -308,17 +320,29 @@ static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
             return 0;
         }
     }
-    phys = pmm_alloc();
-    if (!phys) return -1;
-    mem = (char *)PHYS_TO_VIRT(phys);
-    for (int i = 0; i < (int)(PAGE / 8); i++) ((uint64_t *)mem)[i] = src ? ((uint64_t *)PHYS_TO_VIRT(src))[i] : 0;
+    {
+        uint64_t t0 = tsc_read(), t1, t2;
+        phys = pmm_alloc();
+        t1 = tsc_read();
+        if (!phys) return -1;
+        mem = (char *)PHYS_TO_VIRT(phys);
+        for (int i = 0; i < (int)(PAGE / 8); i++) ((uint64_t *)mem)[i] = src ? ((uint64_t *)PHYS_TO_VIRT(src))[i] : 0;
+        t2 = tsc_read();
+        lxvm_stat.step_cycles[0] += t1 - t0;
+        lxvm_stat.step_cycles[1] += t2 - t1;
+    }
     if (v->node) {
         uint64_t off = v->off + (va - v->start), size = vfs_node_size(v->node);
         if (off < size) (void)vfs_node_read_at(v->node, off, mem, size - off < PAGE ? size - off : PAGE);
     }
-    if (vmm_map_page(p->addr_space, va, phys, pte_flags(v->prot)) != 0) {
-        pmm_free(phys);
-        return -1;
+    {
+        uint64_t t0 = tsc_read();
+        int bad = vmm_map_page(p->addr_space, va, phys, pte_flags(v->prot)) != 0;
+        lxvm_stat.step_cycles[2] += tsc_read() - t0;
+        if (bad) {
+            pmm_free(phys);
+            return -1;
+        }
     }
     return 0;
 }
@@ -346,7 +370,7 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
     phys = vmm_virt_to_phys(p->addr_space, va);
     if (!phys) {
         r = populate(p, v, va) == 0;
-        if (r) {
+        if (r && pmm_free_frames() > pmm_usable_frames() / 4) {   /* not when memory is short */
             uint64_t from = va & ~(FAULT_AROUND * PAGE - 1), to = from + FAULT_AROUND * PAGE;
             if (from < v->start) from = v->start;
             if (to > v->end) to = v->end;
@@ -477,7 +501,10 @@ int64_t lxvm_mremap(process_t *p, uint64_t old, uint64_t old_len, uint64_t new_l
     if ((old & (PAGE - 1)) || !news) return -E_INVAL;
     v = find(p, old);
     if (!v) {
-        if (in_stack(old)) return news <= olds ? (int64_t)old : -E_NOMEM;
+        /* the main stack looks like Linux's: an 8 MB mapping (its size limit).  musl
+         * measures it by growing pages downwards until mremap stops saying
+         * ENOMEM; past the mapping Linux says EFAULT */
+        if (in_stack(old) && USER_STACK_TOP - old <= 8ULL * 1024 * 1024) return news <= olds ? (int64_t)old : -E_NOMEM;
         return -E_FAULT;
     }
     if (!olds) return -E_INVAL;                          /* duplicating shared mappings: not supported */
@@ -660,4 +687,31 @@ int lxvm_lookup(process_t *p, uint64_t addr, struct vfs_node **node, uint64_t *o
     *node = v->node;
     *off = (v->node ? v->off : 0) + (addr - v->start);
     return 1;
+}
+
+/* Memory is short: drop cached file pages no process maps (the cache holds
+ * the only reference), up to want frames.  Called by pmm_alloc before it
+ * gives up. */
+static uint64_t pc_reclaim(uint64_t want) {
+    uint64_t freed = 0;
+    for (uint32_t b = 0; b < PC_BUCKETS && freed < want; b++) {
+        pcent_t **pp = &pc_tab[b];
+        while (*pp && freed < want) {
+            pcent_t *e = *pp;
+            if (pmm_refcount(e->phys) == 1) {
+                *pp = e->next;
+                pmm_free(e->phys);
+                kfree(e);
+                pc_pages--;
+                freed++;
+                continue;
+            }
+            pp = &e->next;
+        }
+    }
+    return freed;
+}
+
+void lxvm_init_reclaim(void) {
+    pmm_set_reclaim(pc_reclaim);
 }

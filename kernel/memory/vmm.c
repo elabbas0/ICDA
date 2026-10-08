@@ -2,6 +2,7 @@
 #include "pmm.h"
 #include "../cpu/multiboot2.h"
 #include "../cpu/pat.h"
+#include "../cpu/smp.h"
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 
@@ -148,11 +149,14 @@ int vmm_map_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags)
     if (!(*pte & PTE_PRESENT) && as && !(flags & VMM_GLOBAL)) {
         as->mapped_pages++;
     }
-    *pte = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;
-    vmm_invlpg(virt);
+    {
+        pte_t old = *pte, nv = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;
+        *pte = nv;
+        vmm_invlpg(virt);
+        if ((old & PTE_PRESENT) && old != nv && virt < 0x0000800000000000ULL) tlb_shootdown(as);
+    }
     return 0;
 }
-
 void vmm_unmap_page(addr_space_t *as, uint64_t virt, int free_phys) {
     virt &= ~0xFFFULL;
     pte_t *pte = get_pte(as, virt, 0);
@@ -163,6 +167,7 @@ void vmm_unmap_page(addr_space_t *as, uint64_t virt, int free_phys) {
     }
     *pte = 0;
     vmm_invlpg(virt);
+    tlb_shootdown(as);
 }
 
 int vmm_map_range(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
@@ -367,6 +372,7 @@ addr_space_t *vmm_clone_user(addr_space_t *src) {
         __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
         __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
     }
+    tlb_shootdown(src);                    /* its writable pages are copy-on-write now */
     return dst;
 fail:
     vmm_destroy_address_space(dst);
@@ -393,6 +399,7 @@ int vmm_cow_break(addr_space_t *as, uint64_t virt) {
     }
     *pte = frame | flags;
     vmm_invlpg(virt & ~0xFFFULL);
+    tlb_shootdown(as);
     return 0;
 }
 
@@ -489,6 +496,7 @@ int vmm_init(uint64_t fb_phys, uint64_t fb_size) {
 void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
                    void (*fn)(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx), void *ctx) {
     pte_t *pml4;
+    int visited = 0;
     uint64_t va = start & ~0xFFFULL;
     if (end > 0x0000800000000000ULL) end = 0x0000800000000000ULL;
     if (!as) return;
@@ -506,10 +514,12 @@ void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
         pt = pt_ptr(PTE_FRAME(pd[i2]));
         for (i1 = VA_PT_IDX(va); i1 < 512 && va < end; i1++, va += PAGE_SIZE_4K) {
             if (!(pt[i1] & PTE_PRESENT)) continue;
+            visited = 1;
             fn(as, va, &pt[i1], ctx);
             vmm_invlpg(va);
         }
     }
+    if (visited) tlb_shootdown(as);            /* other CPUs running this space */
 }
 
 /* Bookkeeping for a page entry the walker cleared */

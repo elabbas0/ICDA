@@ -233,6 +233,10 @@ static int build_stack(process_t *proc, uint64_t *rsp_out, uint64_t argc, char *
         AUX(23, 0);
         AUX(25, random_va);
         if (execfn_va) AUX(31, execfn_va);
+        {
+            uint64_t vdso = lx_vdso_map(proc);  /* clock_gettime without a system call */
+            if (vdso) AUX(33, vdso);
+        }
 #undef AUX
     }
     auxv[aux_n++] = 0;

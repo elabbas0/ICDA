@@ -1,4 +1,4 @@
-param([string]$Disk = ".verify/disk-win.img", [string]$Machine = "q35", [switch]$Audio, [string]$Iso = "", [int]$Wait = 30, [switch]$FreshVars)
+param([string]$Extra = "", [string]$Disk = ".verify/disk-win.img", [string]$Machine = "q35", [switch]$Audio, [string]$Iso = "", [int]$Wait = 30, [switch]$FreshVars)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -12,6 +12,7 @@ $args = @("-machine", $Machine, "-smp", "2", "-m", "2G",
           "-nic", "user,model=e1000",
           "-display", "none", "-monitor", "none", "-serial", "file:.verify/serial.log",
           "-qmp", "tcp:127.0.0.1:4444,server,nowait", "-no-reboot")
+if ($Extra) { $args += @("-drive", "file=$Extra,format=raw,media=disk") }
 if ($Iso) { $args += @("-cdrom", $Iso) }
 if ($Audio) { $args += @("-audiodev", "wav,id=snd0,path=.verify/audio-out.wav", "-device", "intel-hda", "-device", "hda-output,audiodev=snd0") }
 Start-Process -FilePath "C:\Users\elabbas\tools\qemu\qemu-system-x86_64.exe" -ArgumentList $args -WindowStyle Hidden

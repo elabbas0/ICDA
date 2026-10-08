@@ -25,12 +25,24 @@ static void print_dec64(uint64_t v) {
     console_write_dec64(v, CONSOLE_STYLE_INFO);
 }
 
+/* One bit per bitmap word: set while that word has a free frame.  pmm_alloc
+ * skips 4096 used frames per summary bit instead of scanning word by word
+ * (after a free, the search restarts low, and a busy system is mostly full
+ * there).  Valid once pmm_init has built it (summary_ready). */
+#define SUMMARY_WORDS 8192ULL               /* up to 128 GB of frames */
+static uint64_t summary[SUMMARY_WORDS];
+static int      summary_ready;
+
 static inline void frame_set(uint64_t frame) {
-    bitmap[WORD_INDEX(frame)] |= (1ULL << BIT_INDEX(frame));
+    uint64_t w = WORD_INDEX(frame);
+    bitmap[w] |= (1ULL << BIT_INDEX(frame));
+    if (summary_ready && bitmap[w] == ~0ULL) summary[w / 64] &= ~(1ULL << (w % 64));
 }
 
 static inline void frame_clear(uint64_t frame) {
-    bitmap[WORD_INDEX(frame)] &= ~(1ULL << BIT_INDEX(frame));
+    uint64_t w = WORD_INDEX(frame);
+    bitmap[w] &= ~(1ULL << BIT_INDEX(frame));
+    if (summary_ready) summary[w / 64] |= 1ULL << (w % 64);
 }
 
 static inline int frame_used(uint64_t frame) {
@@ -222,13 +234,51 @@ void pmm_init(void *multiboot_info) {
             break;
         }
     }
+
+    if (bitmap_words <= SUMMARY_WORDS * 64) {
+        for (uint64_t i = 0; i < bitmap_words; i++)
+            if (bitmap[i] != ~0ULL) summary[i / 64] |= 1ULL << (i % 64);
+        summary_ready = 1;
+    }
 }
 
-uint64_t pmm_alloc() {
-    uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
+static uint64_t (*reclaim_hook)(uint64_t want);
 
-    for (uint64_t w = WORD_INDEX(next_free); w < bitmap_words; w++) {
-        if (bitmap[w] == ~0ULL) continue;
+void pmm_set_reclaim(uint64_t (*fn)(uint64_t want)) {
+    reclaim_hook = fn;
+}
+
+static uint64_t pmm_alloc_scan(void);
+
+/* a frame; when none is free, caches give some back (reclaim_hook) first */
+uint64_t pmm_alloc() {
+    uint64_t f = pmm_alloc_scan();
+    if (!f && reclaim_hook && reclaim_hook(4096)) {
+        next_free = 0;
+        f = pmm_alloc_scan();
+    }
+    return f;
+}
+
+static uint64_t pmm_alloc_scan(void) {
+    uint64_t bitmap_words = (total_frames + FRAMES_PER_WORD - 1) / FRAMES_PER_WORD;
+    uint64_t w = WORD_INDEX(next_free);
+
+    while (w < bitmap_words) {
+        if (summary_ready) {
+            uint64_t bits = summary[w / 64] & (~0ULL << (w % 64));
+            if (!bits) {
+                w = (w / 64 + 1) * 64;
+                continue;
+            }
+            w = (w / 64) * 64 + (uint64_t)__builtin_ctzll(bits);
+            if (w >= bitmap_words) break;
+        }
+        if (bitmap[w] == ~0ULL) {
+            if (summary_ready) summary[w / 64] &= ~(1ULL << (w % 64));
+            w++;
+            continue;
+        }
 
         uint64_t bit   = __builtin_ctzll(~bitmap[w]);
         uint64_t frame = w * FRAMES_PER_WORD + bit;
@@ -248,12 +298,25 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
     if (count == 0) return 0;
     if (count == 1) return pmm_alloc();
 
-    uint64_t run_start = 0, run_len = 0;
-
-    for (uint64_t f = 0; f < total_frames; f++) {
+    /* first fit from the start, skipping full bitmap words (and, with the
+     * summary, full groups of 64 words) instead of testing every frame */
+    uint64_t run_start = 0, run_len = 0, f = 0;
+    while (f < total_frames) {
+        uint64_t w = WORD_INDEX(f);
+        if (BIT_INDEX(f) == 0) {
+            if (summary_ready && (w % 64) == 0 && !(summary[w / 64])) {
+                run_len = 0;
+                f += 64 * FRAMES_PER_WORD;
+                continue;
+            }
+            if (bitmap[w] == ~0ULL) {
+                run_len = 0;
+                f += FRAMES_PER_WORD;
+                continue;
+            }
+        }
         if (!frame_used(f)) {
             if (run_len == 0) run_start = f;
-
             if (++run_len == count) {
                 for (uint64_t i = run_start; i < run_start + count; i++) {
                     frame_set(i);
@@ -264,6 +327,7 @@ uint64_t pmm_alloc_contiguous(uint64_t count) {
         } else {
             run_len = 0;
         }
+        f++;
     }
 
     return 0;

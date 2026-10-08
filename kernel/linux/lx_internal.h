@@ -58,6 +58,8 @@ lx_file_t *lxi_file_new(const lx_fops_t *ops, void *obj, uint64_t flags);   /* o
 void       lxi_file_ref(lx_file_t *f);
 void       lxi_file_unref(lx_file_t *f);
 lx_file_t *lxi_fd_file(int64_t fd);                          /* current process; 0 if not open */
+/* lx_ipc.c offers: what a waiter on f waits for (sched_event_wait) */
+void       lxi_wait_on_file(lx_file_t *f);
 int64_t    lxi_fd_install(lx_file_t *f, int cloexec);        /* takes the reference; fd or -errno */
 int        lxi_file_ready(lx_file_t *f, int want_write);
 int        lxi_interrupted(void);                            /* a signal is waiting */

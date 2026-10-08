@@ -1,10 +1,10 @@
-param([int]$Wait = 30, [string]$Extra = "", [string]$Accel = "")
+param([int]$Wait = 30, [string]$Extra = "", [string]$Accel = "", [string]$Smp = "2")
 # live ISO + persistence disk + FAT32 media test disk, HDA audio recorded to audio-out.wav
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
-$a = @("-machine","q35","-smp","2","-m","4G","-cdrom","kernel.iso","-boot","d",
+$a = @("-machine","q35,memory-backend=ram0","-object","memory-backend-ram,id=ram0,size=4G,prealloc=on","-smp",$Smp,"-m","4G","-cdrom","kernel.iso","-boot","d",
  "-drive","file=.verify/disk.img,format=raw,media=disk",
  "-drive","file=.verify/mediadisk.img,format=raw,media=disk",
  "-nic","user,model=e1000",

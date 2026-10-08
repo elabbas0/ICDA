@@ -566,7 +566,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi run exit\n");
+    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi webkit run exit\n");
 }
 
 static void shell_pwd(void) {
@@ -1150,6 +1150,57 @@ static void wifi_follow_connect(const char *ssid) {
     icda_write("still trying in the background; see 'wifi status' and 'wifi log'\n");
 }
 
+/* webkit: Surfer's engine (a Linux root in a "linux" folder).
+ * "webkit install" copies it from another volume (the USB stick it came on)
+ * to this system's partition, where Surfer finds it after a restart. */
+static void shell_webkit(char *arg) {
+    icda_disk_edit_t req;
+    uint64_t finished, last_pct = 101;
+    while (arg && *arg == ' ') arg++;
+    if (!arg || !*arg || !str_eq(arg, "install")) {
+        icda_write("usage: webkit install   (copy WebKit from a USB stick to this system)\n");
+        return;
+    }
+    { char *z = (char *)&req; for (uint64_t i = 0; i < sizeof(req); i++) z[i] = 0; }
+    req.op = 6;
+    icda_disk_edit(&req);
+    finished = req.partition;
+    { char *z = (char *)&req; for (uint64_t i = 0; i < sizeof(req); i++) z[i] = 0; }
+    req.op = 7;
+    if (icda_disk_edit(&req) != 0) {
+        icda_write("webkit: could not start (an install is already running?)\n");
+        return;
+    }
+    icda_write("installing WebKit (about 530 MB, a few minutes)...\n");
+    for (;;) {
+        icda_sleep(50);
+        { char *z = (char *)&req; for (uint64_t i = 0; i < sizeof(req); i++) z[i] = 0; }
+        req.op = 6;
+        icda_disk_edit(&req);
+        if (req.sectors) {
+            uint64_t pct = req.start_lba * 100 / req.sectors;
+            if (pct != last_pct && pct % 5 == 0) {
+                char line[48];
+                int n = 0;
+                uint64_t v = pct;
+                char d[8];
+                int k = 0;
+                do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+                while (k) line[n++] = d[--k];
+                line[n++] = '%';
+                line[n++] = '\n';
+                line[n] = 0;
+                icda_write(line);
+                last_pct = pct;
+            }
+        }
+        if (req.partition != finished) break;
+    }
+    if ((int32_t)req.fs == 0) icda_write("WebKit installed. Restart ICDA, then Surfer uses it.\n");
+    else if ((int32_t)req.fs == -3) icda_write("webkit: no WebKit found - plug in the ICDA USB stick (it has a linux folder)\n");
+    else icda_write("webkit: the copy failed\n");
+}
+
 static void shell_wifi(char *arg) {
     char *p = arg ? arg : (char *)"";
     char *sub = wifi_take_arg(&p);
@@ -1313,6 +1364,7 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "diskman")) { shell_diskman(); return; }
     if (str_eq(line, "curl")) { shell_curl(arg); return; }
     if (str_eq(line, "wifi")) { shell_wifi(arg); return; }
+    if (str_eq(line, "webkit")) { shell_webkit(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line, arg)) {

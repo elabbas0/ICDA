@@ -266,6 +266,31 @@ static tab_t *tab_of_exp(void *data) {
     return (tab_t *)data;
 }
 
+/* ---- diagnostics: WPE_TIMING prints when a load is asked for, starts,
+ * commits and finishes, and the first picture after the commit (CLOCK_MONOTONIC
+ * milliseconds: the kernel's clock).  WPE_THEN="seconds url" loads url that
+ * long after the start, as the address bar does. -------------------------- */
+static int timing_on, timing_painted;
+
+static void timing(const char *what, const char *detail) {
+    if (timing_on) fprintf(stderr, "icda-webkit timing: %s at ms %u %s\n", what, now_ms(), detail ? detail : "");
+}
+
+static void on_load_changed(WebKitWebView *v, WebKitLoadEvent ev, gpointer d) {
+    static const char *const names[] = { "started", "redirected", "committed", "finished" };
+    (void)d;
+    if (ev == WEBKIT_LOAD_COMMITTED) timing_painted = 0;
+    timing(ev <= WEBKIT_LOAD_FINISHED ? names[ev] : "load event", webkit_web_view_get_uri(v));
+}
+
+static gboolean then_load(gpointer url) {
+    if (ntabs) {
+        timing("requested", (const char *)url);
+        webkit_web_view_load_uri(tabs[active]->view, (const char *)url);
+    }
+    return G_SOURCE_REMOVE;
+}
+
 static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *buffer) {
     tab_t *t = tab_of_exp(data);
     struct wl_shm_buffer *shm = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
@@ -289,6 +314,10 @@ static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer 
             wl_shm_buffer_end_access(shm);
         }
         if (t == tabs[active]) compose();
+        if (!timing_painted) {
+            timing_painted = 1;
+            timing("first picture", "");
+        }
     }
     wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
     wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(t->exp, buffer);
@@ -398,6 +427,7 @@ static int add_tab(const char *url, WebKitWebView *related) {
     g_signal_connect(t->view, "notify::estimated-load-progress", G_CALLBACK(on_progress), NULL);
     g_signal_connect(t->view, "notify::is-loading", G_CALLBACK(on_progress), NULL);
     g_signal_connect(t->view, "load-failed", G_CALLBACK(on_fail), NULL);
+    g_signal_connect(t->view, "load-changed", G_CALLBACK(on_load_changed), NULL);
     g_signal_connect(t->view, "mouse-target-changed", G_CALLBACK(on_hover), NULL);
     g_signal_connect(t->view, "create", G_CALLBACK(on_create), NULL);
     g_signal_connect(t->view, "web-process-terminated", G_CALLBACK(on_terminated), NULL);
@@ -405,6 +435,7 @@ static int add_tab(const char *url, WebKitWebView *related) {
     select_tab(ntabs - 1);
     if (url) {
         snprintf(t->uri, sizeof t->uri, "%s", url);
+        timing("requested", url);
         webkit_web_view_load_uri(t->view, url);
     }
     sync_addr();
@@ -823,6 +854,8 @@ int main(int argc, char **argv) {
     const char *url = argc > 1 && argv[1][0] ? argv[1] : HOME_URL;
     GMainLoop *loop;
 
+    timing_on = getenv("WPE_TIMING") != NULL;
+
     /* what WebKit needs on ICDA: software rendering, no sandbox helpers,
      * settings in memory, files under the user's home */
     env_default("HOME", "/home");
@@ -837,6 +870,10 @@ int main(int argc, char **argv) {
     /* no PulseAudio server here: sound goes through icdasink, and probing
      * for PulseAudio devices only costs time */
     env_default("GST_PLUGIN_FEATURE_RANK", "pulsesink:NONE,pulsesrc:NONE,pulsedeviceprovider:NONE");
+    /* the plugin registry made with the Linux root (tests/linux/mkroot.sh): with
+     * none, GStreamer reads every plugin (seconds of disk reads) on first use */
+    env_default("GST_REGISTRY", "/usr/lib/icda/gst-registry.bin");
+    env_default("GST_REGISTRY_UPDATE", "no");
 
     if (gui_open_window("Surfer", 1100, 720) != 0) {
         fprintf(stderr, "icda-webkit: no desktop window\n");
@@ -863,6 +900,13 @@ int main(int argc, char **argv) {
     set_status("", 1);
 
     g_timeout_add(10, poll_window, NULL);
+    if (getenv("WPE_THEN")) {
+        char *spec = g_strdup(getenv("WPE_THEN")), *sp = strchr(spec, 0x20);
+        if (sp) {
+            *sp = 0;
+            g_timeout_add((guint)(atof(spec) * 1000), then_load, sp + 1);
+        }
+    }
     loop = g_main_loop_new(NULL, FALSE);
     g_main_loop_run(loop);
     return 0;

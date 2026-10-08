@@ -6,6 +6,7 @@
 #include "initramfs.h"
 #include "persistfs.h"
 #include "vfs.h"
+#include "volumes.h"
 
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
@@ -108,6 +109,7 @@ void install_status_get(install_status_t *out) {
 }
 
 void install_status_finish(int rc) {
+    serial_write(rc == 0 ? "[install] finished\n" : "[install] failed\n");
     install_status.active = 0;
     install_status.finished++;
     install_status.rc = rc;
@@ -633,6 +635,13 @@ static int install_partitions(uint32_t efi_partition_index, uint32_t root_partit
         }
         total_files_written += sys_files;
     }
+    {   /* Surfer's engine; an install without it still works (Surfer's own engine) */
+        uint64_t wk_bytes = 0;
+        int wk = system_install_webkit_to(root_part, &wk_bytes);
+        if (wk == -3) install_progress("Installing WebKit", "Not found next to the system image", 0, 1);
+        else if (wk != 0) install_progress("Installing WebKit", "Could not copy it", 0, 1);
+        total_bytes_written += wk_bytes;
+    }
     install_progress("Preparing boot disk", "Writing EFI boot files", 0, 1);
     if (fat32_install_boot_partition(boot_part) != 0) {
         return -17;
@@ -759,5 +768,169 @@ int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partit
     rc = install_partitions(efi_partition_index, root_partition_index, swap_partition_index, files_installed,
                             bytes_installed);
     boot_files_release();
+    return rc;
+}
+
+/* ---- WebKit ---------------------------------------------------------------------
+ * Surfer's engine is WPE WebKit, which runs from a Linux root: a "linux"
+ * folder (Alpine's libraries, WebKit, GStreamer, fonts, and icda-webkit)
+ * that is too big for the kernel image (about 530 MB).  It travels next to
+ * the system image (the USB stick's top folder, see `make usb-sync`) and an
+ * install copies it to the system partition, where Surfer looks for it.
+ * The copy streams 1 MB at a time; a file's first piece creates it. */
+
+#define WK_CHUNK (1024ULL * 1024ULL)
+
+static void kstrcat_install(char *dst, const char *src, uint64_t cap) {
+    uint64_t n = 0;
+    while (n < cap && dst[n]) n++;
+    while (*src && n + 1 < cap) dst[n++] = *src++;
+    if (n < cap) dst[n] = 0;
+}
+
+typedef struct {
+    fatfs_t *vol;
+    char    *buf;
+    uint64_t total, done, files;
+} wk_copy_t;
+
+static void wk_measure(vfs_node_t *node, uint64_t *bytes, uint64_t *files) {
+    if (vfs_node_type(node) == VFS_NODE_DIR) {
+        uint64_t n = vfs_child_count(node);
+        for (uint64_t i = 0; i < n; i++) wk_measure(vfs_child_at(node, i), bytes, files);
+        return;
+    }
+    *bytes += vfs_node_size(node);
+    (*files)++;
+}
+
+/* dst: the path on the system partition so far ("/linux/usr/...") */
+static int wk_copy_tree(wk_copy_t *c, vfs_node_t *node, char *dst, uint64_t cap) {
+    uint64_t base = 0;
+    while (dst[base]) base++;
+    if (vfs_node_type(node) == VFS_NODE_DIR) {
+        uint64_t count = vfs_child_count(node);
+        (void)fatfs_mkdir(c->vol, dst);
+        for (uint64_t i = 0; i < count; i++) {
+            vfs_node_t *child = vfs_child_at(node, i);
+            const char *name = child ? vfs_node_name(child) : 0;
+            uint64_t n = 0;
+            if (!name) continue;
+            while (name[n]) n++;
+            if (base + 1 + n + 1 > cap) continue;
+            dst[base] = '/';
+            for (uint64_t k = 0; k <= n; k++) dst[base + 1 + k] = name[k];
+            if (wk_copy_tree(c, child, dst, cap) != 0) {
+                dst[base] = 0;
+                return -1;
+            }
+            dst[base] = 0;
+        }
+        return 0;
+    }
+    {
+        uint64_t size = vfs_node_size(node), off = 0;
+        install_progress("Installing WebKit", base > 7 ? dst + 7 : dst, c->done, c->total);
+        do {
+            uint64_t want = size - off < WK_CHUNK ? size - off : WK_CHUNK;
+            int64_t got = want ? vfs_node_read_at(node, off, c->buf, want) : 0;
+            const char *why = 0;
+            if (got < 0 || (uint64_t)got != want) why = "read";
+            else if (off == 0 ? fatfs_write(c->vol, dst, c->buf, want) != 0
+                              : fatfs_write_at(c->vol, dst, off, c->buf, want) != 0) why = off ? "write" : "create";
+            if (why) {
+                serial_write("[install] WebKit: could not ");
+                serial_write(why);
+                serial_write(" ");
+                serial_write(dst);
+                serial_write("\n");
+                return -1;
+            }
+            off += want;
+            c->done += want;
+        } while (off < size);
+        c->files++;
+    }
+    return 0;
+}
+
+/* a Linux root with Surfer's engine in it, not on the target partition */
+static vfs_node_t *wk_source(const partition_info_t *target, char *path, uint64_t cap) {
+    vfs_node_t *root = vfs_root(), *vols = vfs_resolve(root, "/volumes");
+    for (uint64_t i = 0; vols && i < vfs_child_count(vols); i++) {
+        vfs_node_t *v = vfs_child_at(vols, i), *l;
+        const char *name = v ? vfs_node_name(v) : 0;
+        uint64_t n = 0;
+        if (!name) continue;
+        path[0] = 0;
+        kstrcat_install(path, "/volumes/", cap);
+        kstrcat_install(path, name, cap);
+        if (volumes_path_is_on(path, target)) continue;
+        n = 0;
+        while (path[n]) n++;
+        kstrcat_install(path, "/linux/usr/bin/icda-webkit", cap);
+        if (!vfs_resolve(root, path)) continue;
+        path[n] = 0;
+        kstrcat_install(path, "/linux", cap);
+        l = vfs_resolve(root, path);
+        if (l && vfs_node_type(l) == VFS_NODE_DIR) return l;
+    }
+    if (vfs_resolve(root, "/linux/usr/bin/icda-webkit")) {
+        path[0] = 0;
+        kstrcat_install(path, "/linux", cap);
+        return vfs_resolve(root, "/linux");
+    }
+    return 0;
+}
+
+static int webkit_copy(const partition_info_t *part, fatfs_t *volp, char *src_path, char *dst, uint64_t *bytes_out);
+
+int system_install_webkit_to(const partition_info_t *part, uint64_t *bytes_out) {
+    /* on the heap: kernel stacks are small, and the copy nests deep */
+    fatfs_t *volp = (fatfs_t *)kmalloc(sizeof(fatfs_t));
+    char *src_path = (char *)kmalloc(160), *dst = (char *)kmalloc(512);
+    int r = -5;
+    if (volp && src_path && dst) r = webkit_copy(part, volp, src_path, dst, bytes_out);
+    kfree(volp);
+    kfree(src_path);
+    kfree(dst);
+    return r;
+}
+
+static int webkit_copy(const partition_info_t *part, fatfs_t *volp, char *src_path, char *dst, uint64_t *bytes_out) {
+    wk_copy_t c;
+    vfs_node_t *src;
+    int rc;
+    if (!part || part->fs_hint != PARTITION_FS_FAT32) return -2;
+    src = wk_source(part, src_path, 160);
+    if (!src) return -3;
+    if (fatfs_mount_part(volp, part) != 0) return -4;
+    c.vol = volp;
+    c.total = c.done = c.files = 0;
+    wk_measure(src, &c.total, &c.files);
+    c.files = 0;
+    c.buf = (char *)kmalloc(WK_CHUNK);
+    if (!c.buf) return -5;
+    serial_write("[install] WebKit from ");
+    serial_write(src_path);
+    serial_write("\n");
+    dst[0] = 0;
+    kstrcat_install(dst, "/linux", 512);
+    rc = wk_copy_tree(&c, src, dst, 512);
+    kfree(c.buf);
+    if (fatfs_flush(volp) != 0) rc = -1;
+    install_progress("Installing WebKit", rc == 0 ? "Done" : "Failed", c.done, c.total);
+    if (bytes_out) *bytes_out = c.done;
+    return rc == 0 ? 0 : -6;
+}
+
+/* the running system's own partition (an installed system) */
+int system_install_webkit(uint64_t *bytes_out) {
+    int idx = persistfs_active_partition();
+    const partition_info_t *self = idx >= 0 ? partition_get((uint32_t)idx) : 0;
+    int rc;
+    if (!self) return -1;
+    rc = system_install_webkit_to(self, bytes_out);
+    install_progress_done();
     return rc;
 }

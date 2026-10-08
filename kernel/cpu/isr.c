@@ -155,6 +155,11 @@ void irq_handler(struct registers* regs) {
     int irq = (int)regs->int_no - 32;
     int took;
 
+    if (irq == SMP_TLB_VECTOR - 32) {      /* TLB shootdown: no kernel lock needed */
+        tlb_service();
+        lapic_eoi();
+        return;
+    }
     if (irq == 0 || bsp_lapic_tick(irq)) sched_tick();
     took = bkl_enter();
     if (took) bkl_why(32 + irq);

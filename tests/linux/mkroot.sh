@@ -41,6 +41,16 @@ mkdir -p $S/usr/bin
 for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; done; true
 [ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
 [ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $S/usr/lib/gstreamer-1.0/ || true
+# GStreamer plugin registry, so programs do not read every plugin on first use
+# (icda-webkit sets GST_REGISTRY to it, with GST_REGISTRY_UPDATE=no)
+if [ -d $S/usr/lib/gstreamer-1.0 ]; then
+  apk add --no-cache gstreamer-tools >/dev/null
+  cp $S/usr/lib/gstreamer-1.0/libgsticda.so $R/usr/lib/gstreamer-1.0/ 2>/dev/null || true
+  mkdir -p $S/usr/lib/icda
+  cp /usr/bin/gst-inspect-1.0 $R/tmp-gst-inspect
+  GST_REGISTRY=/gst-registry.bin chroot $R /tmp-gst-inspect >/dev/null 2>&1 || true
+  cp $R/gst-registry.bin $S/usr/lib/icda/gst-registry.bin 2>/dev/null || true
+fi
 gcc -O2 -o /tmp/stage/dyntest tests/linux/dyn/dyntest.c -lz -pthread
 du -sh $S
 rm -rf .verify/linuxroot && cp -r $S .verify/linuxroot

@@ -760,6 +760,18 @@ typedef struct {
     char     name[36];
 } disk_edit_req_t;
 
+/* SYS_DISK_EDIT op 7: copies WebKit (a Linux root found on another volume)
+ * to this system's partition, reporting through the installer's status */
+static volatile int *webkit_install_running;
+
+static void webkit_install_thread(void) {
+    uint64_t bytes = 0;
+    int rc = system_install_webkit(&bytes);
+    install_status_finish(rc);
+    if (webkit_install_running) *webkit_install_running = 0;
+    for (;;) sched_sleep(100000);      /* done: stays asleep */
+}
+
 static uint64_t sys_disk_edit(void *user_req) {
     disk_edit_req_t req;
     int rc = -1;
@@ -806,6 +818,17 @@ static uint64_t sys_disk_edit(void *user_req) {
         for (uint64_t i = 0; st.stage[i] && n + 1 < sizeof(req.name); i++) req.name[n++] = st.stage[i];
         req.name[n] = 0;
         rc = 0;
+        break;
+    }
+    case 7: {   /* install WebKit on this system's partition, in the background */
+        static volatile int running;
+        install_status_t st;
+        install_status_get(&st);
+        if (running || st.active) { rc = -16; break; }
+        running = 1;
+        rc = proc_create_kernel(webkit_install_thread) ? 0 : -12;
+        if (rc != 0) running = 0;
+        webkit_install_running = &running;
         break;
     }
     default:

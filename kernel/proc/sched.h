@@ -27,6 +27,14 @@ process_t *sched_current_process(void);
 process_t *sched_first_process(void);
 process_t *sched_find_process(uint64_t pid);
 uint64_t   sched_idle_ticks(void);
+/* no timer preemption of the running thread until enabled again (nests) */
+void       sched_preempt_disable(void);
+void       sched_preempt_enable(void);
+/* sleep until sched_event_wake or one tick; wake every such sleeper */
+void       sched_event_wait(void);
+void       sched_event_wake(void);
+void       sched_wait_on(const void *key);
+void       sched_event_wake_key(const void *key);
 const char *sched_process_state_name(process_state_t state);
 uint64_t sched_ticks(void);
 void sched_sleep(uint64_t ticks);

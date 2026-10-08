@@ -26,6 +26,7 @@ static uint64_t next_tid = 0;
 
 #define SCHED_TICKS 1
 static uint64_t tick_count = 0;
+static volatile int preempt_off;
 static uint64_t uptime_ticks = 0;
 
 static void *alloc_object_page(void) {
@@ -107,11 +108,29 @@ static void sched_wake_parent_if_waiting(process_t *proc) {
     }
 }
 
+/* 1 while some processor still runs on t (its stack is in use) */
+static int thread_on_a_cpu(const thread_t *t) {
+    uint32_t n = smp_cpu_count();
+    if (n < 1) n = 1;
+    for (uint32_t i = 0; i < n; i++)
+        if (smp_cpus[i].current == t) return 1;
+    return 0;
+}
+
+/* Every tick on the BSP; also drops ended threads from the run ring.  They
+ * stayed in it for good, so every walk of the ring (each tick, each switch,
+ * each futex or event wake) grew with every thread ever started - WebKit
+ * starts thousands - and a CPU looking for work gave up after 4096 of them
+ * and idled while threads were ready.  Walks run under the kernel lock and
+ * start from a running thread, which is never dropped. */
 static void wake_blocked_threads(void) {
     thread_t *start = current_thread_ptr, *thread = start;
     if (!start) return;
     do {
         process_t *proc = thread->owner;
+        thread_t *n = thread->next;
+        while (n != start && n != thread && n->state == THREAD_ZOMBIE && !thread_on_a_cpu(n)) n = n->next;
+        thread->next = n;
         if (thread->state == THREAD_BLOCKED && thread->wake_tick != 0 && thread->wake_tick <= uptime_ticks &&
             (thread->block_reason == THREAD_BLOCK_SLEEP || thread->block_reason == THREAD_BLOCK_INPUT ||
              thread->block_reason == THREAD_BLOCK_FUTEX)) {
@@ -466,12 +485,6 @@ int sched_futex_requeue(uint64_t uaddr, uint64_t uaddr2, int n) {
     return moved;
 }
 
-/* a thread whose process already has a thread running on another CPU */
-static int busy_elsewhere(const thread_t *t) {
-    const process_t *p = t->owner;
-    return p && p->kind == PROCESS_USER && p->on_cpu && p->on_cpu != current_thread_ptr;
-}
-
 static void schedule_inner(int force) {
     thread_t *next;
     thread_t *prev;
@@ -485,17 +498,30 @@ static void schedule_inner(int force) {
     if (!force && ++this_cpu()->ticks % SCHED_TICKS != 0) {
         return;
     }
+    {
+        static uint64_t off_since, warned;
+        if (!force && preempt_off) {      /* a FAT operation is running (sched_preempt_disable) */
+            if (!off_since) off_since = uptime_ticks;
+            if (uptime_ticks - off_since > 200 && warned != off_since) {
+                warned = off_since;
+                serial_write("[sched] preemption off for 2 s\n");
+            }
+            return;
+        }
+        off_since = 0;
+    }
     (void)tick_count;
     (void)candidate_idle;
 
     /* Threads running on other CPUs are RUNNING and skipped; idle threads
      * are pinned to their CPU and only used when nothing else is ready. */
-    next = current_thread_ptr->next;
+    prev = current_thread_ptr;
+    next = prev->next;
     while (1) {
-        if (next->state == THREAD_READY && !next->pinned && !busy_elsewhere(next)) {
+        if (next->state == THREAD_READY && !next->pinned) {
             break;
         }
-        if (next == current_thread_ptr) {
+        if (next == prev) {
             if (next->state != THREAD_RUNNING || next->pinned) next = NULL;
             break;
         }
@@ -871,4 +897,72 @@ void sched_force_exit_all_user_processes(uint64_t exit_code) {
 /* ticks the processors spent in their idle threads, all CPUs added up */
 uint64_t sched_idle_ticks(void) {
     return idle_process ? idle_process->cpu_ticks : 0;
+}
+
+/* Kernel code that must not be interleaved with another thread's (a FAT
+ * operation on a shared partition) turns preemption off around itself; the
+ * timer then leaves the running thread alone.  Nests.  Yielding still
+ * switches, so the code must not sleep inside. */
+
+void sched_preempt_disable(void) {
+    preempt_off++;
+}
+
+void sched_preempt_enable(void) {
+    if (preempt_off > 0) preempt_off--;
+}
+
+/* Waiting for a file to become ready (poll, epoll, a pipe, socket or eventfd
+ * with nothing to read ...): the thread sleeps until something that can make
+ * a file ready happens (sched_event_wake: data written, a file closed, a
+ * network packet) or for one tick at most.  Polling once a tick cost every
+ * hand-off between processes up to 10 ms.  Both sides run under the kernel
+ * lock, so a wake cannot fall between a thread's check and its sleep. */
+static volatile int event_waiters;
+
+/* the objects the next sched_event_wait waits on (a pipe, a socket, an
+ * eventfd ...); a wake for one of them ends the wait */
+void sched_wait_on(const void *key) {
+    thread_t *t = current_thread_ptr;
+    if (!t || !key || t->nwait_keys < 0) return;
+    for (int i = 0; i < t->nwait_keys; i++)
+        if (t->wait_keys[i] == key) return;
+    if (t->nwait_keys < 16) t->wait_keys[t->nwait_keys++] = key;
+    else t->nwait_keys = -1;               /* too many: any wake ends it */
+}
+
+void sched_event_wait(void) {
+    thread_t *t = current_thread_ptr;
+    if (!t) return;
+    t->event_wait = 1;
+    event_waiters++;
+    sched_sleep(1);
+    event_waiters--;
+    t->event_wait = 0;
+    t->nwait_keys = 0;
+}
+
+/* wakes the threads waiting on key */
+void sched_event_wake_key(const void *key) {
+    if (!event_waiters || !current_thread_ptr || !key) return;
+    FOR_EACH_THREAD(t) {
+        if (!t->event_wait || t->state != THREAD_BLOCKED) continue;
+        if (t->nwait_keys < 0) {
+            sched_wake_thread(t);
+            continue;
+        }
+        for (int i = 0; i < t->nwait_keys; i++)
+            if (t->wait_keys[i] == key) {
+                sched_wake_thread(t);
+                break;
+            }
+    }
+}
+
+/* wakes every waiter (a process ended: many files at once) */
+void sched_event_wake(void) {
+    if (!event_waiters || !current_thread_ptr) return;
+    FOR_EACH_THREAD(t) {
+        if (t->event_wait && t->state == THREAD_BLOCKED) sched_wake_thread(t);
+    }
 }

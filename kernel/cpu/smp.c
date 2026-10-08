@@ -26,13 +26,73 @@ extern const uint8_t ap_trampoline_end[];
 extern void idt_reload(void);
 void cpu_syscall_init(void);
 
+/* Each application processor runs on the GDT in its cpu_t and the BSP keeps
+ * the boot GDT, so the GDT base names the CPU.  Reading the local APIC ID
+ * instead is an MMIO read - a VM exit under a hypervisor - and this runs on
+ * every kernel lock, TLB check and scheduler step. */
+static uint64_t bsp_gdt_base;
+
 cpu_t *this_cpu(void) {
+    struct gdt_ptr gp;
+    uint64_t off;
     if (cpu_count <= 1) return &smp_cpus[0];
+    __asm__ volatile("sgdt %0" : "=m"(gp));
+    if (gp.base == bsp_gdt_base) return &smp_cpus[0];
+    off = gp.base - (uint64_t)&smp_cpus[0].gdt;
+    if (off < sizeof(smp_cpus) && off % sizeof(cpu_t) == 0) return &smp_cpus[off / sizeof(cpu_t)];
     return &smp_cpus[apic_to_cpu[lapic_id() & 0xFF]];
 }
 
 uint32_t smp_cpu_count(void) {
     return cpu_count;
+}
+
+/* ---- TLB shootdown ----------------------------------------------------------
+ * Threads of one process run on several CPUs at once.  When the kernel takes
+ * away or changes a mapping (munmap, mprotect, copy-on-write, fork), every
+ * other CPU running that address space drops its cached translations before
+ * the kernel goes on (and before it can hand a freed frame to anyone else -
+ * the caller holds the kernel lock throughout).  A CPU waiting for the lock
+ * has interrupts off, so it also looks for flush requests while it waits. */
+static volatile uint32_t tlb_pending[SMP_MAX_CPUS];
+
+void tlb_service(void) {
+    cpu_t *c = this_cpu();
+    if (tlb_pending[c->index]) {
+        uint64_t cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        __atomic_store_n(&tlb_pending[c->index], 0, __ATOMIC_RELEASE);
+    }
+}
+
+void tlb_shootdown(void *as) {
+    cpu_t *me;
+    uint32_t sent = 0;
+    uint64_t t0;
+    if (cpu_count <= 1 || !as) return;
+    me = this_cpu();
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        cpu_t *c = &smp_cpus[i];
+        struct thread *t = c->current;
+        if (c == me || !c->online || !t || !t->owner || t->owner->addr_space != as) continue;
+        __atomic_store_n(&tlb_pending[i], 1, __ATOMIC_RELEASE);
+        lapic_send_ipi(c->apic_id, SMP_TLB_VECTOR);
+        sent |= 1U << i;
+    }
+    if (!sent) return;
+    t0 = tsc_read();
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (!(sent & (1U << i))) continue;
+        while (__atomic_load_n(&tlb_pending[i], __ATOMIC_ACQUIRE)) {
+            __asm__ volatile("pause");
+            if (tsc_read() - t0 > tsc_hz() / 10) {      /* 100 ms: should never happen */
+                serial_write("[smp] tlb shootdown timed out\n");
+                tlb_pending[i] = 0;
+                break;
+            }
+        }
+    }
 }
 
 uint64_t bkl_spin_cycles[SMP_MAX_CPUS];   /* time spent waiting for the lock (profiler) */
@@ -56,7 +116,10 @@ int bkl_enter(void) {
         uint32_t ticket = __sync_fetch_and_add(&bkl_next, 1);
         if (bkl_serving != ticket) {
             uint64_t t0 = tsc_read();
-            while (bkl_serving != ticket) __asm__ volatile("pause");
+            while (bkl_serving != ticket) {
+                tlb_service();
+                __asm__ volatile("pause");
+            }
             bkl_spin_cycles[c->index] += tsc_read() - t0;
         }
     }
@@ -254,6 +317,11 @@ void smp_init(void *multiboot_info) {
         lapic_virtual_wire();
     }
     bsp_apic = lapic_id();
+    {
+        struct gdt_ptr gp;
+        __asm__ volatile("sgdt %0" : "=m"(gp));
+        bsp_gdt_base = gp.base;
+    }
     smp_cpus[0].self = (uint64_t)&smp_cpus[0];
     smp_cpus[0].apic_id = bsp_apic;
     smp_cpus[0].online = 1;

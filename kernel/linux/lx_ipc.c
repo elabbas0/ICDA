@@ -117,6 +117,7 @@ static void usock_release(void *obj) {
     usock_t *s = (usock_t *)obj;
     chunk_t *c = s->rx;
     if (s->peer) {
+        sched_event_wake_key(s->peer);      /* the peer sees the end */
         s->peer->peer = 0;
         s->peer->state = 3;
     }
@@ -164,7 +165,8 @@ static int64_t usock_send(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
         if (s->peer->rx_bytes + total <= USOCK_RX_MAX || s->peer->rx_bytes == 0) break;
         if (nonblock(f, flags)) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(s->peer);              /* room: the peer reads */
+        sched_event_wait();
     }
     c = (chunk_t *)kmalloc(sizeof(chunk_t) + total);
     if (!c) return -ENOMEM;
@@ -197,6 +199,7 @@ static int64_t usock_send(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
     else s->peer->rx = c;
     s->peer->rx_tail = c;
     s->peer->rx_bytes += total;
+    sched_event_wake_key(s->peer);          /* data for the peer */
     return (int64_t)total;
 }
 
@@ -214,7 +217,8 @@ static int64_t usock_recv(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
         if (s->state == 3 || s->shut_rd) return 0;
         if (nonblock(f, flags)) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(s);
+        sched_event_wait();
     }
     while (s->rx && (got < want || (!want && !got))) {
         chunk_t *c = s->rx;
@@ -251,6 +255,7 @@ static int64_t usock_recv(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
             if (!s->rx) s->rx_tail = 0;
             s->rx_bytes -= c->len;
             chunk_free(c);
+            sched_event_wake_key(s);            /* room for the sender */
         }
         if (!stream) break;
         if (!want) break;
@@ -422,6 +427,7 @@ int64_t lxi_connect(int64_t fd, const void *uaddr, uint64_t len) {
         *pp = server;
     }
     l->npending++;
+    sched_event_wake_key(l);                /* for accept */
     return 0;
 }
 
@@ -446,7 +452,8 @@ int64_t lxi_accept(int64_t fd, void *uaddr, uint32_t *ulen, int flags) {
     while (!l->pending) {
         if (f->flags & LX_O_NONBLOCK) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(l);
+        sched_event_wait();
     }
     c = l->pending;
     l->pending = c->next_pending;
@@ -599,6 +606,8 @@ int64_t lxi_shutdown(int64_t fd, int how) {
         s->shut_wr = 1;
         if (s->peer) s->peer->shut_rd = 1;
     }
+    sched_event_wake_key(s);
+    if (s->peer) sched_event_wake_key(s->peer);
     return 0;
 }
 
@@ -661,10 +670,12 @@ static int64_t evfd_read(lx_file_t *f, char *ubuf, uint64_t count) {
     while (!e->count) {
         if (f->flags & LX_O_NONBLOCK) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(e);
+        sched_event_wait();
     }
     v = e->semaphore ? 1 : e->count;
     e->count -= v;
+    sched_event_wake_key(e);                /* writers waiting for room */
     return copy_to_user(ubuf, &v, 8) ? -EFAULT : 8;
 }
 
@@ -677,9 +688,11 @@ static int64_t evfd_write(lx_file_t *f, const char *ubuf, uint64_t count) {
     while (e->count + v < e->count || e->count + v == ~0ULL) {
         if (f->flags & LX_O_NONBLOCK) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(e);
+        sched_event_wait();
     }
     e->count += v;
+    sched_event_wake_key(e);
     return 8;
 }
 
@@ -741,7 +754,7 @@ static int64_t tfd_read(lx_file_t *f, char *ubuf, uint64_t count) {
     while (!(n = tfd_take(t))) {
         if (f->flags & LX_O_NONBLOCK) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_event_wait();
     }
     return copy_to_user(ubuf, &n, 8) ? -EFAULT : 8;
 }
@@ -888,6 +901,7 @@ int64_t lxi_epoll_ctl(int64_t epfd, int op, int64_t fd, const void *uev) {
     int at = -1;
     if (!ef || !tf) return -EBADF;
     if (ef->kind != LXF_OBJ || ef->ops != &epoll_ops || ef == tf) return -EINVAL;
+    sched_event_wake_key(ef->obj);          /* waiters re-read the set */
     ep = (epoll_t *)ef->obj;
     epoll_prune(ep);
     for (int i = 0; i < ep->n; i++)
@@ -926,6 +940,35 @@ int64_t lxi_epoll_ctl(int64_t epfd, int op, int64_t fd, const void *uev) {
     return -EINVAL;
 }
 
+/* ---- waiting for files (sched_event_wait) -------------------------------------
+ * A thread that waits for files to become ready names what it waits on: a
+ * pipe, the socket or eventfd object, every file in an epoll set, and for
+ * network sockets the network as a whole (net_wait_key, woken by sock.c when
+ * a packet arrives).  Whatever makes such a file ready wakes its waiters. */
+extern char net_wait_key;
+static const lx_fops_t inet_ops;
+
+void lxi_wait_on_file(lx_file_t *f) {
+    if (!f) return;
+    if (f->kind == LXF_PIPE) {
+        sched_wait_on(f->pipe);
+        return;
+    }
+    if (f->kind != LXF_OBJ) return;
+    if (f->ops == &inet_ops) {
+        sched_wait_on(&net_wait_key);
+        return;
+    }
+    sched_wait_on(f->obj);
+    if (f->ops == &epoll_ops) {
+        epoll_t *ep = (epoll_t *)f->obj;
+        for (int i = 0; i < ep->n; i++) {
+            lx_file_t *m = ep->e[i].file;
+            if (m && !(m->kind == LXF_OBJ && m->ops == &epoll_ops)) lxi_wait_on_file(m);
+        }
+    }
+}
+
 int64_t lxi_epoll_wait(int64_t epfd, void *uevs, int maxevents, int64_t timeout_ms) {
     lx_file_t *ef = lxi_fd_file(epfd);
     epoll_t *ep;
@@ -958,7 +1001,8 @@ int64_t lxi_epoll_wait(int64_t epfd, void *uevs, int maxevents, int64_t timeout_
         if (timeout_ms == 0) return 0;
         if (timeout_ms > 0 && (sched_ticks() - start) * 10 >= (uint64_t)timeout_ms) return 0;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        lxi_wait_on_file(ef);
+        sched_event_wait();
     }
 }
 
@@ -1145,7 +1189,8 @@ static int64_t inet_send(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len
         if (r != -EAGAIN) return r;
         if (nonblock(f, flags)) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(&net_wait_key);
+        sched_event_wait();
     }
 }
 
@@ -1162,7 +1207,8 @@ static int64_t inet_recv(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len, int 
         }
         if (nonblock(f, flags)) return -EAGAIN;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(&net_wait_key);
+        sched_event_wait();
     }
 }
 
@@ -1259,7 +1305,8 @@ static int64_t inet_connect(lx_file_t *f, inet_t *s, const void *uaddr, uint64_t
         if (st == NET_ST_OPEN) return 0;
         if (st != NET_ST_CONNECTING) return st < 0 ? st : -ECONNREFUSED;
         if (lxi_interrupted()) return -EINTR;
-        sched_sleep(1);
+        sched_wait_on(&net_wait_key);
+        sched_event_wait();
     }
 }
 

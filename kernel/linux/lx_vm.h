@@ -33,6 +33,8 @@ uint64_t lxvm_maps(process_t *p, char *buf, uint64_t cap);
 int      lxvm_fault(process_t *p, uint64_t addr, int write);
 int      lxvm_fault_current(uint64_t addr, int write);
 
+/* lets the page allocator take back unmapped cached file pages when short */
+void     lxvm_init_reclaim(void);
 int      lxvm_fork(process_t *parent, process_t *child);
 void     lxvm_free(process_t *p);
 int      lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot);
@@ -44,7 +46,8 @@ int      lxvm_is_code(process_t *p, uint64_t addr);
 int      lxvm_lookup(process_t *p, uint64_t addr, struct vfs_node **node, uint64_t *off);
 
 /* profiler counters */
-typedef struct { uint64_t faults, file_faults, present_faults, vmas, find_cycles, populate_cycles, miss_reads, miss_cycles; } lxvm_stat_t;
+typedef struct { uint64_t faults, file_faults, present_faults, vmas, find_cycles, populate_cycles, miss_reads, miss_cycles,
+                 pages[3], kind_cycles[3], step_cycles[3]; } lxvm_stat_t;   /* by kind: 0 anonymous, 1 file, 2 memory object */
 extern lxvm_stat_t lxvm_stat;
 
 #endif

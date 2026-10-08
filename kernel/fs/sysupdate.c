@@ -33,7 +33,7 @@
 
 #define REL_MAX       200
 #define PATH_MAX      (REL_MAX + 24)
-#define TEXT_MAX      (64U * 1024U)
+#define TEXT_MAX      (1024U * 1024U)       /* a patch with WebKit lists ~2800 files */
 
 static int  supported;
 static int  trial;
@@ -120,16 +120,18 @@ static void join(char *out, const char *dir, const char *rel) {
     scat(out, PATH_MAX, rel);
 }
 
-/* Files a patch may replace: \SYSTEM\..., the kernel and the boot loader. */
+/* Files a patch may replace: \SYSTEM\..., the kernel, the boot loader and
+ * \linux\... (WebKit: the Linux root Surfer's engine runs from). */
 static int rel_ok(const char *rel) {
     uint64_t n = slen(rel);
     if (n == 0 || n >= REL_MAX) return 0;
-    if (!(sstarts(rel, "SYSTEM/") || seq(rel, "EFI/ICDA/KERNEL.BIN") || seq(rel, "EFI/ICDA/GRUBX64.EFI")))
+    if (!(sstarts(rel, "SYSTEM/") || sstarts(rel, "linux/") || seq(rel, "EFI/ICDA/KERNEL.BIN") ||
+          seq(rel, "EFI/ICDA/GRUBX64.EFI")))
         return 0;
     for (uint64_t i = 0; i < n; i++) {
         char c = rel[i];
         int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                 c == '.' || c == '_' || c == '-' || c == '/';
+                 c == 0x2E || c == 0x5F || c == 0x2D || c == 0x2F || c == 0x2B || c == 0x3D;   /* . _ - / + = */
         if (!ok) return 0;
         if (c == '/' && (i + 1 == n || rel[i + 1] == '/')) return 0;
         if (c == '.' && i + 1 < n && rel[i + 1] == '.') return 0;

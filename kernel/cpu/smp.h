@@ -6,6 +6,7 @@
 
 #define SMP_MAX_CPUS 16
 #define SMP_TIMER_VECTOR 48
+#define SMP_TLB_VECTOR   49    /* TLB shootdown IPI */
 
 struct thread;
 struct addr_space_s;
@@ -51,5 +52,10 @@ void     bkl_exit(void);
 typedef struct { uint64_t n, cycles, max, max_pid; } bkl_stat_t;
 extern bkl_stat_t bkl_stats[BKL_WHY_MAX];
 void     bkl_why(int why);
+
+/* other CPUs running address space as drop cached translations; returns
+ * when they have.  The caller holds the kernel lock. */
+void     tlb_shootdown(void *as);
+void     tlb_service(void);
 
 #endif

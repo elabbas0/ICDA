@@ -97,7 +97,7 @@ static int rel_path(uint8_t id, const char *path, volume_t **out, const char **r
  * so a file's cluster chain is remembered here as runs of contiguous
  * clusters: a read is then one disk command per run.  Any write to a volume
  * forgets what is remembered about it. */
-#define RC_FILES   64
+#define RC_FILES   512                 /* a browser opens a few hundred files */
 #define RC_FAT_BUF 64U                   /* FAT sectors read at once */
 
 typedef struct { uint32_t cluster, count; } rc_run_t;
@@ -121,8 +121,56 @@ static struct {
     fatfs_t  v;
 } rc_vol[VOL_MAX];
 
-static void rc_forget(uint8_t id) {
-    if (id >= 1 && id <= VOL_MAX) rc_gen[id - 1]++;
+/* FAT files carry their first cluster and size in the VFS node's reference
+ * (bit 62 marks it).  A write can move a file's clusters, so paths written
+ * since the volume was mounted are looked up by name again. */
+#define FAT_REF       (1ULL << 62)
+#define WRITTEN_MAX   1024
+
+static uint32_t written_hash[VOL_MAX][WRITTEN_MAX];
+static uint32_t written_n[VOL_MAX];
+
+static uint32_t path_hash(const char *s) {
+    uint32_t h = 2166136261U;
+    while (s && *s) h = (h ^ (uint8_t)*s++) * 16777619U;
+    return h | 1;
+}
+
+static void mark_written(uint8_t id, const char *path) {
+    uint32_t i = id - 1u;
+    if (id == 0 || id > VOL_MAX || !path) return;
+    if (written_n[i] < WRITTEN_MAX) written_hash[i][written_n[i]++] = path_hash(path);
+    else written_n[i] = WRITTEN_MAX + 1;          /* too many: trust no reference */
+}
+
+static int was_written(uint8_t id, const char *path) {
+    uint32_t i = id - 1u, h = path_hash(path);
+    if (written_n[i] > WRITTEN_MAX) return 1;
+    for (uint32_t k = 0; k < written_n[i]; k++)
+        if (written_hash[i][k] == h) return 1;
+    return 0;
+}
+
+/* a write changed path (or what is under it): forget its cluster runs */
+static void rc_forget_path(uint8_t id, const char *path) {
+    for (uint32_t i = 0; i < RC_FILES; i++) {
+        rc_file_t *f = &rc_files[i];
+        uint32_t k = 0;
+        if (!f->runs || f->id != id || !path) continue;
+        while (path[k] && f->path[k] == path[k]) k++;
+        if (path[k] || (f->path[k] && f->path[k] != '/')) continue;
+        kfree(f->runs);
+        f->runs = 0;
+    }
+}
+
+static void bc_forget_range(block_device_t *dev, uint64_t lba, uint32_t count);
+
+/* every sector range a FAT volume writes: cached copies of it go */
+static void vol_write_hook(block_device_t *dev, uint64_t lba, uint32_t count) {
+    bc_forget_range(dev, lba, count);
+    for (uint32_t i = 0; i < VOL_MAX; i++)
+        if (rc_vol[i].ok && volumes[i].used && volumes[i].dev == dev) rc_vol[i].v.cache_sector = -1;
 }
 
 /* the volume's geometry, read once per generation */
@@ -187,7 +235,7 @@ static int rc_build(fatfs_t *v, uint32_t first, uint32_t size, rc_file_t *f) {
     return 0;
 }
 
-static rc_file_t *rc_find(uint8_t id, volume_t *m, const char *path, const char *rel, fatfs_t *v) {
+static rc_file_t *rc_find(uint8_t id, volume_t *m, const char *path, const char *rel, fatfs_t *v, uint64_t ref) {
     rc_file_t *slot = 0;
     fatfs_entry_t *e;
     for (uint32_t i = 0; i < RC_FILES; i++) {
@@ -203,7 +251,11 @@ static rc_file_t *rc_find(uint8_t id, volume_t *m, const char *path, const char 
     (void)m;
     e = (fatfs_entry_t *)kmalloc(sizeof(fatfs_entry_t));
     if (!e) return 0;
-    if (fatfs_lookup(v, rel, e) != 0 || (e->attr & FATFS_ATTR_DIR)) {
+    if ((ref & FAT_REF) && !was_written(id, path)) {      /* known from the mount: no lookup */
+        e->cluster = (uint32_t)(ref & 0x0FFFFFFFU);
+        e->size = (uint32_t)(ref >> 28);
+        e->attr = 0;
+    } else if (fatfs_lookup(v, rel, e) != 0 || (e->attr & FATFS_ATTR_DIR)) {
         kfree(e);
         return 0;
     }
@@ -245,6 +297,13 @@ static struct {
     uint64_t use;
     uint8_t *data;
 } bc[BC_BLOCKS];
+
+static void bc_forget_range(block_device_t *dev, uint64_t lba, uint32_t count) {
+    for (uint32_t i = 0; i < BC_BLOCKS; i++)
+        if (bc[i].data && bc[i].lba != ~0ULL && bc[i].id && volumes[bc[i].id - 1].dev == dev &&
+            bc[i].lba < lba + count && lba < bc[i].lba + BC_SECTORS)
+            bc[i].lba = ~0ULL;
+}
 
 static int bc_read(uint8_t id, fatfs_t *v, uint64_t lba, uint32_t count, uint8_t *out) {
     while (count) {
@@ -330,7 +389,10 @@ static int volume_external(int op, uint8_t id, const char *path, const char *dat
     const char *rel, *dst_rel = 0;
     int rc = -1;
     if (id == 0 || id > VOL_MAX || !volumes[id - 1].used) return 0;
-    rc_forget(id);
+    rc_forget_path(id, path);
+    if (op == VFS_EXT_RENAME) rc_forget_path(id, data);
+    mark_written(id, path);
+    if (op == VFS_EXT_RENAME) mark_written(id, data);
     if (rel_path(id, path, &m, &rel) != 0 || !m->writable) return -1;
     if (op == VFS_EXT_RENAME) {
         volume_t *m2;
@@ -381,7 +443,7 @@ static int64_t volume_loader(uint8_t id, const char *path, uint64_t ref, uint64_
     }
     if (m->fs == VOLUME_FAT32) {
         fatfs_t *cv = rc_volume(id, m);
-        rc_file_t *f = cv ? rc_find(id, m, path, rel, cv) : 0;
+        rc_file_t *f = cv ? rc_find(id, m, path, rel, cv, ref) : 0;
         if (f) return rc_read(id, cv, f, off, buf, len);
     }
     if (m->fs == VOLUME_FAT32) {
@@ -434,7 +496,10 @@ static int fat_import_cb(const fatfs_entry_t *e, void *p) {
         if (vfs_import_node(path, VFS_NODE_DIR, ctx->readonly, 0, 0, 0, 0, 0) != 0) return 0;
         if (e->cluster >= 2) (void)import_fat_dir((fatfs_t *)ctx->vol, e->cluster, path, ctx->depth + 1, ctx->readonly);
     } else {
-        (void)vfs_import_lazy(path, e->size, (uint8_t)(ctx->readonly || (e->attr & FATFS_ATTR_RO)));
+        /* the first cluster and size go with the node (FAT_REF): reads skip the
+         * lookup by name while the file has not been written */
+        (void)vfs_import_ref(path, VFS_NODE_FILE, e->size, (uint8_t)(ctx->readonly || (e->attr & FATFS_ATTR_RO)),
+                             FAT_REF | ((uint64_t)e->size << 28) | (e->cluster & 0x0FFFFFFFU));
     }
     return 0;
 }
@@ -611,6 +676,7 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
 }
 
 static void install_hooks(void) {
+    fatfs_write_hook = vol_write_hook;
     vfs_set_external_hook(volume_external);
     vfs_set_loader(volume_loader);
     vfs_set_dir_loader(volume_dir_loader);
@@ -665,6 +731,21 @@ int volumes_is_writable(uint32_t index, int fs) {
         if (volumes[i].used && volumes[i].fs == fs) {
             if (n == index) return volumes[i].writable;
             n++;
+        }
+    }
+    return 0;
+}
+
+/* 1 if an absolute path is inside the volume mounted from partition p */
+int volumes_path_is_on(const char *path, const partition_info_t *p) {
+    for (uint32_t i = 0; p && i < VOL_MAX; i++) {
+        volume_t *m = &volumes[i];
+        uint64_t n = str_len(m->path);
+        if (!m->used || m->dev != p->device || m->start != p->start_lba) continue;
+        {
+            uint64_t k = 0;
+            while (k < n && path[k] == m->path[k]) k++;
+            if (n && k == n && (path[n] == 0 || path[n] == 0x2F)) return 1;
         }
     }
     return 0;

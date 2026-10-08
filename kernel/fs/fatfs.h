@@ -27,6 +27,7 @@ typedef struct {
     int64_t  cache_sector;
     int      cache_dirty;
     int      touched;
+    uint32_t epoch;          /* fat_epoch when cache was read (fatfs.c) */
     uint8_t  cache[512];
 } fatfs_t;
 
@@ -63,6 +64,8 @@ typedef struct {
 int64_t fatfs_read_range(fatfs_t *vol, const fatfs_entry_t *entry, uint64_t off, void *buf, uint64_t len,
                          fatfs_hint_t *hint);
 int fatfs_flush(fatfs_t *vol);
+/* told about every sector range written (volumes.c drops cached copies) */
+extern void (*fatfs_write_hook)(block_device_t *dev, uint64_t lba, uint32_t count);
 int fatfs_write_at(fatfs_t *vol, const char *path, uint64_t off, const void *data, uint64_t len);
 int fatfs_truncate(fatfs_t *vol, const char *path, uint64_t len);
 int fatfs_rename(fatfs_t *vol, const char *from, const char *to);

@@ -7,7 +7,7 @@
 struct vfs_node;
 struct lx_state;
 
-#define KERNEL_STACK_PAGES  2
+#define KERNEL_STACK_PAGES  4       /* 16 KB: the installer and FAT code nest deep */
 #define KERNEL_STACK_SIZE   (KERNEL_STACK_PAGES * PAGE_SIZE_4K)
 
 typedef enum {
@@ -133,6 +133,9 @@ typedef struct thread {
     uint16_t         lx_last_nr[16];
     int16_t          lx_last_ret[16];
     uint8_t          lx_last_pos;
+    int              event_wait;    /* in sched_event_wait */
+    int              nwait_keys;    /* what it waits on (sched_wait_on); -1: anything */
+    const void      *wait_keys[16];
 } thread_t;
 
 #endif

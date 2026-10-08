@@ -9,12 +9,21 @@
  *   file SYSTEM/apps/wm.app <size> <sha256>
  *   file EFI/ICDA/KERNEL.BIN <size> <sha256>
  *   ...
+ *   lfile linux/usr/lib/libWPEWebKit-2.0.so.1.0.7 <size> <sha256> [parts <n>]
+ *   ...
  *   signature <ed25519 over everything above this line, hex>
  *
  * It checks the signature, compares the files with the installed manifest
  * (/etc/icda-release.txt) and downloads only the ones that changed, straight
  * into /dev/sysupdate.  The kernel checks each file's hash again and installs
  * the patch during the next restart.  Personal files are never involved. */
+/*
+ * "lfile" lines are WebKit, the Linux root Surfer's engine runs from (the
+ * linux folder on the system partition).  Older updaters skip them, so a release with
+ * WebKit still updates an old system; the updater it installs then sees the
+ * WebKit files missing (the version is already current) and fetches them as
+ * a hotfix.  Files over the hosting limit are published in pieces,
+ * REL.part0 ... REL.part<n-1>, fetched one after the other into one file. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +36,8 @@
 #define DEV           "/dev/sysupdate"
 #define INSTALLED     "/etc/icda-release.txt"
 #define MANIFEST_REL  "SYSTEM/etc/icda-release.txt"
-#define MAX_FILES     256
+#define MAX_FILES     4096
+#define TEXT_CAP      (1024 * 1024)
 #define CHUNK         (192 * 1024)
 
 #define TICKS_PER_S   100
@@ -45,6 +55,8 @@ typedef struct {
     char     rel[200];
     uint64_t size;
     char     sha[65];
+    int      parts;      /* 0: one file; n: published as REL.part0 .. REL.part<n-1> */
+    int      webkit;     /* an lfile line */
 } entry_t;
 
 typedef struct {
@@ -107,20 +119,24 @@ static int parse_manifest(const char *text, manifest_t *m) {
                 snprintf(m->version, sizeof(m->version), "%s", line + 8);
             } else if (strncmp(line, "notes ", 6) == 0) {
                 snprintf(m->notes, sizeof(m->notes), "%s", line + 6);
-            } else if (strncmp(line, "file ", 5) == 0 && m->count < MAX_FILES) {
-                /* file REL SIZE SHA256 */
+            } else if ((strncmp(line, "file ", 5) == 0 || strncmp(line, "lfile ", 6) == 0) && m->count < MAX_FILES) {
+                /* file REL SIZE SHA256, lfile REL SIZE SHA256 [parts N] */
                 entry_t *e = &m->files[m->count];
-                char *rel = line + 5, *size = strchr(rel, ' '), *sha = 0;
+                int webkit = line[0] == 'l';
+                char *rel = line + (webkit ? 6 : 5), *size = strchr(rel, ' '), *sha = 0, *extra = 0;
                 if (size) {
                     *size++ = 0;
                     sha = strchr(size, ' ');
                 }
                 if (sha) {
                     *sha++ = 0;
+                    if (webkit && (extra = strchr(sha, ' ')) != 0) *extra++ = 0;
                     if (strlen(sha) == 64 && strlen(rel) < sizeof(e->rel)) {
                         snprintf(e->rel, sizeof(e->rel), "%s", rel);
                         e->size = strtoull(size, 0, 10);
                         snprintf(e->sha, sizeof(e->sha), "%s", sha);
+                        e->webkit = webkit;
+                        e->parts = extra && strncmp(extra, "parts ", 6) == 0 ? atoi(extra + 6) : 0;
                         m->count++;
                     }
                 }
@@ -207,13 +223,16 @@ static int download(const entry_t *e) {
     int st;
 
     if (!out) return -1;
-    snprintf(url, sizeof(url), "%s%s", OTA_BASE, e->rel);
+    sha256_init(&ctx);
+    st = HTTP_DONE;
+    for (int part = 0; part < (e->parts > 0 ? e->parts : 1) && st == HTTP_DONE; part++) {
+    if (e->parts > 0) snprintf(url, sizeof(url), "%s%s.part%d", OTA_BASE, e->rel, part);
+    else snprintf(url, sizeof(url), "%s%s", OTA_BASE, e->rel);
     r = http_open(url, "GET", 0);
     if (!r) {
         free(out);
         return -1;
     }
-    sha256_init(&ctx);
     for (;;) {
         st = http_poll(r, 200);
         if (r->headers_done && r->status != 200) {
@@ -241,6 +260,7 @@ static int download(const entry_t *e) {
         }
     }
     http_free(r);
+    }   /* next part */
     free(out);
     if (st != HTTP_DONE || off != e->size) return -1;
     if (e->size == 0) {
@@ -255,7 +275,7 @@ static int download(const entry_t *e) {
 
 /* ---- one check ------------------------------------------------------------- */
 
-static char manifest_text[64 * 1024];
+static char manifest_text[TEXT_CAP];
 
 static void check(void) {
     char pending[24], bad[24], supported[4];
@@ -266,6 +286,7 @@ static void check(void) {
     char *commit;
     size_t cap, used;
     int need = 0;
+    int hotfix = 0;                 /* same version, WebKit missing */
 
     if (dev_field("supported", supported, sizeof(supported)) != 0 || supported[0] != '1') {
         status("Updates are not available on this installation%s%s", 0, 0);
@@ -287,19 +308,35 @@ static void check(void) {
         return;
     }
 
-    installed = (char *)malloc(64 * 1024);
+    installed = (char *)malloc(TEXT_CAP);
     memset(&have, 0, sizeof(have));
     if (installed) {
-        long n = (long)icda_read_file(INSTALLED, installed, 64 * 1024 - 1);
+        long n = (long)icda_read_file(INSTALLED, installed, TEXT_CAP - 1);
         if (n > 0) {
             installed[n] = 0;
             (void)parse_manifest(installed, &have);
         }
         free(installed);
     }
-    if (have.version[0] && vercmp(want.version, have.version) <= 0) {
+    if (have.version[0] && vercmp(want.version, have.version) < 0) {
         status("ICDA %s is up to date%s", have.version, "");
         return;
+    }
+    if (have.version[0] && vercmp(want.version, have.version) == 0) {
+        /* same version: only WebKit can be missing (installed by an older
+         * updater, which skips it) - fetched as a hotfix */
+        int missing = 0;
+        for (int i = 0; i < want.count && !missing; i++) {
+            const entry_t *old;
+            if (!want.files[i].webkit) continue;
+            old = find(&have, want.files[i].rel);
+            if (!old || strcmp(old->sha, want.files[i].sha) != 0) missing = 1;
+        }
+        if (!missing) {
+            status("ICDA %s is up to date%s", have.version, "");
+            return;
+        }
+        hotfix = 1;
     }
     if (dev_field("bad", bad, sizeof(bad)) == 0 && strcmp(bad, want.version) == 0) {
         status("Update %s was undone after a failed start%s", want.version, "");
@@ -314,6 +351,7 @@ static void check(void) {
     total_bytes = done_bytes = 0;
     for (int i = 0; i < want.count; i++) {
         const entry_t *old = find(&have, want.files[i].rel);
+        if (hotfix && !want.files[i].webkit) continue;
         if (!old || strcmp(old->sha, want.files[i].sha) != 0) total_bytes += want.files[i].size;
     }
     cap = 512 + (size_t)want.count * 300 + (size_t)have.count * 220;
@@ -324,6 +362,7 @@ static void check(void) {
         const entry_t *e = &want.files[i];
         const entry_t *old = find(&have, e->rel);
         if (old && strcmp(old->sha, e->sha) == 0) continue;
+        if (hotfix && !e->webkit) continue;
         if (download(e) != 0) {
             status("Download of update %s failed (%s)", want.version, e->rel);
             free(commit);
@@ -332,7 +371,7 @@ static void check(void) {
         used += (size_t)snprintf(commit + used, cap - used, "file %s %s\n", e->rel, e->sha);
         need++;
     }
-    for (int i = 0; i < have.count; i++) {
+    for (int i = 0; i < have.count && !hotfix; i++) {
         if (!find(&want, have.files[i].rel))
             used += (size_t)snprintf(commit + used, cap - used, "remove %s\n", have.files[i].rel);
     }

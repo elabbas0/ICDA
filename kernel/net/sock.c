@@ -92,6 +92,8 @@ static struct {
 } legacy[LEGACY_QUEUE];
 static int legacy_head, legacy_len;
 static int pumping;
+/* what threads waiting on network sockets wait for (lx_ipc.c) */
+char net_wait_key;
 
 #include "../drivers/serial/serial.h"
 
@@ -518,7 +520,10 @@ static void rx_pump(void) {
             if (arp_input(frame, len)) legacy_push(frame, len);
             continue;
         }
-        if (ntohs16(eth->type_be) == ETH_TYPE_IPV4 && ip_input(frame, len)) continue;
+        if (ntohs16(eth->type_be) == ETH_TYPE_IPV4 && ip_input(frame, len)) {
+            sched_event_wake_key(&net_wait_key);   /* a socket may be readable now */
+            continue;
+        }
         legacy_push(frame, len);
     }
     pumping = 0;

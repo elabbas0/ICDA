@@ -1,6 +1,7 @@
 #include "fatfs.h"
 #include "../memory/heap.h"
 #include "../drivers/rtc/rtc.h"
+#include "../proc/sched.h"
 
 #define SECTOR        512U
 #define EOC           0x0FFFFFFFU
@@ -50,9 +51,12 @@ static int dev_read(fatfs_t *v, uint64_t rel, uint32_t n, void *buf) {
     return v->dev->read(v->dev->context, v->base_lba + rel, n, buf);
 }
 
+void (*fatfs_write_hook)(block_device_t *dev, uint64_t lba, uint32_t count);
+
 static int dev_write(fatfs_t *v, uint64_t rel, uint32_t n, const void *buf) {
     if (!v->dev->write || rel + n > v->sectors) return -1;
     v->touched = 1;
+    if (fatfs_write_hook) fatfs_write_hook(v->dev, v->base_lba + rel, n);
     return v->dev->write(v->dev->context, v->base_lba + rel, n, buf);
 }
 
@@ -64,6 +68,8 @@ static uint64_t cluster_lba(const fatfs_t *v, uint32_t c) {
     return v->data_lba + (uint64_t)(c - 2) * v->sectors_per_cluster;
 }
 
+static uint32_t fat_epoch;    /* bumped by every FAT write: other instances re-read */
+
 static int fat_cache_flush(fatfs_t *v) {
     if (!v->cache_dirty) return 0;
     for (uint32_t f = 0; f < v->fat_count; f++) {
@@ -72,17 +78,19 @@ static int fat_cache_flush(fatfs_t *v) {
         }
     }
     v->cache_dirty = 0;
+    v->epoch = ++fat_epoch;
     return 0;
 }
 
 static int fat_cache_load(fatfs_t *v, uint32_t sector) {
-    if (v->cache_sector == (int64_t)sector) return 0;
+    if (v->cache_sector == (int64_t)sector && (v->cache_dirty || v->epoch == fat_epoch)) return 0;
     if (fat_cache_flush(v) != 0) return -1;
     if (dev_read(v, v->fat_lba + sector, 1, v->cache) != 0) {
         v->cache_sector = -1;
         return -1;
     }
     v->cache_sector = sector;
+    v->epoch = fat_epoch;
     return 0;
 }
 
@@ -100,7 +108,7 @@ static int fat_set(fatfs_t *v, uint32_t c, uint32_t value) {
     return 0;
 }
 
-int fatfs_flush(fatfs_t *v) {
+static int fatfs_flush_op(fatfs_t *v) {
     uint8_t s[SECTOR];
     if (fat_cache_flush(v) != 0) return -1;
     if (!v->touched || v->fsinfo_sector == 0 || v->fsinfo_sector >= v->reserved) return 0;
@@ -147,6 +155,13 @@ int fatfs_mount(fatfs_t *v, block_device_t *dev, uint64_t start_lba, uint64_t se
     }
     if (!valid_cluster(v, v->root_cluster)) return -1;
     v->next_free = 2;
+    /* start allocating where the last writer left off (FSInfo): from cluster
+     * 2, a nearly full start of the disk costs a FAT sector read per 128
+     * clusters for every new cluster */
+    if (v->fsinfo_sector && v->fsinfo_sector < v->reserved && dev_read(v, v->fsinfo_sector, 1, s) == 0 &&
+        rd32(s) == 0x41615252U && rd32(s + 484) == 0x61417272U && valid_cluster(v, rd32(s + 492))) {
+        v->next_free = rd32(s + 492);
+    }
     return 0;
 }
 
@@ -336,16 +351,30 @@ static void short_to_name(const uint8_t *raw, uint8_t ntres, int is_dir, char *o
     out[o] = 0;
 }
 
-int fatfs_iterate(fatfs_t *v, uint32_t dir, fatfs_iter_fn fn, void *ctx) {
-    uint8_t s[SECTOR];
+static int fatfs_iterate_cl(fatfs_t *v, uint32_t dir, fatfs_iter_fn fn, void *ctx, uint8_t *cbuf);
+
+/* a directory is read a cluster per disk command (it was a sector each: a big
+ * directory, like a Linux root's usr/lib, took a hundred commands per lookup) */
+static int fatfs_iterate_op(fatfs_t *v, uint32_t dir, fatfs_iter_fn fn, void *ctx) {
+    uint8_t *cbuf = (uint8_t *)kmalloc(v->cluster_bytes);
+    int r;
+    if (!cbuf) return -1;
+    r = fatfs_iterate_cl(v, dir, fn, ctx, cbuf);
+    kfree(cbuf);
+    return r;
+}
+
+static int fatfs_iterate_cl(fatfs_t *v, uint32_t dir, fatfs_iter_fn fn, void *ctx, uint8_t *cbuf) {
+    uint8_t *s;
     uint16_t lfn[260];
     uint32_t lfn_total = 0, lfn_seen = 0, lfn_first = 0;
     uint8_t lfn_sum = 0;
     uint32_t c = dir, slot = 0, guard = v->cluster_count;
     fatfs_entry_t e;
     while (valid_cluster(v, c) && guard--) {
+        if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, cbuf) != 0) return -1;
         for (uint32_t sec = 0; sec < v->sectors_per_cluster; sec++) {
-            if (dev_read(v, cluster_lba(v, c) + sec, 1, s) != 0) return -1;
+            s = cbuf + sec * SECTOR;
             for (uint32_t off = 0; off < SECTOR; off += 32, slot++) {
                 uint8_t *d = s + off;
                 if (d[0] == 0x00) return 0;
@@ -438,7 +467,7 @@ static void root_entry(fatfs_t *v, fatfs_entry_t *out) {
     out->name[0] = '/';
 }
 
-int fatfs_lookup(fatfs_t *v, const char *path, fatfs_entry_t *out) {
+static int fatfs_lookup_op(fatfs_t *v, const char *path, fatfs_entry_t *out) {
     fatfs_entry_t cur;
     root_entry(v, &cur);
     while (*path) {
@@ -656,7 +685,7 @@ static uint32_t leaf_len(const char *leaf) {
     return n;
 }
 
-int fatfs_mkdir(fatfs_t *v, const char *path) {
+static int fatfs_mkdir_op(fatfs_t *v, const char *path) {
     fatfs_entry_t cur, next;
     root_entry(v, &cur);
     while (*path) {
@@ -702,7 +731,7 @@ int fatfs_mkdir(fatfs_t *v, const char *path) {
     return fatfs_flush(v);
 }
 
-int fatfs_write(fatfs_t *v, const char *path, const void *data, uint64_t size) {
+static int fatfs_write_op(fatfs_t *v, const char *path, const void *data, uint64_t size) {
     fatfs_entry_t parent, old;
     const char *leaf;
     uint32_t first = 0, len;
@@ -744,7 +773,7 @@ int fatfs_write(fatfs_t *v, const char *path, const void *data, uint64_t size) {
     return fatfs_flush(v);
 }
 
-int fatfs_read_entry(fatfs_t *v, const fatfs_entry_t *e, char **data_out) {
+static int fatfs_read_entry_op(fatfs_t *v, const fatfs_entry_t *e, char **data_out) {
     char *buf;
     uint8_t *tmp;
     uint32_t c = e->cluster;
@@ -773,7 +802,7 @@ int fatfs_read_entry(fatfs_t *v, const fatfs_entry_t *e, char **data_out) {
     return 0;
 }
 
-int fatfs_read(fatfs_t *v, const char *path, char **data_out, uint64_t *size_out) {
+static int fatfs_read_op(fatfs_t *v, const char *path, char **data_out, uint64_t *size_out) {
     fatfs_entry_t e;
     if (fatfs_lookup(v, path, &e) != 0 || (e.attr & FATFS_ATTR_DIR)) return -1;
     if (fatfs_read_entry(v, &e, data_out) != 0) return -1;
@@ -838,13 +867,13 @@ static int remove_entry(fatfs_t *v, const char *path, int depth) {
     return 0;
 }
 
-int fatfs_remove(fatfs_t *v, const char *path) {
+static int fatfs_remove_op(fatfs_t *v, const char *path) {
     int rc = remove_entry(v, path, 0);
     if (fatfs_flush(v) != 0) return -1;
     return rc;
 }
 
-int fatfs_usage(fatfs_t *v, uint32_t *free_clusters, uint32_t *highest_used) {
+static int fatfs_usage_op(fatfs_t *v, uint32_t *free_clusters, uint32_t *highest_used) {
     uint32_t free_n = 0, high = 0;
     for (uint32_t c = 2; c < v->cluster_count + 2; c++) {
         if (fat_get(v, c) == 0) free_n++;
@@ -855,7 +884,7 @@ int fatfs_usage(fatfs_t *v, uint32_t *free_clusters, uint32_t *highest_used) {
     return 0;
 }
 
-int64_t fatfs_read_range(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void *buf, uint64_t len,
+static int64_t fatfs_read_range_op(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void *buf, uint64_t len,
                          fatfs_hint_t *hint) {
     uint8_t *tmp;
     uint8_t *out = (uint8_t *)buf;
@@ -979,7 +1008,7 @@ static int grow_to(fatfs_t *v, fatfs_entry_t *e, uint64_t new_size) {
     return fat_cache_flush(v);
 }
 
-int fatfs_write_at(fatfs_t *v, const char *path, uint64_t off, const void *data, uint64_t len) {
+static int fatfs_write_at_op(fatfs_t *v, const char *path, uint64_t off, const void *data, uint64_t len) {
     fatfs_entry_t e;
     uint64_t new_size;
     int rc;
@@ -999,7 +1028,7 @@ int fatfs_write_at(fatfs_t *v, const char *path, uint64_t off, const void *data,
     return rc;
 }
 
-int fatfs_truncate(fatfs_t *v, const char *path, uint64_t len) {
+static int fatfs_truncate_op(fatfs_t *v, const char *path, uint64_t len) {
     fatfs_entry_t e;
     int rc = 0;
     if (fatfs_lookup(v, path, &e) != 0 || (e.attr & (FATFS_ATTR_DIR | FATFS_ATTR_RO))) return -1;
@@ -1031,7 +1060,7 @@ int fatfs_truncate(fatfs_t *v, const char *path, uint64_t len) {
 /* Renames or moves an entry within the volume: a new directory entry takes
  * over the same cluster chain and the old slots are released.  A moved
  * folder gets its ".." entry pointed at the new parent. */
-int fatfs_rename(fatfs_t *v, const char *from, const char *to) {
+static int fatfs_rename_op(fatfs_t *v, const char *from, const char *to) {
     fatfs_entry_t e, parent, existing;
     const char *leaf;
     char name[FATFS_NAME_MAX];
@@ -1065,4 +1094,117 @@ int fatfs_rename(fatfs_t *v, const char *from, const char *to) {
         slot_write(v, e.cluster, 1, d);
     }
     return fatfs_flush(v);
+}
+
+/* ---- one operation at a time -------------------------------------------------
+ * Kernel threads can be preempted, and several write this partition (the boot
+ * log, the overlay sync, updates, installs), each with its own fatfs_t and its
+ * own cached FAT sector.  An operation interrupted half way let another one
+ * allocate the same cluster twice, and a cached FAT sector could be stale.  So
+ * every operation runs without preemption, and any FAT write makes the other
+ * instances read their FAT sector again (fat_epoch). */
+
+int fatfs_flush(fatfs_t *v) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_flush_op(v);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_iterate(fatfs_t *v, uint32_t dir, fatfs_iter_fn fn, void *ctx) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_iterate_op(v, dir, fn, ctx);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_lookup(fatfs_t *v, const char *path, fatfs_entry_t *out) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_lookup_op(v, path, out);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_mkdir(fatfs_t *v, const char *path) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_mkdir_op(v, path);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_write(fatfs_t *v, const char *path, const void *data, uint64_t size) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_write_op(v, path, data, size);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_read_entry(fatfs_t *v, const fatfs_entry_t *e, char **data_out) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_read_entry_op(v, e, data_out);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_read(fatfs_t *v, const char *path, char **data_out, uint64_t *size_out) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_read_op(v, path, data_out, size_out);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_remove(fatfs_t *v, const char *path) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_remove_op(v, path);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_usage(fatfs_t *v, uint32_t *free_clusters, uint32_t *highest_used) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_usage_op(v, free_clusters, highest_used);
+    sched_preempt_enable();
+    return r;
+}
+
+int64_t fatfs_read_range(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void *buf, uint64_t len,
+                         fatfs_hint_t *hint) {
+    int64_t r;
+    sched_preempt_disable();
+    r = fatfs_read_range_op(v, e, off, buf, len, hint);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_write_at(fatfs_t *v, const char *path, uint64_t off, const void *data, uint64_t len) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_write_at_op(v, path, off, data, len);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_truncate(fatfs_t *v, const char *path, uint64_t len) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_truncate_op(v, path, len);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_rename(fatfs_t *v, const char *from, const char *to) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_rename_op(v, from, to);
+    sched_preempt_enable();
+    return r;
 }
