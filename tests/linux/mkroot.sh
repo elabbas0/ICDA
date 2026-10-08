@@ -40,6 +40,7 @@ rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin
 for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; done; true
 [ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
+[ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $S/usr/lib/gstreamer-1.0/ || true
 gcc -O2 -o /tmp/stage/dyntest tests/linux/dyn/dyntest.c -lz -pthread
 du -sh $S
 rm -rf .verify/linuxroot && cp -r $S .verify/linuxroot

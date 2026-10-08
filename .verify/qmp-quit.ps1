@@ -1,0 +1,5 @@
+# Quits QEMU cleanly over QMP (so recorded audio files are finalized)
+$c = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 4444)
+$s = $c.GetStream(); $w = New-Object System.IO.StreamWriter($s); $r = New-Object System.IO.StreamReader($s)
+$null = $r.ReadLine(); $w.WriteLine('{"execute":"qmp_capabilities"}'); $w.Flush(); $null = $r.ReadLine()
+$w.WriteLine('{"execute":"quit"}'); $w.Flush(); Start-Sleep -Milliseconds 800; $c.Close()

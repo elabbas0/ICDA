@@ -303,6 +303,10 @@ static void on_title(WebKitWebView *v, GParamSpec *ps, gpointer d) {
     const char *s = webkit_web_view_get_title(v);
     (void)ps; (void)d;
     if (!t) return;
+    if (s && getenv("WPE_EVAL") && !strncmp(s, "probe:", 6)) {
+        fprintf(stderr, "icda-webkit probe: %s\n", s + 6);
+        return;
+    }
     snprintf(t->title, sizeof t->title, "%s", s ? s : "");
     redraw_pending = 1;
 }
@@ -766,6 +770,38 @@ static void on_download(WebKitNetworkSession *s, WebKitDownload *dl, gpointer d)
 
 /* ---- start --------------------------------------------------------------------------- */
 
+/* ---- diagnostics: WPE_EVAL runs a script in the page every WPE_EVAL_EVERY
+ * seconds (default 60) and prints what it returns ------------------------------ */
+
+static void eval_done(GObject *o, GAsyncResult *res, gpointer d) {
+    GError *err = NULL;
+    JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(o), res, &err);
+    (void)d;
+    if (!v) {
+        fprintf(stderr, "icda-webkit eval: error %s\n", err ? err->message : "?");
+        if (err) g_error_free(err);
+        return;
+    }
+    {
+        char *s = jsc_value_to_string(v);
+        fprintf(stderr, "icda-webkit eval: %s\n", s ? s : "(null)");
+        g_free(s);
+    }
+    g_object_unref(v);
+}
+
+static gboolean eval_tick(gpointer d) {
+    const char *js = getenv("WPE_EVAL");
+    (void)d;
+    if (js && ntabs) {
+        /* the result comes back as the page title (printed by on_title) */
+        char *wrapped = g_strdup_printf("document.title = \"probe:\" + String(%s); 0", js);
+        webkit_web_view_evaluate_javascript(tabs[active]->view, wrapped, -1, NULL, NULL, NULL, eval_done, NULL);
+        g_free(wrapped);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 static void env_default(const char *k, const char *v) {
     if (!getenv(k)) setenv(k, v, 1);
 }
@@ -801,12 +837,13 @@ int main(int argc, char **argv) {
     }
     settings = webkit_settings_new();
     webkit_settings_set_user_agent(settings,
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15");
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15");
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, getenv("WPE_CONSOLE") != NULL);
     webkit_settings_set_enable_smooth_scrolling(settings, FALSE);
     g_signal_connect(webkit_network_session_get_default(), "download-started", G_CALLBACK(on_download), NULL);
 
     add_tab(url, NULL);
+    if (getenv("WPE_EVAL")) g_timeout_add_seconds(getenv("WPE_EVAL_EVERY") ? (guint)atoi(getenv("WPE_EVAL_EVERY")) : 60, eval_tick, NULL);
     set_status("", 1);
 
     g_timeout_add(10, poll_window, NULL);

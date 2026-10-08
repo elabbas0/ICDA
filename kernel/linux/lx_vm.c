@@ -269,7 +269,11 @@ static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
         /* a file: the page cache's frame, copied only when written */
         uint64_t cached = pc_frame(v->node, (v->off + (va - v->start)) / PAGE);
         if (cached) {
-            uint64_t fl = (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
+            /* MAP_SHARED: every mapping of the file uses (and writes) the same
+             * frame, as on Linux - programs write code through one mapping
+             * and run it through another (GStreamer's ORC) */
+            uint64_t fl = (v->flags & LXVM_SHARED) ? pte_flags(v->prot)
+                        : (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
             if (vmm_map_page(p->addr_space, va, cached, fl) != 0) {
                 pmm_free(cached);
                 return -1;
