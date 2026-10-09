@@ -41,3 +41,4 @@ usr/share/sounds/start_close.wav        resources/audio/start_close.wav
 usr/share/sounds/start_open.wav         resources/audio/start_open.wav
 usr/share/sounds/toggle_off.wav         resources/audio/toggle_off.wav
 usr/share/sounds/toggle_on.wav          resources/audio/toggle_on.wav
+usr/share/sounds/notify.wav             resources/audio/notify.wav

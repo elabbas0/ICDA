@@ -335,7 +335,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
             "help","clear","pwd","cd","ls","cat","mkdir","rm","touch","write","stat","install","sync","storage","mount","play","stop",
-            "edit","diskman","curl","run","exit"
+            "edit","diskman","curl","notify","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
             if (str_prefix(builtins[i], token)) {
@@ -1363,6 +1363,19 @@ static void shell_dispatch(char *line) {
     if (str_eq(line, "edit")) { shell_edit(arg); return; }
     if (str_eq(line, "diskman")) { shell_diskman(); return; }
     if (str_eq(line, "curl")) { shell_curl(arg); return; }
+    if (str_eq(line, "notify")) {             /* notify <title> [body]: posts a notification */
+        char msg[256];
+        uint64_t n = 0, i = 0;
+        const char *pre = "Terminal|";
+        if (!arg || !*arg) { icda_write("usage: notify <title> [body]\n"); return; }
+        while (pre[n]) { msg[n] = pre[n]; n++; }
+        while (arg[i] && arg[i] != ' ' && n + 1 < sizeof(msg)) msg[n++] = arg[i++];
+        if (n + 1 < sizeof(msg)) msg[n++] = '\n';
+        while (arg[i] == ' ') i++;
+        while (arg[i] && n + 1 < sizeof(msg)) msg[n++] = arg[i++];
+        (void)icda_write_file("/dev/notify", msg, n);
+        return;
+    }
     if (str_eq(line, "wifi")) { shell_wifi(arg); return; }
     if (str_eq(line, "webkit")) { shell_webkit(arg); return; }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }

@@ -547,8 +547,12 @@ static void check(void) {
         status("Update %s did not pass the final check%s", want.version, "");
     } else {
         char line[96];
+        char note[160];
+        int nlen;
         snprintf(line, sizeof(line), "Update %s is ready: restart to install", want.version);
         status("%s%s", line, "");
+        nlen = snprintf(note, sizeof(note), "Updates|ICDA %s is ready\nRestart your computer to install it.", want.version);
+        (void)icda_write_file("/dev/notify", note, (uint64_t)nlen);
     }
     free(commit);
     (void)need;

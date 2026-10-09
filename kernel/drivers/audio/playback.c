@@ -285,12 +285,30 @@ static int16_t limit(int32_t x) {
     return (int16_t)(x < 0 ? -a : a);
 }
 
+/* Master volume (0..256) and mute: the taskbar's volume control. */
+static int32_t master_volume = 256;
+static int master_muted;
+
+void audio_master_set(uint32_t volume, int muted) {
+    master_volume = (int32_t)(volume > 256 ? 256 : volume);
+    master_muted = muted ? 1 : 0;
+}
+
+uint32_t audio_master_get(int *muted) {
+    if (muted) *muted = master_muted;
+    return (uint32_t)master_volume;
+}
+
 static void mix_into_ring(uint64_t at, uint32_t bytes) {
     uint32_t frames = bytes / FRAME_BYTES;
     for (uint32_t i = 0; i < frames * 2; i++) mix_acc[i] = 0;
     mix_voices(frames);
     mix_streams(frames);
-    for (uint32_t i = 0; i < frames * 2; i++) mix_out[i] = limit(mix_acc[i]);
+    {
+        /* perceived loudness follows the square of the slider */
+        int32_t g = master_muted ? 0 : master_volume * master_volume / 256;
+        for (uint32_t i = 0; i < frames * 2; i++) mix_out[i] = limit((int32_t)(((int64_t)mix_acc[i] * g) >> 8));
+    }
     (void)hda_stream_write((uint32_t)(at % RING_BYTES), (const uint8_t *)mix_out, bytes);
 }
 

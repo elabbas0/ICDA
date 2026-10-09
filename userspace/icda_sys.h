@@ -214,6 +214,9 @@ static inline long icda_audio_stream_position(long id) { return (long)sys_call4(
 static inline long icda_audio_stream_queued(long id) { return (long)sys_call4(SYS_AUDIO_MIX, 5, (uint64_t)id, 0, 0); }
 static inline long icda_audio_stream_control(long id, int paused, uint32_t volume) { return (long)sys_call4(SYS_AUDIO_MIX, 6, (uint64_t)id, (uint64_t)paused, volume); }
 static inline long icda_audio_stream_close(long id) { return (long)sys_call4(SYS_AUDIO_MIX, 7, (uint64_t)id, 0, 0); }
+/* master volume 0..256 and mute (the taskbar volume control) */
+static inline long icda_audio_master_set(uint32_t volume, int muted) { return (long)sys_call4(SYS_AUDIO_MIX, 8, volume, (uint64_t)(muted ? 1 : 0), 0); }
+static inline long icda_audio_master_get(void) { return (long)sys_call4(SYS_AUDIO_MIX, 9, 0, 0, 0); }
 static inline uint64_t icda_play_pcm_u8(const uint8_t *buf, uint64_t size, uint64_t sample_rate) { return sys_call3(SYS_AUDIO_PCM_PLAY, (uint64_t)(uintptr_t)buf, size, sample_rate); }
 static inline uint64_t icda_play_audio_file(const char *path) { return sys_call1(SYS_AUDIO_PLAY_FILE, (uint64_t)(uintptr_t)path); }
 static inline uint64_t icda_stop_audio(void) { return sys_call0(SYS_AUDIO_STOP); }

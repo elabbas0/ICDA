@@ -122,7 +122,9 @@ enum {
     MIX_STREAM_POSITION,   /* id -> frames played */
     MIX_STREAM_QUEUED,     /* id -> frames waiting */
     MIX_STREAM_CONTROL,    /* id, paused, volume */
-    MIX_STREAM_CLOSE       /* id */
+    MIX_STREAM_CLOSE,      /* id */
+    MIX_MASTER_SET,        /* volume 0..256, muted */
+    MIX_MASTER_GET         /* -> volume | muted << 16 */
 };
 
 typedef struct {

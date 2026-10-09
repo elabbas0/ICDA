@@ -517,6 +517,95 @@ static int hda_find_output_path(hda_path_t *out_path) {
     return 0;
 }
 
+/* ---- amplifiers ---------------------------------------------------------------
+ * A real codec comes out of reset with its amplifiers muted (QEMU's does not,
+ * so sound worked there and nowhere else): every DAC and output pin gets its
+ * output amp opened at 0 dB, and every mixer the input that comes from a DAC.
+ * Other mixer inputs (analog loopback from the microphones) stay muted. */
+#define HDA_WCAP_IN_AMP        (1U << 1)
+#define HDA_WCAP_OUT_AMP       (1U << 2)
+#define HDA_WCAP_AMP_OVERRIDE  (1U << 3)
+#define HDA_AMP_SET_BOTH       0x3000U    /* left and right */
+
+static uint32_t hda_amp_caps(uint8_t nid, uint32_t wcaps, uint8_t which) {
+    uint32_t caps = 0;
+    (void)hda_get_param((wcaps & HDA_WCAP_AMP_OVERRIDE) ? nid : hda_afg, which, &caps);
+    return caps;
+}
+
+static int hda_open_amps(void) {
+    uint32_t parm = 0;
+    int opened = 0;
+    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) return 0;
+    for (uint8_t i = 0; i < (uint8_t)(parm & 0x7FU); i++) {
+        uint8_t nid = (uint8_t)(((parm >> 16) & 0x7FU) + i), type;
+        uint32_t wcaps;
+        if (hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, &wcaps) != 0) continue;
+        type = (uint8_t)((wcaps >> 20) & 0x0FU);
+        if ((wcaps & HDA_WCAP_OUT_AMP) && (type == HDA_WIDGET_OUTPUT || type == HDA_WIDGET_PIN ||
+                                           type == HDA_WIDGET_MIXER || type == HDA_WIDGET_SELECTOR)) {
+            uint32_t caps = hda_amp_caps(nid, wcaps, HDA_PARAM_AMP_OUT_CAP);
+            uint16_t gain = (uint16_t)(caps & 0x7FU);              /* the 0 dB step */
+            (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                                (uint16_t)(HDA_AMP_SET_OUTPUT | HDA_AMP_SET_BOTH | gain), 0);
+            opened++;
+        }
+        if ((wcaps & HDA_WCAP_IN_AMP) && (type == HDA_WIDGET_MIXER || type == HDA_WIDGET_SELECTOR)) {
+            uint8_t conns[32], n = 0;
+            uint32_t caps = hda_amp_caps(nid, wcaps, HDA_PARAM_AMP_IN_CAP);
+            uint16_t gain = (uint16_t)(caps & 0x7FU);
+            if (hda_get_connections(nid, conns, &n) != 0) continue;
+            for (uint8_t k = 0; k < n && k < 16; k++) {
+                uint8_t src_type;
+                if (hda_widget_type(conns[k], &src_type) != 0 || src_type != HDA_WIDGET_OUTPUT) continue;
+                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                                    (uint16_t)(HDA_AMP_SET_INPUT | HDA_AMP_SET_BOTH | ((uint16_t)k << 8) | gain), 0);
+                opened++;
+            }
+        }
+    }
+    return opened;
+}
+
+/* Realtek processing coefficients, through the vendor widget 0x20 */
+static void hda_realtek_coef_clear(uint16_t index, uint16_t bits) {
+    uint32_t v = 0;
+    (void)hda_exec_verb(hda_codec, 0x20, 0x500, index, 0);       /* set coefficient index */
+    if (hda_exec_verb(hda_codec, 0x20, 0xC00, 0, &v) != 0) return; /* get processing coefficient */
+    (void)hda_exec_verb(hda_codec, 0x20, 0x500, index, 0);
+    (void)hda_exec_verb(hda_codec, 0x20, 0x400, (uint16_t)(v & ~bits), 0);
+}
+
+static void hda_log_hex(const char *what, uint32_t v) {
+    static const char hex[] = "0123456789abcdef";
+    char b[9];
+    for (int i = 0; i < 8; i++) b[i] = hex[(v >> (28 - 4 * i)) & 15];
+    b[8] = 0;
+    serial_write(what);
+    serial_write(b);
+    serial_write("\n");
+}
+
+/* Codec-specific setup (the parts Linux's patch_realtek does for these) and
+ * a record of the codec and what was opened, in BOOTLOG.TXT */
+static void hda_codec_finish(void) {
+    uint32_t vendor = 0, subsys = 0;
+    int opened;
+    (void)hda_get_param(0, 0x00, &vendor);
+    (void)hda_exec_verb(hda_codec, hda_afg, 0xF20, 0, &subsys);
+    hda_log_hex("hda: codec ", vendor);
+    hda_log_hex("hda: subsystem ", subsys);
+    if (vendor == 0x10ec0293) {
+        /* ALC293: EAPD drives the speaker amplifier only with coefficient
+         * 0x0a bit 13 clear (Linux alc_fill_eapd_coef) */
+        hda_realtek_coef_clear(0x0a, 1U << 13);
+        serial_write("hda: ALC293 speaker amplifier enabled\n");
+    }
+    opened = hda_open_amps();
+    hda_log_hex("hda: amplifiers opened ", (uint32_t)opened);
+    hda_log_hex("hda: output pin / dac ", ((uint32_t)hda_pin << 8) | hda_dac);
+}
+
 static int hda_configure_codec_generic(uint16_t sample_rate) {
     static const uint8_t candidate_dacs[] = { 0x02, 0x03, 0x04, 0x05, 0x06 };
     static const uint8_t candidate_pins[] = { 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15 };
@@ -551,6 +640,7 @@ static int hda_configure_codec_generic(uint16_t sample_rate) {
 
     hda_dac = candidate_dacs[0];
     hda_pin = candidate_pins[0];
+    hda_codec_finish();
     return 0;
 }
 
@@ -649,6 +739,7 @@ static int hda_configure_codec_path(uint16_t sample_rate) {
             }
         }
     }
+    hda_codec_finish();
     return 0;
 }
 

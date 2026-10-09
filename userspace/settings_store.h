@@ -44,6 +44,9 @@ typedef struct {
     int scale;
     int effects;            /* interface sounds (start menu, switches, ...) */
     int zoom;               /* display size in percent: 100, 125, 150, 175, 200 */
+    int volume;             /* master volume, 0..100 (taskbar) */
+    int muted;
+    int power;              /* power mode: 0 saver, 1 balanced, 2 performance */
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -60,6 +63,9 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->scale = 0;
     s->effects = 1;
     s->zoom = 100;
+    s->volume = 70;
+    s->muted = 0;
+    s->power = 1;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -148,6 +154,12 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         s->audio = value;
     } else if (icda_settings_key_is(line, key_len, "effects")) {
         s->effects = value;
+    } else if (icda_settings_key_is(line, key_len, "volume")) {
+        s->volume = value < 0 ? 0 : value > 100 ? 100 : value;
+    } else if (icda_settings_key_is(line, key_len, "muted")) {
+        s->muted = value ? 1 : 0;
+    } else if (icda_settings_key_is(line, key_len, "power")) {
+        s->power = value < 0 || value > 2 ? 1 : value;
     } else if (icda_settings_key_is(line, key_len, "appearance")) {
         s->appearance = value;
     }
@@ -215,6 +227,21 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
     icda_settings_put(buf, sizeof(buf), &pos, s->audio ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "effects=");
     icda_settings_put(buf, sizeof(buf), &pos, s->effects ? "1\n" : "0\n");
+    {
+        char num[8];
+        int v = s->volume < 0 ? 0 : s->volume > 100 ? 100 : s->volume, k = 0;
+        if (v >= 100) num[k++] = '1';
+        if (v >= 10) num[k++] = (char)('0' + (v / 10) % 10);
+        num[k++] = (char)('0' + v % 10);
+        num[k++] = '\n';
+        num[k] = 0;
+        icda_settings_put(buf, sizeof(buf), &pos, "volume=");
+        icda_settings_put(buf, sizeof(buf), &pos, num);
+    }
+    icda_settings_put(buf, sizeof(buf), &pos, "muted=");
+    icda_settings_put(buf, sizeof(buf), &pos, s->muted ? "1\n" : "0\n");
+    icda_settings_put(buf, sizeof(buf), &pos, "power=");
+    icda_settings_put(buf, sizeof(buf), &pos, s->power == 0 ? "0\n" : s->power == 2 ? "2\n" : "1\n");
     icda_settings_put(buf, sizeof(buf), &pos, "zoom=");
     icda_settings_put(buf, sizeof(buf), &pos,
                       s->zoom == 125 ? "125\n" : s->zoom == 150 ? "150\n" : s->zoom == 175 ? "175\n" :

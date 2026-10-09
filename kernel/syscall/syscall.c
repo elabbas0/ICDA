@@ -1624,6 +1624,14 @@ static uint64_t sys_audio_mix(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
     case MIX_STREAM_CLOSE:
         audio_stream_close((int)a);
         return 0;
+    case MIX_MASTER_SET:
+        audio_master_set((uint32_t)a, (int)b);
+        return 0;
+    case MIX_MASTER_GET: {
+        int muted = 0;
+        uint32_t v = audio_master_get(&muted);
+        return (uint64_t)v | ((uint64_t)(muted ? 1 : 0) << 16);
+    }
     default:
         return (uint64_t)-1;
     }

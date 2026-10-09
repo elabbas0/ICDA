@@ -216,9 +216,30 @@ ic_rect_t wm_bar_wifi_rect(int sw, int sh) {
     return ic_rect_make(s.x - WM_BAR_PAD - WM_BAR_BTN_H, l.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
 }
 
-/* "update ready" button, left of Wi-Fi (shown only while a patch waits) */
-ic_rect_t wm_bar_update_rect(int sw, int sh) {
+/* volume, battery and the notification bell, right to left after Wi-Fi */
+static int bar_has_battery;
+
+void wm_bar_set_battery(int present) { bar_has_battery = present; }
+
+ic_rect_t wm_bar_volume_rect(int sw, int sh) {
     ic_rect_t w = wm_bar_wifi_rect(sw, sh);
+    return ic_rect_make(w.x - 2 - WM_BAR_BTN_H, w.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
+}
+
+ic_rect_t wm_bar_battery_rect(int sw, int sh) {
+    ic_rect_t v = wm_bar_volume_rect(sw, sh);
+    int bw = bar_has_battery ? WM_BAR_BTN_H + 30 : 0;
+    return ic_rect_make(v.x - (bw ? 2 : 0) - bw, v.y, bw, WM_BAR_BTN_H);
+}
+
+ic_rect_t wm_bar_notes_rect(int sw, int sh) {
+    ic_rect_t b = wm_bar_battery_rect(sw, sh);
+    return ic_rect_make(b.x - 2 - WM_BAR_BTN_H, b.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
+}
+
+/* "update ready" button, left of the tray (shown only while a patch waits) */
+ic_rect_t wm_bar_update_rect(int sw, int sh) {
+    ic_rect_t w = wm_bar_notes_rect(sw, sh);
     return ic_rect_make(w.x - WM_BAR_PAD - WM_BAR_BTN_H, w.y, WM_BAR_BTN_H, WM_BAR_BTN_H);
 }
 
@@ -226,6 +247,9 @@ int wm_bar_hit(int sw, int sh, const wm_bar_t *b, int mx, int my) {
     if (!ic_ui_hit(wm_bar_rect(sw, sh), mx, my)) return WM_BAR_NONE;
     if (ic_ui_hit(wm_bar_launcher_rect(sw, sh), mx, my)) return WM_BAR_LAUNCHER;
     if (ic_ui_hit(wm_bar_wifi_rect(sw, sh), mx, my)) return WM_BAR_WIFI;
+    if (ic_ui_hit(wm_bar_volume_rect(sw, sh), mx, my)) return WM_BAR_VOLUME;
+    if (bar_has_battery && ic_ui_hit(wm_bar_battery_rect(sw, sh), mx, my)) return WM_BAR_BATTERY;
+    if (ic_ui_hit(wm_bar_notes_rect(sw, sh), mx, my)) return WM_BAR_NOTES;
     if (b && b->update_ready && ic_ui_hit(wm_bar_update_rect(sw, sh), mx, my)) return WM_BAR_UPDATE;
     for (int i = 0; b && i < b->count; i++) {
         ic_rect_t r = wm_bar_task_rect(sw, sh, b->count, i);
@@ -295,6 +319,44 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         ic_gfx_rrect(c, ur.x, ur.y, ur.w, ur.h, IC_R_CONTROL + 2.0f,
                      b->hover == WM_BAR_UPDATE ? p->fill_hover : ic_color_with_alpha(p->accent, 0x30));
         ic_symbol_draw(c, IC_SYM_RELOAD, cx, cy, 18.0f, p->accent);
+    }
+
+    /* volume, battery, notifications */
+    if (b) {
+        ic_rect_t vr = wm_bar_volume_rect(sw, sh), br = wm_bar_battery_rect(sw, sh), nr = wm_bar_notes_rect(sw, sh);
+        float vcx = (float)vr.x + (float)vr.w * 0.5f, vcy = (float)vr.y + (float)vr.h * 0.5f;
+        if (b->quick_open) {
+            ic_gfx_rrect(c, vr.x, vr.y, vr.w, vr.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
+            if (br.w) ic_gfx_rrect(c, br.x, br.y, br.w, br.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
+        } else if (b->hover == WM_BAR_VOLUME) {
+            ic_gfx_rrect(c, vr.x, vr.y, vr.w, vr.h, IC_R_CONTROL + 2.0f, p->fill_hover);
+        } else if (b->hover == WM_BAR_BATTERY && br.w) {
+            ic_gfx_rrect(c, br.x, br.y, br.w, br.h, IC_R_CONTROL + 2.0f, p->fill_hover);
+        }
+        ic_symbol_draw(c, IC_SYM_SPEAKER, vcx, vcy, 18.0f, b->muted ? p->label_tertiary : p->label);
+        if (b->muted || b->volume == 0)
+            ic_gfx_line(c, vcx - 8.0f, vcy + 8.0f, vcx + 8.0f, vcy - 8.0f, 1.6f, p->label_secondary);
+        if (br.w) {
+            char pct[8];
+            ic_uint_to_str((uint64_t)b->battery_pct, pct, sizeof(pct));
+            ic_strlcat(pct, "%", sizeof(pct));
+            wm_battery_glyph(c, (float)br.x + 18.0f, (float)br.y + (float)br.h * 0.5f, b->battery_pct, b->battery_ac,
+                             p->label_secondary, b->battery_pct <= 20 && !b->battery_ac ? p->danger : p->label);
+            ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(br.x + 31, br.y, br.w - 33, br.h), pct, p->label,
+                            IC_ALIGN_LEFT);
+        }
+        if (b->notes_open) ic_gfx_rrect(c, nr.x, nr.y, nr.w, nr.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
+        else if (b->hover == WM_BAR_NOTES) ic_gfx_rrect(c, nr.x, nr.y, nr.w, nr.h, IC_R_CONTROL + 2.0f, p->fill_hover);
+        wm_bell_glyph(c, (float)nr.x + (float)nr.w * 0.5f, (float)nr.y + (float)nr.h * 0.5f,
+                      b->notes_open ? p->accent : p->label);
+        if (b->unread > 0) {
+            char cnt[8];
+            int bx = nr.x + nr.w - 15, by = nr.y + 4;
+            ic_uint_to_str((uint64_t)(b->unread > 9 ? 9 : b->unread), cnt, sizeof(cnt));
+            ic_gfx_rrect(c, bx, by, 13, 13, 6.5f, p->accent);
+            ic_text_draw_in(c, ic_font(IC_FONT_CAPTION_EMPH), ic_rect_make(bx, by, 13, 13), cnt, p->label_on_accent,
+                            IC_ALIGN_CENTER);
+        }
     }
 
     /* Wi-Fi: full colour when online, accent while connecting, faint when

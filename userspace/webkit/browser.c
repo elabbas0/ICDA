@@ -291,8 +291,23 @@ static gboolean then_load(gpointer url) {
     return G_SOURCE_REMOVE;
 }
 
+/* WPE_TIMING: frames shown and the time spent showing them, every 50 frames */
+static unsigned frames_n, frames_ms, frames_t0;
+
+static void frame_stats(unsigned t0) {
+    if (!timing_on) return;
+    if (!frames_t0) frames_t0 = t0;
+    frames_ms += now_ms() - t0;
+    if (++frames_n == 50) {
+        fprintf(stderr, "icda-webkit frames: 50 in %u ms, %u ms of it copying and drawing\n", now_ms() - frames_t0, frames_ms);
+        frames_n = frames_ms = 0;
+        frames_t0 = now_ms();
+    }
+}
+
 static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *buffer) {
     tab_t *t = tab_of_exp(data);
+    unsigned t0 = now_ms();
     struct wl_shm_buffer *shm = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
     if (shm) {
         int w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm), stride = wl_shm_buffer_get_stride(shm);
@@ -318,6 +333,7 @@ static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer 
             timing_painted = 1;
             timing("first picture", "");
         }
+        frame_stats(t0);
     }
     wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
     wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(t->exp, buffer);

@@ -406,6 +406,9 @@ int ic_layout_col(ic_rect_t parent, int pad, int gap,
  * (used by the switches that turn sound itself on and off). */
 void ic_sound(const char *name);
 void ic_sound_any(const char *name, int variants);
+
+/* Posts a notification (shown by the window manager, kept in its history). */
+int  ic_notify(const char *app, const char *title, const char *body);
 void ic_sound_always(const char *name);
 
 /* "Version 1.6.1": the installed release (/etc/icda-release.txt, written by

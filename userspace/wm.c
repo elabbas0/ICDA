@@ -19,6 +19,7 @@
 #include "wm_frame.h"
 #include "wm_shell.h"
 #include "wm_wifi.h"
+#include "wm_panels.h"
 #include "shortcuts.h"
 
 #define MAX_WINDOWS 16
@@ -1292,6 +1293,44 @@ static void wifi_set(int open) {
     mark_dirty_bar();
 }
 
+/* Quick settings and the notification centre (wm_panels.c) */
+static int panel_open = 0;          /* 0, WM_PANEL_QUICK or WM_PANEL_NOTES */
+static ic_tween_t panel_fade;
+
+static ic_rect_t panel_reach(void) {
+    ic_rect_t q = wm_panels_rect(WM_PANEL_QUICK, scr_w, scr_h);
+    int x = scr_w - 360 - 8, top = scr_h - WM_BAR_H - 8 - 440;
+    if (q.y < top) top = q.y;
+    return ic_rect_make(x, top, scr_w - x, scr_h - WM_BAR_H - top);
+}
+
+static void mark_dirty_panel(void) {
+    mark_dirty_rect(reach_of(panel_reach()));
+}
+
+static void mark_dirty_toast(void) {
+    mark_dirty_rect(reach_of(wm_toast_rect(scr_w, scr_h)));
+}
+
+static void panel_set(int which) {
+    if (panel_open == which) return;
+    if (which) wifi_set(0);
+    ic_sound_any(which ? "flyout_open" : "flyout_close", 4);
+    if (which) {
+        wm_panels_open(which);
+        if (wm_toast_visible()) {
+            wm_toast_dismiss();
+            mark_dirty_toast();
+        }
+    }
+    mark_dirty_panel();
+    panel_open = which;
+    ic_tween_to(&panel_fade, which ? 1.0f : 0.0f, (uint32_t)anim_ms(which ? IC_DUR_FAST : IC_DUR_INSTANT),
+                which ? IC_EASE_ENTER : IC_EASE_EXIT);
+    mark_dirty_panel();
+    mark_dirty_bar();
+}
+
 /* A downloaded OTA patch waits for a restart (from /dev/sysupdate). */
 static int update_ready = 0;
 
@@ -1359,6 +1398,12 @@ static int bar_build(wm_bar_t *b, icda_audio_info_t *audio) {
     b->wifi_state = wm_wifi_bar_state();
     b->wifi_open = wifi_open;
     b->update_ready = update_ready;
+    b->volume = wm_panels_volume(&b->muted);
+    b->battery = wm_panels_battery(&b->battery_pct, &b->battery_ac);
+    b->unread = wm_panels_unread();
+    b->quick_open = panel_open == WM_PANEL_QUICK;
+    b->notes_open = panel_open == WM_PANEL_NOTES;
+    wm_bar_set_battery(b->battery);
     if (audio && (long)icda_audio_info(audio) >= 0 && audio->active) b->audio_text = audio->name;
     return n;
 }
@@ -1418,6 +1463,12 @@ static void extend_to_materials(dirty_rect_t *r) {
     }
     if (wifi_open || ic_tween_value(&wifi_fade) > 0.0f) {
         extend_one(r, reach_of(wm_wifi_reach(scr_w, scr_h)));
+    }
+    if (panel_open || ic_tween_value(&panel_fade) > 0.0f) {
+        extend_one(r, reach_of(panel_reach()));
+    }
+    if (wm_toast_visible()) {
+        extend_one(r, reach_of(wm_toast_rect(scr_w, scr_h)));
     }
     if (ctx_open || ic_tween_value(&ctx_fade) > 0.0f) {
         extend_one(r, reach_of(ctx_rect()));
@@ -2115,6 +2166,16 @@ static void draw_launcher_layer(ic_canvas_t *c) {
     wm_launcher_draw(c, scr_w, scr_h, launcher_hover, blur_scratch, BLUR_SCRATCH_PX);
 }
 
+static int panel_drawn = WM_PANEL_QUICK;   /* what a closing panel fades out */
+
+static void draw_panel_layer(ic_canvas_t *c) {
+    wm_panels_draw(panel_open ? panel_open : panel_drawn, c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+}
+
+static void draw_toast_layer(ic_canvas_t *c) {
+    wm_toast_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+}
+
 static void draw_wifi_layer(ic_canvas_t *c) {
     wm_wifi_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
 }
@@ -2167,6 +2228,14 @@ static void draw_overlays(void) {
     if (ic_tween_value(&wifi_fade) > 0.0f) {
         composite_faded(reach_of(wm_wifi_reach(scr_w, scr_h)), ic_tween_value(&wifi_fade),
                         draw_wifi_layer);
+    }
+    if (panel_open) panel_drawn = panel_open;
+    if (ic_tween_value(&panel_fade) > 0.0f) {
+        composite_faded(reach_of(wm_panels_rect(panel_drawn, scr_w, scr_h)), ic_tween_value(&panel_fade),
+                        draw_panel_layer);
+    }
+    if (wm_toast_visible() && !panel_open) {
+        composite_faded(reach_of(wm_toast_rect(scr_w, scr_h)), 1.0f, draw_toast_layer);
     }
     if (ctx_model.count > 0 && ic_tween_value(&ctx_fade) > 0.0f) {
         composite_faded(reach_of(ctx_rect()), ic_tween_value(&ctx_fade), draw_ctx_layer);
@@ -2733,6 +2802,15 @@ static void handle_bar_click(int hit) {
         return;
     }
     launcher_set(0);
+    if (hit == WM_BAR_VOLUME || hit == WM_BAR_BATTERY) {
+        panel_set(panel_open == WM_PANEL_QUICK ? 0 : WM_PANEL_QUICK);
+        return;
+    }
+    if (hit == WM_BAR_NOTES) {
+        panel_set(panel_open == WM_PANEL_NOTES ? 0 : WM_PANEL_NOTES);
+        return;
+    }
+    panel_set(0);
     if (hit == WM_BAR_WIFI) {
         wifi_set(!wifi_open);
         return;
@@ -2875,6 +2953,22 @@ static void left_press(void) {
         else ctx_close();
         return;
     }
+    if (panel_open) {
+        int bh = wm_bar_hit(scr_w, scr_h, 0, mouse_x, mouse_y);
+        if (ic_ui_hit(wm_panels_rect(panel_open, scr_w, scr_h), mouse_x, mouse_y)) {
+            int r = wm_panels_click(panel_open, scr_w, scr_h, mouse_x, mouse_y);
+            if (r == WM_PANEL_CLOSE) panel_set(0);
+            else if (r == WM_PANEL_REDRAW) { mark_dirty_panel(); mark_dirty_bar(); }
+            return;
+        }
+        if ((bh == WM_BAR_VOLUME || bh == WM_BAR_BATTERY) && panel_open == WM_PANEL_QUICK) { panel_set(0); return; }
+        if (bh == WM_BAR_NOTES && panel_open == WM_PANEL_NOTES) { panel_set(0); return; }
+        panel_set(0);
+    }
+    if (wm_toast_visible() && ic_ui_hit(wm_toast_rect(scr_w, scr_h), mouse_x, mouse_y)) {
+        panel_set(WM_PANEL_NOTES);
+        return;
+    }
     if (wifi_open) {
         if (ic_ui_hit(wm_wifi_rect(scr_w, scr_h), mouse_x, mouse_y)) {
             int r = wm_wifi_click(scr_w, scr_h, mouse_x, mouse_y);
@@ -2949,6 +3043,10 @@ static void left_press(void) {
 }
 
 static void left_release(void) {
+    if (panel_open && wm_panels_release() == WM_PANEL_REDRAW) {
+        mark_dirty_panel();
+        mark_dirty_bar();
+    }
     if (press_win >= 0) {
         wm_window_t *win = &windows[press_win];
         int idx = press_win;
@@ -3012,11 +3110,12 @@ static void right_edge(uint8_t prev_buttons) {
         if (pressed) overview_set(0);
         return;
     }
-    if (pressed && (ctx_open || props_open || launcher_open || wifi_open)) {
+    if (pressed && (ctx_open || props_open || launcher_open || wifi_open || panel_open)) {
         ctx_close();
         props_close();
         launcher_set(0);
         wifi_set(0);
+        panel_set(0);
         return;
     }
     idx = window_at(mouse_x, mouse_y, &hit);
@@ -3114,6 +3213,13 @@ static void pointer_moved(void) {
             bar_hover = bh;
             mark_dirty_bar();
         }
+    }
+    if (panel_open && (mouse_buttons & 1) &&
+        wm_panels_drag(panel_open, scr_w, scr_h, mouse_x, mouse_y) == WM_PANEL_REDRAW) {
+        mark_dirty_panel();
+        mark_dirty_bar();
+    } else if (panel_open && wm_panels_hover(panel_open, scr_w, scr_h, mouse_x, mouse_y) == WM_PANEL_REDRAW) {
+        mark_dirty_panel();
     }
     if (wifi_open && wm_wifi_hover(scr_w, scr_h, mouse_x, mouse_y) == WM_WIFI_REDRAW) {
         mark_dirty_rect(wm_wifi_rect(scr_w, scr_h));
@@ -3342,11 +3448,12 @@ static void handle_key(long key) {
         mark_dirty(0, 0, 340, 140);
         return;
     }
-    if (key == 27 && (ctx_open || props_open || launcher_open || wifi_open)) {
+    if (key == 27 && (ctx_open || props_open || launcher_open || wifi_open || panel_open)) {
         ctx_close();
         props_close();
         launcher_set(0);
         wifi_set(0);
+        panel_set(0);
         esc_swallow = 1;
         return;
     }
@@ -3469,6 +3576,8 @@ int main(int argc, char **argv) {
     settings_last_reload = icda_ticks();
     ic_tween_set(&launcher_fade, 0.0f);
     ic_tween_set(&wifi_fade, 0.0f);
+    ic_tween_set(&panel_fade, 0.0f);
+    wm_panels_init();
     ic_tween_set(&ctx_fade, 0.0f);
     ic_tween_set(&props_fade, 0.0f);
 
@@ -3495,6 +3604,13 @@ int main(int argc, char **argv) {
             if (wch & 1) mark_dirty_bar();
             if ((wch & 2) && wifi_open) mark_dirty_wifi();
             if (update_poll()) mark_dirty_bar();
+        }
+        {
+            /* battery and notifications: twice a second */
+            int pch = wm_panels_poll(500);
+            if (pch & 1) mark_dirty_bar();
+            if ((pch & 2) && panel_open) mark_dirty_panel();
+            if (pch & 4) mark_dirty_toast();
         }
 
         while (icda_msg_poll(wm_queue) > 0) {
@@ -3555,7 +3671,15 @@ int main(int argc, char **argv) {
                 right_edge(prev_btn);
                 if ((mouse_buttons & 1) && !(prev_btn & 1)) left_press();
                 else if (!(mouse_buttons & 1) && (prev_btn & 1)) left_release();
-                if (mev.dz) send_wheel(mev.dz);
+                if (mev.dz) {
+                    if (wm_bar_hit(scr_w, scr_h, 0, mouse_x, mouse_y) == WM_BAR_VOLUME) {
+                        wm_panels_wheel(-mev.dz);         /* wheel over the speaker: volume */
+                        mark_dirty_bar();
+                        if (panel_open == WM_PANEL_QUICK) mark_dirty_panel();
+                    } else {
+                        send_wheel(mev.dz);
+                    }
+                }
             }
             if (mouse_moved && (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
                 pointer_moved();

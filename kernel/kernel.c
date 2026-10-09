@@ -60,6 +60,7 @@
 #include "proc/user.h"
 #include "net/net.h"
 #include "firmware/efi.h"
+#include "power/battery.h"
 
 #ifndef SERIAL_SHELL_MIRROR
 #define SERIAL_SHELL_MIRROR 0
@@ -475,6 +476,7 @@ void kernel_main(void *multiboot_info) {
     
 
 
+    power_mgmt_init();
     if (dev_populate() != 0) {
         boot_line("devices", "/dev populate failed, device syscalls will fail closed");
     } else {

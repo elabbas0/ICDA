@@ -65,6 +65,9 @@ typedef struct {
 #define WM_BAR_STATUS    (-3)
 #define WM_BAR_WIFI      (-4)
 #define WM_BAR_UPDATE    (-5)
+#define WM_BAR_VOLUME    (-6)
+#define WM_BAR_BATTERY   (-7)
+#define WM_BAR_NOTES     (-8)
 
 typedef struct {
     const wm_task_t *tasks;
@@ -78,6 +81,14 @@ typedef struct {
     int              wifi_state;   /* WM_WIFI_* from wm_wifi.h */
     int              wifi_open;
     int              update_ready; /* a patch waits for a restart */
+    int              volume;       /* 0..100 */
+    int              muted;
+    int              battery;      /* 1: a battery is present */
+    int              battery_pct;
+    int              battery_ac;
+    int              unread;       /* notifications not seen in the centre */
+    int              quick_open;   /* quick settings flyout */
+    int              notes_open;   /* notification centre */
 } wm_bar_t;
 
 ic_rect_t wm_bar_rect(int sw, int sh);
@@ -85,6 +96,12 @@ ic_rect_t wm_bar_launcher_rect(int sw, int sh);
 ic_rect_t wm_bar_task_rect(int sw, int sh, int count, int index);
 ic_rect_t wm_bar_wifi_rect(int sw, int sh);
 ic_rect_t wm_bar_update_rect(int sw, int sh);
+ic_rect_t wm_bar_volume_rect(int sw, int sh);
+ic_rect_t wm_bar_battery_rect(int sw, int sh);   /* zero width without a battery */
+ic_rect_t wm_bar_notes_rect(int sw, int sh);
+void      wm_bar_set_battery(int present);
+void      wm_battery_glyph(ic_canvas_t *c, float cx, float cy, int percent, int charging, ic_color_t tint, ic_color_t fill);
+void      wm_bell_glyph(ic_canvas_t *c, float cx, float cy, ic_color_t tint);
 int       wm_bar_hit(int sw, int sh, const wm_bar_t *b, int mx, int my);
 void      wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
                       uint32_t *scratch, int scratch_len);

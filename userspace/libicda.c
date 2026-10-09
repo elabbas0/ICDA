@@ -1341,3 +1341,18 @@ void ic_sound_any(const char *name, int variants) {
     ic_strlcat(full, num, sizeof(full));
     ic_sound_play(full);
 }
+
+/* ---- notifications ---------------------------------------------------------- */
+
+int ic_notify(const char *app, const char *title, const char *body) {
+    char msg[256];
+    msg[0] = 0;
+    if (app && *app) {
+        ic_strlcat(msg, app, sizeof(msg));
+        ic_strlcat(msg, "|", sizeof(msg));
+    }
+    ic_strlcat(msg, title ? title : "", sizeof(msg));
+    ic_strlcat(msg, "\n", sizeof(msg));
+    ic_strlcat(msg, body ? body : "", sizeof(msg));
+    return (long)icda_write_file("/dev/notify", msg, ic_strlen(msg)) < 0 ? -1 : 0;
+}

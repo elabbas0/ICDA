@@ -16,6 +16,8 @@
 #include "../syscall/syscall.h"
 #include "../drivers/net/iwm/wifi.h"
 #include "../fs/sysupdate.h"
+#include "../power/battery.h"
+#include "notify.h"
 
 
 
@@ -316,6 +318,29 @@ static const dev_calls_t dev_wifi_calls = {
 
 
 
+/* /dev/battery, /dev/power: battery state, power modes (power/battery.c) */
+static const dev_calls_t dev_battery_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    battery_node_read,
+    0,
+};
+
+static const dev_calls_t dev_power_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    power_node_read,
+    power_node_write,
+};
+
+/* /dev/notify: notifications and their history (dev/notify.c) */
+static const dev_calls_t dev_notify_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    notify_node_read,
+    notify_node_write,
+};
+
 int dev_populate(void) {
     vfs_node_t *dev;
     int rc = 0;
@@ -375,6 +400,14 @@ int dev_populate(void) {
     }
     if (devops_register("/dev/wifi", &dev_wifi_calls) != 0) {
         rc = -1;
+    }
+    {
+        static const char *const extra[] = { "/dev/battery", "/dev/power", "/dev/notify" };
+        static const dev_calls_t *const extra_calls[] = { &dev_battery_calls, &dev_power_calls, &dev_notify_calls };
+        for (int i = 0; i < 3; i++) {
+            if (!vfs_resolve(vfs_root(), extra[i])) (void)vfs_create(vfs_root(), extra[i]);
+            if (devops_register(extra[i], extra_calls[i]) != 0) rc = -1;
+        }
     }
     return rc;
 }

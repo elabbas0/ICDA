@@ -11,6 +11,7 @@
 #include "../drivers/console/console.h"
 #include "../drivers/display/framebuffer.h"
 #include "../fs/bootlog.h"
+#include "../power/battery.h"
 
 const char *exception_names[32] = {
     "division by zero",       "debug",
@@ -163,7 +164,10 @@ void irq_handler(struct registers* regs) {
     if (irq == 0 || bsp_lapic_tick(irq)) sched_tick();
     took = bkl_enter();
     if (took) bkl_why(32 + irq);
-    if (irq == 0 || irq == 16) lx_prof_tick(regs);
+    if (irq == 0 || irq == 16) {
+        lx_prof_tick(regs);
+        power_tick();
+    }
     irq_dispatch(regs, irq);
     if (took) bkl_exit();
 }
@@ -200,9 +204,32 @@ static void irq_dispatch(struct registers* regs, int irq) {
     irq_controller_eoi(irq);
 }
 
+/* Linux sched_yield comes from spin loops: WebKit's threads called it about
+ * 100,000 times a second while waiting for each other (video playback).
+ * Taking the kernel lock for each one kept the threads doing the work - page
+ * faults, other system calls - waiting for the lock.  Most calls now return
+ * without it; every 16th still really yields, so a thread waiting for this
+ * CPU gets it. */
+static uint32_t yield_spins[SMP_MAX_CPUS];
+
+static int linux_yield_fast(struct registers *regs) {
+    process_t *p;
+    cpu_t *c;
+    if (regs->rax != 24) return 0;
+    p = sched_current_process();
+    if (!p || !p->linux_personality) return 0;
+    c = this_cpu();
+    if ((++yield_spins[c->index] & 15) == 0) return 0;
+    for (int i = 0; i < 64; i++) __asm__ volatile("pause");
+    regs->rax = 0;
+    return 1;
+}
+
 void syscall_handler(struct registers* regs) {
-    int took = bkl_enter();
+    int took;
     thread_t *t;
+    if (linux_yield_fast(regs)) return;
+    took = bkl_enter();
     if (took) {
         process_t *p = sched_current_process();
         uint64_t nr = regs->rax;
