@@ -60,12 +60,21 @@ static int ec_wait(uint8_t mask, uint8_t want) {
     return -1;
 }
 
+static int ec_errors;
+static char ec_note[48] = "not probed";
+
+/* a byte the EC left in its output buffer would be read as the answer */
+static void ec_drain(void) {
+    for (int i = 0; i < 16 && (inb(ec_cmd) & EC_OBF); i++) (void)inb(ec_data);
+}
+
 static int ec_read(uint8_t addr, uint8_t *v) {
-    if (ec_wait(EC_IBF, 0)) return -1;
+    ec_drain();
+    if (ec_wait(EC_IBF, 0)) { ec_errors++; return -1; }
     outb(ec_cmd, 0x80);
     if (ec_wait(EC_IBF, 0)) return -1;
     outb(ec_data, addr);
-    if (ec_wait(EC_OBF, EC_OBF)) return -1;
+    if (ec_wait(EC_OBF, EC_OBF)) { ec_errors++; return -1; }
     *v = inb(ec_data);
     return 0;
 }
@@ -163,14 +172,33 @@ void power_tick(void) {
 
 /* ---- setup and device nodes ------------------------------------------------------- */
 
+static void scopy_note(const char *s) {
+    int i = 0;
+    for (; s[i] && i + 1 < (int)sizeof(ec_note); i++) ec_note[i] = s[i];
+    ec_note[i] = 0;
+}
+
 void power_mgmt_init(void) {
     /* Dell gives every table the same OEM ids; the DSDT itself is not in the root list */
     const struct acpi_sdt_header *dsdt = acpi_find_table("FACP");
     uint32_t a, b, c, d;
     if (dsdt && same((const char *)dsdt->oem_id, "DELL", 4) && same((const char *)dsdt->oem_table_id, "CBX3", 4)) {
-        ec_data = 0x930;
-        ec_cmd = 0x934;
-        if (inb(ec_cmd) != 0xFF) ec_layout = 1;
+        /* the ports the DSDT's EC device names, then the usual ones; the
+         * first that answers a read of the AC / battery flags wins */
+        static const uint16_t ports[2][2] = { { 0x930, 0x934 }, { 0x62, 0x66 } };
+        uint8_t flags;
+        scopy_note("no EC answered");
+        for (int i = 0; i < 2 && !ec_layout; i++) {
+            ec_data = ports[i][0];
+            ec_cmd = ports[i][1];
+            if (inb(ec_cmd) == 0xFF) continue;
+            if (ec_read(0x06, &flags) == 0) {
+                ec_layout = 1;
+                scopy_note(i == 0 ? "Dell EC at 0x930" : "Dell EC at 0x62");
+            }
+        }
+    } else {
+        scopy_note(dsdt ? "firmware not recognised" : "no ACPI FADT");
     }
     cpuid(0, &a, &b, &c, &d);
     if (a >= 6) {
@@ -217,6 +245,10 @@ uint64_t battery_node_read(char *buf, uint64_t cap) {
         put(buf, cap, &n, "\nminutes ");
         put_num(buf, cap, &n, bat.minutes);
     }
+    put(buf, cap, &n, "\nec ");
+    put(buf, cap, &n, ec_note);
+    put(buf, cap, &n, "\nec_errors ");
+    put_num(buf, cap, &n, ec_errors);
     put(buf, cap, &n, "\n");
     return n;
 }

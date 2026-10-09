@@ -1158,13 +1158,15 @@ dhcp_thread(void)
 	}
 }
 
+void sock_tick(void);		/* net/sock.c: moves received frames into the stack */
+
 void icda_wifi_main(void) __attribute__((noreturn));
 
 void
 icda_wifi_main(void)
 {
 	struct ifnet *ifp;
-	uint64_t last_sec = 0, last_snap = 0, last_rescan = 0;
+	uint64_t last_sec = 0, last_snap = 0, last_rescan = 0, last_work = 0;
 
 	iwm_compat_init();		/* TSC calibration for DELAY() */
 	iwm_compat_set_console(1);	/* bring-up steps on screen too */
@@ -1237,7 +1239,17 @@ icda_wifi_main(void)
 			last_snap = now;
 			update_status_snapshot();
 		}
-		if (work)
+		/*
+		 * The adapter is polled (no interrupts).  Sleeping a whole tick
+		 * after every idle pass added up to 10 ms to each packet in and
+		 * each ACK out; while traffic flows (work in the last 50 ms) the
+		 * thread only yields between passes.
+		 */
+		if (work) {
+			last_work = now;
+			sock_tick();	/* received frames to TCP now, not at the next tick */
+		}
+		if (work || now - last_work < 50000000ULL)
 			sched_yield();
 		else
 			sched_sleep(1);

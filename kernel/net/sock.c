@@ -13,7 +13,11 @@
 #define SOCK_MAX        64
 #define TCP_MSS         1460
 #define TCP_SBUF        (64 * 1024)
-#define TCP_RBUF        65535
+/* 512 KiB of receive window per connection (window scaling, RFC 7323): with
+ * 64 KiB a connection moved at most 64 KiB per round trip - about 1 MB/s at
+ * 60 ms - however fast the link */
+#define TCP_RBUF        (512 * 1024)
+#define TCP_RCV_WSCALE  4
 #define TCP_RTO_MIN     30      /* ticks (10 ms each) */
 #define TCP_RTO_MAX     600
 #define TCP_RETRIES     12
@@ -71,6 +75,8 @@ typedef struct {
     uint32_t  rto;
     int       retries;
     uint32_t  last_wnd;
+    int       ws_ok;          /* both sides sent a window scale option */
+    uint8_t   snd_wscale;     /* the peer's shift for the windows it sends */
     /* UDP */
     udp_dgram_t q[UDP_QUEUE];
     int       qhead, qlen;
@@ -282,9 +288,16 @@ static uint32_t rbuf_free(const sock_t *s) {
 }
 
 static void tcp_send(sock_t *s, uint32_t seq, uint8_t flags, const uint8_t *data, uint16_t len) {
-    uint8_t h[24];
-    uint16_t hlen = (flags & TCP_FLAG_SYN) ? 24 : 20;
-    uint32_t wnd = rbuf_free(s);
+    uint8_t h[28];
+    uint16_t hlen = (flags & TCP_FLAG_SYN) ? 28 : 20;
+    uint32_t wnd = rbuf_free(s), field;
+    /* a SYN's window is never scaled; without scaling 16 bits is all */
+    if ((flags & TCP_FLAG_SYN) || !s->ws_ok) field = wnd > 65535 ? 65535 : wnd;
+    else {
+        field = wnd >> TCP_RCV_WSCALE;
+        if (field > 65535) field = 65535;
+    }
+    wnd = (flags & TCP_FLAG_SYN) || !s->ws_ok ? field : field << TCP_RCV_WSCALE;
     zero_bytes(h, sizeof(h));
     h[0] = (uint8_t)(s->lport >> 8);
     h[1] = (uint8_t)s->lport;
@@ -294,13 +307,17 @@ static void tcp_send(sock_t *s, uint32_t seq, uint8_t flags, const uint8_t *data
     wr32be(h + 8, (flags & TCP_FLAG_ACK) ? s->rcv_nxt : 0);
     h[12] = (uint8_t)((hlen / 4) << 4);
     h[13] = flags;
-    h[14] = (uint8_t)(wnd >> 8);
-    h[15] = (uint8_t)wnd;
-    if (hlen == 24) {
-        h[20] = 2;
+    h[14] = (uint8_t)(field >> 8);
+    h[15] = (uint8_t)field;
+    if (hlen == 28) {
+        h[20] = 2;                    /* MSS */
         h[21] = 4;
         h[22] = (uint8_t)(TCP_MSS >> 8);
         h[23] = (uint8_t)TCP_MSS;
+        h[24] = 1;                    /* NOP, then window scale */
+        h[25] = 3;
+        h[26] = 3;
+        h[27] = TCP_RCV_WSCALE;
     }
     s->last_wnd = wnd;
     ip_output(s, IP_PROTO_TCP, h, hlen, data, len);
@@ -381,7 +398,19 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
         if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) && ack == s->snd_nxt) {
             s->rcv_nxt = seq + 1;
             s->snd_una = ack;
-            s->snd_wnd = ((uint32_t)t[14] << 8) | t[15];
+            s->snd_wnd = ((uint32_t)t[14] << 8) | t[15];      /* a SYN's window is unscaled */
+            s->ws_ok = 0;
+            for (uint16_t o = 20; o < doff; ) {               /* the peer's options */
+                uint8_t kind = t[o];
+                if (kind == 0) break;
+                if (kind == 1) { o++; continue; }
+                if (o + 1 >= doff || t[o + 1] < 2) break;
+                if (kind == 3 && t[o + 1] == 3 && o + 2 < doff) {
+                    s->ws_ok = 1;
+                    s->snd_wscale = t[o + 2] > 14 ? 14 : t[o + 2];
+                }
+                o = (uint16_t)(o + t[o + 1]);
+            }
             s->state = T_ESTABLISHED;
             s->retries = 0;
             ntrace("connected", s->rip, s->rport, s->lport);
@@ -415,7 +444,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
                 }
             }
         }
-        s->snd_wnd = ((uint32_t)t[14] << 8) | t[15];
+        s->snd_wnd = (((uint32_t)t[14] << 8) | t[15]) << (s->ws_ok ? s->snd_wscale : 0);
     }
     if (dlen || (flags & TCP_FLAG_FIN)) {
         if (seq != s->rcv_nxt) trace("ooo", s, seq, s->rcv_nxt);

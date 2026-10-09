@@ -1927,17 +1927,20 @@ static int animations_tick(void) {
         mark_dirty_win(win);
     }
     {
-        static int launcher_was, ctx_was, props_was, wifi_was;
+        static int launcher_was, ctx_was, props_was, wifi_was, panel_was;
         int l = ic_tween_running(&launcher_fade);
         int x = ic_tween_running(&ctx_fade);
         int p = ic_tween_running(&props_fade);
         int wf = ic_tween_running(&wifi_fade);
+        int pf = ic_tween_running(&panel_fade);
         if (l || launcher_was) mark_dirty_launcher();
         if (x || ctx_was) mark_dirty_rect(reach_of(ctx_rect()));
         if (p || props_was) mark_dirty_rect(reach_of(props_rect()));
         if (wf || wifi_was) mark_dirty_wifi();
-        if (l || x || p || wf) running = 1;
+        if (pf || panel_was) mark_dirty_panel();     /* every frame of a panel's fade, and the last */
+        if (l || x || p || wf || pf) running = 1;
         wifi_was = wf;
+        panel_was = pf;
         launcher_was = l;
         ctx_was = x;
         props_was = p;
