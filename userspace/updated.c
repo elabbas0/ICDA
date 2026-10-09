@@ -9,7 +9,8 @@
  *   file SYSTEM/apps/wm.app <size> <sha256>
  *   file EFI/ICDA/KERNEL.BIN <size> <sha256>
  *   ...
- *   lfile linux/usr/lib/libWPEWebKit-2.0.so.1.0.7 <size> <sha256> [parts <n>]
+ *   wfile linux/usr/lib/libWPEWebKit-2.0.so.1.0.7 <size> <sha256> <offset in the pack>
+ *   wpack linux.pack <size> <sha256> <pieces>
  *   ...
  *   signature <ed25519 over everything above this line, hex>
  *
@@ -56,14 +57,20 @@ typedef struct {
     uint64_t size;
     char     sha[65];
     int      parts;      /* 0: one file; n: published as REL.part0 .. REL.part<n-1> */
-    int      webkit;     /* an lfile line */
+    int      webkit;     /* an lfile or wfile line */
+    int      packed;     /* a wfile line: its bytes are at pack_off in the WebKit pack */
+    uint64_t pack_off;
 } entry_t;
 
 typedef struct {
-    char    version[24];
-    char    notes[160];
-    entry_t files[MAX_FILES];
-    int     count;
+    char     version[24];
+    char     notes[160];
+    entry_t  files[MAX_FILES];
+    int      count;
+    char     pack_rel[64];      /* wpack: the WebKit pack, published as REL.part0 .. */
+    uint64_t pack_size;
+    char     pack_sha[65];
+    int      pack_parts;
 } manifest_t;
 
 static manifest_t want, have;
@@ -105,6 +112,19 @@ static int dev_field(const char *key, char *out, size_t cap) {
 
 /* ---- manifests ------------------------------------------------------------ */
 
+/* splits s at spaces in place into up to max fields; returns how many */
+static int fields(char *s, char **f, int max) {
+    int n = 0;
+    while (*s && n < max) {
+        while (*s == ' ') *s++ = 0;
+        if (!*s) break;
+        f[n++] = s;
+        while (*s && *s != ' ') s++;
+    }
+    while (*s == ' ') *s++ = 0;
+    return *s ? -1 : n;
+}
+
 static int parse_manifest(const char *text, manifest_t *m) {
     const char *p = text;
     memset(m, 0, sizeof(*m));
@@ -119,6 +139,28 @@ static int parse_manifest(const char *text, manifest_t *m) {
                 snprintf(m->version, sizeof(m->version), "%s", line + 8);
             } else if (strncmp(line, "notes ", 6) == 0) {
                 snprintf(m->notes, sizeof(m->notes), "%s", line + 6);
+            } else if (strncmp(line, "wpack ", 6) == 0) {
+                /* wpack REL SIZE SHA256 PARTS */
+                char *f[4];
+                if (fields(line + 6, f, 4) == 4 && strlen(f[2]) == 64 && strlen(f[0]) < sizeof(m->pack_rel) && atoi(f[3]) > 0) {
+                    snprintf(m->pack_rel, sizeof(m->pack_rel), "%s", f[0]);
+                    m->pack_size = strtoull(f[1], 0, 10);
+                    snprintf(m->pack_sha, sizeof(m->pack_sha), "%s", f[2]);
+                    m->pack_parts = atoi(f[3]);
+                }
+            } else if (strncmp(line, "wfile ", 6) == 0 && m->count < MAX_FILES) {
+                /* wfile REL SIZE SHA256 OFFSET: a WebKit file inside the pack */
+                entry_t *e = &m->files[m->count];
+                char *f[4];
+                if (fields(line + 6, f, 4) == 4 && strlen(f[2]) == 64 && strlen(f[0]) < sizeof(e->rel)) {
+                    snprintf(e->rel, sizeof(e->rel), "%s", f[0]);
+                    e->size = strtoull(f[1], 0, 10);
+                    snprintf(e->sha, sizeof(e->sha), "%s", f[2]);
+                    e->webkit = 1;
+                    e->packed = 1;
+                    e->pack_off = strtoull(f[3], 0, 10);
+                    m->count++;
+                }
             } else if ((strncmp(line, "file ", 5) == 0 || strncmp(line, "lfile ", 6) == 0) && m->count < MAX_FILES) {
                 /* file REL SIZE SHA256, lfile REL SIZE SHA256 [parts N] */
                 entry_t *e = &m->files[m->count];
@@ -201,12 +243,15 @@ static int vercmp(const char *a, const char *b) {
 
 /* ---- downloading ----------------------------------------------------------- */
 
-static uint64_t total_bytes, done_bytes;
+static uint64_t total_bytes, done_bytes, last_report;
 
+/* The whole update's progress, refreshed every 512 KB (it was counted per
+ * file, so the thousands of small WebKit files never moved it off 0%). */
 static void progress(void) {
-    char pct[8], line[64];
+    char pct[8], line[96];
     snprintf(pct, sizeof(pct), "%d", total_bytes ? (int)(done_bytes * 100 / total_bytes) : 0);
-    snprintf(line, sizeof(line), "Downloading update %s: %s%%", want.version, pct);
+    snprintf(line, sizeof(line), "Downloading update %s: %s%% (%llu of %llu MB)", want.version, pct,
+             (unsigned long long)(done_bytes >> 20), (unsigned long long)(total_bytes >> 20));
     status("%s%s", line, "");
 }
 
@@ -218,7 +263,6 @@ static int download(const entry_t *e) {
     uint8_t digest[32];
     char hex[65];
     uint64_t off = 0;
-    uint64_t last_report = 0;
     char *out = (char *)malloc(CHUNK + 256);
     int st;
 
@@ -273,9 +317,92 @@ static int download(const entry_t *e) {
     return strcmp(hex, e->sha) == 0 ? 0 : -1;
 }
 
+/* Streams the WebKit pack - its files back to back at the offsets their wfile
+ * lines give, published as REL.part0, REL.part1 ... - and sends the files
+ * marked in need to /dev/sysupdate.  A handful of downloads instead of one
+ * HTTPS connection for each of thousands of files. */
+static int download_pack(const manifest_t *m, const unsigned char *need) {
+    char url[URL_CAP];
+    sha256_ctx_t ctx;
+    uint8_t digest[32];
+    char hex[65];
+    uint64_t pos = 0;               /* bytes of the pack seen so far */
+    int fi = 0;                     /* the wfile entry pos is in */
+    char *out = (char *)malloc(CHUNK + 256);
+    int st = HTTP_DONE;
+
+    if (!out) return -1;
+    sha256_init(&ctx);
+    for (int i = 0; i < m->count; i++) {           /* empty files have no bytes in the pack */
+        if (m->files[i].packed && need[i] && m->files[i].size == 0) {
+            int head = snprintf(out, 256, "put %s 0\n", m->files[i].rel);
+            icda_write_file(DEV, out, (uint64_t)head);
+        }
+    }
+    for (int part = 0; part < m->pack_parts && st == HTTP_DONE; part++) {
+        http_req_t *r;
+        snprintf(url, sizeof(url), "%s%s.part%d", OTA_BASE, m->pack_rel, part);
+        r = http_open(url, "GET", 0);
+        if (!r) {
+            free(out);
+            return -1;
+        }
+        for (;;) {
+            st = http_poll(r, 200);
+            if (r->headers_done && r->status != 200) {
+                st = HTTP_ERROR;
+                break;
+            }
+            if (r->body_len > 0) {
+                const char *b = (const char *)r->body;
+                size_t len = r->body_len, used = 0;
+                while (used < len) {
+                    const entry_t *e;
+                    size_t take;
+                    while (fi < m->count && (!m->files[fi].packed || m->files[fi].pack_off + m->files[fi].size <= pos)) fi++;
+                    if (fi >= m->count || m->files[fi].pack_off > pos) {   /* not the layout the manifest gives */
+                        st = HTTP_ERROR;
+                        break;
+                    }
+                    e = &m->files[fi];
+                    take = len - used;
+                    if (take > e->pack_off + e->size - pos) take = (size_t)(e->pack_off + e->size - pos);
+                    if (take > CHUNK) take = CHUNK;
+                    if (need[fi]) {
+                        int head = snprintf(out, 256, "put %s %llu\n", e->rel, (unsigned long long)(pos - e->pack_off));
+                        memcpy(out + head, b + used, take);
+                        if ((long)icda_write_file(DEV, out, (uint64_t)head + take) < 0) {
+                            st = HTTP_ERROR;
+                            break;
+                        }
+                    }
+                    used += take;
+                    pos += take;
+                }
+                sha256_update(&ctx, (const uint8_t *)b, (uint32_t)used);
+                done_bytes += used;
+                r->body_len = 0;
+            }
+            if (st != HTTP_PENDING) break;
+            if (done_bytes - last_report > 512 * 1024) {
+                last_report = done_bytes;
+                progress();
+            }
+        }
+        http_free(r);
+    }
+    free(out);
+    if (st != HTTP_DONE || pos != m->pack_size) return -1;
+    sha256_final(&ctx, digest);
+    to_hex(digest, hex);
+    return strcmp(hex, m->pack_sha) == 0 ? 0 : -1;
+}
+
 /* ---- one check ------------------------------------------------------------- */
 
 static char manifest_text[TEXT_CAP];
+static unsigned char pack_need[MAX_FILES];      /* wfile entries to install */
+static int packed_need;
 
 static void check(void) {
     char pending[24], bad[24], supported[4];
@@ -348,12 +475,17 @@ static void check(void) {
     }
 
     /* only what changed */
-    total_bytes = done_bytes = 0;
+    total_bytes = done_bytes = last_report = 0;
+    packed_need = 0;
     for (int i = 0; i < want.count; i++) {
         const entry_t *old = find(&have, want.files[i].rel);
+        pack_need[i] = 0;
         if (hotfix && !want.files[i].webkit) continue;
-        if (!old || strcmp(old->sha, want.files[i].sha) != 0) total_bytes += want.files[i].size;
+        if (old && strcmp(old->sha, want.files[i].sha) == 0) continue;
+        if (want.files[i].packed) pack_need[i] = 1, packed_need = 1;
+        else total_bytes += want.files[i].size;
     }
+    if (packed_need) total_bytes += want.pack_size;      /* the pack comes whole */
     cap = 512 + (size_t)want.count * 300 + (size_t)have.count * 220;
     commit = (char *)malloc(cap);
     if (!commit) return;
@@ -363,6 +495,7 @@ static void check(void) {
         const entry_t *old = find(&have, e->rel);
         if (old && strcmp(old->sha, e->sha) == 0) continue;
         if (hotfix && !e->webkit) continue;
+        if (e->packed) continue;                            /* from the pack, below */
         if (download(e) != 0) {
             status("Download of update %s failed (%s)", want.version, e->rel);
             free(commit);
@@ -370,6 +503,18 @@ static void check(void) {
         }
         used += (size_t)snprintf(commit + used, cap - used, "file %s %s\n", e->rel, e->sha);
         need++;
+    }
+    if (packed_need) {
+        if (!want.pack_parts || download_pack(&want, pack_need) != 0) {
+            status("Download of update %s failed (%s)", want.version, want.pack_rel[0] ? want.pack_rel : "WebKit");
+            free(commit);
+            return;
+        }
+        for (int i = 0; i < want.count; i++) {
+            if (!pack_need[i]) continue;
+            used += (size_t)snprintf(commit + used, cap - used, "file %s %s\n", want.files[i].rel, want.files[i].sha);
+            need++;
+        }
     }
     for (int i = 0; i < have.count && !hotfix; i++) {
         if (!find(&want, have.files[i].rel))

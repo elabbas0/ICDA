@@ -61,15 +61,22 @@ body=$(mktemp)
         sha=$(sha256sum "$OUT/$rel" | cut -d' ' -f1)
         echo "file $rel $size $sha"
     done
-    [ -d "$OUT/linux" ] && (cd "$OUT" && find linux -type f | LC_ALL=C sort) | while read -r rel; do
-        size=$(wc -c < "$OUT/$rel" | tr -d ' ')
-        sha=$(sha256sum "$OUT/$rel" | cut -d' ' -f1)
-        if [ "$size" -gt "$PART" ]; then
-            echo "lfile $rel $size $sha parts $(( (size + PART - 1) / PART ))"
-        else
-            echo "lfile $rel $size $sha"
-        fi
-    done
+    # WebKit as one pack: its files back to back ("wfile REL SIZE SHA OFFSET"),
+    # published as linux.pack.part0 ... - a few downloads instead of thousands
+    # of HTTPS connections.  Updaters before 1.8.5 skip wpack / wfile lines.
+    if [ -d "$OUT/linux" ]; then
+        rm -f "$OUT/linux.pack"
+        off=0
+        (cd "$OUT" && find linux -type f | LC_ALL=C sort) | while read -r rel; do
+            size=$(wc -c < "$OUT/$rel" | tr -d ' ')
+            sha=$(sha256sum "$OUT/$rel" | cut -d' ' -f1)
+            cat "$OUT/$rel" >> "$OUT/linux.pack"
+            echo "wfile $rel $size $sha $off"
+            off=$((off + size))
+        done
+        psize=$(wc -c < "$OUT/linux.pack" | tr -d ' ')
+        echo "wpack linux.pack $psize $(sha256sum "$OUT/linux.pack" | cut -d' ' -f1) $(( (psize + PART - 1) / PART ))"
+    fi
 } > "$body"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$body" -out "$body.sig"
 {
@@ -89,23 +96,17 @@ if [ "$PUBLISH" = "--publish" ]; then
         blob=$(git hash-object -w "$OUT/$rel")
         GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
     done
-    # WebKit: big files as REL.part0, REL.part1 ... (the host's file size limit)
-    [ -d "$OUT/linux" ] && (cd "$OUT" && find linux -type f | LC_ALL=C sort) | while read -r rel; do
-        size=$(wc -c < "$OUT/$rel" | tr -d ' ')
-        if [ "$size" -gt "$PART" ]; then
-            tmp=$(mktemp -d)
-            split -b "$PART" -d -a 1 "$OUT/$rel" "$tmp/p"
-            for p in "$tmp"/p*; do
-                k=${p##*/p}
-                blob=$(git hash-object -w "$p")
-                GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel.part$k"
-            done
-            rm -rf "$tmp"
-        else
-            blob=$(git hash-object -w "$OUT/$rel")
-            GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
-        fi
-    done
+    # WebKit: the pack in pieces, linux.pack.part0 ... (the host's file size limit)
+    if [ -f "$OUT/linux.pack" ]; then
+        tmp=$(mktemp -d)
+        split -b "$PART" -d -a 1 "$OUT/linux.pack" "$tmp/p"
+        for p in "$tmp"/p*; do
+            k=${p##*/p}
+            blob=$(git hash-object -w "$p")
+            GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,linux.pack.part$k"
+        done
+        rm -rf "$tmp"
+    fi
     tree=$(GIT_INDEX_FILE="$idx" git write-tree)
     rm -f "$idx"
     commit=$(GIT_AUTHOR_NAME=elabbas0 GIT_AUTHOR_EMAIL=arkanabak09@gmail.com \
