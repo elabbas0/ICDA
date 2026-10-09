@@ -32,6 +32,7 @@
 #include "crypto/ed25519.h"
 #include "sha256.h"
 #include "icda_sys.h"
+#include "../version.h"
 
 #define OTA_BASE      "https://raw.githubusercontent.com/elabbas0/ICDA/ota/"
 #define DEV           "/dev/sysupdate"
@@ -445,6 +446,9 @@ static void check(void) {
         }
         free(installed);
     }
+    /* installed from the ISO, no release manifest yet: this build's version
+     * (an older release on the server was offered as an update before) */
+    if (!have.version[0]) snprintf(have.version, sizeof(have.version), "%s", ICDA_VERSION_STRING);
     if (have.version[0] && vercmp(want.version, have.version) < 0) {
         status("ICDA %s is up to date%s", have.version, "");
         return;
