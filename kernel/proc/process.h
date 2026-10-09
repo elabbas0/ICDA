@@ -120,7 +120,7 @@ typedef struct thread {
     
 
 
-    uint8_t          fpu_state[512] __attribute__((aligned(16)));
+    uint8_t          fpu_state[1024] __attribute__((aligned(64)));   /* FPU_STATE_SIZE, XSAVE needs 64 */
     uint64_t         fs_base;
     void            *lx_frame;
     int              pinned;

@@ -13,7 +13,7 @@
 
 
 
-#define FPU_STATE_SIZE 512
+#define FPU_STATE_SIZE 1024   /* XSAVE area: x87, SSE and AVX (832 bytes) */
 
 
 

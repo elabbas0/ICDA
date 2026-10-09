@@ -49,6 +49,8 @@ static process_t *alloc_process(void) {
     return (process_t *)alloc_object_page();
 }
 
+_Static_assert(sizeof(thread_t) <= 4096, "thread_t lives in one object page");
+
 static thread_t *alloc_thread(void) {
     thread_t *thread = (thread_t *)alloc_object_page();
     if (thread) {
