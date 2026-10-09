@@ -928,15 +928,25 @@ static int64_t fatfs_read_range_op(fatfs_t *v, const fatfs_entry_t *e, uint64_t 
     return (int64_t)done;
 }
 
+/* Where the last chain walk ended.  It outlives an operation while the FAT
+ * is unchanged (fat_epoch), so writing a big file in pieces - an update
+ * staged 192 KB at a time - goes on from the end of the last piece instead
+ * of walking the whole chain again, cold, for every piece.  seek_live: the
+ * running operation only appended clusters, which leaves the hint good. */
 static struct {
     uint32_t first;
     uint32_t idx;
     uint32_t cluster;
+    uint32_t epoch;
+    block_device_t *dev;
+    uint64_t base;
 } seek_hint;
+static int seek_live;
 
 static uint32_t chain_seek(fatfs_t *v, uint32_t first, uint32_t idx) {
     uint32_t c = first, i = 0;
-    if (seek_hint.first == first && seek_hint.cluster && seek_hint.idx <= idx) {
+    if (seek_hint.first == first && seek_hint.cluster && seek_hint.idx <= idx &&
+        seek_hint.dev == v->dev && seek_hint.base == v->base_lba && (seek_live || seek_hint.epoch == fat_epoch)) {
         c = seek_hint.cluster;
         i = seek_hint.idx;
     }
@@ -948,6 +958,9 @@ static uint32_t chain_seek(fatfs_t *v, uint32_t first, uint32_t idx) {
         seek_hint.first = first;
         seek_hint.idx = idx;
         seek_hint.cluster = c;
+        seek_hint.epoch = fat_epoch;
+        seek_hint.dev = v->dev;
+        seek_hint.base = v->base_lba;
     }
     return c;
 }
@@ -1012,11 +1025,14 @@ static int fatfs_write_at_op(fatfs_t *v, const char *path, uint64_t off, const v
     fatfs_entry_t e;
     uint64_t new_size;
     int rc;
-    seek_hint.cluster = 0;
     if (fatfs_lookup(v, path, &e) != 0 || (e.attr & (FATFS_ATTR_DIR | FATFS_ATTR_RO))) return -1;
     new_size = off + len > e.size ? off + len : e.size;
     if (new_size > 0xFFFFFFFFULL) return -1;
+    seek_live = seek_hint.epoch == fat_epoch;       /* the hint from the last piece still holds */
+    if (!seek_live) seek_hint.cluster = 0;
+    seek_live = 1;                                  /* growing only appends: the chain stays */
     if (grow_to(v, &e, new_size) != 0) {
+        seek_live = 0;
         fatfs_flush(v);
         return -1;
     }
@@ -1025,6 +1041,8 @@ static int fatfs_write_at_op(fatfs_t *v, const char *path, uint64_t off, const v
     if (rc == 0 && len) rc = write_range(v, e.cluster, off, (const uint8_t *)data, len);
     if (rc == 0) rc = update_dirent(v, &e, e.cluster, (uint32_t)new_size);
     if (fatfs_flush(v) != 0) rc = -1;
+    seek_live = 0;
+    seek_hint.epoch = fat_epoch;                    /* this operation's own FAT writes */
     return rc;
 }
 

@@ -21,6 +21,7 @@
 #include "../memory/heap.h"
 #include "../crypto/sha256.h"
 #include "version.h"
+#include "../cpu/tsc.h"
 
 #define ENV_PATH      "/EFI/ICDA/GRUBENV"
 #define KERNEL_PATH   "/EFI/ICDA/KERNEL.BIN"
@@ -85,6 +86,28 @@ static void ulog(const char *a, const char *b) {
     serial_write("[update] ");
     serial_write(a);
     if (b) serial_write(b);
+    serial_write("\n");
+}
+
+/* Staging time and progress on the serial port: where an update's time goes. */
+static uint64_t put_us, put_bytes;
+
+static void log_num(uint64_t v) {
+    char b[24];
+    int n = 0;
+    do b[n++] = (char)('0' + v % 10); while (v /= 10);
+    while (n) { char c[2] = { b[--n], 0 }; serial_write(c); }
+}
+
+static void log_status(void) {
+    serial_write("[update] at s ");
+    log_num(tsc_us() / 1000000);
+    serial_write(", staged MB ");
+    log_num(put_bytes >> 20);
+    serial_write(" in ms ");
+    log_num(put_us / 1000);
+    serial_write(": ");
+    serial_write(status_text);
     serial_write("\n");
 }
 
@@ -594,6 +617,7 @@ uint64_t sysupdate_write_user(const char *buf, uint64_t len) {
 
     if (sstarts(head, "status ")) {
         scopy(status_text, sizeof(status_text), head + 7);
+        log_status();
         check_requested = 0;
         return len;
     }
@@ -619,7 +643,10 @@ uint64_t sysupdate_write_user(const char *buf, uint64_t len) {
         uint64_t off = 0;
         if (!offs) return (uint64_t)-1;
         while (*offs >= '0' && *offs <= '9') off = off * 10 + (uint64_t)(*offs++ - '0');
+        uint64_t t0 = tsc_us();
         rc = put(&v, rel, off, body, body_len);
+        put_us += tsc_us() - t0;
+        put_bytes += body_len;
     } else if (seq(head, "commit")) {
         char *text = (char *)kmalloc((size_t)body_len + 1);
         if (!text || body_len > TEXT_MAX) {

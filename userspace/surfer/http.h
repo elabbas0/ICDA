@@ -48,6 +48,7 @@ struct http_req {
     /* decoded body */
     uint8_t *body;
     size_t   body_len, body_cap;
+    uint64_t body_seen;     /* body bytes received in all (callers may drain body) */
     /* keep-alive: the connection goes back to a pool when the response is complete */
     int      reused;          /* connection came from the pool */
     int      conn_close;      /* server said Connection: close */

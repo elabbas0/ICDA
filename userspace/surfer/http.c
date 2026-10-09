@@ -565,9 +565,10 @@ static int decode_body(http_req_t *r) {
     if (!r->chunked) {
         if (r->in_len) {
             if (append(&r->body, &r->body_len, &r->body_cap, r->in, r->in_len) != 0) return -1;
+            r->body_seen += r->in_len;
             r->in_len = 0;
         }
-        return r->content_length >= 0 && (int64_t)r->body_len >= r->content_length;
+        return r->content_length >= 0 && (int64_t)r->body_seen >= r->content_length;
     }
     for (;;) {
         if (r->chunk_phase == 0) {
