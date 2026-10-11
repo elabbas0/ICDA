@@ -992,7 +992,11 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
     
 
 
-    out->mem_bytes = proc->addr_space ? proc->addr_space->mapped_pages * PAGE_SIZE_4K : 0;
+    /* kernel threads share the kernel's address space: no memory of their
+     * own to show; a user count is never more than the machine has */
+    out->mem_bytes = proc->kind == PROCESS_USER && proc->addr_space ? proc->addr_space->mapped_pages : 0;
+    if (out->mem_bytes > pmm_usable_frames()) out->mem_bytes = pmm_usable_frames();
+    out->mem_bytes *= PAGE_SIZE_4K;
     {
         uint64_t i = 0;
         while (proc->name[i] && i < sizeof(out->name) - 1) {

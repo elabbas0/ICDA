@@ -10,13 +10,13 @@
  * TCP with retransmission, flow control and slow start, and UDP datagram
  * sockets.  Frames are pumped from the timer tick and from socket calls. */
 
-#define SOCK_MAX        64
+#define SOCK_MAX        128
 #define TCP_MSS         1460
 #define TCP_SBUF        (64 * 1024)
-/* 512 KiB of receive window per connection (window scaling, RFC 7323): with
+/* 256 KiB of receive window per connection (window scaling, RFC 7323): with
  * 64 KiB a connection moved at most 64 KiB per round trip - about 1 MB/s at
  * 60 ms - however fast the link */
-#define TCP_RBUF        (512 * 1024)
+#define TCP_RBUF        (256 * 1024)
 #define TCP_RCV_WSCALE  4
 #define TCP_RTO_MIN     30      /* ticks (10 ms each) */
 #define TCP_RTO_MAX     600
@@ -365,9 +365,13 @@ static void tcp_output(sock_t *s) {
 
 /* ---- input -------------------------------------------------------------- */
 
+/* TCP buffers belong to the socket slot: made on its first use and kept.
+ * Freed and made again for every connection, 576 KiB at a time, they ran the
+ * kernel heap out ("cannot create socket") after a few hundred connections -
+ * a few browser tabs - however much memory was free. */
+static uint8_t *slot_sbuf[SOCK_MAX], *slot_rbuf[SOCK_MAX];
+
 static void sock_release(sock_t *s) {
-    if (s->sbuf) kfree(s->sbuf);
-    if (s->rbuf) kfree(s->rbuf);
     for (int i = 0; i < s->qlen; i++) kfree(s->q[(s->qhead + i) % UDP_QUEUE].data);
     zero_bytes(s, sizeof(*s));
 }
@@ -676,8 +680,10 @@ static int64_t op_socket(uint64_t type) {
         s->owner = p ? p->pid : 0;
         s->lport = alloc_port();
         if (type == SOCK_TCP) {
-            s->sbuf = (uint8_t *)kmalloc(TCP_SBUF);
-            s->rbuf = (uint8_t *)kmalloc(TCP_RBUF);
+            if (!slot_sbuf[i]) slot_sbuf[i] = (uint8_t *)kmalloc(TCP_SBUF);
+            if (!slot_rbuf[i]) slot_rbuf[i] = (uint8_t *)kmalloc(TCP_RBUF);
+            s->sbuf = slot_sbuf[i];
+            s->rbuf = slot_rbuf[i];
             if (!s->sbuf || !s->rbuf) {
                 sock_release(s);
                 return -ENOMEM_;
