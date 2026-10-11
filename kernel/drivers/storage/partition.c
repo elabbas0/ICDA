@@ -248,6 +248,23 @@ static partition_kind_t scan_mbr(block_device_t *device) {
     if (device->read(device->context, 0, 1, sector) != 0) return PARTITION_KIND_UNKNOWN;
     if (sector[510] != 0x55 || sector[511] != 0xAA) return PARTITION_KIND_UNKNOWN;
 
+    /* no partition table, a file system from sector 0 ("superfloppy": many
+     * flash drives): the whole device is one partition */
+    if (sector[0] == 0xEB || sector[0] == 0xE9) {
+        static const struct { uint32_t at; const char *sig; uint8_t type; } fs[] = {
+            { 82, "FAT32   ", 0x0C }, { 54, "FAT16   ", 0x0E }, { 54, "FAT12   ", 0x01 },
+            { 3, "EXFAT   ", 0x07 }, { 3, "NTFS    ", 0x07 },
+        };
+        for (uint32_t f = 0; f < sizeof(fs) / sizeof(fs[0]); f++) {
+            uint32_t k = 0;
+            while (k < 8 && sector[fs[f].at + k] == (uint8_t)fs[f].sig[k]) k++;
+            if (k == 8 && partitions_found < PARTITION_MAX) {
+                add_partition(device, 0, device->sector_count, PARTITION_KIND_MBR, fs[f].type, "whole", 0, 0, 0, 0);
+                return PARTITION_KIND_MBR;
+            }
+        }
+    }
+
     for (uint32_t i = 0; i < 4; i++) {
         if (entries[i].type == 0xEE) {
             protective_gpt = 1;

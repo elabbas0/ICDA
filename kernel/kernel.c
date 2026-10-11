@@ -61,6 +61,7 @@
 #include "net/net.h"
 #include "firmware/efi.h"
 #include "power/battery.h"
+#include "drivers/usb/xhci.h"
 
 #ifndef SERIAL_SHELL_MIRROR
 #define SERIAL_SHELL_MIRROR 0
@@ -477,6 +478,7 @@ void kernel_main(void *multiboot_info) {
 
 
     power_mgmt_init();
+    usb_init();                    /* a thread: keyboards, mice and flash drives as they appear */
     if (dev_populate() != 0) {
         boot_line("devices", "/dev populate failed, device syscalls will fail closed");
     } else {
