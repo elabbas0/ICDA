@@ -168,6 +168,23 @@ wifi_mac(uint8_t out[6])
 	return 0;
 }
 
+/*
+ * The adapter's MSI (vector 50, kernel/cpu/isr.c) and the send path wake
+ * the driver thread from its idle sleep.  Without MSI it still wakes at
+ * every tick, as when it was only polled.
+ */
+static thread_t		*wifi_thr;
+static int		 wifi_msi;
+static volatile uint32_t wifi_irqs;
+
+void
+wifi_irq_wake(void)
+{
+	wifi_irqs++;
+	if (wifi_thr != NULL)
+		sched_wake_thread(wifi_thr);
+}
+
 int
 wifi_send_frame(const void *data, uint16_t len)
 {
@@ -186,6 +203,8 @@ wifi_send_frame(const void *data, uint16_t len)
 	} else
 		tx_drops++;
 	irq_restore(f);
+	if (rc == 0)
+		wifi_irq_wake();	/* send it now, not after the driver's nap */
 	return rc;
 }
 
@@ -758,10 +777,16 @@ wifi_attach(void)
 		    "could not enable PCI memory/bus master");
 		return ENXIO;
 	}
-	/* No interrupts: mask INTx; iwm_intr() is polled. */
+	/*
+	 * INTx stays masked; iwm_intr() runs on the driver thread.  An MSI
+	 * only wakes that thread, so frames are handled as they arrive
+	 * instead of at the next timer tick.
+	 */
 	cmd = pci_read_config32(wifi_pci, PCI_COMMAND_STATUS_REG);
 	pci_write_config16(wifi_pci, PCI_COMMAND_STATUS_REG,
 	    (uint16_t)(cmd | PCI_COMMAND_INTERRUPT_DISABLE));
+	wifi_msi = pci_enable_msi(wifi_pci, 50) == 0;
+	printf("wifi: %s\n", wifi_msi ? "MSI interrupts" : "polled (no MSI)");
 
 	bar0 = pci_read_config32(wifi_pci, 0x10);
 	bar1 = pci_read_config32(wifi_pci, 0x14);
@@ -1166,7 +1191,9 @@ void
 icda_wifi_main(void)
 {
 	struct ifnet *ifp;
-	uint64_t last_sec = 0, last_snap = 0, last_rescan = 0, last_work = 0;
+
+	wifi_thr = sched_current_thread();
+	uint64_t last_sec = 0, last_snap = 0, last_rescan = 0;
 
 	iwm_compat_init();		/* TSC calibration for DELAY() */
 	iwm_compat_set_console(1);	/* bring-up steps on screen too */
@@ -1240,18 +1267,15 @@ icda_wifi_main(void)
 			update_status_snapshot();
 		}
 		/*
-		 * The adapter is polled (no interrupts).  Sleeping a whole tick
-		 * after every idle pass added up to 10 ms to each packet in and
-		 * each ACK out; while traffic flows (work in the last 50 ms) the
-		 * thread only yields between passes.
+		 * Idle: sleep until the adapter's interrupt (MSI), a frame to
+		 * send or the next tick, whichever comes first.  Polling
+		 * without sleeping cut the latency but kept a CPU busy for as
+		 * long as any traffic flowed.
 		 */
 		if (work) {
-			last_work = now;
 			sock_tick();	/* received frames to TCP now, not at the next tick */
-		}
-		if (work || now - last_work < 50000000ULL)
 			sched_yield();
-		else
+		} else
 			sched_sleep(1);
 	}
 }

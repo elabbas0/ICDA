@@ -12,6 +12,7 @@
 #include "../drivers/display/framebuffer.h"
 #include "../fs/bootlog.h"
 #include "../power/battery.h"
+#include "../drivers/net/iwm/wifi.h"
 
 const char *exception_names[32] = {
     "division by zero",       "debug",
@@ -173,6 +174,11 @@ void irq_handler(struct registers* regs) {
 }
 
 static void irq_dispatch(struct registers* regs, int irq) {
+    if (irq == 18) {                       /* Wi-Fi MSI: wake its driver thread */
+        lapic_eoi();
+        wifi_irq_wake();
+        return;
+    }
     if (irq == 16) {
         lapic_eoi();
         if (bsp_lapic_tick(irq)) {

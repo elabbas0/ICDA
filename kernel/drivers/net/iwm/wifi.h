@@ -12,6 +12,7 @@
 int	wifi_init(void);
 int	wifi_present(void);
 int	wifi_send_frame(const void *data, uint16_t len);
+void	wifi_irq_wake(void);	/* the adapter's MSI or a frame to send: wake the driver */
 int	wifi_recv_frame(void *data, uint16_t cap, uint16_t *len_out);
 int	wifi_mac(uint8_t out[6]);
 int	wifi_ready(void);	/* associated and the data port is open */
