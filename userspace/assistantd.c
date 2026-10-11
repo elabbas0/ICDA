@@ -10,7 +10,8 @@
  *
  *   <tier> <name> <base url> <model> <api key or ->
  *
- * tier "local" serves daily questions (a llama.cpp server on this machine),
+ * tier "local" serves daily questions (file: - icda-llm, llama.cpp on this
+ * machine, through /tmp/ai/local-request and -reply),
  * "cloud" the complex ones: code, research, long questions, or anything
  * starting with "/cloud".  Each request tries its tier's providers in order,
  * then the other tier's, until one answers - a provider out of free quota or
@@ -48,11 +49,13 @@ static const char *cur_name = "";
 static const char conf_default[] =
     "# ICDA assistant: the models it asks, tried in order.\n"
     "#   <tier> <name> <base url> <model> <api key or ->\n"
-    "# local answers daily questions (a llama.cpp server on this machine);\n"
-    "# cloud the complex ones (code, research, long questions, or \"/cloud ...\").\n"
-    "# Any OpenAI-compatible endpoint works.  Free cloud tiers are rate-limited\n"
-    "# and may train on what you send: keep private things out of them.\n"
-    "local llama      http://127.0.0.1:8080/v1   local   -\n"
+    "# local answers daily questions: file:auto runs the first .gguf model found in\n"
+    "# an icda-models folder on any drive (C:\\icda-models from Windows works), on\n"
+    "# this computer, offline.  cloud answers the complex ones (code, research,\n"
+    "# long questions, or \"/cloud ...\"): any OpenAI-compatible endpoint works.\n"
+    "# Free cloud tiers are rate-limited and may train on what you send: keep\n"
+    "# private things out of them.\n"
+    "local qwen       file:auto   local   -\n"
     "# Free keys:  console.groq.com   aistudio.google.com   openrouter.ai\n"
     "#cloud groq       https://api.groq.com/openai/v1                           llama-3.3-70b-versatile               YOUR_KEY\n"
     "#cloud gemini     https://generativelanguage.googleapis.com/v1beta/openai  gemini-2.5-flash                      YOUR_KEY\n"
@@ -304,6 +307,149 @@ static int ask(const provider_t *v, const char *q, char *err, size_t errcap) {
     return got ? 0 : -1;
 }
 
+/* ---- the local model (icda-llm, through files) --------------------------------- */
+
+#define LREQ   "/tmp/ai/local-request"
+#define LREPLY "/tmp/ai/local-reply"
+
+static int llm_started;
+static uint32_t lseq;
+
+/* the first entry of dir ending in suffix ("" for any), as dir/name in out */
+static int find_in(const char *dir, const char *suffix, char *out, size_t cap) {
+    static char list[8192];
+    long n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
+    size_t sl = strlen(suffix);
+    if (n <= 0) return 0;
+    list[n] = 0;
+    for (char *p = list; *p;) {
+        char *e = strchr(p, '\n');
+        size_t len;
+        if (e) *e = 0;
+        len = strlen(p);
+        if (len && p[len - 1] == '/') p[--len] = 0;
+        if (len >= sl && strcmp(p + len - sl, suffix) == 0 && len) {
+            snprintf(out, cap, "%s/%s", dir, p);
+            return 1;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* path on any mounted volume: /volumes/<fs>-<n>/<rel>, or under / */
+static int find_on_volumes(const char *rel, const char *suffix, char *out, size_t cap) {
+    static const char *const fs[] = { "fat32", "exfat", "ntfs", "usb" };
+    char dir[160];
+    snprintf(dir, sizeof(dir), "/%s", rel);
+    if (find_in(dir, suffix, out, cap)) return 1;
+    for (int f = 0; f < 4; f++)
+        for (int i = 0; i < 8; i++) {
+            snprintf(dir, sizeof(dir), "/volumes/%s-%d/%s", fs[f], i, rel);
+            if (find_in(dir, suffix, out, cap)) return 1;
+        }
+    return 0;
+}
+
+/* starts icda-llm with the model: "file:auto" finds the first .gguf in an
+ * icda-models folder on any drive (Windows' C: included), "file:/path" names it */
+static int llm_start(const provider_t *v, char *err, size_t errcap) {
+    char model[256], bin[256], args[320];
+    if (llm_started) return 0;
+    if (strcmp(v->url, "file:auto") == 0) {
+        if (!find_on_volumes("icda-models", ".gguf", model, sizeof(model))) {
+            snprintf(err, errcap, "%s: no local model - put a .gguf model in an icda-models folder on any drive "
+                     "(for example C:\\icda-models in Windows)", v->name);
+            return -1;
+        }
+    } else {
+        snprintf(model, sizeof(model), "%s", v->url + 5);
+    }
+    if (!find_on_volumes("linux/usr/bin", "icda-llm", bin, sizeof(bin))) {
+        snprintf(err, errcap, "%s: icda-llm is not installed (it comes with system updates)", v->name);
+        return -1;
+    }
+    snprintf(args, sizeof(args), "-m %s -t 4 -c 4096", model);
+    {
+        char note[700];
+        int nn = snprintf(note, sizeof(note), "starting %s %s\n", bin, args);
+        (void)icda_write_file("/tmp/ai/log", note, (uint64_t)nn);
+    }
+    if ((long)icda_spawn_args(bin, args) < 0) {
+        snprintf(err, errcap, "%s: icda-llm did not start", v->name);
+        return -1;
+    }
+    llm_started = 1;
+    return 0;
+}
+
+static void lput(char *out, size_t cap, size_t *n, const char *role, const char *text) {
+    put(out, cap, n, role);
+    if (*n + 1 < cap) out[(*n)++] = '\x1f';
+    for (const char *t = text; *t && *n + 2 < cap; t++) if (*t != '\x1e' && *t != '\x1f') out[(*n)++] = *t;
+    if (*n + 1 < cap) out[(*n)++] = '\x1e';
+    out[*n] = 0;
+}
+
+static int ask_local(const provider_t *v, const char *q, char *err, size_t errcap) {
+    static char req[24000], rep[A_MAX + 64];
+    char sys[400], when[96];
+    size_t n;
+    uint64_t t0 = icda_ticks(), last = 0;
+    if (llm_start(v, err, errcap)) return -1;
+    today(when, sizeof(when));
+    snprintf(sys, sizeof(sys), "You are the assistant built into ICDA, a small operating system. "
+             "Answer plainly and briefly. Current date and time: %s.", when);
+    lseq = lseq ? lseq + 1 : (uint32_t)icda_ticks();
+    n = (size_t)snprintf(req, sizeof(req), "%u\n", lseq);
+    lput(req, sizeof(req), &n, "system", sys);
+    for (int i = 0; i < nhist; i++) {
+        lput(req, sizeof(req), &n, "user", hist[i].q);
+        lput(req, sizeof(req), &n, "assistant", hist[i].a);
+    }
+    lput(req, sizeof(req), &n, "user", q);
+    (void)icda_write_file(LREQ, req, n);
+    answer[0] = 0;
+    for (;;) {
+        long r = (long)icda_read_file(LREPLY, rep, sizeof(rep) - 1);
+        if (r > 0) {
+            uint32_t s = 0;
+            char *p = rep, state[12];
+            int k = 0;
+            rep[r] = 0;
+            while (*p >= '0' && *p <= '9') s = s * 10 + (uint32_t)(*p++ - '0');
+            if (*p == ' ') p++;
+            while (*p && *p != '\n' && k < 11) state[k++] = *p++;
+            state[k] = 0;
+            if (*p == '\n') p++;
+            if (s == 0 && strcmp(state, "error") == 0) {      /* the model failed to load */
+                snprintf(err, errcap, "%s: %s", v->name, p);
+                llm_started = 0;
+                return -1;
+            }
+            if (s == lseq) {
+                snprintf(answer, sizeof(answer), "%s", p);
+                if (strcmp(state, "done") == 0) return answer[0] ? 0 : -1;
+                if (strcmp(state, "error") == 0) {
+                    snprintf(err, errcap, "%s: %s", v->name, p);
+                    return -1;
+                }
+                if (icda_ticks() - last >= 10) {
+                    last = icda_ticks();
+                    reply(answer[0] ? "answer" : "thinking");
+                }
+            }
+        }
+        /* the first question waits for the model to load */
+        if (icda_ticks() - t0 > (uint64_t)(answer[0] ? 30000 : 18000)) {
+            snprintf(err, errcap, "%s: the local model did not answer in time", v->name);
+            return answer[0] ? 0 : -1;
+        }
+        icda_sleep(5);
+    }
+}
+
 /* code, research, long questions - or the user said so */
 static int complex_question(const char **q) {
     static const char *const words[] = { "code", "program", "function", "debug", "compile", "research", "compare",
@@ -333,7 +479,8 @@ static void handle(const char *question) {
             if (prov[i].cloud != want_cloud) continue;
             cur_name = prov[i].name;
             reply("thinking");
-            if (ask(&prov[i], q, err, sizeof(err)) == 0) {
+            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], q, err, sizeof(err))
+                                                       : ask(&prov[i], q, err, sizeof(err))) == 0) {
                 /* remembered for the conversation */
                 if (nhist == HIST) {
                     memmove(&hist[0], &hist[1], sizeof(hist[0]) * (HIST - 1));

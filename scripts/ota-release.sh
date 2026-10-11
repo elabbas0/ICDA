@@ -61,7 +61,8 @@ body=$(mktemp)
     if [ -d "$LINUXROOT/usr/bin" ]; then
         perl scripts/ota-webkit.pl "$LINUXROOT" "$CACHE" "$PART" \
             linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
-            linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so
+            linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
+            loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm
     fi
 } > "$body"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$body" -out "$body.sig"
@@ -97,6 +98,11 @@ if [ "$PUBLISH" = "--publish" ]; then
         while read -r k blob; do
             GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,linux.pack.part$k"
         done < "$CACHE/blobs.txt"
+        # files kept out of the pack (lfile lines): each at its own path
+        [ -f "$CACHE/loose.txt" ] && while IFS="$(printf '\t')" read -r rel src; do
+            blob=$(git hash-object -w "$src")
+            GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
+        done < "$CACHE/loose.txt"
     fi
     tree=$(GIT_INDEX_FILE="$idx" git write-tree)
     rm -f "$idx"
