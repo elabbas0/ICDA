@@ -21,5 +21,7 @@ int     mouse_read_event(mouse_event_t *out);
 int32_t mouse_abs_x(void);
 int32_t mouse_abs_y(void);
 uint8_t mouse_buttons(void);
+void    mouse_inject(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons);   /* a USB mouse */
+void    mouse_inject_abs(int32_t x, int32_t y, int32_t dz, uint8_t buttons); /* 0..32767 */
 
 #endif

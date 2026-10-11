@@ -284,3 +284,32 @@ int mouse_read_event(mouse_event_t *out) {
 int32_t mouse_abs_x(void) { return mouse_x; }
 int32_t mouse_abs_y(void) { return mouse_y; }
 uint8_t mouse_buttons(void) { return mouse_btn; }
+
+/* Movement from another pointing device (a USB mouse): the same queue and
+ * position as the PS/2 mouse, so everything above sees one mouse. */
+void mouse_inject(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons) {
+    uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
+    mouse_x += dx;
+    mouse_y += dy;
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    if (screen_w > 0 && mouse_x >= screen_w) mouse_x = screen_w - 1;
+    if (screen_h > 0 && mouse_y >= screen_h) mouse_y = screen_h - 1;
+    mouse_btn = buttons & 0x07;
+    if (next == mouse_buf_tail) mouse_buf_tail = (mouse_buf_tail + 1) % MOUSE_BUF_CAP;
+    mouse_buf[mouse_buf_head].abs_x   = mouse_x;
+    mouse_buf[mouse_buf_head].abs_y   = mouse_y;
+    mouse_buf[mouse_buf_head].dx      = dx;
+    mouse_buf[mouse_buf_head].dy      = dy;
+    mouse_buf[mouse_buf_head].buttons = mouse_btn;
+    mouse_buf[mouse_buf_head].dz      = (int8_t)dz;
+    mouse_buf_head = next;
+    sched_wake_input_waiters();
+}
+
+/* An absolute position (a USB tablet: QEMU's pointer), 0..32767 per axis */
+void mouse_inject_abs(int32_t x, int32_t y, int32_t dz, uint8_t buttons) {
+    int32_t nx = screen_w > 0 ? (int32_t)((int64_t)x * screen_w / 32768) : x;
+    int32_t ny = screen_h > 0 ? (int32_t)((int64_t)y * screen_h / 32768) : y;
+    mouse_inject(nx - mouse_x, ny - mouse_y, dz, buttons);
+}

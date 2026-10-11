@@ -427,3 +427,8 @@ int keyboard_read_char(void) {
     queue_tail = (queue_tail + 1) % KEYBOARD_QUEUE_SIZE;
     return (unsigned char)c;
 }
+
+/* A key from another keyboard (USB), as a PS/2 set-1 scancode */
+void keyboard_inject_scancode(uint8_t scancode) {
+    keyboard_handle_scancode(scancode);
+}
