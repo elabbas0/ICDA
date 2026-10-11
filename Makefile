@@ -490,7 +490,7 @@ updated.o: userspace/updated.c $(SURFER_HEADERS) userspace/surfer/crypto/ed25519
 	$(CC) $(SURFER_CFLAGS) -c userspace/updated.c -o /tmp/icda-updated.o
 	cp -f /tmp/icda-updated.o updated.o
 
-assistantd.o: userspace/assistantd.c $(SURFER_HEADERS)
+assistantd.o: userspace/assistantd.c userspace/settings_store.h $(SURFER_HEADERS)
 	$(CC) $(SURFER_CFLAGS) -c userspace/assistantd.c -o /tmp/icda-assistantd.o
 	cp -f /tmp/icda-assistantd.o assistantd.o
 

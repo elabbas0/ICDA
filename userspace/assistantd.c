@@ -22,6 +22,7 @@
 #include <string.h>
 #include "http.h"
 #include "icda_sys.h"
+#include "settings_store.h"
 
 #define CONF_PATH   "/home/.config/ai.conf"
 #define REQ_PATH    "/tmp/ai/request"
@@ -200,15 +201,15 @@ static void take_error(const char *json, char *out, size_t cap) {
 
 /* ---- asking a provider ------------------------------------------------------- */
 
+static long long now_local(void);
+static void fmt_local(long long t, char *out, size_t cap);
+static void rem_check(void);
+
+/* the local date and time, for the model */
 static void today(char *out, size_t cap) {
-    char r[96];
-    long n = (long)icda_read_file("/dev/rtc", r, sizeof(r) - 1);
+    long long t = now_local();
     out[0] = 0;
-    if (n > 0) {
-        r[n] = 0;
-        for (long i = 0; i < n; i++) if (r[i] == '\n') r[i] = ' ';
-        snprintf(out, cap, "%s", r);
-    }
+    if (t) fmt_local(t, out, cap);
 }
 
 static size_t build_body(const provider_t *v, const char *q, char *body, size_t cap) {
@@ -294,6 +295,7 @@ static int ask(const provider_t *v, const char *q, char *err, size_t errcap) {
             last_write = icda_ticks();
             reply("answer");
         }
+        rem_check();
         if (st != HTTP_PENDING) break;
         if (icda_ticks() - t0 > 12000) {               /* two minutes */
             snprintf(err, errcap, "%s: no answer in time", v->name);
@@ -305,6 +307,301 @@ static int ask(const provider_t *v, const char *q, char *err, size_t errcap) {
     if (!got) snprintf(err, errcap, "%s: %s", v->name, st == HTTP_ERROR ? (r->error[0] ? r->error : "connection failed") : "empty answer");
     http_free(r);
     return got ? 0 : -1;
+}
+
+/* ---- local time ------------------------------------------------------------------ */
+
+/* days since 1970-01-01 of a civil date (Howard Hinnant's algorithm) */
+static long days_from_civil(long y, long m, long d) {
+    long era, yoe, doy, doe;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* now in local time, as seconds since 1970 (the RTC is UTC; settings give the zone) */
+static long long now_local(void) {
+    char r[40];
+    long n = (long)icda_read_file("/dev/rtc", r, sizeof(r) - 1);
+    icda_settings_t s;
+    int Y, M, D, h, m, sec;
+    if (n < 19) return 0;
+    r[n] = 0;
+    Y = atoi(r); M = atoi(r + 5); D = atoi(r + 8); h = atoi(r + 11); m = atoi(r + 14); sec = atoi(r + 17);
+    icda_settings_load(&s);
+    return (long long)days_from_civil(Y, M, D) * 86400 + h * 3600 + m * 60 + sec + (long long)s.tz_minutes * 60;
+}
+
+static void fmt_local(long long t, char *out, size_t cap) {
+    static const char *const wd[] = { "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday" };
+    long days = (long)(t / 86400), z = days + 719468, era, doe, yoe, y, doy, mp, d, m;
+    int secs = (int)(t % 86400);
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    snprintf(out, cap, "%s %04ld-%02ld-%02ld %02d:%02d", wd[((days % 7) + 7) % 7], y + (m <= 2), m, d,
+             secs / 3600, secs / 60 % 60);
+}
+
+/* ---- reminders ---------------------------------------------------------------- */
+
+#define REM_PATH "/home/.config/reminders"
+#define REM_MAX  32
+
+static struct { long long due; char text[160]; } rem[REM_MAX];
+static int nrem;
+
+static void rem_save(void) {
+    static char out[REM_MAX * 200];
+    size_t n = 0;
+    for (int i = 0; i < nrem; i++) n += (size_t)snprintf(out + n, sizeof(out) - n, "%lld %s\n", rem[i].due, rem[i].text);
+    (void)icda_write_file(REM_PATH, out, n);
+}
+
+static void rem_load(void) {
+    static char in[REM_MAX * 200];
+    long n = (long)icda_read_file(REM_PATH, in, sizeof(in) - 1);
+    nrem = 0;
+    if (n <= 0) return;
+    in[n] = 0;
+    for (char *p = in; *p && nrem < REM_MAX;) {
+        char *e = strchr(p, '\n'), *sp;
+        if (e) *e = 0;
+        sp = strchr(p, ' ');
+        if (sp) {
+            rem[nrem].due = strtoll(p, 0, 10);
+            snprintf(rem[nrem].text, sizeof(rem[nrem].text), "%s", sp + 1);
+            nrem++;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+}
+
+/* due reminders become notifications (with their sound), even with the overlay closed */
+static void rem_check(void) {
+    static uint64_t last;
+    long long now;
+    int fired = 0;
+    if (last && icda_ticks() - last < 100) return;      /* once a second at most */
+    last = icda_ticks();
+    now = now_local();
+    for (int i = 0; i < nrem; i++) {
+        if (now && rem[i].due <= now) {
+            char msg[220];
+            int k = snprintf(msg, sizeof(msg), "Assistant|Reminder\n%s", rem[i].text);
+            (void)icda_write_file("/dev/notify", msg, (uint64_t)k);
+            rem[i] = rem[--nrem];
+            i--;
+            fired = 1;
+        }
+    }
+    if (fired) rem_save();
+}
+
+static const char *after_word(const char *s, const char *w) {
+    size_t n = strlen(w);
+    while (*s == ' ') s++;
+    return strncmp(s, w, n) == 0 ? s + n : 0;
+}
+
+static int number_word(const char **p) {
+    static const char *const nums[] = { "a ", "an ", "one ", "two ", "three ", "four ", "five ", "ten ", "fifteen ",
+                                        "twenty ", "thirty " };
+    static const int vals[] = { 1, 1, 1, 2, 3, 4, 5, 10, 15, 20, 30 };
+    while (**p == ' ') (*p)++;
+    if (**p >= '0' && **p <= '9') {
+        int v = 0;
+        while (**p >= '0' && **p <= '9') v = v * 10 + (*(*p)++ - '0');
+        return v;
+    }
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++)
+        if (strncmp(*p, nums[i], strlen(nums[i])) == 0) {
+            *p += strlen(nums[i]) - 1;
+            return vals[i];
+        }
+    return -1;
+}
+
+/* "remind me in 10 minutes to ...", "remind me at 18:30 to ...", "set a timer for 5 minutes":
+ * 1 with the reminder scheduled and a confirmation in answer */
+static int try_reminder(const char *q) {
+    char low[Q_MAX], when[40];
+    const char *p, *what;
+    long long now = now_local(), due = 0;
+    int timer = 0;
+    size_t i;
+    for (i = 0; q[i] && i + 1 < sizeof(low); i++) low[i] = (char)(q[i] >= 'A' && q[i] <= 'Z' ? q[i] + 32 : q[i]);
+    low[i] = 0;
+    if (!now) return 0;
+    if ((p = strstr(low, "remind me")) != 0) p += 9;
+    else if ((p = strstr(low, "timer")) != 0) { p += 5; timer = 1; }
+    else return 0;
+    if (timer) { const char *f = after_word(p, "for"); if (f) p = f; }
+    {
+        const char *in = after_word(p, "in");
+        const char *at = after_word(p, "at");
+        if (!in) in = after_word(p, "after");
+        if (in || timer) {
+            int v;
+            const char *u = in ? in : p;
+            v = number_word(&u);
+            while (*u == ' ') u++;
+            if (v < 0) return 0;
+            if (!strncmp(u, "sec", 3)) due = now + v;
+            else if (!strncmp(u, "min", 3)) due = now + (long long)v * 60;
+            else if (!strncmp(u, "hour", 4) || !strncmp(u, "hr", 2)) due = now + (long long)v * 3600;
+            else return 0;
+            while (*u && *u != ' ') u++;
+            p = u;
+        } else if (at) {
+            int h = 0, m = 0;
+            const char *u = at;
+            while (*u == ' ') u++;
+            if (*u < '0' || *u > '9') return 0;
+            while (*u >= '0' && *u <= '9') h = h * 10 + (*u++ - '0');
+            if (*u == ':' || *u == '.') { u++; while (*u >= '0' && *u <= '9') m = m * 10 + (*u++ - '0'); }
+            while (*u == ' ') u++;
+            if (!strncmp(u, "pm", 2) && h < 12) h += 12;
+            if (!strncmp(u, "am", 2) && h == 12) h = 0;
+            if (!strncmp(u, "am", 2) || !strncmp(u, "pm", 2)) u += 2;
+            if (h > 23 || m > 59) return 0;
+            due = now - now % 86400 + h * 3600 + m * 60;
+            if (due <= now) due += 86400;                       /* that time tomorrow */
+            p = u;
+        } else {
+            return 0;
+        }
+    }
+    /* what to be reminded of: the rest, in the user's own capitals */
+    what = q + (p - low);
+    while (*what == ' ' || *what == ',') what++;
+    if (!strncmp(what, "to ", 3)) what += 3;
+    else if (!strncmp(what, "about ", 6)) what += 6;
+    else if (!strncmp(what, "that ", 5)) what += 5;
+    if (nrem >= REM_MAX) {
+        snprintf(answer, sizeof(answer), "There are already %d reminders waiting.", REM_MAX);
+        return 1;
+    }
+    rem[nrem].due = due;
+    snprintf(rem[nrem].text, sizeof(rem[nrem].text), "%s", *what ? what : timer ? "Your timer is done" : "Reminder");
+    nrem++;
+    rem_save();
+    fmt_local(due, when, sizeof(when));
+    snprintf(answer, sizeof(answer), "%s set for %s%s%s.", timer ? "Timer" : "Reminder", when + (strchr(when, ' ') - when) + 1,
+             *what ? ": " : "", what);
+    return 1;
+}
+
+/* ---- web search ------------------------------------------------------------------ */
+
+static void strip_tags(const char *s, size_t n, char *out, size_t cap) {
+    size_t k = 0;
+    int tag = 0;
+    for (size_t i = 0; i < n && k + 1 < cap; i++) {
+        if (s[i] == '<') tag = 1;
+        else if (s[i] == '>') tag = 0;
+        else if (!tag) {
+            if (s[i] == '&' && !strncmp(s + i, "&amp;", 5)) { out[k++] = '&'; i += 4; }
+            else if (s[i] == '&' && !strncmp(s + i, "&#x27;", 6)) { out[k++] = '\''; i += 5; }
+            else if (s[i] == '&' && !strncmp(s + i, "&quot;", 6)) { out[k++] = '"'; i += 5; }
+            else if (s[i] != '\n') out[k++] = s[i];
+        }
+    }
+    out[k] = 0;
+}
+
+/* the top results for query from DuckDuckGo's plain HTML page, as numbered lines */
+static int web_search(const char *query, char *out, size_t cap) {
+    char url[700], final[700];
+    size_t k = 0, u = 0;
+    int found = 0;
+    http_req_t *r;
+    char *page;
+    u = (size_t)snprintf(url, sizeof(url), "https://html.duckduckgo.com/html/?q=");
+    for (const char *q = query; *q && u + 4 < sizeof(url); q++) {
+        unsigned char c = (unsigned char)*q;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.') url[u++] = (char)c;
+        else if (c == ' ') url[u++] = '+';
+        else u += (size_t)snprintf(url + u, sizeof(url) - u, "%%%02X", c);
+    }
+    url[u] = 0;
+    r = http_get(url, final, sizeof(final));
+    out[0] = 0;
+    if (!r || r->status != 200 || !r->body) {
+        if (r) http_free(r);
+        return 0;
+    }
+    page = (char *)malloc(r->body_len + 1);
+    if (!page) { http_free(r); return 0; }
+    memcpy(page, r->body, r->body_len);
+    page[r->body_len] = 0;
+    http_free(r);
+    for (char *p = page; found < 4 && (p = strstr(p, "class=\"result__a\"")) != 0;) {
+        char title[160], snip[240], link[200];   /* short: a local model reads every word */
+        char *te = strstr(p, "</a>"), *href, *s;
+        link[0] = 0;
+        href = strstr(p, "href=\"");
+        if (href && href < te) {
+            char *e = strchr(href + 6, '"');
+            char *ud = strstr(href, "uddg=");
+            size_t lk = 0;
+            if (ud && e && ud < e) {             /* /l/?uddg=<encoded target> */
+                for (char *c = ud + 5; c < e && *c != '&' && lk + 1 < sizeof(link); c++) {
+                    if (*c == '%' && c[1] && c[2]) {
+                        char hx[3] = { c[1], c[2], 0 };
+                        link[lk++] = (char)strtol(hx, 0, 16);
+                        c += 2;
+                    } else link[lk++] = *c;
+                }
+            }
+            link[lk] = 0;
+        }
+        if (!te) break;
+        strip_tags(strchr(p, '>') + 1, (size_t)(te - strchr(p, '>') - 1), title, sizeof(title));
+        s = strstr(te, "class=\"result__snippet\"");
+        snip[0] = 0;
+        if (s) {
+            char *se = strstr(s, "</a>");
+            if (se) strip_tags(strchr(s, '>') + 1, (size_t)(se - strchr(s, '>') - 1), snip, sizeof(snip));
+        }
+        found++;
+        k += (size_t)snprintf(out + k, cap - k, "%d. %s - %s (%s)\n", found, title, snip, link);
+        if (k >= cap) break;
+        p = te;
+    }
+    free(page);
+    return found;
+}
+
+/* questions that need the web: "search ...", "look up ...", news, prices ... */
+static int wants_web(const char *q, char *query, size_t cap) {
+    static const char *const lead[] = { "search the web for ", "search for ", "search ", "look up ", "google ", "/web " };
+    static const char *const hint[] = { "latest", "news", "today's", "this week", "current price", "price of",
+                                        "weather", "who won", "score", "release date" };
+    char low[Q_MAX];
+    size_t i;
+    for (i = 0; q[i] && i + 1 < sizeof(low); i++) low[i] = (char)(q[i] >= 'A' && q[i] <= 'Z' ? q[i] + 32 : q[i]);
+    low[i] = 0;
+    for (i = 0; i < sizeof(lead) / sizeof(lead[0]); i++)
+        if (!strncmp(low, lead[i], strlen(lead[i]))) {
+            snprintf(query, cap, "%s", q + strlen(lead[i]));
+            return 1;
+        }
+    for (i = 0; i < sizeof(hint) / sizeof(hint[0]); i++)
+        if (strstr(low, hint[i])) {
+            snprintf(query, cap, "%s", q);
+            return 1;
+        }
+    return 0;
 }
 
 /* ---- the local model (icda-llm, through files) --------------------------------- */
@@ -446,6 +743,7 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             snprintf(err, errcap, "%s: the local model did not answer in time", v->name);
             return answer[0] ? 0 : -1;
         }
+        rem_check();                     /* a long answer must not hold up a reminder */
         icda_sleep(5);
     }
 }
@@ -466,21 +764,42 @@ static int complex_question(const char **q) {
 
 static void handle(const char *question) {
     char err[400], errs[800];
-    const char *q = question;
+    const char *q = question, *asked;
+    static char augmented[Q_MAX + 4096];
+    char query[Q_MAX];
     int cloud_first = complex_question(&q);
     load_conf();
     errs[0] = 0;
     cur_name = "";
     answer[0] = 0;
     reply("thinking");
+    /* reminders and timers need no model */
+    if (try_reminder(q)) {
+        cur_name = "reminders";
+        reply("done");
+        return;
+    }
+    /* the web: the top results go to the model with the question */
+    asked = q;
+    if (wants_web(q, query, sizeof(query))) {
+        static char results[3000];
+        cur_name = "web search";
+        reply("thinking");
+        if (web_search(query, results, sizeof(results))) {
+            snprintf(augmented, sizeof(augmented),
+                     "Web search results for \"%s\":\n%s\nUsing these results, answer: %s\n"
+                     "Mention which results you used.", query, results, q);
+            asked = augmented;
+        }
+    }
     for (int pass = 0; pass < 2; pass++) {
         int want_cloud = pass == 0 ? cloud_first : !cloud_first;
         for (int i = 0; i < nprov; i++) {
             if (prov[i].cloud != want_cloud) continue;
             cur_name = prov[i].name;
             reply("thinking");
-            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], q, err, sizeof(err))
-                                                       : ask(&prov[i], q, err, sizeof(err))) == 0) {
+            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
+                                                       : ask(&prov[i], asked, err, sizeof(err))) == 0) {
                 /* remembered for the conversation */
                 if (nhist == HIST) {
                     memmove(&hist[0], &hist[1], sizeof(hist[0]) * (HIST - 1));
@@ -514,7 +833,9 @@ int main(void) {
         long n = (long)icda_read_file(REQ_PATH, buf, sizeof(buf) - 1);
         for (long i = 0; i < n && buf[i] >= '0' && buf[i] <= '9'; i++) cur_seq = cur_seq * 10 + (uint32_t)(buf[i] - '0');
     }
-    for (;;) {
+    rem_load();
+    for (uint64_t loop = 0;; loop++) {
+        if (loop % 10 == 0) rem_check();  /* reminders: about once a second */
         long n = (long)icda_read_file(REQ_PATH, buf, sizeof(buf) - 1);
         if (n > 0) {
             uint32_t seq = 0;
