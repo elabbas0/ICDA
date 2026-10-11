@@ -23,6 +23,7 @@ OUT=.verify/ota
 # it); listed as "lfile" lines, files over PART bytes published in pieces
 LINUXROOT=${LINUXROOT:-.verify/linuxroot}
 PART=$((90 * 1024 * 1024))
+CACHE=.verify/ota-cache     # the WebKit pack and its manifest lines, reused while the root is unchanged
 [ -n "$VERSION" ] || { echo "usage: $0 <version> \"<notes>\" [--publish]"; exit 2; }
 [ -f "$KEY" ] || { echo "signing key $KEY missing"; exit 1; }
 # a release without the WebKit root makes updaters remove WebKit from installed systems
@@ -44,14 +45,6 @@ grep -v '^#' boot/system-files.txt | while read -r dest src; do
     mkdir -p "$OUT/SYSTEM/$(dirname "$dest")"
     cp "$src" "$OUT/SYSTEM/$dest"
 done
-if [ -d "$LINUXROOT" ]; then
-    echo "[ota] adding WebKit from $LINUXROOT"
-    cp -r "$LINUXROOT" "$OUT/linux"
-    cp userspace/webkit/out/icda-webkit "$OUT/linux/usr/bin/icda-webkit"
-    cp userspace/webkit/out/libgsticda.so "$OUT/linux/usr/lib/gstreamer-1.0/libgsticda.so" 2>/dev/null || true
-    # names the kernel accepts in a patch: letters, digits and . _ - / + =
-    (cd "$OUT" && find linux -type f | LC_ALL=C grep -v '^[A-Za-z0-9._/+=-]*$' | while read -r f; do rm -f "$f"; done)
-fi
 
 echo "[ota] manifest for $VERSION"
 body=$(mktemp)
@@ -59,26 +52,16 @@ body=$(mktemp)
     echo "icda-ota 1"
     echo "version $VERSION"
     echo "notes $NOTES"
-    (cd "$OUT" && find EFI SYSTEM -type f | LC_ALL=C sort) | while read -r rel; do
-        size=$(wc -c < "$OUT/$rel" | tr -d ' ')
-        sha=$(sha256sum "$OUT/$rel" | cut -d' ' -f1)
-        echo "file $rel $size $sha"
-    done
+    # one process hashes them all (a size and a hash program per file was slow)
+    (cd "$OUT" && find EFI SYSTEM -type f | LC_ALL=C sort) | perl -MDigest::SHA -ne \
+        'chomp; my $f = "'"$OUT"'/$_"; print "file $_ ", -s $f, " ", Digest::SHA->new(256)->addfile($f, "b")->hexdigest, "\n"'
     # WebKit as one pack: its files back to back ("wfile REL SIZE SHA OFFSET"),
     # published as linux.pack.part0 ... - a few downloads instead of thousands
     # of HTTPS connections.  Updaters before 1.8.5 skip wpack / wfile lines.
-    if [ -d "$OUT/linux" ]; then
-        rm -f "$OUT/linux.pack"
-        off=0
-        (cd "$OUT" && find linux -type f | LC_ALL=C sort) | while read -r rel; do
-            size=$(wc -c < "$OUT/$rel" | tr -d ' ')
-            sha=$(sha256sum "$OUT/$rel" | cut -d' ' -f1)
-            cat "$OUT/$rel" >> "$OUT/linux.pack"
-            echo "wfile $rel $size $sha $off"
-            off=$((off + size))
-        done
-        psize=$(wc -c < "$OUT/linux.pack" | tr -d ' ')
-        echo "wpack linux.pack $psize $(sha256sum "$OUT/linux.pack" | cut -d' ' -f1) $(( (psize + PART - 1) / PART ))"
+    if [ -d "$LINUXROOT/usr/bin" ]; then
+        perl scripts/ota-webkit.pl "$LINUXROOT" "$CACHE" "$PART" \
+            linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
+            linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so
     fi
 } > "$body"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$body" -out "$body.sig"
@@ -100,15 +83,20 @@ if [ "$PUBLISH" = "--publish" ]; then
         GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
     done
     # WebKit: the pack in pieces, linux.pack.part0 ... (the host's file size limit)
-    if [ -f "$OUT/linux.pack" ]; then
-        tmp=$(mktemp -d)
-        split -b "$PART" -d -a 1 "$OUT/linux.pack" "$tmp/p"
-        for p in "$tmp"/p*; do
-            k=${p##*/p}
-            blob=$(git hash-object -w "$p")
+    if grep -q '^wpack ' "$OUT/manifest.txt"; then
+        # the pieces' git objects are kept with the cached pack: hashed again
+        # only when the pack changed or the objects are gone
+        if [ -f "$CACHE/blobs.txt" ] && (while read -r k blob; do git cat-file -e "$blob" 2>/dev/null || exit 1; done < "$CACHE/blobs.txt"); then
+            echo "[ota] WebKit pieces: cached objects"
+        else
+            tmp=$(mktemp -d)
+            split -b "$PART" -d -a 1 "$CACHE/linux.pack" "$tmp/p"
+            for p in "$tmp"/p*; do echo "${p##*/p} $(git hash-object -w "$p")"; done > "$CACHE/blobs.txt"
+            rm -rf "$tmp"
+        fi
+        while read -r k blob; do
             GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,linux.pack.part$k"
-        done
-        rm -rf "$tmp"
+        done < "$CACHE/blobs.txt"
     fi
     tree=$(GIT_INDEX_FILE="$idx" git write-tree)
     rm -f "$idx"
