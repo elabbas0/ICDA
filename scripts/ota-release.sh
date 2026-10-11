@@ -62,7 +62,8 @@ body=$(mktemp)
         perl scripts/ota-webkit.pl "$LINUXROOT" "$CACHE" "$PART" \
             linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
             linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
-            loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm
+            loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
+            loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say
     fi
 } > "$body"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$body" -out "$body.sig"

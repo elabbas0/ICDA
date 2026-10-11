@@ -39,6 +39,7 @@ typedef struct {
 
 static provider_t prov[MAX_PROV];
 static int nprov;
+static int speak = 1;                /* read answers aloud (ai.conf: speak on / off) */
 
 static struct { char q[Q_MAX], a[A_MAX]; } hist[HIST];
 static int nhist;
@@ -57,6 +58,8 @@ static const char conf_default[] =
     "# Free cloud tiers are rate-limited and may train on what you send: keep\n"
     "# private things out of them.\n"
     "local qwen       file:auto   local   -\n"
+    "# answers read aloud (offline voice): speak on / speak off\n"
+    "speak on\n"
     "# Free keys:  console.groq.com   aistudio.google.com   openrouter.ai\n"
     "#cloud groq       https://api.groq.com/openai/v1                           llama-3.3-70b-versatile               YOUR_KEY\n"
     "#cloud gemini     https://generativelanguage.googleapis.com/v1beta/openai  gemini-2.5-flash                      YOUR_KEY\n"
@@ -89,10 +92,13 @@ static void load_conf(void) {
     }
     text[n] = 0;
     nprov = 0;
+    speak = 1;
     for (p = text; *p && nprov < MAX_PROV; ) {
         char tier[16];
         provider_t *v = &prov[nprov];
-        if (*p != '#' && word(&p, tier, sizeof(tier)) && word(&p, v->name, sizeof(v->name)) &&
+        if (!strncmp(p, "speak ", 6)) {              /* "speak on" / "speak off": answers read aloud */
+            speak = strncmp(p + 6, "off", 3) != 0;
+        } else if (*p != '#' && word(&p, tier, sizeof(tier)) && word(&p, v->name, sizeof(v->name)) &&
             word(&p, v->url, sizeof(v->url)) && word(&p, v->model, sizeof(v->model)) && word(&p, v->key, sizeof(v->key))) {
             v->cloud = strcmp(tier, "cloud") == 0;
             if (strcmp(v->key, "-") == 0) v->key[0] = 0;
@@ -204,6 +210,7 @@ static void take_error(const char *json, char *out, size_t cap) {
 static long long now_local(void);
 static void fmt_local(long long t, char *out, size_t cap);
 static void rem_check(void);
+static void say(const char *text);
 
 /* the local date and time, for the model */
 static void today(char *out, size_t cap) {
@@ -399,6 +406,11 @@ static void rem_check(void) {
             char msg[220];
             int k = snprintf(msg, sizeof(msg), "Assistant|Reminder\n%s", rem[i].text);
             (void)icda_write_file("/dev/notify", msg, (uint64_t)k);
+            {
+                char spoken[200];
+                snprintf(spoken, sizeof(spoken), "Reminder. %s", rem[i].text);
+                say(spoken);
+            }
             rem[i] = rem[--nrem];
             i--;
             fired = 1;
@@ -649,6 +661,43 @@ static int find_on_volumes(const char *rel, const char *suffix, char *out, size_
     return 0;
 }
 
+/* ---- the voice (icda-say, Flite) ------------------------------------------------ */
+
+/* reads text aloud: icda-say writes /tmp/ai/say.wav, the mixer plays it while
+ * the next question can already be asked.  Long answers are cut at a sentence
+ * end near 700 characters. */
+static void say(const char *text) {
+    static char bin[256], clip[800];
+    size_t k = strlen(text);
+    uint64_t pid;
+    if (!speak || !k) return;
+    if (!bin[0] && !find_on_volumes("linux/usr/bin", "icda-say", bin, sizeof(bin))) return;
+    if (k > 700) {
+        size_t cut = 700;
+        for (size_t i = 700; i > 200; i--)
+            if (text[i] == '.' || text[i] == '!' || text[i] == '?') { cut = i + 1; break; }
+        k = cut;
+    }
+    memcpy(clip, text, k);
+    clip[k] = 0;
+    (void)icda_write_file("/tmp/ai/say.txt", clip, k);
+    (void)icda_remove("/tmp/ai/say.wav");
+    pid = icda_spawn_args(bin, "/tmp/ai/say.txt /tmp/ai/say.wav");
+    if ((long)pid <= 0) {
+        bin[0] = 0;
+        return;
+    }
+    {   /* icda-say renames the file into place when it is whole */
+        icda_stat_t st;
+        uint64_t t0 = icda_ticks();
+        while ((long)icda_stat("/tmp/ai/say.wav", &st) < 0) {
+            if (icda_ticks() - t0 > 3000) return;      /* 30 s: give up */
+            icda_sleep(5);
+        }
+    }
+    (void)icda_audio_effect("/tmp/ai/say.wav", 230);
+}
+
 /* starts icda-llm with the model: "file:auto" finds the first .gguf in an
  * icda-models folder on any drive (Windows' C: included), "file:/path" names it */
 static int llm_start(const provider_t *v, char *err, size_t errcap) {
@@ -777,6 +826,7 @@ static void handle(const char *question) {
     if (try_reminder(q)) {
         cur_name = "reminders";
         reply("done");
+        say(answer);
         return;
     }
     /* the web: the top results go to the model with the question */
@@ -809,6 +859,7 @@ static void handle(const char *question) {
                 snprintf(hist[nhist].a, A_MAX, "%s", answer);
                 nhist++;
                 reply("done");
+                say(answer);
                 return;
             }
             if (strlen(errs) + strlen(err) + 2 < sizeof(errs)) {
