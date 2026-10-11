@@ -507,9 +507,10 @@ static int try_reminder(const char *q) {
     snprintf(rem[nrem].text, sizeof(rem[nrem].text), "%s", *what ? what : timer ? "Your timer is done" : "Reminder");
     nrem++;
     rem_save();
+    /* "at 21:03" or "tomorrow at 07:30": short, and it reads aloud well */
     fmt_local(due, when, sizeof(when));
-    snprintf(answer, sizeof(answer), "%s set for %s%s%s.", timer ? "Timer" : "Reminder", when + (strchr(when, ' ') - when) + 1,
-             *what ? ": " : "", what);
+    snprintf(answer, sizeof(answer), "%s set for %sat %s%s%s.", timer ? "Timer" : "Reminder",
+             due / 86400 != now / 86400 ? "tomorrow " : "", strrchr(when, ' ') + 1, *what ? ": " : "", what);
     return 1;
 }
 
@@ -658,6 +659,114 @@ static int find_on_volumes(const char *rel, const char *suffix, char *out, size_
             snprintf(dir, sizeof(dir), "/volumes/%s-%d/%s", fs[f], i, rel);
             if (find_in(dir, suffix, out, cap)) return 1;
         }
+    return 0;
+}
+
+/* ---- listening (the microphone and icda-stt, Whisper) --------------------------- */
+
+#define MIC_RATE    16000
+#define MIC_MAX_S   15
+
+static int16_t heard_pcm[MIC_RATE * MIC_MAX_S];
+
+static void put_le(uint8_t *p, uint32_t v, int n) { for (int i = 0; i < n; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
+/* records until a pause after speech (or 15 s); the wave follows the voice
+ * through "listening" replies whose provider field is the level 0..99.
+ * Returns the samples kept (16 kHz mono), 0 when nothing was said. */
+static int record(void) {
+    static uint8_t raw[65536];
+    int n = 0, spoke = 0, quiet_ms = 0, elapsed = 0;
+    long floor_sum = 0, floor_n = 0;
+    char level[8];
+    if (icda_mic_start() < 0) return -1;
+    while (elapsed < MIC_MAX_S * 1000) {
+        long got = icda_mic_read(raw, sizeof(raw));
+        long long sq = 0;
+        int frames = got > 0 ? (int)(got / 4) : 0, block = 0;
+        /* 48 kHz stereo -> 16 kHz mono: every third frame, both channels */
+        for (int f = 0; f + 2 < frames && n < MIC_RATE * MIC_MAX_S; f += 3) {
+            const int16_t *s = (const int16_t *)raw + f * 2;
+            int v = (s[0] + s[1] + s[2] + s[3] + s[4] + s[5]) / 6;
+            heard_pcm[n++] = (int16_t)v;
+            sq += (long long)v * v;
+            block++;
+        }
+        if (block) {
+            int rms = 0;
+            long long m = sq / block;
+            while ((long long)(rms + 1) * (rms + 1) <= m) rms++;
+            if (elapsed < 300) { floor_sum += rms; floor_n++; }         /* the room, before speaking */
+            else {
+                int fl = floor_n ? (int)(floor_sum / floor_n) : 0;
+                if (rms > fl * 3 + 300) { spoke = 1; quiet_ms = 0; }
+                else if (spoke) quiet_ms += 50;
+            }
+            snprintf(level, sizeof(level), "%d", rms * 99 / 6000 > 99 ? 99 : rms * 99 / 6000);
+            cur_name = level;
+            reply("listening");
+        }
+        if (spoke && quiet_ms >= 1200) break;            /* a pause: the question is over */
+        if (!spoke && elapsed >= 6000) break;            /* nothing said */
+        icda_sleep(5);
+        elapsed += 50;
+    }
+    icda_mic_stop();
+    cur_name = "";
+    return spoke ? n : 0;
+}
+
+/* speech to text: the recording, then icda-stt with the first ggml-*.bin
+ * Whisper model in an icda-models folder.  0 with the words in out. */
+static int transcribe(int samples, char *out, size_t cap, char *err, size_t errcap) {
+    static uint8_t wav[44 + sizeof(heard_pcm)];
+    char model[256], bin[256], args[600];
+    icda_stat_t st;
+    uint64_t pid, t0;
+    long n;
+    if (!find_on_volumes("icda-models", ".bin", model, sizeof(model))) {
+        snprintf(err, errcap, "No speech model: put a Whisper model (ggml-base.en.bin) in an icda-models folder.");
+        return -1;
+    }
+    if (!find_on_volumes("linux/usr/bin", "icda-stt", bin, sizeof(bin))) {
+        snprintf(err, errcap, "icda-stt is not installed (it comes with system updates).");
+        return -1;
+    }
+    memcpy(wav, "RIFF", 4); put_le(wav + 4, 36 + (uint32_t)samples * 2, 4); memcpy(wav + 8, "WAVEfmt ", 8);
+    put_le(wav + 16, 16, 4); put_le(wav + 20, 1, 2); put_le(wav + 22, 1, 2); put_le(wav + 24, MIC_RATE, 4);
+    put_le(wav + 28, MIC_RATE * 2, 4); put_le(wav + 32, 2, 2); put_le(wav + 34, 16, 2);
+    memcpy(wav + 36, "data", 4); put_le(wav + 40, (uint32_t)samples * 2, 4);
+    memcpy(wav + 44, heard_pcm, (size_t)samples * 2);
+    (void)icda_write_file("/tmp/ai/heard.wav", (const char *)wav, 44 + (uint64_t)samples * 2);
+    (void)icda_remove("/tmp/ai/heard.txt");
+    snprintf(args, sizeof(args), "%s /tmp/ai/heard.wav /tmp/ai/heard.txt", model);
+    pid = icda_spawn_args(bin, args);
+    if ((long)pid <= 0) {
+        snprintf(err, errcap, "icda-stt did not start.");
+        return -1;
+    }
+    t0 = icda_ticks();
+    while ((long)icda_stat("/tmp/ai/heard.txt", &st) < 0) {      /* renamed into place when done */
+        if (icda_ticks() - t0 > 6000) {
+            snprintf(err, errcap, "Speech recognition took too long.");
+            return -1;
+        }
+        rem_check();
+        icda_sleep(5);
+    }
+    n = (long)icda_read_file("/tmp/ai/heard.txt", out, cap - 1);
+    out[n > 0 ? n : 0] = 0;
+    {   /* trim */
+        char *s = out, *e;
+        while (*s == ' ' || *s == '\n') s++;
+        memmove(out, s, strlen(s) + 1);
+        e = out + strlen(out);
+        while (e > out && (e[-1] == ' ' || e[-1] == '\n')) *--e = 0;
+    }
+    if (!out[0] || !strcmp(out, "[BLANK_AUDIO]")) {
+        snprintf(err, errcap, "I didn't catch that.");
+        return -1;
+    }
     return 0;
 }
 
@@ -813,7 +922,25 @@ static int complex_question(const char **q) {
 
 static void handle(const char *question) {
     char err[400], errs[800];
+    static char spoken[Q_MAX];
     const char *q = question, *asked;
+    if (!strcmp(question, "/listen")) {          /* a spoken question */
+        cur_name = "";
+        int samples;
+        answer[0] = 0;
+        samples = record();
+        err[0] = 0;
+        if (samples < 0) snprintf(err, sizeof(err), "No microphone was found.");
+        else if (samples == 0) snprintf(err, sizeof(err), "I didn't hear anything.");
+        if (err[0] || transcribe(samples, spoken, sizeof(spoken), err, sizeof(err)) != 0) {
+            snprintf(answer, sizeof(answer), "%s", err);
+            reply("error");
+            return;
+        }
+        snprintf(answer, sizeof(answer), "%s", spoken);   /* the overlay shows what it heard */
+        reply("heard");
+        q = question = spoken;
+    }
     static char augmented[Q_MAX + 4096];
     char query[Q_MAX];
     int cloud_first = complex_question(&q);

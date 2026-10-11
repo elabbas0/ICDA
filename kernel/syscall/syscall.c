@@ -1615,6 +1615,15 @@ static uint64_t sys_audio_mix(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
     }
     case MIX_STREAM_OPEN:
         return (uint64_t)(int64_t)audio_stream_open((uint32_t)a, (uint32_t)b);
+    case MIX_CAPTURE_START:
+        return hda_capture_start() == 0 ? 0 : (uint64_t)-1;
+    case MIX_CAPTURE_READ:                     /* a = buffer, b = capacity: bytes recorded since the last read */
+        if (!a || b == 0 || b > (1ULL << 20)) return (uint64_t)-1;
+        if (!user_range_prepare_cur_w((void *)(uintptr_t)a, b)) return (uint64_t)-U_EFAULT;
+        return hda_capture_read((uint8_t *)(uintptr_t)a, (uint32_t)b);
+    case MIX_CAPTURE_STOP:
+        hda_capture_stop();
+        return 0;
     case MIX_STREAM_WRITE:
         if (!b || c == 0 || c > (16ULL << 20)) return (uint64_t)-1;
         if (!user_range_prepare_cur((const void *)(uintptr_t)b, c)) return (uint64_t)-U_EFAULT;

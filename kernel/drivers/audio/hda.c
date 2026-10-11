@@ -1027,3 +1027,163 @@ uint8_t hda_diag_ctl2(void) {
     }
     return mmio_read8(hda_stream_base + 0x02U);
 }
+
+/* ---- capture: the microphone --------------------------------------------------
+ * The first input stream (tag 2, its own ring) records from an ADC.  The mic
+ * is the first pin whose default configuration says "Mic In" that the ADC
+ * reaches - directly or through one mixer / selector - the built-in one
+ * preferred.  48 kHz 16-bit stereo, like playback; callers take the bytes the
+ * controller has written since they last asked. */
+#define HDA_WIDGET_AUDIO_INPUT 0x1
+#define HDA_CAP_TAG            2U
+#define HDA_PINCTL_IN_ENABLE   0x20
+
+static hda_bdl_entry_t hda_cap_bdl[HDA_BDL_COUNT]
+    __attribute__((aligned(HDA_BDL_ALIGN), section(".dma_low")));
+static uint8_t hda_cap_ring[HDA_RING_BYTES]
+    __attribute__((aligned(128), section(".dma_low")));
+static int hda_cap_running;
+static uint32_t hda_cap_read_pos;
+
+static int hda_is_mic(uint8_t nid, int *internal) {
+    uint8_t type;
+    uint32_t cfg = 0;
+    if (hda_widget_type(nid, &type) != 0 || type != HDA_WIDGET_PIN) return 0;
+    if (hda_exec_verb(hda_codec, nid, HDA_VERB_GET_CFG_DEFAULT, 0, &cfg) != 0) return 0;
+    if (((cfg >> 30) & 3U) == 1) return 0;                     /* not connected */
+    if (((cfg >> 20) & 0xFU) == 0x8) {                         /* Line In: if there is no mic */
+        *internal = 0;
+        return 1;
+    }
+    if (((cfg >> 20) & 0xFU) != 0xA) return 0;                 /* device: Mic In */
+    *internal = ((cfg >> 30) & 3U) == 2;                       /* fixed function: built in */
+    return 2;
+}
+
+static void hda_amp_in(uint8_t nid, uint8_t index, int boost) {
+    uint32_t wcaps = 0, caps;
+    uint16_t gain;
+    if (hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, &wcaps) != 0 || !(wcaps & HDA_WCAP_IN_AMP)) return;
+    caps = hda_amp_caps(nid, wcaps, HDA_PARAM_AMP_IN_CAP);
+    gain = (uint16_t)(caps & 0x7FU);                           /* 0 dB */
+    if (boost) {                                               /* a mic boost: two steps up */
+        uint16_t steps = (uint16_t)((caps >> 8) & 0x7FU);
+        gain = steps >= 2 ? 2 : steps;
+    }
+    (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                        (uint16_t)(HDA_AMP_SET_INPUT | HDA_AMP_SET_BOTH | ((uint16_t)index << 8) | gain), 0);
+}
+
+/* finds an ADC and its mic and opens the path; 0 when one was found */
+static int hda_capture_path(uint8_t *adc_out) {
+    uint32_t parm = 0;
+    int best = -1;
+    uint8_t b_adc = 0, b_mid = 0, b_pin = 0, b_idx = 0, b_mid_idx = 0;
+    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) return -1;
+    for (uint8_t i = 0; i < (uint8_t)(parm & 0x7FU); i++) {
+        uint8_t adc = (uint8_t)(((parm >> 16) & 0x7FU) + i), type, conns[32], n = 0;
+        if (hda_widget_type(adc, &type) != 0 || type != HDA_WIDGET_AUDIO_INPUT) continue;
+        if (hda_get_connections(adc, conns, &n) != 0) continue;
+        for (uint8_t k = 0; k < n && k < 16; k++) {
+            int internal = 0;
+            uint8_t sub[32], m = 0;
+            if (hda_is_mic(conns[k], &internal)) {
+                int score = (hda_is_mic(conns[k], &internal) == 2) * 2 + internal + 1;
+                if (score > best) { best = score; b_adc = adc; b_mid = 0; b_pin = conns[k]; b_idx = k; }
+                continue;
+            }
+            if (hda_get_connections(conns[k], sub, &m) != 0) continue;     /* a mixer or selector */
+            for (uint8_t j = 0; j < m && j < 16; j++) {
+                int kind = hda_is_mic(sub[j], &internal), score;
+                if (!kind) continue;
+                score = (kind == 2) * 2 + internal + 1;      /* built-in mic > mic > line in */
+                if (score > best) {
+                    best = score;
+                    b_adc = adc; b_mid = conns[k]; b_pin = sub[j]; b_idx = k; b_mid_idx = j;
+                }
+            }
+        }
+    }
+    if (best < 0) return -1;
+    (void)hda_exec_verb(hda_codec, b_pin, HDA_VERB_SET_POWER_STATE, 0, 0);
+    (void)hda_exec_verb(hda_codec, b_adc, HDA_VERB_SET_POWER_STATE, 0, 0);
+    {
+        uint32_t pincaps = 0;
+        uint8_t ctl = HDA_PINCTL_IN_ENABLE;
+        if (hda_get_param(b_pin, HDA_PARAM_PIN_CAP, &pincaps) == 0 && (pincaps & (1U << 12))) ctl |= 0x04;  /* VREF 80% */
+        (void)hda_exec_verb(hda_codec, b_pin, HDA_VERB_SET_PIN_CONTROL, ctl, 0);
+    }
+    hda_amp_in(b_pin, 0, 1);
+    if (b_mid) {
+        uint8_t mt;
+        (void)hda_exec_verb(hda_codec, b_mid, HDA_VERB_SET_POWER_STATE, 0, 0);
+        if (hda_widget_type(b_mid, &mt) == 0 && mt == HDA_WIDGET_SELECTOR)
+            (void)hda_exec_verb(hda_codec, b_mid, HDA_VERB_SET_SEL_INPUT, b_mid_idx, 0);
+        hda_amp_in(b_mid, b_mid_idx, 0);
+    }
+    {
+        uint8_t conns[32], n = 0;
+        if (hda_get_connections(b_adc, conns, &n) == 0 && n > 1)
+            (void)hda_exec_verb(hda_codec, b_adc, HDA_VERB_SET_SEL_INPUT, b_idx, 0);
+    }
+    hda_amp_in(b_adc, b_idx, 0);
+    hda_log_hex("hda: mic pin / adc ", ((uint32_t)b_pin << 8) | b_adc);
+    *adc_out = b_adc;
+    return 0;
+}
+
+int hda_capture_start(void) {
+    static uint8_t adc;
+    uint32_t base = 0x80U;                 /* input streams come first */
+    uint64_t bdl_phys = kernel_buffer_phys(hda_cap_bdl), ring_phys = kernel_buffer_phys(hda_cap_ring);
+    uint16_t fmt = hda_format_for_rate(48000);
+    uint8_t ctl0, ctl2;
+    if (!hda_present || hda_cap_running) return hda_present ? 0 : -1;
+    if (((mmio_read16(HDA_REG_GCAP) >> 8) & 0x0FU) == 0) return hda_fail(12, "hda: no input stream\n");
+    if (!adc && hda_capture_path(&adc) != 0) return hda_fail(12, "hda: no microphone path\n");
+    (void)hda_exec_verb(hda_codec, adc, HDA_VERB_SET_FORMAT, fmt, 0);
+    (void)hda_exec_verb(hda_codec, adc, HDA_VERB_SET_CONV_STREAM, (uint16_t)(HDA_CAP_TAG << 4), 0);
+    for (uint32_t i = 0; i < HDA_BDL_COUNT; i++) {
+        hda_cap_bdl[i].addr = ring_phys + (uint64_t)i * HDA_SEG_BYTES;
+        hda_cap_bdl[i].length = HDA_SEG_BYTES;
+        hda_cap_bdl[i].flags = 0;
+    }
+    for (uint32_t i = 0; i < HDA_RING_BYTES; i++) hda_cap_ring[i] = 0;
+    ctl0 = mmio_read8(base) & (uint8_t)~HDA_SD_CTL_RUN;
+    mmio_write8(base, ctl0);
+    mmio_write8(base, (uint8_t)(ctl0 | HDA_SD_CTL_SRST));
+    if (wait_mask16(base, HDA_SD_CTL_SRST, HDA_SD_CTL_SRST) != 0) return -1;
+    mmio_write8(base, ctl0);
+    if (wait_mask16(base, HDA_SD_CTL_SRST, 0) != 0) return -1;
+    mmio_write8(base + 0x03U, 0x1CU);
+    mmio_write32(base + 0x18U, (uint32_t)bdl_phys);
+    mmio_write32(base + 0x1CU, (uint32_t)(bdl_phys >> 32));
+    mmio_write32(base + 0x08U, HDA_RING_BYTES);
+    mmio_write16(base + 0x0CU, (uint16_t)(HDA_BDL_COUNT - 1U));
+    mmio_write16(base + 0x12U, fmt);
+    ctl2 = (uint8_t)((mmio_read8(base + 0x02U) & 0x0FU) | (HDA_CAP_TAG << 4));
+    mmio_write8(base + 0x02U, ctl2);
+    mmio_write8(base, (uint8_t)(mmio_read8(base) | HDA_SD_CTL_RUN));
+    hda_cap_read_pos = 0;
+    hda_cap_running = 1;
+    return 0;
+}
+
+/* the bytes recorded since the last call (s16 stereo, 48 kHz), at most cap */
+uint32_t hda_capture_read(uint8_t *out, uint32_t cap) {
+    uint32_t pos, n = 0;
+    if (!hda_cap_running) return 0;
+    pos = mmio_read32(0x80U + 0x04U) % HDA_RING_BYTES;
+    while (hda_cap_read_pos != pos && n < cap) {
+        out[n++] = hda_cap_ring[hda_cap_read_pos];
+        hda_cap_read_pos = (hda_cap_read_pos + 1) % HDA_RING_BYTES;
+    }
+    return n;
+}
+
+void hda_capture_stop(void) {
+    if (!hda_cap_running) return;
+    mmio_write8(0x80U, (uint8_t)(mmio_read8(0x80U) & (uint8_t)~HDA_SD_CTL_RUN));
+    mmio_write8(0x80U + 0x03U, 0x1CU);
+    hda_cap_running = 0;
+}

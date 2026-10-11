@@ -21,7 +21,7 @@
 #define REQ_PATH    "/tmp/ai/request"
 #define REPLY_PATH  "/tmp/ai/reply"
 
-enum { ST_CLOSED, ST_INPUT, ST_THINKING, ST_ANSWER, ST_DONE, ST_ERROR };
+enum { ST_CLOSED, ST_INPUT, ST_LISTEN, ST_THINKING, ST_ANSWER, ST_DONE, ST_ERROR };
 
 static struct {
     int      state;
@@ -33,6 +33,7 @@ static struct {
     uint64_t t0;              /* ms, animation clock */
     float    energy;          /* eased wave amplitude 0..1 */
     float    speed;
+    int      level;           /* the voice while listening, 0..99 */
 } A;
 
 static uint64_t now_ms(void) { return icda_ticks() * 10; }
@@ -104,11 +105,11 @@ static void send_request(void) {
     buf[n++] = '\n';
     for (int i = 0; A.q[i] && n < (int)sizeof(buf) - 1; i++) buf[n++] = A.q[i];
     (void)icda_write_file(REQ_PATH, buf, (uint64_t)n);
-    ic_strcpy(A.shown_q, A.q, sizeof(A.shown_q));
+    ic_strcpy(A.shown_q, ic_streq(A.q, "/listen") ? "Listening..." : A.q, sizeof(A.shown_q));
+    A.state = ic_streq(A.q, "/listen") ? ST_LISTEN : ST_THINKING;
+    if (A.state == ST_THINKING) ic_sound("ai_thinking");
     A.q[0] = 0;
     A.a[0] = 0;
-    A.state = ST_THINKING;
-    ic_sound("ai_thinking");
 }
 
 static int poll_reply(void) {
@@ -141,6 +142,20 @@ static int poll_reply(void) {
         changed = 1;
     }
     {
+        if (ic_streq(state, "listening")) {         /* the provider field carries the voice level */
+            int lv = 0;
+            for (const char *c = A.provider; *c >= '0' && *c <= '9'; c++) lv = lv * 10 + (*c - '0');
+            A.level = lv;
+            A.provider[0] = 0;
+            return 1;
+        }
+        if (ic_streq(state, "heard")) {              /* what was said becomes the question */
+            ic_strcpy(A.shown_q, A.a, sizeof(A.shown_q));
+            A.a[0] = 0;
+            if (A.state != ST_THINKING) ic_sound("ai_thinking");
+            A.state = ST_THINKING;
+            return 1;
+        }
         int st = ic_streq(state, "thinking") ? ST_THINKING : ic_streq(state, "answer") ? ST_ANSWER :
                  ic_streq(state, "done") ? ST_DONE : ic_streq(state, "error") ? ST_ERROR : A.state;
         if (st != A.state) {
@@ -155,8 +170,9 @@ static int poll_reply(void) {
 int wm_ai_tick(void) {
     float want, want_speed;
     if (A.state == ST_CLOSED) return WM_AI_KEEP;
-    if (A.state == ST_THINKING || A.state == ST_ANSWER) (void)poll_reply();
-    want = A.state == ST_INPUT ? 0.45f : A.state == ST_THINKING ? 0.8f : A.state == ST_ANSWER ? 1.0f : 0.3f;
+    if (A.state == ST_LISTEN || A.state == ST_THINKING || A.state == ST_ANSWER) (void)poll_reply();
+    want = A.state == ST_INPUT ? 0.45f : A.state == ST_LISTEN ? 0.2f + (float)A.level / 99.0f * 0.8f :
+           A.state == ST_THINKING ? 0.8f : A.state == ST_ANSWER ? 1.0f : 0.3f;
     want_speed = A.state == ST_THINKING ? 2.6f : A.state == ST_ANSWER ? 1.8f : 1.0f;
     A.energy += (want - A.energy) * 0.08f;
     A.speed += (want_speed - A.speed) * 0.05f;
@@ -231,7 +247,7 @@ void wm_ai_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratch_l
         tf.sel_start = tf.sel_end = len;
         tf.focused = 1;
         tf.caret_on = (now_ms() / 500) % 2 == 0;
-        tf.placeholder = "Ask anything...  (Enter to send, Esc to close)";
+        tf.placeholder = "Ask anything...  (Tab: speak, Enter: send, Esc: close)";
         tf.leading = IC_SYM_SEARCH;
         tf.scroll_px = 0;
         {
@@ -245,7 +261,7 @@ void wm_ai_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratch_l
         ic_rect_t qr = ic_rect_make(card.x + CARD_PAD, card.y + 14, card.w - 2 * CARD_PAD, 18);
         ic_rect_t ar = ic_rect_make(card.x + CARD_PAD, card.y + 42, card.w - 2 * CARD_PAD, card.h - 42 - 30);
         ic_rect_t saved;
-        const char *status = A.state == ST_THINKING ? "Thinking..." : A.state == ST_ERROR ? "Something went wrong" :
+        const char *status = A.state == ST_LISTEN ? "Listening - speak, then pause" : A.state == ST_THINKING ? "Thinking..." : A.state == ST_ERROR ? "Something went wrong" :
                              A.state == ST_ANSWER ? "Answering" : "Enter: ask again   Esc: close";
         ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), qr, A.shown_q, p->label, IC_ALIGN_LEFT);
         ic_gfx_hline(c, card.x + CARD_PAD, card.y + 36, card.w - 2 * CARD_PAD, p->separator);
@@ -298,6 +314,10 @@ int wm_ai_key(int key) {
     if (A.state != ST_INPUT) return WM_AI_KEEP;
     if (key == 13) {
         if (len) send_request();
+    } else if (key == 9 && !len) {             /* Tab: speak the question */
+        ic_strcpy(A.q, "/listen", sizeof(A.q));
+        send_request();
+        ic_sound("ai_listen");
     } else if (key == 8 || key == 127) {
         if (len) A.q[len - 1] = 0;
     } else if (key >= 32 && key < 127 && len < Q_MAX - 1) {

@@ -124,7 +124,10 @@ enum {
     MIX_STREAM_CONTROL,    /* id, paused, volume */
     MIX_STREAM_CLOSE,      /* id */
     MIX_MASTER_SET,        /* volume 0..256, muted */
-    MIX_MASTER_GET         /* -> volume | muted << 16 */
+    MIX_MASTER_GET,        /* -> volume | muted << 16 */
+    MIX_CAPTURE_START,     /* the microphone: 48 kHz s16 stereo */
+    MIX_CAPTURE_READ,      /* buffer, capacity -> bytes recorded since the last read */
+    MIX_CAPTURE_STOP
 };
 
 typedef struct {

@@ -9,6 +9,10 @@ int hda_last_error(void);
 int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len);
 int hda_stream_run(void);
 int hda_stream_write(uint32_t offset, const uint8_t *samples, uint32_t length);
+/* the microphone: 48 kHz s16 stereo; read returns the bytes since the last read */
+int      hda_capture_start(void);
+uint32_t hda_capture_read(uint8_t *out, uint32_t cap);
+void     hda_capture_stop(void);
 void hda_stop_playback(void);
 uint32_t hda_diag_lpi_b(void);
 uint8_t hda_diag_status(void);
