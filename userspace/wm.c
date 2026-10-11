@@ -1296,7 +1296,8 @@ static void wifi_set(int open) {
 
 /* Quick settings and the notification centre (wm_panels.c) */
 static int panel_open = 0;          /* 0, WM_PANEL_QUICK or WM_PANEL_NOTES */
-static void mark_dirty_ai(void);    /* the assistant overlay (below) */
+static void mark_dirty_ai(void);      /* the assistant overlay (below) */
+static void mark_dirty_ai_wave(void); /* just the wave band of it */
 static ic_tween_t panel_fade;
 
 static ic_rect_t panel_reach(void) {
@@ -1946,8 +1947,13 @@ static int animations_tick(void) {
         {
             static int ai_was;
             int ai = wm_ai_is_open();
-            if (ai && wm_ai_tick() == WM_AI_REDRAW) running = 1;
-            if (ai || ai_was) mark_dirty_ai();       /* and once more after it closes */
+            if (ai) {
+                int r = wm_ai_tick();
+                if (r == WM_AI_REDRAW_ALL) { mark_dirty_ai(); running = 1; }
+                else if (r == WM_AI_REDRAW) { mark_dirty_ai_wave(); running = 1; }
+                else if (r == WM_AI_CLOSE) { mark_dirty_ai(); }
+            }
+            if (!ai && ai_was) mark_dirty_ai();       /* the frame it closed on */
             ai_was = ai;
         }
         if (l || x || p || wf || pf) running = 1;
@@ -2187,12 +2193,21 @@ static void draw_panel_layer(ic_canvas_t *c) {
     wm_panels_draw(panel_open ? panel_open : panel_drawn, c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
 }
 
-static void draw_ai_layer(ic_canvas_t *c) {
-    wm_ai_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+static void draw_ai_wave_layer(ic_canvas_t *c) {
+    wm_ai_draw_wave(c, scr_w, scr_h);
+}
+
+static void draw_ai_card_layer(ic_canvas_t *c) {
+    wm_ai_draw_card(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
 }
 
 static void mark_dirty_ai(void) {
     mark_dirty_rect(reach_of(wm_ai_rect(scr_w, scr_h)));
+}
+
+/* Just the wave is moving: the band, not the whole overlay. */
+static void mark_dirty_ai_wave(void) {
+    mark_dirty_rect(reach_of(wm_ai_wave_rect(scr_w, scr_h)));
 }
 
 static void draw_toast_layer(ic_canvas_t *c) {
@@ -2261,7 +2276,14 @@ static void draw_overlays(void) {
         composite_faded(reach_of(wm_toast_rect(scr_w, scr_h)), 1.0f, draw_toast_layer);
     }
     if (wm_ai_is_open()) {
-        composite_faded(reach_of(wm_ai_rect(scr_w, scr_h)), 1.0f, draw_ai_layer);
+        float op = wm_ai_opacity();
+        if (op > 0.0f) {
+            composite_faded(reach_of(wm_ai_wave_rect(scr_w, scr_h)), op, draw_ai_wave_layer);
+            /* the card fades in after the wave, on top of it */
+            if (wm_ai_card_visible())
+                composite_faded(reach_of(wm_ai_card_rect(scr_w, scr_h)), op * wm_ai_card_opacity(),
+                                draw_ai_card_layer);
+        }
     }
     if (ctx_model.count > 0 && ic_tween_value(&ctx_fade) > 0.0f) {
         composite_faded(reach_of(ctx_rect()), ic_tween_value(&ctx_fade), draw_ctx_layer);
@@ -2980,7 +3002,7 @@ static void left_press(void) {
         return;
     }
     if (wm_ai_is_open()) {
-        if (wm_ai_click(scr_w, scr_h, mouse_x, mouse_y) == WM_AI_CLOSE) mark_dirty_ai();
+        if (wm_ai_click(scr_w, scr_h, mouse_x, mouse_y) == WM_AI_REDRAW_ALL) mark_dirty_ai();
         return;
     }
     if (panel_open) {
@@ -3489,7 +3511,7 @@ static void handle_key(long key) {
         return;
     }
     if (wm_ai_is_open()) {
-        if (wm_ai_key(key) != WM_AI_KEEP) mark_dirty_ai();
+        if (wm_ai_key(key) == WM_AI_REDRAW_ALL) mark_dirty_ai();
         if (key == 27) esc_swallow = 1;
         return;
     }

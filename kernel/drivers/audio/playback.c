@@ -27,7 +27,10 @@
 #define MIX_RATE        48000U
 #define FRAME_BYTES     4U                      /* stereo s16 */
 #define RING_BYTES      65536U                  /* 341 ms; matches the HDA buffer descriptor list */
-#define LEAD_BYTES      11520U                  /* 60 ms written ahead */
+/* 120 ms written ahead.  A software compositor repainting the screen can hold
+ * the worker off for tens of milliseconds at a time, and 60 ms of lead was
+ * thin enough that the ring ran dry mid-sound: the effect was there, silent. */
+#define LEAD_BYTES      23040U
 #define CHUNK_FRAMES    512U
 #define MAX_VOICES      32
 #define MAX_STREAMS     4
@@ -533,13 +536,37 @@ int audio_playback_status(audio_playback_status_t *out) {
 
 /* ---- effects ------------------------------------------------------------------ */
 
+/* A sound that cannot be queued says so on the serial port, once per sound:
+ * "no sound" with nothing on the console is the one failure nobody can work
+ * out, and a line per keypress would drown the log. */
+static void effect_failed(const char *path) {
+    static char said[128];
+    char name[128];
+    uint64_t i = 0;
+    int same = 1;
+    for (; i < sizeof(name) - 1 && path[i] && path[i] != '\n'; i++) {
+        name[i] = path[i];
+        if (path[i] == ' ') { i++; break; }
+    }
+    name[i] = 0;
+    for (uint64_t k = 0; k < i; k++)
+        if (said[k] != name[k]) { same = 0; break; }
+    if (same) return;
+    for (uint64_t k = 0; k <= i; k++) said[k] = name[k];
+    serial_write("audio: no sound for ");
+    serial_write(name);
+    serial_write(hda_available() ? "\n" : " (no hda device)\n");
+}
+
 int audio_effect_play(const char *path, uint32_t volume) {
     voice_t *v;
-    if (!path || !*path || !hda_available()) return -1;
+    if (!path || !*path) return -1;
+    if (!hda_available()) { effect_failed(path); return -1; }
     v = voice_slot();
     if (!v) return -1;
     if (voice_load(v, path, V_EFFECT, (int32_t)(volume > 256 ? 256 : volume)) != 0) {
         v->kind = V_FREE;
+        effect_failed(path);
         return -1;
     }
     kick();

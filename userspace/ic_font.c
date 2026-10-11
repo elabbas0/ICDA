@@ -256,18 +256,19 @@ void ic_text_draw_in(ic_canvas_t *c, const ic_face_t *f, ic_rect_t r, const char
 int ic_text_draw_wrapped(ic_canvas_t *c, const ic_face_t *f, ic_rect_t r, const char *s,
                          ic_color_t color, int line_gap) {
     int used = 0, i = 0, line_h;
+    int para = 0;                    /* the next paragraph break, found once and kept */
     if (!f || !s) return 0;
     line_h = f->line_h + line_gap;
     while (s[i]) {
-        int fit, brk, start = i;
+        int fit, brk, start = i, room;
         if (r.h > 0 && used + f->line_h > r.h) break;
-        
-        {
-            int nl = start;
-            while (s[nl] && s[nl] != '\n') nl++;
-            fit = ic_text_fit(f, s + start, r.w);
-            if (start + fit > nl) fit = nl - start;
-        }
+
+        if (para < start) para = start;
+        while (s[para] && s[para] != '\n') para++;   /* forward only: once per paragraph */
+        room = para - start;
+        fit = ic_text_fit(f, s + start, r.w);
+        if (fit > room) fit = room;
+
         brk = fit;
         if (s[start + fit] && s[start + fit] != '\n' && s[start + fit] != ' ') {
             int k = fit;
