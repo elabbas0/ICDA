@@ -486,7 +486,10 @@ ucrypto_%.o: kernel/crypto/%.c $(wildcard kernel/crypto/*.h)
 	$(CC) $(SURFER_CFLAGS) -c $< -o /tmp/icda-$@
 	cp -f /tmp/icda-$@ $@
 
-updated.o: userspace/updated.c $(SURFER_HEADERS) userspace/surfer/crypto/ed25519.h
+# version.h: updated.c includes it - without this the release's updater carries
+# the previous version's string (the version it reports for an install with no
+# release manifest yet, and the one it undoes back to)
+updated.o: userspace/updated.c $(SURFER_HEADERS) userspace/surfer/crypto/ed25519.h version.h
 	$(CC) $(SURFER_CFLAGS) -c userspace/updated.c -o /tmp/icda-updated.o
 	cp -f /tmp/icda-updated.o updated.o
 
@@ -497,7 +500,7 @@ assistantd.o: userspace/assistantd.c userspace/settings_store.h $(SURFER_HEADERS
 # the assistant's answers (/sbin/assistantd)
 userspace/assistantd.elf: crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-assistantd.elf crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o
-	printf 'ÿ' | dd of=/tmp/icda-assistantd.elf bs=1 seek=7 conv=notrunc status=none
+	printf 'ï¿½' | dd of=/tmp/icda-assistantd.elf bs=1 seek=7 conv=notrunc status=none
 	cp -f /tmp/icda-assistantd.elf userspace/assistantd.elf
 
 # OTA patch daemon (/sbin/updated)
