@@ -32,6 +32,8 @@ global userprog_fetch_start
 global userprog_fetch_end
 global userprog_updated_start
 global userprog_updated_end
+global userprog_assistantd_start
+global userprog_assistantd_end
 global userprog_cacert_start
 global userprog_cacert_end
 global userprog_ticker_start
@@ -122,6 +124,12 @@ userprog_updated_start:
     incbin "userspace/updated.elf"
 %endif
 userprog_updated_end:
+
+userprog_assistantd_start:
+%if SLIM == 0
+    incbin "userspace/assistantd.elf"
+%endif
+userprog_assistantd_end:
 
 userprog_cacert_start:
 %if SLIM == 0

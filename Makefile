@@ -490,6 +490,16 @@ updated.o: userspace/updated.c $(SURFER_HEADERS) userspace/surfer/crypto/ed25519
 	$(CC) $(SURFER_CFLAGS) -c userspace/updated.c -o /tmp/icda-updated.o
 	cp -f /tmp/icda-updated.o updated.o
 
+assistantd.o: userspace/assistantd.c $(SURFER_HEADERS)
+	$(CC) $(SURFER_CFLAGS) -c userspace/assistantd.c -o /tmp/icda-assistantd.o
+	cp -f /tmp/icda-assistantd.o assistantd.o
+
+# the assistant's answers (/sbin/assistantd)
+userspace/assistantd.elf: crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-assistantd.elf crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o
+	printf 'ÿ' | dd of=/tmp/icda-assistantd.elf bs=1 seek=7 conv=notrunc status=none
+	cp -f /tmp/icda-assistantd.elf userspace/assistantd.elf
+
 # OTA patch daemon (/sbin/updated)
 userspace/updated.elf: crt1.o updated.o surfer_ed25519.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-updated.elf crt1.o updated.o surfer_ed25519.o $(SURFER_NET_OBJS) libc.o
@@ -1155,7 +1165,7 @@ userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
 	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
 
-wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/wm_panels.h userspace/shortcuts.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/wm_panels.h userspace/wm_assistant.h userspace/shortcuts.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
       userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o
@@ -1172,12 +1182,16 @@ wm_wifi.o: userspace/wm_wifi.c userspace/wm_wifi.h userspace/wm_shell.h $(IC_HEA
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_wifi.c -o /tmp/icda-wm_wifi.o
 	cp -f /tmp/icda-wm_wifi.o wm_wifi.o
 
+wm_assistant.o: userspace/wm_assistant.c userspace/wm_assistant.h userspace/wm_shell.h $(IC_HEADERS)
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_assistant.c -o /tmp/icda-wm_assistant.o
+	cp -f /tmp/icda-wm_assistant.o wm_assistant.o
+
 wm_panels.o: userspace/wm_panels.c userspace/wm_panels.h userspace/wm_shell.h userspace/settings_store.h $(IC_HEADERS)
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_panels.c -o /tmp/icda-wm_panels.o
 	cp -f /tmp/icda-wm_panels.o wm_panels.o
 
-userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o gui.o libicda.o
+userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_assistant.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_assistant.o gui.o libicda.o
 	cp -f /tmp/icda-wm.app userspace/wm.app
 
 desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h $(IC_HEADERS) userspace/font.h userspace/icda_sys.h \
@@ -1201,7 +1215,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/assistantd.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)

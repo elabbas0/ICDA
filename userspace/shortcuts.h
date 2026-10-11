@@ -60,6 +60,7 @@ static const sc_action_t sc_actions[] = {
     { "desktop",  "Show the desktop",     "super+d" },
     { "overview", "Window overview",      "super+tab" },
     { "wifi",     "Wi-Fi",                "super+w" },
+    { "assistant", "Ask the assistant",   "super+space" },
 };
 #define SC_COUNT ((int)(sizeof(sc_actions) / sizeof(sc_actions[0])))
 

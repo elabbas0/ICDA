@@ -20,6 +20,7 @@
 #include "wm_shell.h"
 #include "wm_wifi.h"
 #include "wm_panels.h"
+#include "wm_assistant.h"
 #include "shortcuts.h"
 
 #define MAX_WINDOWS 16
@@ -1295,6 +1296,7 @@ static void wifi_set(int open) {
 
 /* Quick settings and the notification centre (wm_panels.c) */
 static int panel_open = 0;          /* 0, WM_PANEL_QUICK or WM_PANEL_NOTES */
+static void mark_dirty_ai(void);    /* the assistant overlay (below) */
 static ic_tween_t panel_fade;
 
 static ic_rect_t panel_reach(void) {
@@ -1469,6 +1471,9 @@ static void extend_to_materials(dirty_rect_t *r) {
     }
     if (wm_toast_visible()) {
         extend_one(r, reach_of(wm_toast_rect(scr_w, scr_h)));
+    }
+    if (wm_ai_is_open()) {
+        extend_one(r, reach_of(wm_ai_rect(scr_w, scr_h)));
     }
     if (ctx_open || ic_tween_value(&ctx_fade) > 0.0f) {
         extend_one(r, reach_of(ctx_rect()));
@@ -1938,6 +1943,13 @@ static int animations_tick(void) {
         if (p || props_was) mark_dirty_rect(reach_of(props_rect()));
         if (wf || wifi_was) mark_dirty_wifi();
         if (pf || panel_was) mark_dirty_panel();     /* every frame of a panel's fade, and the last */
+        {
+            static int ai_was;
+            int ai = wm_ai_is_open();
+            if (ai && wm_ai_tick() == WM_AI_REDRAW) running = 1;
+            if (ai || ai_was) mark_dirty_ai();       /* and once more after it closes */
+            ai_was = ai;
+        }
         if (l || x || p || wf || pf) running = 1;
         wifi_was = wf;
         panel_was = pf;
@@ -2175,6 +2187,14 @@ static void draw_panel_layer(ic_canvas_t *c) {
     wm_panels_draw(panel_open ? panel_open : panel_drawn, c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
 }
 
+static void draw_ai_layer(ic_canvas_t *c) {
+    wm_ai_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+}
+
+static void mark_dirty_ai(void) {
+    mark_dirty_rect(reach_of(wm_ai_rect(scr_w, scr_h)));
+}
+
 static void draw_toast_layer(ic_canvas_t *c) {
     wm_toast_draw(c, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
 }
@@ -2239,6 +2259,9 @@ static void draw_overlays(void) {
     }
     if (wm_toast_visible() && !panel_open) {
         composite_faded(reach_of(wm_toast_rect(scr_w, scr_h)), 1.0f, draw_toast_layer);
+    }
+    if (wm_ai_is_open()) {
+        composite_faded(reach_of(wm_ai_rect(scr_w, scr_h)), 1.0f, draw_ai_layer);
     }
     if (ctx_model.count > 0 && ic_tween_value(&ctx_fade) > 0.0f) {
         composite_faded(reach_of(ctx_rect()), ic_tween_value(&ctx_fade), draw_ctx_layer);
@@ -2956,6 +2979,10 @@ static void left_press(void) {
         else ctx_close();
         return;
     }
+    if (wm_ai_is_open()) {
+        if (wm_ai_click(scr_w, scr_h, mouse_x, mouse_y) == WM_AI_CLOSE) mark_dirty_ai();
+        return;
+    }
     if (panel_open) {
         int bh = wm_bar_hit(scr_w, scr_h, 0, mouse_x, mouse_y);
         if (ic_ui_hit(wm_panels_rect(panel_open, scr_w, scr_h), mouse_x, mouse_y)) {
@@ -3380,6 +3407,16 @@ static void sc_run(const char *id) {
     } else if (ic_streq(id, "switch")) sc_switch_window();
     else if (ic_streq(id, "desktop")) sc_show_desktop();
     else if (ic_streq(id, "overview")) overview_set(!overview_open);
+    else if (ic_streq(id, "assistant")) {
+        if (wm_ai_is_open()) wm_ai_close();
+        else {
+            launcher_set(0);
+            wifi_set(0);
+            panel_set(0);
+            wm_ai_open();
+        }
+        mark_dirty_ai();
+    }
     else if (ic_streq(id, "wifi")) wifi_set(!wifi_open);
 }
 
@@ -3449,6 +3486,11 @@ static void handle_key(long key) {
         
         wm_debug_overlay = !wm_debug_overlay;
         mark_dirty(0, 0, 340, 140);
+        return;
+    }
+    if (wm_ai_is_open()) {
+        if (wm_ai_key(key) != WM_AI_KEEP) mark_dirty_ai();
+        if (key == 27) esc_swallow = 1;
         return;
     }
     if (key == 27 && (ctx_open || props_open || launcher_open || wifi_open || panel_open)) {
@@ -3581,6 +3623,7 @@ int main(int argc, char **argv) {
     ic_tween_set(&wifi_fade, 0.0f);
     ic_tween_set(&panel_fade, 0.0f);
     wm_panels_init();
+    wm_ai_init();
     ic_tween_set(&ctx_fade, 0.0f);
     ic_tween_set(&props_fade, 0.0f);
 

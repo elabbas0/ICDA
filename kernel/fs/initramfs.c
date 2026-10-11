@@ -49,6 +49,8 @@ extern const char userprog_fetch_start[];
 extern const char userprog_fetch_end[];
 extern const char userprog_updated_start[];
 extern const char userprog_updated_end[];
+extern const char userprog_assistantd_start[];
+extern const char userprog_assistantd_end[];
 extern const char userprog_cacert_start[];
 extern const char userprog_cacert_end[];
 extern const char userprog_ticker_start[];
@@ -154,6 +156,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/busybox", 0, 0 },
     { "/bin/fetch", 0, 0 },
     { "/sbin/updated", 0, 0 },
+    { "/sbin/assistantd", 0, 0 },
     { "/etc/ssl/certs.pem", 0, 0 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
@@ -209,6 +212,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_busybox_start, userprog_busybox_end);
     initramfs_seed_at(&n, userprog_fetch_start, userprog_fetch_end);
     initramfs_seed_at(&n, userprog_updated_start, userprog_updated_end);
+    initramfs_seed_at(&n, userprog_assistantd_start, userprog_assistantd_end);
     initramfs_seed_at(&n, userprog_cacert_start, userprog_cacert_end);
     initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
     initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);

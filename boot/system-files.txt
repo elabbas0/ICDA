@@ -22,6 +22,7 @@ bin/busybox           resources/linux/busybox
 bin/fetch             userspace/fetch.elf
 sbin/init.app         userspace/init.app
 sbin/updated          userspace/updated.elf
+sbin/assistantd       userspace/assistantd.elf
 etc/ssl/certs.pem     resources/ssl/cacert.pem
 # interface sounds (tools/soundgen renders them)
 usr/share/sounds/ai_end.wav             resources/audio/ai_end.wav
