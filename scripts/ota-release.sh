@@ -25,6 +25,9 @@ LINUXROOT=${LINUXROOT:-.verify/linuxroot}
 PART=$((90 * 1024 * 1024))
 [ -n "$VERSION" ] || { echo "usage: $0 <version> \"<notes>\" [--publish]"; exit 2; }
 [ -f "$KEY" ] || { echo "signing key $KEY missing"; exit 1; }
+# a release without the WebKit root makes updaters remove WebKit from installed systems
+[ -d "$LINUXROOT/usr/bin" ] || [ -n "${NO_WEBKIT:-}" ] || {
+    echo "WebKit root $LINUXROOT missing: not publishing a release that removes WebKit (NO_WEBKIT=1 overrides)"; exit 1; }
 
 echo "[ota] building"
 powershell -NoProfile -Command "Get-Process qemu-system-x86_64 -EA SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
