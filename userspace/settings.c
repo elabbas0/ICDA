@@ -56,7 +56,7 @@ static const toggle_row_t toggles[TOG_COUNT] = {
       IC_SYM_RELOAD, IC_TINT_TEAL },
     { PANE_SOUND, "Sound", "Allow apps to play audio",
       IC_SYM_SPEAKER, IC_TINT_PINK },
-    { PANE_SOUND, "Sound effects", "Sounds for menus, switches and notifications",
+    { PANE_SOUND, "Oversaturated effects", "Every interface sound; off: only the AI assistant's sounds",
       IC_SYM_SPEAKER, IC_TINT_INDIGO },
 };
 

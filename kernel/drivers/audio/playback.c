@@ -32,7 +32,13 @@
 #define MAX_VOICES      32
 #define MAX_STREAMS     4
 #define STREAM_SECONDS  2U
-#define IDLE_STOP_TICKS 150U                    /* stop the stream after 1.5 s of silence */
+#define IDLE_STOP_TICKS 6000U                   /* stop the stream after a minute of silence */
+/* A real codec's speaker amplifier takes 100-200 ms to wake once a stream
+ * starts: a short sound right after a cold start was over before it was on
+ * (sound "sometimes" played - when the stream was still running from the
+ * last one).  The stream now runs on through a minute of silence, and after
+ * a cold start the first WARMUP_US are silence; sounds wait, they are not cut. */
+#define WARMUP_US       200000U
 
 #define AUDIO_MIN_RATE_HZ   8000U
 #define AUDIO_MAX_RATE_HZ   96000U
@@ -299,9 +305,16 @@ uint32_t audio_master_get(int *muted) {
     return (uint32_t)master_volume;
 }
 
+static uint64_t warm_until;
+
 static void mix_into_ring(uint64_t at, uint32_t bytes) {
     uint32_t frames = bytes / FRAME_BYTES;
     for (uint32_t i = 0; i < frames * 2; i++) mix_acc[i] = 0;
+    if (tsc_us() < warm_until) {                 /* the amplifier is waking: silence, voices wait */
+        for (uint32_t i = 0; i < frames * 2; i++) mix_out[i] = 0;
+        (void)hda_stream_write((uint32_t)(at % RING_BYTES), (const uint8_t *)mix_out, bytes);
+        return;
+    }
     mix_voices(frames);
     mix_streams(frames);
     {
@@ -322,6 +335,7 @@ static int output_start(void) {
     pos_from_lpib = 0;
     lpib_changes = 0;
     out_running = 1;
+    warm_until = tsc_us() + WARMUP_US;
     idle_since = sched_ticks();
     return 0;
 }

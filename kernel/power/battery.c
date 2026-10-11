@@ -109,20 +109,29 @@ typedef struct {
 } battery_t;
 
 static battery_t bat;
+static uint8_t raw[48];             /* EC 0x00..0x2F as last read (diagnosis) */
 static uint64_t bat_read_tick;
+
+static void ec_probe(void);
+static int dell, probes;
 
 static void battery_refresh(void) {
     uint8_t flags, st;
     uint16_t rate, rem, full;
-    if (!ec_layout) return;
     if (bat_read_tick && sched_ticks() - bat_read_tick < 200) return;   /* every 2 s at most */
     bat_read_tick = sched_ticks();
+    if (!ec_layout && dell && probes < 30) ec_probe();
+    if (!ec_layout) return;
     if (ec_read(0x06, &flags)) return;
     bat.ac = flags & 1;
     bat.present = (flags >> 1) & 1;
-    if (!bat.present) return;
+    /* the flag is what the DSDT's _STA tests; a battery that answers with a
+     * sane full capacity counts as present as well */
     if (ec_write(0x03, 1) || ec_read(0x10, &st) || ec_read16(0x12, &rate) ||
         ec_read16(0x16, &rem) || ec_read16(0x1E, &full)) return;
+    if (full >= 500 && full <= 30000 && rem <= full + full / 4) bat.present = 1;
+    for (int i = 0; i < 48; i++) (void)ec_read((uint8_t)i, &raw[i]);   /* for /dev/battery's raw line */
+    if (!bat.present) return;
     bat.rate_ma = (int16_t)rate < 0 ? -(int)(int16_t)rate : (int)rate;
     bat.remaining_mah = rem;
     bat.full_mah = full;
@@ -178,6 +187,27 @@ static void scopy_note(const char *s) {
     ec_note[i] = 0;
 }
 
+/* the ports the DSDT's EC device names, then the usual ones; the first that
+ * answers a read of the AC / battery flags wins.  Tried again from the
+ * battery poll if the EC was busy at boot. */
+static int dell, probes;
+
+static void ec_probe(void) {
+    static const uint16_t ports[2][2] = { { 0x930, 0x934 }, { 0x62, 0x66 } };
+    uint8_t flags;
+    probes++;
+    scopy_note("no EC answered");
+    for (int i = 0; i < 2 && !ec_layout; i++) {
+        ec_data = ports[i][0];
+        ec_cmd = ports[i][1];
+        if (inb(ec_cmd) == 0xFF) continue;
+        if (ec_read(0x06, &flags) == 0) {
+            ec_layout = 1;
+            scopy_note(i == 0 ? "Dell EC at 0x930" : "Dell EC at 0x62");
+        }
+    }
+}
+
 void power_mgmt_init(void) {
     /* Dell gives every table the same OEM ids; the DSDT itself is not in the root list */
     const struct acpi_sdt_header *dsdt = acpi_find_table("FACP");
@@ -185,18 +215,8 @@ void power_mgmt_init(void) {
     if (dsdt && same((const char *)dsdt->oem_id, "DELL", 4) && same((const char *)dsdt->oem_table_id, "CBX3", 4)) {
         /* the ports the DSDT's EC device names, then the usual ones; the
          * first that answers a read of the AC / battery flags wins */
-        static const uint16_t ports[2][2] = { { 0x930, 0x934 }, { 0x62, 0x66 } };
-        uint8_t flags;
-        scopy_note("no EC answered");
-        for (int i = 0; i < 2 && !ec_layout; i++) {
-            ec_data = ports[i][0];
-            ec_cmd = ports[i][1];
-            if (inb(ec_cmd) == 0xFF) continue;
-            if (ec_read(0x06, &flags) == 0) {
-                ec_layout = 1;
-                scopy_note(i == 0 ? "Dell EC at 0x930" : "Dell EC at 0x62");
-            }
-        }
+        dell = 1;
+        ec_probe();
     } else {
         scopy_note(dsdt ? "firmware not recognised" : "no ACPI FADT");
     }
@@ -249,6 +269,12 @@ uint64_t battery_node_read(char *buf, uint64_t cap) {
     put(buf, cap, &n, ec_note);
     put(buf, cap, &n, "\nec_errors ");
     put_num(buf, cap, &n, ec_errors);
+    put(buf, cap, &n, "\nraw");
+    for (int i = 0; i < 48; i++) {
+        static const char hex[] = "0123456789abcdef";
+        char b[4] = { ' ', hex[raw[i] >> 4], hex[raw[i] & 15], 0 };
+        put(buf, cap, &n, b);
+    }
     put(buf, cap, &n, "\n");
     return n;
 }

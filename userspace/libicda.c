@@ -1310,18 +1310,21 @@ static void ic_sound_play(const char *name) {
     (void)icda_audio_effect(path, IC_SOUND_VOLUME);
 }
 
-static int ic_sound_enabled(int need_effects) {
+/* "Oversaturated effects" (settings: effects) on: every interface sound.
+ * Off: none but the AI assistant's (ai_*), which play whenever sound is on. */
+static int ic_sound_enabled(const char *name) {
     icda_settings_t s;
     icda_settings_load(&s);
-    return s.audio && (!need_effects || s.effects);
+    if (!s.audio) return 0;
+    return s.effects || (name[0] == 'a' && name[1] == 'i' && name[2] == '_');
 }
 
 void ic_sound(const char *name) {
-    if (name && ic_sound_enabled(1)) ic_sound_play(name);
+    if (name && ic_sound_enabled(name)) ic_sound_play(name);
 }
 
 void ic_sound_always(const char *name) {
-    if (name) ic_sound_play(name);
+    if (name && ic_sound_enabled(name)) ic_sound_play(name);
 }
 
 void ic_sound_any(const char *name, int variants) {
@@ -1329,7 +1332,7 @@ void ic_sound_any(const char *name, int variants) {
     static int last = -1;
     char full[64], num[8];
     int pick;
-    if (!name || variants < 1 || !ic_sound_enabled(1)) return;
+    if (!name || variants < 1 || !ic_sound_enabled(name)) return;
     seed = seed * 1664525u + 1013904223u + (uint32_t)icda_ticks();
     pick = (int)((seed >> 16) % (uint32_t)variants);
     if (variants > 1 && pick == last) pick = (pick + 1) % variants;   /* never twice in a row */

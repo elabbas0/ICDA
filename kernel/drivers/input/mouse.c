@@ -38,6 +38,7 @@ static int screen_h = 720;
 static uint8_t mouse_packet[4];
 static int     mouse_packet_len = 3;
 static int     mouse_packet_idx = 0;
+static int     mouse_half;          /* the device took 8 counts/mm: halve */
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -129,7 +130,19 @@ void mouse_init(void) {
         uint8_t id = ps2_read();
         mouse_packet_len = (id == 3 || id == 4) ? 4 : 3;
     }
-    mouse_set_rate(100);
+    /* 200 reports a second at 8 counts/mm (from 100 at 4): the same speed -
+     * counts are halved below, the remainder kept - in steps half as big and
+     * twice as often, so the pointer no longer jumps several pixels a report */
+    mouse_set_rate(200);
+    mouse_send(0xE8);                   /* set resolution */
+    (void)ps2_read();
+    mouse_send(3);                      /* 8 counts/mm */
+    (void)ps2_read();
+    mouse_send(0xE9);                   /* status: did it take? (some pads keep 4/mm) */
+    (void)ps2_read();
+    (void)ps2_read();
+    mouse_half = ps2_read() == 3;
+    (void)ps2_read();
 
     
     mouse_send(MOUSE_CMD_ENABLE_STREAM);
@@ -157,38 +170,6 @@ void mouse_set_screen(int w, int h) {
 
 void mouse_irq(struct registers *regs) {
     (void)regs;
-    static uint64_t irq_cnt = 0;
-    static uint64_t last_diag_tsc = 0;
-    irq_cnt++;
-    
-
-
-    {
-        uint32_t lo, hi;
-        uint64_t now;
-        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        now = ((uint64_t)hi << 32) | lo;
-        if (now - last_diag_tsc > 5000000) {
-            last_diag_tsc = now;
-            serial_write("mouse: irq cnt=");
-            
-            {
-                char buf[21]; int n = 0; uint64_t v = irq_cnt;
-                if (v == 0) { buf[n++] = '0'; }
-                else { while (v && n < 20) { buf[n++] = (char)('0' + v % 10); v /= 10; } }
-                for (int i = n - 1; i >= 0; i--) serial_write_char(buf[i]);
-            }
-            serial_write(" qdepth=");
-            {
-                uint32_t depth = (mouse_buf_head + MOUSE_BUF_CAP - mouse_buf_tail) % MOUSE_BUF_CAP;
-                char buf[21]; int n = 0; uint64_t v = depth;
-                if (v == 0) { buf[n++] = '0'; }
-                else { while (v && n < 20) { buf[n++] = (char)('0' + v % 10); v /= 10; } }
-                for (int i = n - 1; i >= 0; i--) serial_write_char(buf[i]);
-            }
-            serial_write("\n");
-        }
-    }
     
 
 
@@ -228,6 +209,17 @@ void mouse_irq(struct registers *regs) {
 
             
             dy = -dy;
+
+            /* 8 counts/mm: two counts a pixel, the odd count carried */
+            if (mouse_half) {
+                static int32_t rx, ry;
+                rx += dx;
+                ry += dy;
+                dx = rx / 2;
+                dy = ry / 2;
+                rx -= dx * 2;
+                ry -= dy * 2;
+            }
 
             
             if (flags & 0x40) dx = 0;

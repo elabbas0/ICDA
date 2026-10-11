@@ -42,7 +42,7 @@ typedef struct {
     int accent;
     int tz_minutes;
     int scale;
-    int effects;            /* interface sounds (start menu, switches, ...) */
+    int effects;            /* "oversaturated effects": every interface sound; off: AI sounds only */
     int zoom;               /* display size in percent: 100, 125, 150, 175, 200 */
     int volume;             /* master volume, 0..100 (taskbar) */
     int muted;

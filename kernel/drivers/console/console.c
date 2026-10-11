@@ -110,6 +110,10 @@ void console_refresh_overlay(void) {
     int start_col;
     uint64_t overlay_len;
     uint64_t panel_len;
+
+    /* the desktop owns the screen (it shows what is playing itself): drawing
+     * here left a black bar over it */
+    if (console_fb_text_muted) return;
     console_style_t style = console_overlay_style;
 
     if (!console_overlay_active || !console_overlay_text[0]) {
@@ -209,6 +213,11 @@ void console_clear_overlay_top_right(void) {
 
     console_overlay_active = 0;
     console_overlay_text[0] = 0;
+    if (console_fb_text_muted) {
+        console_overlay_last_col = -1;
+        console_overlay_last_width = 0;
+        return;
+    }
     if (console_overlay_last_width <= 0 || console_overlay_last_col < 0) {
         return;
     }
