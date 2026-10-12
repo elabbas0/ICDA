@@ -33,7 +33,7 @@ CACHE=.verify/ota-cache     # the WebKit pack and its manifest lines, reused whi
 
 echo "[ota] building"
 powershell -NoProfile -Command "Get-Process qemu-system-x86_64 -EA SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
-spin "kernel + apps" "$OUT.build.log" docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
+spin "kernel + apps" "$OUT.build.log" env MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
     sh -c 'make > /tmp/b.log 2>&1 || { tail -20 /tmp/b.log; exit 1; }'
 rm -f "$OUT.build.log"
 

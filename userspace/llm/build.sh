@@ -19,7 +19,8 @@ mkdir -p userspace/llm/out "$LOGS"
 # be watched on its own.  cmake's build tree is on the volume, so the expensive
 # compile is only paid once.
 run_in_container() {
-    docker run --rm --dns 8.8.8.8 -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c "
+    # without this, Git Bash rewrites the container-side /w into a Windows path
+    MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c "
         apk add -q build-base cmake linux-headers >/dev/null 2>&1
         $1"
 }

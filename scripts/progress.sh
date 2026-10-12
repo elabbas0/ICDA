@@ -18,7 +18,7 @@
 # status is the one that comes back out of spin, and a failure prints the tail
 # of its log exactly as before.
 
-PB_TTY=0
+PB_TTY=${PB_TTY:-0}
 [ -t 1 ] && PB_TTY=1
 
 pb_elapsed() {                                  # pb_elapsed <seconds> -> m:ss
@@ -87,7 +87,11 @@ pb_line() {
 }
 
 # spin <label> <log> <cmd...>        bar sweeps, the step reports no percentage
-# spin_pct <label> <log> <cmd...>    bar follows "[ NN%]" in the log
+# spin_pct <label> <log> <cmd...>    bar follows "[ NN%]" in the log, sweeping
+#                                     until the step produces one: a cmake
+#                                     configure prints none for the better part
+#                                     of a minute, and a bar parked at 0% looks
+#                                     like the hang this is here to remove
 _pb_spin() {
     _pb_label=$1
     _pb_log=$2
@@ -101,9 +105,17 @@ _pb_spin() {
     # pid outlives an exited child until something waits for it
     ( "$@" >>"$_pb_log" 2>&1; printf '%s' $? > "$_pb_rc" ) &
     _pb_i=0
+    _pb_seen=0
     while [ ! -f "$_pb_rc" ]; do
         if [ "$_pb_mode" = pct ]; then
             _pb_p=$(pb_pct "$_pb_log")
+            # while the step has reported nothing, sweep; from the first real
+            # percentage on, follow it
+            if [ "$_pb_p" = 0 ] && [ "$_pb_seen" = 0 ]; then
+                _pb_p=$(((_pb_i * 4) % 100))
+            else
+                _pb_seen=1
+            fi
         else
             _pb_p=$(((_pb_i * 4) % 100))
         fi
