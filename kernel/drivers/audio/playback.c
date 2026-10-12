@@ -80,6 +80,19 @@ static stream_t streams[MAX_STREAMS];
 static int32_t  mix_acc[CHUNK_FRAMES * 2];
 static int16_t  mix_out[CHUNK_FRAMES * 2];
 static uint8_t  silence[4096];
+/* What the mixer actually produced, so "is there sound" is answerable on a
+ * serial log instead of by ear: the loudest sample and how many frames went
+ * out while a sound was playing.  Reported when the mixer falls idle. */
+static uint32_t mix_peak;
+static uint32_t mix_pre_peak;      /* loudest sample before the master gain */
+static uint64_t mix_live_frames;
+
+static void serial_write_dec(uint64_t v) {
+    char t[24];
+    int n = 0;
+    do { t[n++] = (char)('0' + v % 10U); v /= 10U; } while (v);
+    while (n) serial_write_char(t[--n]);
+}
 
 static int      out_running;
 static uint64_t write_abs, play_abs;            /* bytes written / played since start */
@@ -355,10 +368,20 @@ static void mix_into_ring(uint64_t at, uint32_t bytes) {
     }
     mix_voices(frames);
     mix_streams(frames);
+    for (uint32_t i = 0; i < frames * 2; i++) {
+        int32_t a = mix_acc[i] < 0 ? -mix_acc[i] : mix_acc[i];
+        if ((uint32_t)a > mix_pre_peak) mix_pre_peak = (uint32_t)a;
+    }
     {
         /* perceived loudness follows the square of the slider */
         int32_t g = master_muted ? 0 : master_volume * master_volume / 256;
-        for (uint32_t i = 0; i < frames * 2; i++) mix_out[i] = limit((int32_t)(((int64_t)mix_acc[i] * g) >> 8));
+        for (uint32_t i = 0; i < frames * 2; i++) {
+            int32_t s = limit((int32_t)(((int64_t)mix_acc[i] * g) >> 8));
+            uint32_t mag = (uint32_t)(s < 0 ? -s : s);
+            mix_out[i] = (int16_t)s;
+            if (mag > mix_peak) mix_peak = mag;
+        }
+        mix_live_frames += frames;
     }
     (void)hda_stream_write((uint32_t)(at % RING_BYTES), (const uint8_t *)mix_out, bytes);
 }
@@ -439,9 +462,24 @@ static void output_service(void) {
     }
     if (anything_audible()) {
         idle_since = sched_ticks();
-    } else if (sched_ticks() - idle_since > IDLE_STOP_TICKS) {
-        hda_stop_playback();
-        out_running = 0;
+    } else {
+        /* nothing left to play: say what came out, then go quiet */
+        if (mix_live_frames && mix_pre_peak) {      /* only while something was actually sounding */
+            serial_write("audio: mixed ");
+            serial_write_dec((uint64_t)mix_live_frames);
+            serial_write(" frames, peak ");
+            serial_write_dec((uint64_t)mix_peak);
+            serial_write(" (audible)\n");
+        }
+        if (mix_live_frames) {
+            mix_live_frames = 0;
+            mix_peak = 0;
+            mix_pre_peak = 0;
+        }
+        if (sched_ticks() - idle_since > IDLE_STOP_TICKS) {
+            hda_stop_playback();
+            out_running = 0;
+        }
     }
 }
 
