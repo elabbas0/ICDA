@@ -14,6 +14,7 @@
 # index, so the working tree and the current branch are left alone.
 set -e
 cd "$(dirname "$0")/.."
+. scripts/progress.sh
 VERSION=$1
 NOTES=$2
 PUBLISH=$3
@@ -32,19 +33,28 @@ CACHE=.verify/ota-cache     # the WebKit pack and its manifest lines, reused whi
 
 echo "[ota] building"
 powershell -NoProfile -Command "Get-Process qemu-system-x86_64 -EA SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
-MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
+spin "kernel + apps" "$OUT.build.log" docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
     sh -c 'make > /tmp/b.log 2>&1 || { tail -20 /tmp/b.log; exit 1; }'
+rm -f "$OUT.build.log"
 
 echo "[ota] assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT/EFI/ICDA"
 cp kernel/install-kernel.bin "$OUT/EFI/ICDA/KERNEL.BIN"
 cp kernel/fs/bootx64-install.efi "$OUT/EFI/ICDA/GRUBX64.EFI"
+# every system file, one line of progress each: on a cold tree this is several
+# hundred copies and the loop used to show nothing at all until it was done
+pb_reset
+SF_TOTAL=$(grep -v '^#' boot/system-files.txt | wc -l | tr -d ' ')
+SF_DONE=0
 grep -v '^#' boot/system-files.txt | while read -r dest src; do
     [ -n "$dest" ] || continue
     mkdir -p "$OUT/SYSTEM/$(dirname "$dest")"
     cp "$src" "$OUT/SYSTEM/$dest"
+    SF_DONE=$((SF_DONE + 1))
+    progress "system files" "$SF_DONE" "$SF_TOTAL" "$dest"
 done
+note "system files: $SF_TOTAL copied"
 
 echo "[ota] manifest for $VERSION"
 body=$(mktemp)
@@ -53,8 +63,10 @@ body=$(mktemp)
     echo "version $VERSION"
     echo "notes $NOTES"
     # one process hashes them all (a size and a hash program per file was slow)
+    # Perl reports each file's hash as it goes, so the bar has something real to
+    # follow instead of sitting at zero through a few hundred megabytes
     (cd "$OUT" && find EFI SYSTEM -type f | LC_ALL=C sort) | perl -MDigest::SHA -ne \
-        'chomp; my $f = "'"$OUT"'/$_"; print "file $_ ", -s $f, " ", Digest::SHA->new(256)->addfile($f, "b")->hexdigest, "\n"'
+        'chomp; my $f = "'"$OUT"'/$_"; print "file $_ ", -s $f, " ", Digest::SHA->new(256)->addfile($f, "b")->hexdigest, "\n"; print STDERR "$_\n"'
     # WebKit as one pack: its files back to back ("wfile REL SIZE SHA OFFSET"),
     # published as linux.pack.part0 ... - a few downloads instead of thousands
     # of HTTPS connections.  Updaters before 1.8.5 skip wpack / wfile lines.
@@ -81,10 +93,16 @@ if [ "$PUBLISH" = "--publish" ]; then
     echo "[ota] publishing to origin/ota"
     idx=$(mktemp)
     rm -f "$idx"
+    pb_reset
+    OBJS=$( (cd "$OUT" && find EFI SYSTEM manifest.txt -type f) | wc -l | tr -d ' ')
+    OBJS_DONE=0
     (cd "$OUT" && find EFI SYSTEM manifest.txt -type f | LC_ALL=C sort) | while read -r rel; do
         blob=$(git hash-object -w "$OUT/$rel")
         GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
+        OBJS_DONE=$((OBJS_DONE + 1))
+        progress "hashing" "$OBJS_DONE" "$OBJS" "$rel"
     done
+    note "hashed $OBJS files"
     # WebKit: the pack in pieces, linux.pack.part0 ... (the host's file size limit)
     if grep -q '^wpack ' "$OUT/manifest.txt"; then
         # the pieces' git objects are kept with the cached pack: hashed again
@@ -94,7 +112,19 @@ if [ "$PUBLISH" = "--publish" ]; then
         else
             tmp=$(mktemp -d)
             split -b "$PART" -d -a 1 "$CACHE/linux.pack" "$tmp/p"
-            for p in "$tmp"/p*; do echo "${p##*/p} $(git hash-object -w "$p")"; done > "$CACHE/blobs.txt"
+            # hashing the pieces is the longest part of a publish: a few hundred
+            # megabytes of WebKit, and until now it said nothing while it ran
+            pb_reset
+            : > "$CACHE/blobs.txt"
+            PIECES_TOTAL=$(ls "$tmp"/p* | wc -l | tr -d ' ')
+            PIECES_DONE=0
+            for p in "$tmp"/p*; do
+                echo "${p##*/p} $(git hash-object -w "$p")" >> "$CACHE/blobs.txt"
+                PIECES_DONE=$((PIECES_DONE + 1))
+                progress "webkit pieces" "$PIECES_DONE" "$PIECES_TOTAL" \
+                    "${p##*/p}  $(wc -c < "$p" | tr -d ' ') bytes"
+            done
+            note "webkit pieces: $PIECES_TOTAL hashed"
             rm -rf "$tmp"
         fi
         while read -r k blob; do
@@ -111,6 +141,7 @@ if [ "$PUBLISH" = "--publish" ]; then
     commit=$(GIT_AUTHOR_NAME=elabbas0 GIT_AUTHOR_EMAIL=arkanabak09@gmail.com \
              GIT_COMMITTER_NAME=elabbas0 GIT_COMMITTER_EMAIL=arkanabak09@gmail.com \
              git commit-tree "$tree" -m "ICDA $VERSION OTA release" -m "$NOTES")
-    git push -f origin "$commit:refs/heads/ota"
+    spin "pushing" "$OUT.push.log" git push -f origin "$commit:refs/heads/ota"
+    rm -f "$OUT.push.log"
     echo "[ota] published $VERSION ($commit)"
 fi
