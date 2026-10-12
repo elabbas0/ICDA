@@ -367,6 +367,50 @@ static int populate_page(process_t *p, lx_vma_t *v, uint64_t va) {
  * sixteen pages cost one. */
 #define FAULT_AROUND 16ULL
 
+/* A run of pages of a file-backed region, filled with one read.
+ *
+ * Doing this page by page asks the file for four kilobytes at a time: sixteen
+ * trips through the file system to get sixty-four, each one re-reading the
+ * file's metadata and its own sector chain.  A model file is far too large for
+ * that - two and a half gigabytes is six hundred thousand pages.
+ *
+ * The pages of a run are consecutive in the file, so they are read together
+ * into one contiguous run of frames and then mapped one page per frame.
+ * Anything unexpected - the frames are not available, the read is short, a
+ * page is already mapped - falls back to filling the pages one at a time. */
+static void populate_run(process_t *p, lx_vma_t *v, uint64_t from, uint64_t to, uint64_t skip) {
+    uint64_t va[FAULT_AROUND], n = 0, off, phys, size, want, i;
+    uint64_t flags = (v->flags & LXVM_SHARED) ? pte_flags(v->prot)
+                : (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
+
+    if (!v->node) return;
+    for (uint64_t a = from; a < to && n < FAULT_AROUND; a += PAGE)
+        if (a != skip && !vmm_virt_to_phys(p->addr_space, a)) va[n++] = a;
+    if (n < 2) return;
+
+    size = vfs_node_size(v->node);
+    off = v->off + (from - v->start);
+    if (off >= size) return;
+    want = n * PAGE;
+    if (want > size - off) want = size - off;
+    /* a tail that does not fill whole pages is left to the one-at-a-time path */
+    n = want / PAGE;
+    if (n < 2) return;
+
+    phys = pmm_alloc_contiguous_aligned_below(n, PAGE, ~0ULL);
+    if (!phys) return;
+    if ((uint64_t)vfs_node_read_at(v->node, off, (char *)PHYS_TO_VIRT(phys), n * PAGE) != n * PAGE) {
+        pmm_free_range(phys, n);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        if (vmm_map_page(p->addr_space, va[i], phys + i * PAGE, flags) != 0) {
+            pmm_free_range(phys + (i + 1) * PAGE, n - i - 1);
+            return;
+        }
+    }
+}
+
 int lxvm_fault(process_t *p, uint64_t addr, int write) {
     lx_vma_t *v;
     uint64_t va = addr & PAGE_MASK, phys, t0 = tsc_read(), t1;
@@ -385,8 +429,13 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
             uint64_t from = va & ~(FAULT_AROUND * PAGE - 1), to = from + FAULT_AROUND * PAGE;
             if (from < v->start) from = v->start;
             if (to > v->end) to = v->end;
-            for (uint64_t a = from; a < to; a += PAGE)
-                if (a != va && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
+            if (v->node) {
+                /* a file: the run is consecutive in the file, so one read */
+                populate_run(p, v, from, to, va);
+            } else {
+                for (uint64_t a = from; a < to; a += PAGE)
+                    if (a != va && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
+            }
         }
         lxvm_stat.populate_cycles += tsc_read() - t0;
         if (v->node) lxvm_stat.file_faults++;

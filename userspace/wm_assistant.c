@@ -34,7 +34,7 @@
 #define AI_FADE_IN_MS     340u
 #define AI_FADE_OUT_MS    220u
 
-enum { ST_CLOSED, ST_INPUT, ST_LISTEN, ST_THINKING, ST_ANSWER, ST_DONE, ST_ERROR };
+enum { ST_CLOSED, ST_INPUT, ST_LISTEN, ST_LOADING, ST_THINKING, ST_ANSWER, ST_DONE, ST_ERROR };
 
 static struct {
     int      state;
@@ -231,7 +231,8 @@ static int poll_reply(void) {
             A.card_dirty = 1;
             return 1;
         }
-        int st = ic_streq(state, "thinking") ? ST_THINKING : ic_streq(state, "answer") ? ST_ANSWER :
+        int st = ic_streq(state, "loading") ? ST_LOADING :
+                 ic_streq(state, "thinking") ? ST_THINKING : ic_streq(state, "answer") ? ST_ANSWER :
                  ic_streq(state, "done") ? ST_DONE : ic_streq(state, "error") ? ST_ERROR : A.state;
         if (st != A.state) {
             if (st == ST_DONE || st == ST_ERROR) ic_sound("ai_end");
@@ -274,16 +275,21 @@ int wm_ai_tick(void) {
         A.card_alpha = 0.0f;
         return WM_AI_CLOSE;
     }
-    if (!A.closing && (A.state == ST_LISTEN || A.state == ST_THINKING || A.state == ST_ANSWER))
+    if (!A.closing && (A.state == ST_LISTEN || A.state == ST_LOADING ||
+                   A.state == ST_THINKING || A.state == ST_ANSWER))
         if (poll_reply()) A.card_dirty = 1;
     tick_card_fade(t);
     if (A.state == ST_INPUT) {                   /* the caret blinks on its own */
         int on = (int)((t / 500) % 2 == 0);
         if (on != A.caret) { A.caret = on; A.card_dirty = 1; }
     }
+    /* Loading is quieter and slower than thinking: it is a wait, not work, and
+     * the wave settling is the only sign of it that can be had. */
     want = A.state == ST_INPUT ? 0.45f : A.state == ST_LISTEN ? 0.2f + (float)A.level / 99.0f * 0.8f :
+           A.state == ST_LOADING ? 0.5f :
            A.state == ST_THINKING ? 0.8f : A.state == ST_ANSWER ? 1.0f : 0.3f;
-    want_speed = A.state == ST_THINKING ? 2.6f : A.state == ST_ANSWER ? 1.8f : 1.0f;
+    want_speed = A.state == ST_THINKING ? 2.6f : A.state == ST_ANSWER ? 1.8f :
+                 A.state == ST_LOADING ? 1.5f : 1.0f;
     A.energy += (want - A.energy) * 0.08f;
     A.speed += (want_speed - A.speed) * 0.05f;
     /* the whole overlay is one alpha: while it moves, all of it is repainted,
@@ -427,7 +433,9 @@ void wm_ai_draw_card(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scra
         ic_rect_t qr = ic_rect_make(card.x + CARD_PAD, card.y + 14, card.w - 2 * CARD_PAD, 18);
         ic_rect_t ar = ic_rect_make(card.x + CARD_PAD, card.y + 42, card.w - 2 * CARD_PAD, card.h - 42 - 30);
         ic_rect_t saved;
-        const char *status = A.state == ST_LISTEN ? "Listening - speak, then pause" : A.state == ST_THINKING ? "Thinking..." : A.state == ST_ERROR ? "Something went wrong" :
+        const char *status = A.state == ST_LISTEN ? "Listening - speak, then pause" :
+                             A.state == ST_LOADING ? "Loading the local model - a large one takes a few minutes" :
+                             A.state == ST_THINKING ? "Thinking..." : A.state == ST_ERROR ? "Something went wrong" :
                              A.state == ST_ANSWER ? "Answering" : "Enter: ask again   Esc: close";
         ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), qr, A.shown_q, p->label, IC_ALIGN_LEFT);
         ic_gfx_hline(c, card.x + CARD_PAD, card.y + 36, card.w - 2 * CARD_PAD, p->separator);

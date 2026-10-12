@@ -623,6 +623,7 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
         (void)vfs_detach_tree(mount_path);
         if (vfs_import_node(mount_path, VFS_NODE_DIR, 1, 0, 0, 0, 0, 0) != 0 || vfs_set_mount(mount_path, id) != 0 ||
             vfs_import_ref(mount_path, VFS_NODE_DIR, 0, 1, NTFS_ROOT_RECORD) != 0) {
+            ntfs_free(n);
             kfree(n);
             m->ntfs = 0;
             m->used = 0;
@@ -687,7 +688,10 @@ int volumes_mount_all(void) {
     for (uint32_t i = 0; i < VOL_MAX; i++) {
         if (volumes[i].used) (void)vfs_detach_tree(volumes[i].path);
         if (volumes[i].upcase) kfree(volumes[i].upcase);
-        if (volumes[i].ntfs) kfree(volumes[i].ntfs);
+        if (volumes[i].ntfs) {
+            ntfs_free(volumes[i].ntfs);      /* releases the cached placement */
+            kfree(volumes[i].ntfs);
+        }
         volumes[i].upcase = 0;
         volumes[i].ntfs = 0;
         volumes[i].used = 0;

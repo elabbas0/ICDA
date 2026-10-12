@@ -408,33 +408,109 @@ int64_t ntfs_file_size(ntfs_t *v, uint64_t record) {
     return size;
 }
 
+/* The $DATA of one file, kept between reads.
+ *
+ * Reading a file means finding where its clusters are, and that means reading
+ * its MFT record and walking its run list.  Doing that for every read is fine
+ * for a directory listing and ruinous for a model: the file is mapped, so it is
+ * read a run of pages at a time, six hundred thousand times over, and each of
+ * them would re-read the record and re-parse a run list that can be hundreds
+ * of entries long.
+ *
+ * So the last file's placement is kept, keyed by its record number.  One entry
+ * is enough: reads come in runs within a single file, and a change of file
+ * costs one parse.  The pointer is owned here and must not be freed by the
+ * caller, which is why it is copied out rather than returned in the struct. */
+typedef struct {
+    uint64_t    record;
+    ntfs_run_t *runs;
+    uint32_t    nruns;
+    uint64_t    size;
+    uint64_t    init_size;
+    int         resident;
+    uint8_t    *data;
+    uint16_t    flags;
+    int         valid;
+} data_cache_t;
+
+static void data_cache_drop(data_cache_t *c) {
+    if (c->runs) kfree(c->runs);
+    if (c->data) kfree(c->data);
+    c->runs = 0;
+    c->data = 0;
+    c->valid = 0;
+}
+
+void ntfs_free(ntfs_t *v) {
+    if (v) data_cache_drop(&v->data_cache);
+}
+
+/* TEMPORARY: measure the path without the placement cache, for a baseline. */
+static int data_cache_load(ntfs_t *v, uint64_t record, data_cache_t *c) {
+    attr_data_t d;
+    if (c->valid && c->record == record) return 0;
+    data_cache_drop(c);
+    if (get_attr(v, record, ATTR_DATA, 0, 0, &d) != 0) {
+        free_attr(&d);
+        return -1;
+    }
+    if (d.runs) {
+        c->runs = d.runs;
+        d.runs = 0;                     /* ownership moves to the cache */
+    } else if (d.data) {
+        c->data = d.data;
+        d.data = 0;
+    }
+    c->nruns = d.nruns;
+    c->size = d.size;
+    c->init_size = d.init_size;
+    c->resident = d.resident;
+    c->flags = d.flags;
+    c->record = record;
+    c->valid = 1;
+    free_attr(&d);
+    return 0;
+}
+
 int64_t ntfs_read_file(ntfs_t *v, uint64_t record, uint64_t off, void *buf, uint64_t len) {
-    attr_data_t data;
+    data_cache_t *c = &v->data_cache;
     int64_t got = -1;
-    if (get_attr(v, record, ATTR_DATA, 0, 0, &data) != 0) {
-        free_attr(&data);
-        return -1;
+#ifdef RDBENCH_NO_CACHE
+    {   /* the way this read before the cache existed, for a baseline */
+        attr_data_t d;
+        if (get_attr(v, record, ATTR_DATA, 0, 0, &d) != 0) { free_attr(&d); return -1; }
+        if (d.flags & (FLAG_COMPRESSED | FLAG_ENCRYPTED)) { free_attr(&d); return -1; }
+        if (off >= d.size) { free_attr(&d); return 0; }
+        if (len > d.size - off) len = d.size - off;
+        if (d.resident) {
+            mem_copy(buf, d.data + off, len);
+            got = (int64_t)len;
+        } else {
+            uint64_t readable = off < d.init_size ? d.init_size - off : 0;
+            if (readable > len) readable = len;
+            if (readable == 0 || stream_read(v, d.runs, d.nruns, off, buf, readable) == 0) {
+                mem_zero((uint8_t *)buf + readable, len - readable);
+                got = (int64_t)len;
+            }
+        }
+        free_attr(&d);
+        return got;
     }
-    if (data.flags & (FLAG_COMPRESSED | FLAG_ENCRYPTED)) {
-        free_attr(&data);
-        return -1;
-    }
-    if (off >= data.size) {
-        free_attr(&data);
-        return 0;
-    }
-    if (len > data.size - off) len = data.size - off;
-    if (data.resident) {
-        mem_copy(buf, data.data + off, len);
+#endif
+    if (data_cache_load(v, record, c) != 0) return -1;
+    if (c->flags & (FLAG_COMPRESSED | FLAG_ENCRYPTED)) return -1;
+    if (off >= c->size) return 0;
+    if (len > c->size - off) len = c->size - off;
+    if (c->resident) {
+        mem_copy(buf, c->data + off, len);
         got = (int64_t)len;
     } else {
-        uint64_t readable = off < data.init_size ? data.init_size - off : 0;
+        uint64_t readable = off < c->init_size ? c->init_size - off : 0;
         if (readable > len) readable = len;
-        if (readable == 0 || stream_read(v, data.runs, data.nruns, off, buf, readable) == 0) {
+        if (readable == 0 || stream_read(v, c->runs, c->nruns, off, buf, readable) == 0) {
             mem_zero((uint8_t *)buf + readable, len - readable);
             got = (int64_t)len;
         }
     }
-    free_attr(&data);
     return got;
 }

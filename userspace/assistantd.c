@@ -850,11 +850,24 @@ static void lput(char *out, size_t cap, size_t *n, const char *role, const char 
     out[*n] = 0;
 }
 
+/* How long to wait for the local model.
+ *
+ * The first question pays for loading the model, and a model big enough to be
+ * worth running is a couple of gigabytes: reading that off the disk and
+ * setting it up takes minutes, not the seconds a spinner would suggest.  A
+ * short wait meant every first question came back "did not answer in time"
+ * while the model was still loading perfectly well behind it - and because the
+ * daemon had already given up, nothing it was doing was ever seen.
+ *
+ * So the wait is generous, and it says what it is waiting for. */
+#define LLM_LOAD_MS   900000          /* 15 minutes: the first question */
+#define LLM_ANSWER_MS  120000         /* 2 minutes: once it is loaded */
+
 static int ask_local(const provider_t *v, const char *q, char *err, size_t errcap) {
     static char req[24000], rep[A_MAX + 64];
     char sys[400], when[96];
     size_t n;
-    uint64_t t0 = icda_ticks(), last = 0;
+    uint64_t t0 = icda_ticks(), last = 0, load_noted = 0;
     if (llm_start(v, err, errcap)) return -1;
     today(when, sizeof(when));
     snprintf(sys, sizeof(sys), "You are the assistant built into ICDA, a small operating system. "
@@ -870,6 +883,7 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
     (void)icda_write_file(LREQ, req, n);
     answer[0] = 0;
     for (;;) {
+        uint64_t waited = icda_ticks() - t0;
         long r = (long)icda_read_file(LREPLY, rep, sizeof(rep) - 1);
         if (r > 0) {
             uint32_t s = 0;
@@ -904,9 +918,17 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             }
         }
         /* the first question waits for the model to load */
-        if (icda_ticks() - t0 > (uint64_t)(answer[0] ? 30000 : 18000)) {
-            snprintf(err, errcap, "%s: the local model did not answer in time", v->name);
+        if (waited > (uint64_t)(answer[0] ? LLM_ANSWER_MS : LLM_LOAD_MS)) {
+            snprintf(err, errcap, "%s: the local model did not answer in %d minutes. "
+                     "The first question loads the model, which can take a while on a large one; "
+                     "ask again once it has finished.", v->name, (int)(waited / 60000));
             return answer[0] ? 0 : -1;
+        }
+        /* say what the silence is: the model is loading, not stuck */
+        if (!answer[0] && !load_noted && waited > 3000) {
+            load_noted = 1;
+            reply("loading");
+            (void)icda_write_file("/dev/serial", "ai: waiting for the local model to load\n", 39);
         }
         rem_check();                     /* a long answer must not hold up a reminder */
         icda_sleep(5);
