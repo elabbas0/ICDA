@@ -64,6 +64,52 @@ static std::string visible(const std::string &s) {
     return s.substr(0, a) + (k == std::string::npos ? "" : rest.substr(k));
 }
 
+// How much of MemAvailable the model may use, and how it is found.
+//
+// ICDA hands the model process a page-fault-at-a-time view of a file that can
+// be gigabytes long.  If the machine cannot hold it, the load does not fail
+// where we can report it: the allocator simply stops handing out pages part
+// way through, and the program dies on a signal with nothing to say.  So the
+// size is checked against free memory first, and the answer says why.
+static uint64_t mem_available_kb() {
+    std::string m = read_file("/proc/meminfo");
+    size_t p = m.find("MemAvailable:");
+    if (p == std::string::npos) p = m.find("MemFree:");
+    if (p == std::string::npos) return 0;
+    p = m.find(':', p) + 1;
+    while (p < m.size() && (m[p] == ' ' || m[p] == '\t')) p++;
+    uint64_t kb = strtoull(m.c_str() + p, nullptr, 10);
+    // the interface is drawing, the browser is running and llama.cpp wants a
+    // compute buffer on top of the weights and the cache: keep a third back
+    return kb / 3U * 2U;
+}
+
+static bool model_fits(const std::string &path, int n_ctx, std::string &why) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) { why = "The model could not be opened: " + path; return false; }
+    fseek(f, 0, SEEK_END);
+    uint64_t bytes = (uint64_t)ftell(f);
+    fclose(f);
+    uint64_t kb = mem_available_kb();
+    if (!kb) return true;                      // no meminfo: let it try
+    /* the context cache, plus the scratch the weights do not cover.  Roughly
+     * 150 kB of context per token covers the KV cache of a model this size
+     * and leaves room for the batch buffers. */
+    uint64_t need = bytes / 1024 + (uint64_t)n_ctx * 150 + 256 * 1024;
+    if (need > kb) {
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "This model needs about %llu MB of memory and this computer has "
+                 "%llu MB free. Close some windows, or put a smaller model in "
+                 "icda-models.",
+                 (unsigned long long)((need + 1023) / 1024),
+                 (unsigned long long)(kb / 1024));
+        why = buf;
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
     std::setlocale(LC_NUMERIC, "C");
     // started by assistantd there is no terminal: what it has to say goes to a log
@@ -81,6 +127,15 @@ int main(int argc, char **argv) {
     if (model_path.empty()) {
         fprintf(stderr, "usage: icda-llm -m model.gguf [-t threads] [-c context]\n");
         return 1;
+    }
+    {
+        // say why before loading, not by dying part way through it
+        std::string why;
+        if (!model_fits(model_path, n_ctx, why)) {
+            fprintf(stderr, "icda-llm: %s\n", why.c_str());
+            write_reply(0, "error", why);
+            return 1;
+        }
     }
     llama_log_set([](enum ggml_log_level level, const char *text, void *) {
         if (level >= GGML_LOG_LEVEL_ERROR) fprintf(stderr, "%s", text);

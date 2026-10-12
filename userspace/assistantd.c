@@ -830,6 +830,9 @@ static int llm_start(const provider_t *v, char *err, size_t errcap) {
         char note[700];
         int nn = snprintf(note, sizeof(note), "starting %s %s\n", bin, args);
         (void)icda_write_file("/tmp/ai/log", note, (uint64_t)nn);
+        /* the same on the serial port: if the local model takes the machine
+         * down, this is the only record of what it was asked to load */
+        (void)icda_write_file("/dev/serial", note, strlen(note));
     }
     if ((long)icda_spawn_args(bin, args) < 0) {
         snprintf(err, errcap, "%s: icda-llm did not start", v->name);
@@ -885,8 +888,12 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             }
             if (s == lseq) {
                 snprintf(answer, sizeof(answer), "%s", p);
-                if (strcmp(state, "done") == 0) return answer[0] ? 0 : -1;
+                if (strcmp(state, "done") == 0) {
+                    (void)icda_write_file("/dev/serial", "ai: local model finished\n", 27);
+                    return answer[0] ? 0 : -1;
+                }
                 if (strcmp(state, "error") == 0) {
+                    (void)icda_write_file("/dev/serial", "ai: local model error\n", 23);
                     snprintf(err, errcap, "%s: %s", v->name, p);
                     return -1;
                 }

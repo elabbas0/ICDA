@@ -1000,7 +1000,7 @@ userspace/browser.app: crt1.o surfer_surfer.o $(SURFER_ENGINE_OBJS) $(SURFER_MED
 	cp -f /tmp/icda-browser.app userspace/browser.app
 
 
-settings.o: userspace/settings.c userspace/settings_wifi.h userspace/settings_updates.h userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
+settings.o: userspace/settings.c userspace/settings_wifi.h userspace/settings_updates.h userspace/settings_ai.h userspace/gui.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h \
            userspace/font.h userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings.c -o /tmp/icda-settings.o
 	cp -f /tmp/icda-settings.o settings.o
@@ -1017,8 +1017,12 @@ settings_keys.o: userspace/settings_keys.c userspace/settings_keys.h userspace/s
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_keys.c -o /tmp/icda-settings_keys.o
 	cp -f /tmp/icda-settings_keys.o settings_keys.o
 
-userspace/settings.app: crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o gui.o libicda.o
+settings_ai.o: userspace/settings_ai.c userspace/settings_ai.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h Makefile
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_ai.c -o /tmp/icda-settings_ai.o
+	cp -f /tmp/icda-settings_ai.o settings_ai.o
+
+userspace/settings.app: crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o settings_ai.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-settings.app crt0.o settings.o settings_wifi.o settings_updates.o settings_keys.o settings_ai.o gui.o libicda.o
 	cp -f /tmp/icda-settings.app userspace/settings.app
 
 shell_blob.o: kernel/proc/shell_blob.asm userspace/shell.app

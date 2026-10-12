@@ -332,8 +332,19 @@ static int populate_page(process_t *p, lx_vma_t *v, uint64_t va) {
         lxvm_stat.step_cycles[1] += t2 - t1;
     }
     if (v->node) {
-        uint64_t off = v->off + (va - v->start), size = vfs_node_size(v->node);
-        if (off < size) (void)vfs_node_read_at(v->node, off, mem, size - off < PAGE ? size - off : PAGE);
+        uint64_t off = v->off + (va - v->start), size = vfs_node_size(v->node), want;
+        if (off < size) {
+            want = size - off < PAGE ? size - off : PAGE;
+            /* A read that fails or comes up short leaves the zeros above in the
+             * page, and the program then parses them as if they were the file:
+             * a model's header full of zeros is read as nonsense sizes, and it
+             * dies somewhere far away from here.  Hand the fault back instead,
+             * so the program is told the page is not there. */
+            if ((uint64_t)vfs_node_read_at(v->node, off, mem, want) != want) {
+                pmm_free(phys);
+                return -1;
+            }
+        }
     }
     {
         uint64_t t0 = tsc_read();

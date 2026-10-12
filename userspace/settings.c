@@ -16,6 +16,7 @@
 #include "settings_wifi.h"
 #include "settings_updates.h"
 #include "settings_keys.h"
+#include "settings_ai.h"
 
 #define WIN_W 700
 #define WIN_H 480
@@ -27,13 +28,13 @@
 #define GROUP_GAP     IC_SP_6
 #define ROW_H         IC_H_ROW_TALL
 
-enum { PANE_WIFI = 0, PANE_APPEARANCE, PANE_MOTION, PANE_SOUND, PANE_KEYBOARD, PANE_TIME, PANE_UPDATES, PANE_ABOUT, PANE_COUNT };
+enum { PANE_WIFI = 0, PANE_ASSISTANT, PANE_APPEARANCE, PANE_MOTION, PANE_SOUND, PANE_KEYBOARD, PANE_TIME, PANE_UPDATES, PANE_ABOUT, PANE_COUNT };
 
 static const char *const pane_titles[PANE_COUNT] = {
-    "Wi-Fi", "Appearance", "Motion & Display", "Sound", "Keyboard", "Date & Time", "Updates", "About"
+    "Wi-Fi", "Assistant", "Appearance", "Motion & Display", "Sound", "Keyboard", "Date & Time", "Updates", "About"
 };
 static const ic_symbol_t pane_symbols[PANE_COUNT] = {
-    IC_SYM_WIFI, IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_KEYBOARD, IC_SYM_GLOBE, IC_SYM_RELOAD, IC_SYM_INFO
+    IC_SYM_WIFI, IC_SYM_ACTIVITY, IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_KEYBOARD, IC_SYM_GLOBE, IC_SYM_RELOAD, IC_SYM_INFO
 };
 
 
@@ -390,6 +391,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     if (st.pane == PANE_WIFI) wifi_pane_draw(app, c, wifi_area(app));
     else if (st.pane == PANE_UPDATES) updates_pane_draw(app, c, wifi_area(app));
     else if (st.pane == PANE_KEYBOARD) keys_pane_draw(app, c, wifi_area(app));
+    else if (st.pane == PANE_ASSISTANT) ai_pane_draw(app, c, wifi_area(app));
     else if (st.pane == PANE_APPEARANCE) draw_appearance(app, c);
     else if (st.pane == PANE_ABOUT) draw_about(app, c);
     else if (st.pane == PANE_TIME) draw_time(app, c);
@@ -472,11 +474,13 @@ static void update_hover(ic_app_t *app, int x, int y) {
 static void select_pane(int pane) {
     if (pane < 0 || pane >= PANE_COUNT || pane == st.pane) return;
     if (st.pane == PANE_KEYBOARD) keys_pane_leave();
+    if (st.pane == PANE_ASSISTANT) ai_pane_leave();
     st.pane = pane;
     st.hover_row = -1;
     if (pane == PANE_WIFI) wifi_pane_enter();
     if (pane == PANE_UPDATES) updates_pane_enter();
     if (pane == PANE_KEYBOARD) keys_pane_enter();
+    if (pane == PANE_ASSISTANT) ai_pane_enter();
     for (int i = 0; i < 4; i++) ic_tween_set(&st.row_hover[i], 0.0f);
 }
 
@@ -562,6 +566,11 @@ static void click(ic_app_t *app, int x, int y) {
 }
 
 static void event(ic_app_t *app, const ic_event_t *ev) {
+    if (st.pane == PANE_ASSISTANT && (ai_pane_modal() || ev->type != IC_EV_KEY) &&
+        ai_pane_event(app, ev, wifi_area(app))) {
+        ic_app_invalidate(app);
+        return;
+    }
     if (st.pane == PANE_KEYBOARD && (keys_pane_modal() || ev->type != IC_EV_KEY) &&
         keys_pane_event(app, ev, wifi_area(app))) {
         ic_app_invalidate(app);
@@ -615,6 +624,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
 static void tick(ic_app_t *app) {
     if (st.pane == PANE_WIFI) wifi_pane_tick(app);
     if (st.pane == PANE_UPDATES) updates_pane_tick(app);
+    if (st.pane == PANE_ASSISTANT) ai_pane_tick(app);
 }
 
 /* "settings wifi" or "settings updates" opens on that page */

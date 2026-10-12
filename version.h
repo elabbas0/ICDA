@@ -7,7 +7,7 @@
 
 #define ICDA_VERSION_MAJOR  1
 #define ICDA_VERSION_MINOR  8
-#define ICDA_VERSION_PATCH  15
+#define ICDA_VERSION_PATCH  16
 
 
 
@@ -16,7 +16,7 @@
      ((uint32_t)ICDA_VERSION_MINOR <<  8) | \
      ((uint32_t)ICDA_VERSION_PATCH))
 
-#define ICDA_VERSION_STRING "1.8.15"
+#define ICDA_VERSION_STRING "1.8.16"
 
 
 

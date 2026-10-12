@@ -22,6 +22,7 @@ typedef struct {
     uint16_t    flags;
     ntfs_run_t *runs;
     uint32_t    nruns;
+    uint32_t    runs_cap;              /* how many entries runs can hold */
     int         found;
 } attr_data_t;
 
@@ -172,16 +173,34 @@ static void take_attr(const uint8_t *a, attr_data_t *out) {
         out->found = 1;
         return;
     }
-    if (!out->runs) {
-        out->runs = (ntfs_run_t *)kmalloc(sizeof(ntfs_run_t) * NTFS_RUNS_MAX);
-        if (!out->runs) return;
+    /* Every descriptor is at least two bytes, so this attribute record cannot
+     * contribute more than alen/2 of them.  A fragmented file has several
+     * $DATA records and they share one table, so ask for the room all of them
+     * might need and grow if a later one turns out to be bigger. */
+    {
+        uint32_t want = out->nruns + alen / 2U + 1U;
+        if (want > NTFS_RUNS_MAX) want = NTFS_RUNS_MAX;
+        if (want > out->runs_cap) {
+            ntfs_run_t *bigger = (ntfs_run_t *)kmalloc(sizeof(ntfs_run_t) * want);
+            if (!bigger) return;
+            if (out->runs) {
+                mem_copy(bigger, out->runs, sizeof(ntfs_run_t) * out->nruns);
+                kfree(out->runs);
+            }
+            out->runs = bigger;
+            out->runs_cap = want;
+        }
     }
+    if (!out->runs) return;
     if (rd64(a + 16) == 0) {
         out->size = rd64(a + 48);
         out->init_size = rd64(a + 56);
         out->flags = (uint16_t)rd16(a + 12);
     }
-    (void)parse_runs(a, alen, out->runs, &out->nruns, NTFS_RUNS_MAX);
+    /* A run list that does not fit leaves the file unreadable rather than
+     * readable up to the point where it stopped fitting: a short read in the
+     * middle of a model file is far worse than a clean failure. */
+    if (parse_runs(a, alen, out->runs, &out->nruns, out->runs_cap) != 0) return;
     out->found = 1;
 }
 
@@ -287,9 +306,13 @@ int ntfs_mount(ntfs_t *v, block_device_t *dev, uint64_t start_lba, uint64_t sect
         mem_zero(&data, sizeof(data));
         scan_record(v, rec, ATTR_DATA, 0, 0, &data);
         if (data.found && !data.resident && data.nruns) {
-            mem_copy(v->mft_runs, data.runs, sizeof(ntfs_run_t) * data.nruns);
-            v->mft_run_count = data.nruns;
-            v->mft_size = data.size;
+            /* the $MFT keeps its runs in a fixed table; a table this small
+             * overflowing means the volume is not one we can read */
+            if (data.nruns <= NTFS_MFT_RUNS_MAX) {
+                mem_copy(v->mft_runs, data.runs, sizeof(ntfs_run_t) * data.nruns);
+                v->mft_run_count = data.nruns;
+                v->mft_size = data.size;
+            }
         }
         free_attr(&data);
     }

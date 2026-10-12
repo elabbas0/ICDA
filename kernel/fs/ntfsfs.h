@@ -5,7 +5,15 @@
 #include "../drivers/storage/block.h"
 
 #define NTFS_ROOT_RECORD 5ULL
-#define NTFS_RUNS_MAX    512U
+/* The run list of a file's $DATA.  A run's length is variable-width and can
+ * span the whole file, so a healthy volume needs very few - but a fragmented
+ * one can need thousands, and a big model file on such a volume does.  The
+ * old 512 silently dropped the tail, which turned into a read that failed
+ * partway through the file. */
+#define NTFS_RUNS_MAX    4096U
+/* The $MFT itself is read through this table; it is never fragmented enough
+ * to need more, and keeping it small keeps ntfs_t down. */
+#define NTFS_MFT_RUNS_MAX 256U
 
 typedef struct {
     uint64_t vcn;
@@ -23,7 +31,7 @@ typedef struct {
     uint32_t record_bytes;
     uint32_t index_bytes;
     uint64_t mft_size;
-    ntfs_run_t mft_runs[NTFS_RUNS_MAX];
+    ntfs_run_t mft_runs[NTFS_MFT_RUNS_MAX];
     uint32_t mft_run_count;
 } ntfs_t;
 

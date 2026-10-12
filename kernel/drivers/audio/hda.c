@@ -663,6 +663,8 @@ static uint16_t hda_format_for_rate(uint16_t sample_rate) {
     return (uint16_t)(rate_bits | HDA_FMT_BITS_16 | HDA_FMT_CHAN(2));
 }
 
+static int hda_configure_codec_generic(uint16_t sample_rate);
+
 static int hda_configure_codec_path(uint16_t sample_rate) {
     hda_path_t path = {0};
     uint8_t conns[32];
@@ -690,11 +692,17 @@ static int hda_configure_codec_path(uint16_t sample_rate) {
 
     hda_format = hda_format_for_rate(sample_rate);
     if (hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_FORMAT, hda_format, 0) != 0) {
-        return -1;
+        /* This codec will not take the format on the node the search picked -
+         * common on real hardware.  The generic setup below sweeps every
+         * plausible DAC and pin instead, and never fails, so prefer it over
+         * writing the device off. */
+        serial_write("hda: dac refused the format, trying the generic path\n");
+        return hda_configure_codec_generic(sample_rate);
     }
     (void)hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_CHANNELS, 1, 0);
     if (hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_CONV_STREAM, (uint16_t)(stream_id << 4), 0) != 0) {
-        return -1;
+        serial_write("hda: dac refused the converter, trying the generic path\n");
+        return hda_configure_codec_generic(sample_rate);
     }
     if (hda_get_param(hda_pin, HDA_PARAM_PIN_CAP, &pin_caps) == 0) {
         if (pin_caps & HDA_PINCAP_HP_DRV) {
