@@ -15,6 +15,7 @@
  * one multiply-add per voice per sample, followed by a soft limiter so many
  * sounds together do not clip harshly.  With nothing to play for a moment
  * the stream stops and the thread only checks for work. */
+#include <string.h>
 #include "playback.h"
 
 #include "hda.h"
@@ -52,6 +53,7 @@ enum { V_FREE = 0, V_MUSIC, V_EFFECT };
 typedef struct {
     int            kind;
     const uint8_t *pcm;
+    uint8_t       *own;       /* a private copy of the samples, when we could take one */
     uint32_t       frames;
     uint16_t       channels, bits;
     uint32_t       rate;
@@ -185,14 +187,47 @@ static int32_t voice_sample(const voice_t *v, uint32_t frame, int ch) {
     return ((int32_t)v->pcm[(size_t)frame * v->channels + c] - 128) << 8;
 }
 
+/* The mixer runs on its own kernel thread and keeps reading a voice's samples
+ * long after the system call that started it returned.  vfs_read hands back a
+ * pointer into the VFS node's buffer, and that buffer is kfree'd the moment the
+ * file is rewritten or grown (vfs.c: node_reserve, vfs_write) - the assistant
+ * rewrites /tmp/ai/say.wav for every answer.  A voice still playing one of
+ * those then walked freed kernel memory: a kernel-mode fault, and pf_panic
+ * ends in cli; hlt, which stops the whole machine.  So each voice takes a
+ * private copy of its samples, bounded so a burst of sounds cannot eat the
+ * heap; if the copy does not fit we still read in place. */
+#define PCM_COPY_LIMIT (6u * 1024u * 1024u)
+
+static uint64_t pcm_owned_bytes;
+
+/* frees a voice's private copy and marks the slot free */
+static void voice_done(voice_t *v) {
+    if (v->own) {
+        pcm_owned_bytes -= (uint64_t)v->frames * v->channels * (v->bits / 8u);
+        kfree(v->own);
+        v->own = 0;
+    }
+    v->kind = V_FREE;
+}
+
 static int voice_load(voice_t *v, const char *path, int kind, int32_t vol) {
     uint64_t size = 0;
     const uint8_t *file = (const uint8_t *)vfs_read(vfs_root(), path, &size);
     uint16_t ch = 0, bits = 0;
     uint32_t rate = 0, bytes = 0;
     const uint8_t *pcm = 0;
+    uint8_t *own = 0;
+    voice_done(v);                  /* the slot may still hold a sound being replaced */
     if (!file || !size || parse_wav(file, size, &ch, &rate, &bits, &pcm, &bytes) != 0) return -1;
-    v->pcm = pcm;
+    if (bytes <= PCM_COPY_LIMIT && pcm_owned_bytes + bytes <= PCM_COPY_LIMIT) {
+        own = (uint8_t *)kmalloc((size_t)bytes);
+        if (own) {
+            memcpy(own, pcm, (size_t)bytes);
+            pcm_owned_bytes += bytes;
+        }
+    }
+    v->own = own;
+    v->pcm = own ? own : pcm;
     v->channels = ch;
     v->bits = bits;
     v->rate = rate;
@@ -242,7 +277,7 @@ static void mix_voices(uint32_t frames) {
             uint32_t idx, nxt;
             int32_t frac, l0, r0, l1, r1;
             if (v->pos >= end) {
-                v->kind = V_FREE;
+                voice_done(v);
                 break;
             }
             idx = (uint32_t)(v->pos >> 16);
@@ -486,7 +521,7 @@ int audio_playback_play_wav(vfs_node_t *cwd, const char *path) {
     v = voice_slot();
     if (!v || voice_load(v, path, V_MUSIC, 256) != 0) {
         serial_write("audio: wav unreadable or unsupported, refusing\n");
-        if (v) v->kind = V_FREE;
+        if (v) voice_done(v);
         return -1;
     }
     for (const char *p = path; *p; p++)
@@ -499,7 +534,7 @@ int audio_playback_play_wav(vfs_node_t *cwd, const char *path) {
 
 void audio_playback_stop(void) {
     voice_t *m = music_voice();
-    if (m) m->kind = V_FREE;
+    if (m) voice_done(m);
     audio_update_hud(1);
 }
 
@@ -565,7 +600,7 @@ int audio_effect_play(const char *path, uint32_t volume) {
     v = voice_slot();
     if (!v) return -1;
     if (voice_load(v, path, V_EFFECT, (int32_t)(volume > 256 ? 256 : volume)) != 0) {
-        v->kind = V_FREE;
+        voice_done(v);
         effect_failed(path);
         return -1;
     }

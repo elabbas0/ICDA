@@ -14,7 +14,13 @@ SERIAL_VERBOSE ?= 0
 SERIAL_SHELL_MIRROR ?= 0
 
 
-AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody.wav userspace/hava_clip.wav)
+# The interface sounds (resources/audio) are embedded too, seeded at
+# /usr/share/sounds.  They used to live only in \SYSTEM, so a live boot with no
+# disk - the ISO, or any install before them - had no sounds at all.
+UI_SOUND_WAVS := $(wildcard resources/audio/*.wav)
+UI_SOUND_DIR := /usr/share/sounds
+AUDIO_WAVS := $(wildcard userspace/boot.wav userspace/chime.wav userspace/melody.wav userspace/hava_clip.wav) \
+              $(UI_SOUND_WAVS)
 ICON_ICOS := $(wildcard resources/icons/*.ico)
 
 CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
@@ -1034,13 +1040,15 @@ kernel/fs/audio_assets_gen.c kernel/proc/audio_assets.asm &: Makefile $(AUDIO_WA
 	for f in $(AUDIO_WAVS); do \
 		if [ ! -f "$$f" ]; then continue; fi; \
 		base=$$(basename "$$f"); \
+		dest="/usr/share/audio/$$base"; \
+		case " $(UI_SOUND_WAVS) " in *" $$f "*) dest="$(UI_SOUND_DIR)/$$base";; esac; \
 		sym=$$(printf '%s' "$$base" | sed 's/[^A-Za-z0-9]/_/g'); \
 		printf 'extern const char asset_%s_start[];\n' "$$sym" >> kernel/fs/.audio_assets.externs.tmp; \
 		printf 'extern const char asset_%s_end[];\n' "$$sym" >> kernel/fs/.audio_assets.externs.tmp; \
 		printf 'global asset_%s_start\n' "$$sym" >> kernel/proc/audio_assets.asm; \
 		printf 'global asset_%s_end\n' "$$sym" >> kernel/proc/audio_assets.asm; \
 		printf 'asset_%s_start:\n    incbin "%s"\nasset_%s_end:\n\n' "$$sym" "$$f" "$$sym" >> kernel/proc/audio_assets.asm; \
-		printf '    { "/usr/share/audio/%s", asset_%s_start, asset_%s_end },\n' "$$base" "$$sym" "$$sym" >> kernel/fs/.audio_assets.entries.tmp; \
+		printf '    { "%s", asset_%s_start, asset_%s_end },\n' "$$dest" "$$sym" "$$sym" >> kernel/fs/.audio_assets.entries.tmp; \
 		count=$$((count + 1)); \
 	done; \
 	cat kernel/fs/.audio_assets.externs.tmp >> kernel/fs/audio_assets_gen.c; \

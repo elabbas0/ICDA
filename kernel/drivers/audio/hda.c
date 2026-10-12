@@ -942,11 +942,12 @@ int hda_stream_start_s16_stereo(uint16_t sample_rate, uint32_t buffer_len) {
         /* A codec that has only just come out of reset answers some of the
          * first verbs badly.  Try a few times before writing the device off:
          * one bad attempt used to leave the machine silent for good. */
+        int configured = 0;
         for (uint32_t attempt = 0; attempt < 3U; attempt++) {
-            if (hda_configure_codec_path(sample_rate) == 0) break;
+            if (hda_configure_codec_path(sample_rate) == 0) { configured = 1; break; }
             udelay(20000);
         }
-        if (hda_configured_rate != sample_rate) {
+        if (!configured) {
             hda_present = 0;            /* do not retry on every sound */
             return hda_fail(10, "hda: codec configure failed, playback disabled\n");
         }
