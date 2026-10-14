@@ -504,7 +504,9 @@ static void check(void) {
         int missing = 0;
         for (int i = 0; i < want.count && !missing; i++) {
             const entry_t *old;
-            if (!want.files[i].webkit) continue;
+            /* Model rows describe optional, user-selected HTTP downloads.
+             * They must never make a same-version system update fetch a model. */
+            if (!want.files[i].webkit || want.files[i].source_url[0]) continue;
             old = find(&have, want.files[i].rel);
             if (!entry_current(&want.files[i], old)) missing = 1;
         }
@@ -529,6 +531,10 @@ static void check(void) {
     for (int i = 0; i < want.count; i++) {
         const entry_t *old = find(&have, want.files[i].rel);
         pack_need[i] = 0;
+        /* The manifest carries pinned model sources for the model picker.
+         * Downloading every listed weight as part of an OS update can add
+         * more than 1.5 GB; the assistant fetches a chosen model on demand. */
+        if (want.files[i].source_url[0]) continue;
         if (hotfix && !want.files[i].webkit) continue;
         if (entry_current(&want.files[i], old)) continue;
         if (want.files[i].packed) pack_need[i] = 1, packed_need = 1;
@@ -542,6 +548,7 @@ static void check(void) {
     for (int i = 0; i < want.count; i++) {
         const entry_t *e = &want.files[i];
         const entry_t *old = find(&have, e->rel);
+        if (e->source_url[0]) continue;
         if (entry_current(e, old)) continue;
         if (hotfix && !e->webkit) continue;
         if (e->packed) continue;                            /* from the pack, below */

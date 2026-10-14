@@ -272,6 +272,7 @@ static int fd_close(struct lx_state *s, int64_t fd) {
 /* ---- for the other modules (lx_internal.h) ------------------------------ */
 
 static int signal_pending(struct lx_state *s);
+static int default_ignored(int sig);
 static uint64_t lx_mono_ns(void);
 static uint64_t lx_realtime_ns(void);
 
@@ -325,7 +326,18 @@ void lx_proc_exit(process_t *proc) {
 
 static int signal_pending(struct lx_state *s) {
     thread_t *t = sched_current_thread();
-    return s && t && (s->pending & ~t->lx_sigmask) != 0;
+    uint64_t ready;
+    if (!s || !t) return 0;
+    ready = s->pending & ~t->lx_sigmask;
+    for (int sig = 1; sig < LX_NSIG; sig++) {
+        uint64_t bit = 1ULL << (sig - 1);
+        lx_sigaction_t *sa;
+        if (!(ready & bit)) continue;
+        sa = &s->sa[sig];
+        if (sa->handler == 1 || (sa->handler == 0 && default_ignored(sig))) continue;
+        return 1;
+    }
+    return 0;
 }
 
 int lx_signal(process_t *proc, int sig) {

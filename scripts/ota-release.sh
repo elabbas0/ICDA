@@ -10,8 +10,9 @@
 #
 # The manifest is signed with the Ed25519 key in ~/.icda/ota-ed25519.pem
 # (never committed); /sbin/updated only accepts manifests signed by it.
-# Publishing writes a single orphan commit (force-pushed) through a temporary
-# index, so the working tree and the current branch are left alone.
+# Publishing writes one commit through a temporary index, linked to the prior
+# OTA release so GitHub reuses unchanged WebKit and Codex blobs. The working
+# tree and current branch are left alone.
 set -e
 cd "$(dirname "$0")/.."
 . scripts/progress.sh
@@ -32,7 +33,6 @@ CACHE=.verify/ota-cache     # the WebKit pack and its manifest lines, reused whi
     echo "WebKit root $LINUXROOT missing: not publishing a release that removes WebKit (NO_WEBKIT=1 overrides)"; exit 1; }
 
 echo "[ota] building"
-powershell -NoProfile -Command "Get-Process qemu-system-x86_64 -EA SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
 spin "kernel + apps" "$OUT.build.log" env MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
     sh -c 'make > /tmp/b.log 2>&1 || { tail -20 /tmp/b.log; exit 1; }'
 rm -f "$OUT.build.log"
@@ -184,9 +184,15 @@ if [ "$PUBLISH" = "--publish" ]; then
     fi
     tree=$(GIT_INDEX_FILE="$idx" git write-tree)
     rm -f "$idx"
+    # Fetch only the current commit and trees. This gives pack-objects the
+    # prior file list so unchanged multi-hundred-megabyte packages are not
+    # resent when the OTA branch advances.
+    git fetch --quiet --filter=blob:none --depth=1 origin \
+        refs/heads/ota:refs/remotes/origin/ota
+    parent=$(git rev-parse --verify refs/remotes/origin/ota)
     commit=$(GIT_AUTHOR_NAME=elabbas0 GIT_AUTHOR_EMAIL=arkanabak09@gmail.com \
              GIT_COMMITTER_NAME=elabbas0 GIT_COMMITTER_EMAIL=arkanabak09@gmail.com \
-             git commit-tree "$tree" -m "ICDA $VERSION OTA release" -m "$NOTES")
+             git commit-tree "$tree" -p "$parent" -m "ICDA $VERSION OTA release" -m "$NOTES")
     # The push is the one step that runs for a long time over a slow link, and
     # it is the one step that does not need this shell: OTA_COMMIT_ONLY stops
     # here and leaves the commit in .verify/ota-commit, for the caller to push
