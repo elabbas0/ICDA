@@ -41,6 +41,9 @@ foreach($pair in $core){
 }
 Get-ChildItem -LiteralPath $linux -File -Recurse | Sort-Object FullName | ForEach-Object {
     $relative=$_.FullName.Substring($linux.TrimEnd('\').Length+1).Replace('\','/')
+    # Keep the signed model catalog and pinned HTTP sources; do not bundle all
+    # model weights in an OS update. The model picker downloads a chosen model.
+    if($relative -match '^usr/share/icda/models/.*\.(gguf|bin)$') { return }
     if($relative -match '(^|/)(auth\.json|\.codex)(/|$)' -or $relative -match '^(home|root)/') {
         throw 'Private state must not enter an offline runtime bundle'
     }

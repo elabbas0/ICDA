@@ -31,12 +31,12 @@ download, causing a first update to request roughly 1.6 GB of model weights.
 Model catalog entries are now excluded from OS update size and downloads;
 users choose and fetch models over HTTP from the model picker.
 
-Release status: public OTA 1.8.22 is live. It accidentally treats each pinned
-Qwen weight as required during an OS update; the 1.5B model is over 1 GB.
-Version 1.8.23 fixes that by keeping model rows in the signed catalog while
-excluding them from the OS download plan. Rebuild and publish 1.8.23, then
-regenerate the signed offline payload from the final sources. Keep it under
-`.verify` and never include private auth.
+Release status: signed OTA 1.8.23 is public. It keeps model rows in the
+catalog while excluding weights from the OS download plan. The signed offline
+payload also excludes model weights and private auth; it preserves any models
+already on the ICDA partition. The current Wi-Fi driver still tops out at
+legacy 54 Mbps, and real hotspot throughput has not been measured on the
+user's hardware.
 
 Preserve the user's work and existing Windows data. The old dual-boot
 installer is disabled after a Windows crash; never repartition, edit boot
