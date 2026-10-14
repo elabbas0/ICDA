@@ -414,11 +414,15 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         break;
     }
     case IC_SYM_WIFI:
+    case IC_SYM_WIFI_WEAK:
+    case IC_SYM_WIFI_MEDIUM:
         /* three arcs over a dot, opening upwards */
         sym_disc(m, 0.0f, 0.28f, 0.06f);
         sym_arc(m, 0.0f, 0.30f, 0.20f, -PI * 0.75f, -PI * 0.25f);
-        sym_arc(m, 0.0f, 0.30f, 0.38f, -PI * 0.75f, -PI * 0.25f);
-        sym_arc(m, 0.0f, 0.30f, 0.56f, -PI * 0.75f, -PI * 0.25f);
+        if (sym != IC_SYM_WIFI_WEAK)
+            sym_arc(m, 0.0f, 0.30f, 0.38f, -PI * 0.75f, -PI * 0.25f);
+        if (sym == IC_SYM_WIFI)
+            sym_arc(m, 0.0f, 0.30f, 0.56f, -PI * 0.75f, -PI * 0.25f);
         break;
     case IC_SYM_LOCK:
         sym_rrect(m, -0.24f, -0.02f, 0.24f, 0.34f, 0.05f);

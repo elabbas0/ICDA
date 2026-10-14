@@ -27,7 +27,7 @@
 
 #define ICDA_SETTINGS_PATH "/cfg/icda-settings"
 #define ICDA_SETTINGS_FALLBACK "/etc/icda-settings"
-#define ICDA_SETTINGS_CAP 256
+#define ICDA_SETTINGS_CAP 384
 
 #define ICDA_APPEARANCE_DARK  0
 #define ICDA_APPEARANCE_LIGHT 1
@@ -47,6 +47,9 @@ typedef struct {
     int volume;             /* master volume, 0..100 (taskbar) */
     int muted;
     int power;              /* power mode: 0 saver, 1 balanced, 2 performance */
+    int mouse_speed;        /* sensitivity percent, 25..300 */
+    int mouse_smooth;       /* smoothing, 0..3 */
+    int mouse_accel;        /* pointer acceleration */
 } icda_settings_t;
 
 static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
@@ -66,6 +69,9 @@ static __attribute__((unused)) void icda_settings_defaults(icda_settings_t *s) {
     s->volume = 70;
     s->muted = 0;
     s->power = 1;
+    s->mouse_speed = 100;
+    s->mouse_smooth = 0;
+    s->mouse_accel = 0;
 }
 
 static __attribute__((unused)) int icda_settings_key_is(const char *line, uint64_t key_len,
@@ -99,6 +105,20 @@ static __attribute__((unused)) void icda_settings_apply_line(icda_settings_t *s,
         return;
     }
     if (key_len + 2 > len) {
+        return;
+    }
+    if (icda_settings_key_is(line + i, key_len, "mouse_speed") ||
+        icda_settings_key_is(line + i, key_len, "mouse_smooth") ||
+        icda_settings_key_is(line + i, key_len, "mouse_accel")) {
+        uint64_t j = i + key_len + 1;
+        int v = 0;
+        if (j >= len || line[j] < '0' || line[j] > '9') return;
+        while (j < len && line[j] >= '0' && line[j] <= '9' && v < 1000)
+            v = v * 10 + line[j++] - '0';
+        if (j != len && line[j] != '\r') return;
+        if (icda_settings_key_is(line + i, key_len, "mouse_speed") && v >= 25 && v <= 300) s->mouse_speed = v;
+        if (icda_settings_key_is(line + i, key_len, "mouse_smooth") && v <= 3) s->mouse_smooth = v;
+        if (icda_settings_key_is(line + i, key_len, "mouse_accel") && v <= 1) s->mouse_accel = v;
         return;
     }
     if (icda_settings_key_is(line + i, key_len, "zoom")) {
@@ -238,7 +258,22 @@ static __attribute__((unused)) int icda_settings_save(const icda_settings_t *s) 
         icda_settings_put(buf, sizeof(buf), &pos, "volume=");
         icda_settings_put(buf, sizeof(buf), &pos, num);
     }
-    icda_settings_put(buf, sizeof(buf), &pos, "muted=");
+    {
+        char num[5];
+        int v = s->mouse_speed >= 25 && s->mouse_speed <= 300 ? s->mouse_speed : 100;
+        int k = 0;
+        if (v >= 100) num[k++] = (char)('0' + v / 100);
+        num[k++] = (char)('0' + (v / 10) % 10);
+        num[k++] = (char)('0' + v % 10);
+        num[k++] = '\n'; num[k] = 0;
+        icda_settings_put(buf, sizeof(buf), &pos, "mouse_speed=");
+        icda_settings_put(buf, sizeof(buf), &pos, num);
+        icda_settings_put(buf, sizeof(buf), &pos, "mouse_smooth=");
+        icda_settings_put(buf, sizeof(buf), &pos, s->mouse_smooth == 1 ? "1\n" : s->mouse_smooth == 2 ? "2\n" : s->mouse_smooth == 3 ? "3\n" : "0\n");
+        icda_settings_put(buf, sizeof(buf), &pos, "mouse_accel=");
+        icda_settings_put(buf, sizeof(buf), &pos, s->mouse_accel ? "1\n" : "0\n");
+        icda_settings_put(buf, sizeof(buf), &pos, "muted=");
+    }
     icda_settings_put(buf, sizeof(buf), &pos, s->muted ? "1\n" : "0\n");
     icda_settings_put(buf, sizeof(buf), &pos, "power=");
     icda_settings_put(buf, sizeof(buf), &pos, s->power == 0 ? "0\n" : s->power == 2 ? "2\n" : "1\n");

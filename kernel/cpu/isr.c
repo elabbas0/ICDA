@@ -223,7 +223,8 @@ static int linux_yield_fast(struct registers *regs) {
     cpu_t *c;
     if (regs->rax != 24) return 0;
     p = sched_current_process();
-    if (!p || !p->linux_personality) return 0;
+    if (!p || !p->linux_personality || p->state >= PROCESS_EXITED ||
+        sched_current_thread()->state == THREAD_ZOMBIE) return 0;
     c = this_cpu();
     if ((++yield_spins[c->index] & 15) == 0) return 0;
     for (int i = 0; i < 64; i++) __asm__ volatile("pause");
@@ -242,8 +243,23 @@ void syscall_handler(struct registers* regs) {
         if (p && p->linux_personality && nr < 0x1C000) bkl_why(1000 + (int)(nr & 1023));
         else bkl_why(2000 + (int)((nr >= 0x1C000 ? nr - 0x1C000 : nr) & 511));
     }
-    regs->rax = syscall_dispatch(regs);
-    lx_after_syscall(regs);
+    t = sched_current_thread();
+    process_t *p = t ? t->owner : NULL;
+    if (p && p->kind == PROCESS_USER &&
+        (p->state >= PROCESS_EXITED || t->state == THREAD_ZOMBIE)) {
+        /* exit_group on another CPU stopped this thread before it acquired
+         * the lock. Finish in the kernel without touching user memory. */
+        t->user_return_pending = 1;
+        regs->rax = 0;
+    } else {
+        regs->rax = syscall_dispatch(regs);
+        t = sched_current_thread();
+        p = t ? t->owner : NULL;
+        if (p && p->kind == PROCESS_USER &&
+            (p->state >= PROCESS_EXITED || t->state == THREAD_ZOMBIE))
+            t->user_return_pending = 1;
+        else lx_after_syscall(regs);
+    }
     t = sched_current_thread();
     /* An exiting thread keeps the lock: user_thread_finish still runs kernel
      * code and hands the lock to the next thread when it yields. */

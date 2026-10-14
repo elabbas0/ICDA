@@ -129,6 +129,7 @@ typedef struct {
 
 
 extern net_state_t net_state;
+const char *net_dhcp_error(void);
 
 
 uint16_t bswap16(uint16_t value);

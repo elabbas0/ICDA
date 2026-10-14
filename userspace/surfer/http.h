@@ -57,6 +57,8 @@ struct http_req {
 };
 
 http_req_t *http_open(const char *url, const char *method, const char *extra_headers);
+/* Follows redirects up to the final response headers; body stays streamable. */
+http_req_t *http_open_follow(const char *url, const char *extra_headers);
 http_req_t *http_open_body(const char *url, const char *method, const char *extra_headers,
                            const void *body, size_t body_len);
 int         http_poll(http_req_t *r, int timeout_ms);

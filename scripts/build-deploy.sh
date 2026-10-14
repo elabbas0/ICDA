@@ -21,4 +21,16 @@ dd if=.verify/scratch.img of=.verify/deploy/ICDAROOT.BIN bs=512 skip=1 count=$((
 printf 'swap=-1\n' > .verify/deploy/ICDACFG.TXT
 cp kernel/fs/bootx64-install.efi .verify/deploy/GRUBX64.EFI
 cp kernel/install-kernel.bin .verify/deploy/KERNEL.BIN
+# The installed kernel loads applications from SYSTEM; ICDAROOT.BIN only
+# contains writable configuration and personal files.
+while read -r dest src; do
+    case "$dest" in ''|'#'*) continue ;; esac
+    mkdir -p ".verify/deploy/SYSTEM/$(dirname "$dest")"
+    cp "$src" ".verify/deploy/SYSTEM/$dest"
+done < boot/system-files.txt
+if [ -d .verify/linuxroot/usr/share/icda/models ]; then
+    mkdir -p .verify/deploy/linux/usr/bin .verify/deploy/linux/usr/share/icda
+    cp userspace/llm/out/icda-llm .verify/deploy/linux/usr/bin/icda-llm
+    cp -R .verify/linuxroot/usr/share/icda/models .verify/deploy/linux/usr/share/icda/
+fi
 ls -la .verify/deploy

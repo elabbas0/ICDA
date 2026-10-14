@@ -614,9 +614,28 @@ ieee80211_watchdog(struct ifnet *ifp)
  * AMRR (Lacage, Manshaei, Turletti, "IEEE 802.11 Rate Adaptation: A
  * Practical Approach", 2004) over the legacy rate set.
  */
-#define amrr_success(amn)	((amn)->amn_retrycnt < (amn)->amn_txcnt / 10)
-#define amrr_failure(amn)	((amn)->amn_retrycnt > (amn)->amn_txcnt / 3)
+#define amrr_success(amn)	((uint64_t)(amn)->amn_retrycnt * 10 < (amn)->amn_txcnt)
+#define amrr_failure(amn)	((uint64_t)(amn)->amn_retrycnt * 3 > (amn)->amn_txcnt)
 #define amrr_enough(amn)	((amn)->amn_txcnt > 10)
+
+/* Begin a strong link at a moderate negotiated rate. Starting every link
+ * at 1/6 Mbps makes initial transfers wait through several AMRR windows.
+ * The firmware retry table still contains every lower supported rate. */
+int
+ieee80211_initial_txrate(const struct ieee80211_node *ni, int dbm)
+{
+	int best = 0, best_rate = 0, ceiling, i;
+
+	ceiling = dbm >= -67 ? 48 : dbm >= -75 ? 24 : 0;
+	for (i = 0; i < ni->ni_rates.rs_nrates; i++) {
+		int rate = ni->ni_rates.rs_rates[i] & IEEE80211_RATE_VAL;
+		if (rate <= ceiling && rate > best_rate) {
+			best = i;
+			best_rate = rate;
+		}
+	}
+	return best;
+}
 
 void
 ieee80211_amrr_node_init(const struct ieee80211_amrr *amrr,

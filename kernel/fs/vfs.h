@@ -33,7 +33,9 @@ typedef int64_t (*vfs_loader_fn)(uint8_t mount_id, const char *path, uint64_t re
                                  uint64_t len);
 typedef int (*vfs_dir_loader_fn)(uint8_t mount_id, const char *path, uint64_t ref);
 
-#define VFS_LAZY_LOAD_MAX (256ULL * 1024ULL * 1024ULL)
+/* The official static Codex CLI is about 281 MiB. Whole-file readers such
+ * as the ELF loader need room for it; streaming model reads remain lazy. */
+#define VFS_LAZY_LOAD_MAX (512ULL * 1024ULL * 1024ULL)
 
 int vfs_init(void);
 void vfs_set_external_hook(vfs_external_fn fn);

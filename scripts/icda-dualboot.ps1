@@ -182,6 +182,8 @@ if ($icda) {
     Say ("  create a {0} GB FAT32 partition at {1:N2} GB, inside unallocated space" -f $RootSizeGB, ($newOffset / 1GB))
 }
 Say "  copy KERNEL.BIN + ICDAROOT.BIN + ICDACFG.TXT to the ICDA partition"
+if (Test-Path (Join-Path $Deploy 'SYSTEM')) { Say "  copy updated system applications to the ICDA partition's SYSTEM directory" }
+if (Test-Path (Join-Path $Deploy 'linux')) { Say "  copy bundled AI runtime and models to the ICDA partition's linux directory" }
 Say ("  copy GRUBX64.EFI ({0:N1} MB) to \EFI\ICDA on the EFI partition" -f ($grubSize / 1MB))
 $entry = Find-BootEntry
 if ($entry) { Say "  UEFI boot entry '$EntryName' already exists ($entry)" }
@@ -220,6 +222,14 @@ try {
     if (-not ($KeepData -and (Test-Path "$root\ICDAROOT.BIN"))) {
         Copy-Item -Force (Join-Path $Deploy "ICDAROOT.BIN") "$root\ICDAROOT.BIN"
         Copy-Item -Force (Join-Path $Deploy "ICDACFG.TXT") "$root\ICDACFG.TXT"
+    }
+    $aiBundle = Join-Path $Deploy 'linux'
+    if (Test-Path -LiteralPath $aiBundle) {
+        Copy-Item -LiteralPath $aiBundle -Destination $root -Recurse -Force
+    }
+    $systemBundle = Join-Path $Deploy 'SYSTEM'
+    if (Test-Path -LiteralPath $systemBundle) {
+        Copy-Item -LiteralPath $systemBundle -Destination $root -Recurse -Force
     }
     Write-VolumeCache -DriveLetter $letter
     Say "  kernel and system image written"

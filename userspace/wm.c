@@ -154,6 +154,62 @@ static uint64_t title_click_tick = 0;
 
 
 static icda_settings_t wm_settings;
+static float pointer_target_x, pointer_target_y, pointer_filter_x, pointer_filter_y;
+static uint64_t pointer_last_tick;
+static int pointer_initialized;
+
+static void pointer_input(const icda_mouse_event_t *ev) {
+    if (!pointer_initialized) {
+        pointer_target_x = pointer_filter_x = (float)mouse_x;
+        pointer_target_y = pointer_filter_y = (float)mouse_y;
+        pointer_initialized = 1;
+    }
+    if (ev->absolute) {
+        float sx = (float)scr_w / (float)fb_info.width;
+        float sy = (float)scr_h / (float)fb_info.height;
+        pointer_target_x = pointer_filter_x = ev->abs_x * sx;
+        pointer_target_y = pointer_filter_y = ev->abs_y * sy;
+    } else {
+        float gain = (float)wm_settings.mouse_speed / (100.0f * wm_scale);
+        if (wm_settings.mouse_accel) {
+            int speed = (ev->dx < 0 ? -ev->dx : ev->dx) + (ev->dy < 0 ? -ev->dy : ev->dy);
+            gain *= 1.0f + (float)(speed > 24 ? 24 : speed) / 24.0f;
+        }
+        pointer_target_x += ev->dx * gain;
+        pointer_target_y += ev->dy * gain;
+        if (pointer_target_x < 0) pointer_target_x = 0;
+        if (pointer_target_y < 0) pointer_target_y = 0;
+        if (pointer_target_x > scr_w - 1) pointer_target_x = (float)(scr_w - 1);
+        if (pointer_target_y > scr_h - 1) pointer_target_y = (float)(scr_h - 1);
+        if (!wm_settings.mouse_smooth) {
+            pointer_filter_x = pointer_target_x;
+            pointer_filter_y = pointer_target_y;
+        }
+    }
+    mouse_x = (int)(pointer_filter_x + 0.5f);
+    mouse_y = (int)(pointer_filter_y + 0.5f);
+}
+
+/* Position filtering runs at 100 Hz and settles even after input stops. */
+static int pointer_settle(void) {
+    uint64_t tick = icda_ticks();
+    if (!pointer_initialized || tick == pointer_last_tick) return 0;
+    uint64_t elapsed = tick - pointer_last_tick;
+    pointer_last_tick = tick;
+    if (elapsed > 10) elapsed = 10;
+    float alpha = wm_settings.mouse_smooth ? 1.0f / (wm_settings.mouse_smooth + 1.0f) : 1.0f;
+    while (elapsed--) {
+        pointer_filter_x += (pointer_target_x - pointer_filter_x) * alpha;
+        pointer_filter_y += (pointer_target_y - pointer_filter_y) * alpha;
+    }
+    float dx = pointer_target_x - pointer_filter_x, dy = pointer_target_y - pointer_filter_y;
+    if (dx > -0.05f && dx < 0.05f) pointer_filter_x = pointer_target_x;
+    if (dy > -0.05f && dy < 0.05f) pointer_filter_y = pointer_target_y;
+    int x = (int)(pointer_filter_x + 0.5f), y = (int)(pointer_filter_y + 0.5f);
+    int changed = x != mouse_x || y != mouse_y;
+    mouse_x = x; mouse_y = y;
+    return changed;
+}
 static uint64_t settings_last_reload = 0;
 
 static void build_desktop_layer(void);
@@ -1946,12 +2002,15 @@ static int animations_tick(void) {
         if (pf || panel_was) mark_dirty_panel();     /* every frame of a panel's fade, and the last */
         {
             static int ai_was;
+            static uint64_t ai_poll;
             int ai = wm_ai_is_open();
-            if (ai) {
+            if (ai || icda_ticks() - ai_poll >= 25) {
+                ai_poll = icda_ticks();
                 int r = wm_ai_tick();
                 if (r == WM_AI_REDRAW_ALL) { mark_dirty_ai(); running = 1; }
                 else if (r == WM_AI_REDRAW) { mark_dirty_ai_wave(); running = 1; }
                 else if (r == WM_AI_CLOSE) { mark_dirty_ai(); }
+                ai = wm_ai_is_open();
             }
             if (!ai && ai_was) mark_dirty_ai();       /* the frame it closed on */
             ai_was = ai;
@@ -3729,8 +3788,7 @@ int main(int argc, char **argv) {
                 uint8_t prev_btn = mouse_buttons;
                 mouse_moved = 1;
                 wm_diag_mouse_events++;
-                mouse_x = mev.abs_x / wm_scale;
-                mouse_y = mev.abs_y / wm_scale;
+                pointer_input(&mev);
                 mouse_buttons = mev.buttons;
                 if (mouse_x < 0) mouse_x = 0;
                 if (mouse_y < 0) mouse_y = 0;
@@ -3749,6 +3807,7 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+            mouse_moved |= pointer_settle();
             if (mouse_moved && (mouse_x != prev_mouse_x || mouse_y != prev_mouse_y)) {
                 pointer_moved();
             }

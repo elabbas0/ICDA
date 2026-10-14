@@ -6150,6 +6150,8 @@ iwm_umac_scan(struct iwm_softc *sc, int bgscan)
 		    IWM_UCODE_TLV_API_ADAPTIVE_DWELL_V2)) {
 			req->v8.active_dwell[IWM_SCAN_LB_LMAC_IDX] = 10;
 			req->v8.passive_dwell[IWM_SCAN_LB_LMAC_IDX] = 110;
+			req->v8.active_dwell[IWM_SCAN_HB_LMAC_IDX] = 10;
+			req->v8.passive_dwell[IWM_SCAN_HB_LMAC_IDX] = 110;
 		} else {
 			req->v7.active_dwell = 10;
 			req->v7.passive_dwell = 110;
@@ -7017,8 +7019,10 @@ iwm_run(struct iwm_softc *sc)
 		return 0;
 	}
 
-	/* Start at lowest available bit-rate, AMRR will raise. */
-	in->in_ni.ni_txrate = 0;
+	/* Strong links can start above the slowest rate; failed attempts use
+	 * the lower entries of the firmware retry table and feed AMRR. */
+	in->in_ni.ni_txrate = ieee80211_initial_txrate(&in->in_ni,
+	    (int)in->in_ni.ni_rssi + IWM_MIN_DBM);
 	in->in_ni.ni_txmcs = 0;
 	in->in_ni.ni_vht_ss = 1;
 	iwm_setrates(in, 0);

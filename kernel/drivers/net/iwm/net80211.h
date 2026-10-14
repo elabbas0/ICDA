@@ -747,6 +747,7 @@ u_int	ieee80211_ieee2mhz(u_int, u_int);
 int	ieee80211_setmode(struct ieee80211com *, enum ieee80211_phymode);
 int	ieee80211_min_basic_rate(struct ieee80211com *);
 int	ieee80211_max_basic_rate(struct ieee80211com *);
+int	ieee80211_initial_txrate(const struct ieee80211_node *, int dbm);
 void	ieee80211_watchdog(struct ifnet *);
 int	ieee80211_fix_rate(struct ieee80211com *, struct ieee80211_node *,
 	    int);

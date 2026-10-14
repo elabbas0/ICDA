@@ -51,13 +51,14 @@ static const char *cur_name = "";
 static const char conf_default[] =
     "# ICDA assistant: the models it asks, tried in order.\n"
     "#   <tier> <name> <base url> <model> <api key or ->\n"
-    "# local answers daily questions: file:auto runs the first .gguf model found in\n"
-    "# an icda-models folder on any drive (C:\\icda-models from Windows works), on\n"
+    "# local answers daily questions: file:auto loads the named GGUF from\n"
+    "# ICDA's linux/usr/share/icda/models directory, on\n"
     "# this computer, offline.  cloud answers the complex ones (code, research,\n"
     "# long questions, or \"/cloud ...\"): any OpenAI-compatible endpoint works.\n"
     "# Free cloud tiers are rate-limited and may train on what you send: keep\n"
     "# private things out of them.\n"
-    "local qwen       file:auto   local   -\n"
+    "local qwen       file:auto   qwen2.5-0.5b-instruct-q4_k_m.gguf   -\n"
+    "cloud codex      codex:chatgpt auto -\n"
     "# answers read aloud (offline voice): speak on / speak off\n"
     "speak on\n"
     "# Free keys:  console.groq.com   aistudio.google.com   openrouter.ai\n"
@@ -623,43 +624,30 @@ static int wants_web(const char *q, char *query, size_t cap) {
 #define LREPLY "/tmp/ai/local-reply"
 
 static int llm_started;
+static uint64_t llm_pid;
+static char llm_model[256];
 static uint32_t lseq;
 
-/* the first entry of dir ending in suffix ("" for any), as dir/name in out */
-static int find_in(const char *dir, const char *suffix, char *out, size_t cap) {
-    static char list[8192];
-    long n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
-    size_t sl = strlen(suffix);
-    if (n <= 0) return 0;
-    list[n] = 0;
-    for (char *p = list; *p;) {
-        char *e = strchr(p, '\n');
-        size_t len;
-        if (e) *e = 0;
-        len = strlen(p);
-        if (len && p[len - 1] == '/') p[--len] = 0;
-        if (len >= sl && strcmp(p + len - sl, suffix) == 0 && len) {
-            snprintf(out, cap, "%s/%s", dir, p);
-            return 1;
-        }
-        if (!e) break;
-        p = e + 1;
+/* Only ICDA system partitions are eligible; never search Windows for AI. */
+static int find_system_file(const char *rel, char *out, size_t cap) {
+    icda_stat_t st;
+    char marker[128];
+    snprintf(out, cap, "/linux/%s", rel);
+    if ((long)icda_stat(out, &st) >= 0) return 1;
+    for (int i = 0; i < 32; i++) {
+        snprintf(marker, sizeof(marker), "/volumes/fat32-%d/ICDACFG.TXT", i);
+        if ((long)icda_stat(marker, &st) < 0) continue;
+        snprintf(out, cap, "/volumes/fat32-%d/linux/%s", i, rel);
+        if ((long)icda_stat(out, &st) >= 0) return 1;
     }
     return 0;
 }
 
-/* path on any mounted volume: /volumes/<fs>-<n>/<rel>, or under / */
-static int find_on_volumes(const char *rel, const char *suffix, char *out, size_t cap) {
-    static const char *const fs[] = { "fat32", "exfat", "ntfs", "usb" };
-    char dir[160];
-    snprintf(dir, sizeof(dir), "/%s", rel);
-    if (find_in(dir, suffix, out, cap)) return 1;
-    for (int f = 0; f < 4; f++)
-        for (int i = 0; i < 8; i++) {
-            snprintf(dir, sizeof(dir), "/volumes/%s-%d/%s", fs[f], i, rel);
-            if (find_in(dir, suffix, out, cap)) return 1;
-        }
-    return 0;
+static void llm_stop(void) {
+    if (llm_started) (void)icda_kill(llm_pid, 1);
+    llm_started = 0;
+    llm_pid = 0;
+    llm_model[0] = 0;
 }
 
 /* ---- listening (the microphone and icda-stt, Whisper) --------------------------- */
@@ -716,19 +704,18 @@ static int record(void) {
     return spoke ? n : 0;
 }
 
-/* speech to text: the recording, then icda-stt with the first ggml-*.bin
- * Whisper model in an icda-models folder.  0 with the words in out. */
+/* Speech assets use the same ICDA-owned storage as the chat model. */
 static int transcribe(int samples, char *out, size_t cap, char *err, size_t errcap) {
     static uint8_t wav[44 + sizeof(heard_pcm)];
     char model[256], bin[256], args[600];
     icda_stat_t st;
     uint64_t pid, t0;
     long n;
-    if (!find_on_volumes("icda-models", ".bin", model, sizeof(model))) {
-        snprintf(err, errcap, "No speech model: put a Whisper model (ggml-base.en.bin) in an icda-models folder.");
+    if (!find_system_file("usr/share/icda/models/ggml-base.en.bin", model, sizeof(model))) {
+        snprintf(err, errcap, "No speech model: install ggml-base.en.bin in ICDA's linux/usr/share/icda/models directory.");
         return -1;
     }
-    if (!find_on_volumes("linux/usr/bin", "icda-stt", bin, sizeof(bin))) {
+    if (!find_system_file("usr/bin/icda-stt", bin, sizeof(bin))) {
         snprintf(err, errcap, "icda-stt is not installed (it comes with system updates).");
         return -1;
     }
@@ -780,7 +767,7 @@ static void say(const char *text) {
     size_t k = strlen(text);
     uint64_t pid;
     if (!speak || !k) return;
-    if (!bin[0] && !find_on_volumes("linux/usr/bin", "icda-say", bin, sizeof(bin))) return;
+    if (!bin[0] && !find_system_file("usr/bin/icda-say", bin, sizeof(bin))) return;
     if (k > 700) {
         size_t cut = 700;
         for (size_t i = 700; i > 200; i--)
@@ -807,25 +794,46 @@ static void say(const char *text) {
     (void)icda_audio_effect("/tmp/ai/say.wav", 230);
 }
 
-/* starts icda-llm with the model: "file:auto" finds the first .gguf in an
- * icda-models folder on any drive (Windows' C: included), "file:/path" names it */
+/* file:auto selects the Model field inside ICDA's own model directory. */
 static int llm_start(const provider_t *v, char *err, size_t errcap) {
-    char model[256], bin[256], args[320];
-    if (llm_started) return 0;
+    char model[256], bin[256], args[320], rel[160];
     if (strcmp(v->url, "file:auto") == 0) {
-        if (!find_on_volumes("icda-models", ".gguf", model, sizeof(model))) {
-            snprintf(err, errcap, "%s: no local model - put a .gguf model in an icda-models folder on any drive "
-                     "(for example C:\\icda-models in Windows)", v->name);
+        const char *name = strcmp(v->model, "local") == 0 ?
+            "qwen2.5-0.5b-instruct-q4_k_m.gguf" : v->model;
+        if (!name[0] || strchr(name, '/') || strchr(name, '\\') || strstr(name, "..")) {
+            snprintf(err, errcap, "%s: choose a GGUF filename in Settings > Assistant", v->name);
+            return -1;
+        }
+        snprintf(rel, sizeof(rel), "usr/share/icda/models/%s", name);
+        if (!find_system_file(rel, model, sizeof(model))) {
+            snprintf(err, errcap, "%s: %s is not installed in ICDA. Open Settings > Updates to download the models, then restart.", v->name, name);
             return -1;
         }
     } else {
-        snprintf(model, sizeof(model), "%s", v->url + 5);
+        /* Explicit paths still stay in ICDA, rather than mounted foreign drives. */
+        if (strncmp(v->url, "file:/linux/usr/share/icda/models/", strlen("file:/linux/usr/share/icda/models/")) != 0 ||
+            strstr(v->url, "..")) {
+            snprintf(err, errcap, "%s: use file:auto and an ICDA model filename", v->name);
+            return -1;
+        }
+        snprintf(rel, sizeof(rel), "%s", v->url + 12);
+        if (!find_system_file(rel, model, sizeof(model))) {
+            snprintf(err, errcap, "%s: the selected ICDA model is not installed", v->name);
+            return -1;
+        }
     }
-    if (!find_on_volumes("linux/usr/bin", "icda-llm", bin, sizeof(bin))) {
+    if (llm_started && strcmp(llm_model, model) == 0) {
+        icda_proc_info_t info;
+        if ((long)icda_proc_info(llm_pid, &info) >= 0 && info.state < 5) return 0;
+    }
+    llm_stop();
+    if (!find_system_file("usr/bin/icda-llm", bin, sizeof(bin))) {
         snprintf(err, errcap, "%s: icda-llm is not installed (it comes with system updates)", v->name);
         return -1;
     }
-    snprintf(args, sizeof(args), "-m %s -t 4 -c 4096", model);
+    snprintf(args, sizeof(args), "-m %s -t 1 -c 2048", model);
+    (void)icda_write_file(LREPLY, "", 0);
+    (void)icda_write_file(LREQ, "", 0);
     {
         char note[700];
         int nn = snprintf(note, sizeof(note), "starting %s %s\n", bin, args);
@@ -834,11 +842,14 @@ static int llm_start(const provider_t *v, char *err, size_t errcap) {
          * down, this is the only record of what it was asked to load */
         (void)icda_write_file("/dev/serial", note, strlen(note));
     }
-    if ((long)icda_spawn_args(bin, args) < 0) {
+    long pid = (long)icda_spawn_args(bin, args);
+    if (pid < 0) {
         snprintf(err, errcap, "%s: icda-llm did not start", v->name);
         return -1;
     }
     llm_started = 1;
+    llm_pid = (uint64_t)pid;
+    snprintf(llm_model, sizeof(llm_model), "%s", model);
     return 0;
 }
 
@@ -873,6 +884,7 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
     snprintf(sys, sizeof(sys), "You are the assistant built into ICDA, a small operating system. "
              "Answer plainly and briefly. Current date and time: %s.", when);
     lseq = lseq ? lseq + 1 : (uint32_t)icda_ticks();
+    if (!lseq) lseq = 1;
     n = (size_t)snprintf(req, sizeof(req), "%u\n", lseq);
     lput(req, sizeof(req), &n, "system", sys);
     for (int i = 0; i < nhist; i++) {
@@ -880,10 +892,24 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
         lput(req, sizeof(req), &n, "assistant", hist[i].a);
     }
     lput(req, sizeof(req), &n, "user", q);
-    (void)icda_write_file(LREQ, req, n);
+    if ((long)icda_write_file(LREQ, req, n) < 0) {
+        snprintf(err, errcap, "%s: could not write the local request", v->name);
+        return -1;
+    }
     answer[0] = 0;
     for (;;) {
-        uint64_t waited = icda_ticks() - t0;
+        uint64_t waited = (icda_ticks() - t0) * 10;
+        icda_proc_info_t info;
+        if ((long)icda_proc_info(llm_pid, &info) < 0 || info.state >= 5) {
+            /* Read a startup error before falling back to the exit status. */
+            long got = (long)icda_read_file(LREPLY, rep, sizeof(rep) - 1);
+            if (got > 0) rep[got] = 0;
+            snprintf(err, errcap, "%s: %s", v->name,
+                     got > 8 && strncmp(rep, "0 error\n", 8) == 0 ? rep + 8 :
+                     "The local model stopped. See /tmp/ai/llm.log for details.");
+            llm_stop();
+            return -1;
+        }
         long r = (long)icda_read_file(LREPLY, rep, sizeof(rep) - 1);
         if (r > 0) {
             uint32_t s = 0;
@@ -897,17 +923,18 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             if (*p == '\n') p++;
             if (s == 0 && strcmp(state, "error") == 0) {      /* the model failed to load */
                 snprintf(err, errcap, "%s: %s", v->name, p);
-                llm_started = 0;
+                llm_stop();
                 return -1;
             }
             if (s == lseq) {
                 snprintf(answer, sizeof(answer), "%s", p);
                 if (strcmp(state, "done") == 0) {
-                    (void)icda_write_file("/dev/serial", "ai: local model finished\n", 27);
+                    (void)icda_write_file("/dev/serial", "ai: local model finished\n", sizeof("ai: local model finished\n") - 1);
+                    if (!answer[0]) snprintf(err, errcap, "%s: the model returned an empty answer", v->name);
                     return answer[0] ? 0 : -1;
                 }
                 if (strcmp(state, "error") == 0) {
-                    (void)icda_write_file("/dev/serial", "ai: local model error\n", 23);
+                    (void)icda_write_file("/dev/serial", "ai: local model error\n", sizeof("ai: local model error\n") - 1);
                     snprintf(err, errcap, "%s: %s", v->name, p);
                     return -1;
                 }
@@ -922,16 +949,132 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             snprintf(err, errcap, "%s: the local model did not answer in %d minutes. "
                      "The first question loads the model, which can take a while on a large one; "
                      "ask again once it has finished.", v->name, (int)(waited / 60000));
+            llm_stop();
             return answer[0] ? 0 : -1;
         }
         /* say what the silence is: the model is loading, not stuck */
         if (!answer[0] && !load_noted && waited > 3000) {
             load_noted = 1;
             reply("loading");
-            (void)icda_write_file("/dev/serial", "ai: waiting for the local model to load\n", 39);
+            (void)icda_write_file("/dev/serial", "ai: waiting for the local model to load\n", sizeof("ai: waiting for the local model to load\n") - 1);
         }
         rem_check();                     /* a long answer must not hold up a reminder */
         icda_sleep(5);
+    }
+}
+
+/* The official Codex CLI uses ChatGPT sign-in and executes real tools. */
+static void codex_plain(char *text) {
+    char *out = text;
+    for (char *p = text; *p;) {
+        if ((unsigned char)*p == 27 && p[1] == '[') {
+            p += 2;
+            while (*p && !(*p >= '@' && *p <= '~')) p++;
+            if (*p) p++;
+        } else if (*p == '\r') p++;
+        else *out++ = *p++;
+    }
+    *out = 0;
+}
+
+static void codex_context(void) {
+    static char text[12000];
+    const char *files[] = { "AGENTS.md", "CURRENT_TASK.md" };
+    (void)icda_mkdir("/home/icda");
+    for (int i = 0; i < 2; i++) {
+        char source[256], dest[160], rel[160];
+        icda_stat_t st;
+        snprintf(dest, sizeof(dest), "/home/icda/%s", files[i]);
+        if ((long)icda_stat(dest, &st) >= 0) continue;
+        snprintf(source, sizeof(source), "/usr/share/icda/codex/%s", files[i]);
+        if ((long)icda_stat(source, &st) < 0) {
+            snprintf(rel, sizeof(rel), "usr/share/icda/codex/%s", files[i]);
+            if (!find_system_file(rel, source, sizeof(source))) continue;
+        }
+        long n = (long)icda_read_file(source, text, sizeof(text));
+        if (n > 0) (void)icda_write_file(dest, text, (uint64_t)n);
+    }
+}
+
+static int ask_codex(const provider_t *v, const char *q, const char *mode,
+                     char *err, size_t errcap) {
+    static char prompt[24000], log[32000];
+    char bin[256], script[256], args[600], when[96];
+    icda_stat_t st;
+    if (!find_system_file("usr/bin/codex", bin, sizeof(bin))) {
+        snprintf(err, errcap, "Codex is not installed. Apply the ICDA offline update first.");
+        return -1;
+    }
+    snprintf(script, sizeof(script), "/usr/share/icda/codex/assistant.sh");
+    if ((long)icda_stat(script, &st) < 0 &&
+        !find_system_file("usr/share/icda/codex/assistant.sh", script, sizeof(script))) {
+        snprintf(err, errcap, "The Codex launcher is missing from ICDA.");
+        return -1;
+    }
+    codex_context();
+    (void)icda_write_file("/tmp/ai/codex.exit", "", 0);
+    (void)icda_write_file("/tmp/ai/codex.answer", "", 0);
+    (void)icda_write_file("/tmp/ai/codex.log", "", 0);
+    (void)icda_write_file("/tmp/ai/codex.pid", "", 0);
+    (void)icda_write_file("/tmp/ai/codex.model", v->model, strlen(v->model));
+    today(when, sizeof(when));
+    size_t n = (size_t)snprintf(prompt, sizeof(prompt),
+        "You are the Codex assistant inside ICDA. Read AGENTS.md and CURRENT_TASK.md "
+        "in your workspace for available tools and the active task. Current date: %s.\n", when);
+    for (int i = 0; i < nhist; i++) {
+        put(prompt, sizeof(prompt), &n, "\nUser: "); put(prompt, sizeof(prompt), &n, hist[i].q);
+        put(prompt, sizeof(prompt), &n, "\nAssistant: "); put(prompt, sizeof(prompt), &n, hist[i].a);
+    }
+    put(prompt, sizeof(prompt), &n, "\nUser: "); put(prompt, sizeof(prompt), &n, q);
+    if ((long)icda_write_file("/tmp/ai/codex.prompt", prompt, n) < 0) {
+        snprintf(err, errcap, "Could not write the Codex prompt."); return -1;
+    }
+    snprintf(args, sizeof(args), "sh %s %s %s", script, mode, bin);
+    long pid = (long)icda_spawn_args("/bin/busybox", args);
+    if (pid < 0) { snprintf(err, errcap, "Could not start Codex."); return -1; }
+    uint64_t start = icda_ticks(), last = 0;
+    for (;;) {
+        char done[32];
+        long got = (long)icda_read_file("/tmp/ai/codex.log", log, sizeof(log) - 1);
+        if (got > 0) log[got] = 0; else log[0] = 0;
+        codex_plain(log);
+        long d = (long)icda_read_file("/tmp/ai/codex.exit", done, sizeof(done) - 1);
+        if (d > 0) {
+            done[d] = 0;
+            if (!strcmp(mode, "ask") && done[0] == '0') {
+                long a = (long)icda_read_file("/tmp/ai/codex.answer", answer, sizeof(answer) - 1);
+                if (a > 0) { answer[a] = 0; return 0; }
+                snprintf(err, errcap, "Codex finished without a response. See /tmp/ai/codex.log.");
+                return -1;
+            }
+            if (strcmp(mode, "ask") && done[0] == '0') {
+                snprintf(answer, sizeof(answer), "%s", log[0] ? log : "Codex completed.");
+                return 0;
+            }
+            snprintf(err, errcap, "Codex: %.300s", log[0] ? log : "The runtime stopped without an answer.");
+            return -1;
+        }
+        icda_proc_info_t info;
+        if ((long)icda_proc_info((uint64_t)pid, &info) < 0 || info.state >= 5) {
+            snprintf(err, errcap, "Codex launcher stopped: %.270s", log[0] ? log : "See /tmp/ai/codex.log.");
+            return -1;
+        }
+        if (icda_ticks() - start > 60000) {
+            char id[32]; uint64_t child = 0;
+            long len = (long)icda_read_file("/tmp/ai/codex.pid", id, sizeof(id) - 1);
+            if (len > 0) { id[len] = 0; for (char *p = id; *p >= '0' && *p <= '9'; p++) child = child * 10 + (unsigned)(*p - '0'); }
+            if (child) (void)icda_kill(child, 1);
+            (void)icda_kill((uint64_t)pid, 1);
+            snprintf(err, errcap, "Codex timed out after ten minutes. See /tmp/ai/codex.log."); return -1;
+        }
+        if (icda_ticks() - last >= 50) {
+            last = icda_ticks();
+            if (!strcmp(mode, "login") && log[0]) {
+                snprintf(answer, sizeof(answer), "%s", log);
+                reply("answer"); /* URL/code appear while the login is pending. */
+            } else reply("thinking");
+        }
+        rem_check(); icda_sleep(10);
     }
 }
 
@@ -947,6 +1090,16 @@ static int complex_question(const char **q) {
     if (strlen(*q) > 280) return 1;
     for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) if (strstr(*q, words[i])) return 1;
     return 0;
+}
+
+static void remember_answer(const char *q) {
+    if (nhist == HIST) {
+        memmove(&hist[0], &hist[1], sizeof(hist[0]) * (HIST - 1));
+        nhist--;
+    }
+    snprintf(hist[nhist].q, Q_MAX, "%s", q);
+    snprintf(hist[nhist].a, A_MAX, "%s", answer);
+    nhist++;
 }
 
 static void handle(const char *question) {
@@ -978,6 +1131,24 @@ static void handle(const char *question) {
     cur_name = "";
     answer[0] = 0;
     reply("thinking");
+    if (!strncmp(q, "/codex", 6) && (!q[6] || q[6] == ' ')) {
+        provider_t selected = {0};
+        strcpy(selected.name, "codex"); strcpy(selected.url, "codex:chatgpt");
+        strcpy(selected.model, "auto"); selected.cloud = 1;
+        for (int i = 0; i < nprov; i++) if (!strcmp(prov[i].url, "codex:chatgpt")) { selected = prov[i]; break; }
+        q += 6; while (*q == ' ') q++;
+        const char *mode = !strcmp(q, "login") ? "login" :
+                           !strcmp(q, "status") ? "status" :
+                           !strcmp(q, "version") ? "version" : "ask";
+        cur_name = "codex";
+        if (!q[0]) { strcpy(answer, "Use /codex <task>, /codex login, /codex status or /codex version. Choose the Codex model in Settings > Assistant."); reply("done"); return; }
+        if (ask_codex(&selected, q, mode, err, sizeof(err))) { snprintf(answer, sizeof(answer), "%s", err); reply("error"); }
+        else {
+            if (!strcmp(mode, "ask")) remember_answer(q);
+            reply("done");
+        }
+        return;
+    }
     /* reminders and timers need no model */
     if (try_reminder(q)) {
         cur_name = "reminders";
@@ -1004,16 +1175,11 @@ static void handle(const char *question) {
             if (prov[i].cloud != want_cloud) continue;
             cur_name = prov[i].name;
             reply("thinking");
-            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
+            if ((!strcmp(prov[i].url, "codex:chatgpt") ? ask_codex(&prov[i], asked, "ask", err, sizeof(err)) :
+                 strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
                                                        : ask(&prov[i], asked, err, sizeof(err))) == 0) {
                 /* remembered for the conversation */
-                if (nhist == HIST) {
-                    memmove(&hist[0], &hist[1], sizeof(hist[0]) * (HIST - 1));
-                    nhist--;
-                }
-                snprintf(hist[nhist].q, Q_MAX, "%s", q);
-                snprintf(hist[nhist].a, A_MAX, "%s", answer);
-                nhist++;
+                remember_answer(q);
                 reply("done");
                 say(answer);
                 return;
@@ -1036,9 +1202,15 @@ int main(void) {
     (void)icda_mkdir("/tmp");
     (void)icda_mkdir("/tmp/ai");
     load_conf();
-    {   /* a question left from before this start is not news */
-        long n = (long)icda_read_file(REQ_PATH, buf, sizeof(buf) - 1);
-        for (long i = 0; i < n && buf[i] >= '0' && buf[i] <= '9'; i++) cur_seq = cur_seq * 10 + (uint32_t)(buf[i] - '0');
+    {   /* Skip completed replies only; a request arriving during startup must run. */
+        long n = (long)icda_read_file(REPLY_PATH, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            char *p = buf;
+            uint32_t previous = 0;
+            buf[n] = 0;
+            while (*p >= '0' && *p <= '9') previous = previous * 10 + (uint32_t)(*p++ - '0');
+            if (!strncmp(p, " done ", 6) || !strncmp(p, " error ", 7)) cur_seq = previous;
+        }
     }
     rem_load();
     for (uint64_t loop = 0;; loop++) {
@@ -1052,6 +1224,7 @@ int main(void) {
             if (*p == '\n') p++;
             if (seq && seq != cur_seq) {
                 cur_seq = seq;
+                (void)icda_write_file("/dev/serial", "ai: request received\n", 21);
                 handle(p);
             }
         }

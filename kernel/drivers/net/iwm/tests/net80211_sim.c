@@ -51,6 +51,7 @@ static int (*net80211_newstate)(struct ieee80211com *, enum ieee80211_state,
 static const uint8_t sta[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 static const uint8_t ap[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
 static const uint8_t gw[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x99 };
+static int ap_channel = 6;
 
 /* driver stand-ins */
 static uint8_t hw_tk[16];
@@ -112,7 +113,7 @@ deliver(const uint8_t *frame, size_t len, int rxflags)
 	memcpy(m->m_data, frame, len);
 	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = 60;
-	rxi.rxi_chan = 6;
+	rxi.rxi_chan = ap_channel;
 	rxi.rxi_flags = (u_int32_t)rxflags;
 	ni = ieee80211_find_rxnode(ic, mtod(m, struct ieee80211_frame *));
 	ieee80211_inputm(&ic->ic_if, m, ni, &rxi, &ml);
@@ -147,16 +148,19 @@ send_beacon(void)
 	static const uint8_t rates[] = { 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c,
 	    0x12, 0x18, 0x24 };
 	static const uint8_t xrates[] = { 50, 4, 0x30, 0x48, 0x60, 0x6c };
+	static const uint8_t arates[] = { 1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
 
 	memset(f + n, 0, 8); n += 8;		/* timestamp */
 	f[n++] = 100; f[n++] = 0;		/* beacon interval */
 	f[n++] = 0x11; f[n++] = 0x04;		/* ESS | privacy | short slot */
 	f[n++] = 0; f[n++] = 7;
 	memcpy(f + n, "ICDA-AP", 7); n += 7;
-	memcpy(f + n, rates, sizeof(rates)); n += sizeof(rates);
-	f[n++] = 3; f[n++] = 1; f[n++] = 6;	/* DS params: channel 6 */
+	if (ap_channel > 14) { memcpy(f + n, arates, sizeof(arates)); n += sizeof(arates); }
+	else { memcpy(f + n, rates, sizeof(rates)); n += sizeof(rates); }
+	/* 5 GHz beacons need not contain DS params: use RX channel metadata. */
+	if (ap_channel <= 14) { f[n++] = 3; f[n++] = 1; f[n++] = (uint8_t)ap_channel; }
 	f[n++] = 5; f[n++] = 4; f[n++] = 0; f[n++] = 1; f[n++] = 0; f[n++] = 0;
-	memcpy(f + n, xrates, sizeof(xrates)); n += sizeof(xrates);
+	if (ap_channel <= 14) { memcpy(f + n, xrates, sizeof(xrates)); n += sizeof(xrates); }
 	memcpy(f + n, ap_rsnie, ap_rsnie_len); n += ap_rsnie_len;
 	deliver(f, n, 0);
 }
@@ -258,8 +262,9 @@ ap_frame_eapol(uint8_t *f, unsigned int info, uint64_t replay,
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	if (argc > 1 && argv[1][0] == '5') ap_channel = 36;
 	struct ifnet *ifp = &ic->ic_if;
 	struct ieee80211_frame *wh;
 	struct mbuf *m;
@@ -278,6 +283,9 @@ main(void)
 		    IEEE80211_CHAN_OFDM | IEEE80211_CHAN_DYN | IEEE80211_CHAN_2GHZ;
 	}
 	ic->ic_sup_rates[IEEE80211_MODE_11B] = ieee80211_std_rateset_11b;
+	ic->ic_channels[36].ic_freq = 5180;
+	ic->ic_channels[36].ic_flags = IEEE80211_CHAN_A;
+	ic->ic_sup_rates[IEEE80211_MODE_11A] = ieee80211_std_rateset_11a;
 	ic->ic_sup_rates[IEEE80211_MODE_11G] = ieee80211_std_rateset_11g;
 	ic->ic_caps = IEEE80211_C_RSN | IEEE80211_C_SHSLOT |
 	    IEEE80211_C_SHPREAMBLE | IEEE80211_C_SCANALL;
@@ -320,13 +328,13 @@ main(void)
 	    ieee80211_find_node(ic, ap) != NULL);
 	{
 		struct ieee80211_node *ni = ieee80211_find_node(ic, ap);
-		check("scan entry: ssid, channel 6, WPA2-PSK/CCMP",
+		check("scan entry: ssid, correct band/channel, WPA2-PSK/CCMP",
 		    ni->ni_esslen == 7 && memcmp(ni->ni_essid, "ICDA-AP", 7) == 0 &&
-		    ieee80211_chan2ieee(ic, ni->ni_chan) == 6 &&
+		    ieee80211_chan2ieee(ic, ni->ni_chan) == (u_int)ap_channel &&
 		    (ni->ni_rsnprotos & IEEE80211_PROTO_RSN) &&
 		    (ni->ni_rsnakms & IEEE80211_AKM_PSK) &&
 		    ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP &&
-		    ni->ni_rates.rs_nrates == 12);
+		    ni->ni_rates.rs_nrates == (ap_channel > 14 ? 8 : 12));
 	}
 
 	/* ---- join, auth ---- */
@@ -569,6 +577,54 @@ main(void)
 			ieee80211_release_node(ic, m->m_pkthdr.ph_cookie);
 			m_freem(m);
 		}
+	}
+
+	/* ---- startup rate and AMRR feedback ---- */
+	{
+		struct ieee80211_node ni;
+		struct ieee80211_amrr amrr = { 1, 15 };
+		struct ieee80211_amrr_node amn;
+		memset(&ni, 0, sizeof(ni));
+		ni.ni_rates = ieee80211_std_rateset_11a;
+		int rate = ieee80211_initial_txrate(&ni, -55);
+		check("strong 5 GHz starts at negotiated 24 Mbps",
+		    (ni.ni_rates.rs_rates[rate] & IEEE80211_RATE_VAL) == 48);
+		rate = ieee80211_initial_txrate(&ni, -72);
+		check("moderate 5 GHz starts at negotiated 12 Mbps",
+		    (ni.ni_rates.rs_rates[rate] & IEEE80211_RATE_VAL) == 24);
+		check("weak 5 GHz keeps the lowest rate",
+		    ieee80211_initial_txrate(&ni, -85) == 0);
+		ni.ni_rates.rs_nrates = 3;
+		ni.ni_rates.rs_rates[0] = 12;
+		ni.ni_rates.rs_rates[1] = 36;
+		ni.ni_rates.rs_rates[2] = 108;
+		check("startup uses only rates negotiated with the AP",
+		    ieee80211_initial_txrate(&ni, -55) == 1);
+		ni.ni_rates = ieee80211_std_rateset_11b;
+		rate = ieee80211_initial_txrate(&ni, -55);
+		check("11b startup never invents OFDM rates",
+		    (ni.ni_rates.rs_rates[rate] & IEEE80211_RATE_VAL) == 22);
+		ni.ni_rates = ieee80211_std_rateset_11a;
+		ni.ni_txrate = 2;
+		ieee80211_amrr_node_init(&amrr, &amn);
+		amn.amn_txcnt = 11; amn.amn_retrycnt = 1;
+		ieee80211_amrr_choose(&amrr, &ni, &amn);
+		check("AMRR raises with one retry among eleven packets (9%)",
+		    ni.ni_txrate == 3);
+		ni.ni_txrate = 3;
+		amn.amn_txcnt = 11; amn.amn_retrycnt = 4;
+		ieee80211_amrr_choose(&amrr, &ni, &amn);
+		check("AMRR lowers after excessive retries",
+		    ni.ni_txrate == 2);
+		ni.ni_txrate = 2;
+		ieee80211_amrr_node_init(&amrr, &amn);
+		amn.amn_txcnt = 20; amn.amn_retrycnt = 2;
+		ieee80211_amrr_choose(&amrr, &ni, &amn);
+		check("AMRR keeps rate at exactly ten percent retries",
+		    ni.ni_txrate == 2);
+		ieee80211_amrr_node_init(&amrr, &amn);
+		ieee80211_amrr_choose(&amrr, &ni, &amn);
+		check("AMRR ignores an empty feedback window", ni.ni_txrate == 2);
 	}
 
 	printf("\n%d/%d simulation checks passed\n", checks - failures, checks);

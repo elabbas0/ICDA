@@ -837,189 +837,134 @@ static uint32_t dhcp_read32(const uint8_t *p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+#define DHCP_PACKET_BYTES 300U /* BOOTP minimum; pad the options area */
+#define DHCP_WAIT_TICKS   400U
+static const char *dhcp_error = "";
+const char *net_dhcp_error(void) { return dhcp_error; }
+
+typedef struct {
+    uint8_t type;
+    uint32_t address, server, mask, router, dns;
+} dhcp_reply_t;
+
+static int dhcp_parse_reply(const uint8_t *frame, uint16_t len, uint32_t xid,
+                            dhcp_reply_t *reply) {
+    if (len < sizeof(eth_hdr_t) + sizeof(ipv4_hdr_t)) return 0;
+    const eth_hdr_t *eth = (const eth_hdr_t *)frame;
+    const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(frame + sizeof(*eth));
+    uint16_t ihl = (ip->ver_ihl & 15U) * 4U;
+    uint16_t total = ntohs16(ip->total_len_be);
+    if (ntohs16(eth->type_be) != ETH_TYPE_IPV4 || (ip->ver_ihl >> 4) != 4 ||
+        ip->proto != IP_PROTO_UDP || ihl < sizeof(*ip) || total < ihl + sizeof(udp_hdr_t) + 240 ||
+        sizeof(*eth) + total > len || (ntohs16(ip->frag_be) & 0x3FFFU)) return 0;
+    const udp_hdr_t *udp = (const udp_hdr_t *)((const uint8_t *)ip + ihl);
+    uint16_t ulen = ntohs16(udp->len_be);
+    if (ntohs16(udp->src_port_be) != 67 || ntohs16(udp->dst_port_be) != 68 ||
+        ulen < sizeof(*udp) + 240 || ulen > total - ihl) return 0;
+    const uint8_t *body = (const uint8_t *)(udp + 1);
+    if (body[0] != DHCP_OP_BOOTREPLY || body[1] != DHCP_HTYPE_ETHERNET ||
+        body[2] != DHCP_HLEN_ETHERNET || dhcp_read32(body + 4) != xid ||
+        dhcp_read32(body + 236) != DHCP_MAGIC_COOKIE) return 0;
+    for (int i = 0; i < 6; i++) if (body[28 + i] != net_state.mac[i]) return 0;
+    zero_bytes(reply, sizeof(*reply));
+    reply->address = dhcp_read32(body + 16);
+    const uint8_t *opts = body + 240;
+    uint32_t opt_len = ulen - sizeof(*udp) - 240;
+    for (uint32_t at = 0; at < opt_len;) {
+        uint8_t tag = opts[at++];
+        if (tag == DHCP_OPT_END) break;
+        if (!tag) continue;
+        if (at >= opt_len) return 0;
+        uint8_t n = opts[at++];
+        if (n > opt_len - at) return 0;
+        if (tag == DHCP_OPT_MSG_TYPE && n == 1) reply->type = opts[at];
+        else if (n >= 4) {
+            uint32_t v = dhcp_read32(opts + at);
+            if (tag == DHCP_OPT_SERVER_ID) reply->server = v;
+            else if (tag == DHCP_OPT_SUBNET_MASK) reply->mask = v;
+            else if (tag == DHCP_OPT_ROUTER) reply->router = v;
+            else if (tag == DHCP_OPT_DNS_SERVER) reply->dns = v;
+        }
+        at += n;
+    }
+    return reply->type != 0;
+}
+
+static void dhcp_build(uint8_t packet[DHCP_PACKET_BYTES], uint32_t xid,
+                        uint8_t type, uint32_t address, uint32_t server) {
+    zero_bytes(packet, DHCP_PACKET_BYTES);
+    packet[0] = DHCP_OP_BOOTREQUEST; packet[1] = DHCP_HTYPE_ETHERNET;
+    packet[2] = DHCP_HLEN_ETHERNET; packet[10] = 0x80;
+    dhcp_write32(packet + 4, xid);
+    copy_bytes(packet + 28, net_state.mac, 6);
+    dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
+    unsigned at = 240;
+    packet[at++] = DHCP_OPT_MSG_TYPE; packet[at++] = 1; packet[at++] = type;
+    if (type == DHCP_MSG_REQUEST) {
+        packet[at++] = DHCP_OPT_REQUESTED_IP; packet[at++] = 4;
+        dhcp_write32(packet + at, address); at += 4;
+        packet[at++] = DHCP_OPT_SERVER_ID; packet[at++] = 4;
+        dhcp_write32(packet + at, server); at += 4;
+    }
+    packet[at++] = 61; packet[at++] = 7; packet[at++] = DHCP_HTYPE_ETHERNET;
+    copy_bytes(packet + at, net_state.mac, 6); at += 6;
+    packet[at++] = 55; packet[at++] = 3; /* parameter request list */
+    packet[at++] = DHCP_OPT_SUBNET_MASK; packet[at++] = DHCP_OPT_ROUTER;
+    packet[at++] = DHCP_OPT_DNS_SERVER;
+    packet[at] = DHCP_OPT_END;
+}
+
 static int net_dhcp_discover(void) {
-    uint8_t packet[548];
-    uint8_t dst_mac[6];
-    uint16_t len = 0;
-    uint64_t deadline;
-    uint8_t frame_buf[NET_FRAME_CAP];
-    uint32_t offered_ip = 0;
-    uint32_t server_ip = 0;
-    uint32_t offered_mask = 0;
-    uint32_t offered_router = 0;
-    uint32_t offered_dns = 0;
-    int got_offer = 0;
-
-    
-    zero_bytes(packet, sizeof(packet));
-    packet[0] = DHCP_OP_BOOTREQUEST;
-    packet[1] = DHCP_HTYPE_ETHERNET;
-    packet[2] = DHCP_HLEN_ETHERNET;
-    packet[4] = 0x00; 
-    packet[5] = 0x00;
-    packet[6] = (uint8_t)(sched_ticks() & 0xFF);
-    packet[7] = (uint8_t)((sched_ticks() >> 8) & 0xFF);
-    
-    packet[10] = 0x80;
-    packet[11] = 0x00;
-    
-    
-    for (int i = 0; i < 6; i++) {
-        packet[28 + i] = net_state.mac[i];
+    uint8_t packet[DHCP_PACKET_BYTES], frame[NET_FRAME_CAP];
+    const uint8_t broadcast[6] = {255,255,255,255,255,255};
+    dhcp_reply_t offer = {0}, ack = {0};
+    static uint32_t sequence;
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint32_t xid = lo ^ hi ^ ++sequence;
+    for (int i = 0; i < 6; i++) xid = xid * 33U + net_state.mac[i];
+    dhcp_error = "";
+    /* RFC 2131 section 4.4.1: REQUEST keeps the OFFER's transaction ID.
+     * Recomputing it from the clock made strict hotspot servers ignore it. */
+    dhcp_build(packet, xid, DHCP_MSG_DISCOVER, 0, 0);
+    if (send_udp_packet(broadcast, 0xFFFFFFFFU, 68, 67, packet, sizeof(packet)) != 0) {
+        dhcp_error = "Unable to send DHCP discovery"; return -1;
     }
-    
-    dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
-    
-    packet[240] = DHCP_OPT_MSG_TYPE;
-    packet[241] = 1;
-    packet[242] = DHCP_MSG_DISCOVER;
-    
-    packet[243] = DHCP_OPT_END;
-
-    
-    for (int i = 0; i < 6; i++) dst_mac[i] = 0xFF;
-
-    
-    if (send_udp_packet(dst_mac, 0xFFFFFFFFU, 68, 67, packet, 244) != 0) {
-        return -1;
-    }
-
-    
-    deadline = sched_ticks() + 200;
-    while (sched_ticks() < deadline && !got_offer) {
-        int rc = net_rx_frame(frame_buf, sizeof(frame_buf), &len);
-        if (rc < 0) break;
-        if (rc == 0) { sched_sleep(1); continue; }
-
-        
-        {
-            const eth_hdr_t *eth = (const eth_hdr_t *)frame_buf;
-            if (ntohs16(eth->type_be) != ETH_TYPE_IPV4) continue;
-            const ipv4_hdr_t *ip = (const ipv4_hdr_t *)(frame_buf + sizeof(eth_hdr_t));
-            if ((ip->ver_ihl >> 4) != 4 || ip->proto != IP_PROTO_UDP) continue;
-            uint16_t ip_hdr_len = (uint16_t)((ip->ver_ihl & 0x0FU) * 4U);
-            const udp_hdr_t *udp = (const udp_hdr_t *)((const uint8_t *)ip + ip_hdr_len);
-            if (ntohs16(udp->src_port_be) != 67 || ntohs16(udp->dst_port_be) != 68) continue;
-            uint16_t udp_len = ntohs16(udp->len_be);
-            if (udp_len < sizeof(udp_hdr_t) + 240) continue;
-            const uint8_t *dhcp_payload = (const uint8_t *)udp + sizeof(udp_hdr_t);
-            if (dhcp_read32(dhcp_payload + 236) != DHCP_MAGIC_COOKIE) continue;
-
-        
-        const uint8_t *opts = dhcp_payload + 240;
-        uint8_t msg_type = 0;
-        uint32_t srv_id = 0;
-        uint32_t opt_len = udp_len - sizeof(udp_hdr_t) - 240;
-        for (uint32_t oi = 0; oi + 1 < opt_len; ) {
-            uint8_t tag = opts[oi];
-            if (tag == 0xFF) break;
-            if (tag == 0) { oi++; continue; }
-            if (oi + 1 >= opt_len) break;
-            uint8_t olen = opts[oi + 1];
-            if (oi + 2 + olen > opt_len) break;
-            const uint8_t *oval = opts + oi + 2;
-            if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
-            if (tag == DHCP_OPT_SERVER_ID && olen >= 4) srv_id = dhcp_read32(oval);
-            oi += 2 + olen;
-        }
-        if (msg_type == DHCP_MSG_OFFER) {
-            offered_ip = dhcp_read32(dhcp_payload + 16);
-            server_ip = srv_id;
-            got_offer = 1;
-        }
-        } 
-    } 
-    if (!got_offer) {
-        return -1;
-    }
-
-    
-    zero_bytes(packet, sizeof(packet));
-    packet[0] = DHCP_OP_BOOTREQUEST;
-    packet[1] = DHCP_HTYPE_ETHERNET;
-    packet[2] = DHCP_HLEN_ETHERNET;
-    packet[6] = (uint8_t)(sched_ticks() & 0xFF);
-    packet[7] = (uint8_t)((sched_ticks() >> 8) & 0xFF);
-    packet[10] = 0x80;
-    packet[11] = 0x00;
-    for (int i = 0; i < 6; i++) {
-        packet[28 + i] = net_state.mac[i];
-    }
-    dhcp_write32(packet + 236, DHCP_MAGIC_COOKIE);
-    {
-        uint32_t opt_off = 240;
-        
-        packet[opt_off++] = DHCP_OPT_MSG_TYPE;
-        packet[opt_off++] = 1;
-        packet[opt_off++] = DHCP_MSG_REQUEST;
-        
-        packet[opt_off++] = DHCP_OPT_REQUESTED_IP;
-        packet[opt_off++] = 4;
-        dhcp_write32(packet + opt_off, offered_ip);
-        opt_off += 4;
-        
-        packet[opt_off++] = DHCP_OPT_SERVER_ID;
-        packet[opt_off++] = 4;
-        dhcp_write32(packet + opt_off, server_ip);
-        opt_off += 4;
-        packet[opt_off++] = DHCP_OPT_END;
-    }
-
-    if (send_udp_packet(dst_mac, 0xFFFFFFFFU, 68, 67, packet, 260) != 0) {
-        return -1;
-    }
-
-    
-
-    deadline = sched_ticks() + 200;
+    uint64_t deadline = sched_ticks() + DHCP_WAIT_TICKS;
     while (sched_ticks() < deadline) {
-        int rc = net_rx_frame(frame_buf, sizeof(frame_buf), &len);
+        uint16_t len = 0;
+        int rc = net_rx_frame(frame, sizeof(frame), &len);
         if (rc < 0) break;
-        if (rc == 0) { sched_sleep(1); continue; }
-
-        
-        const eth_hdr_t *eth2 = (const eth_hdr_t *)frame_buf;
-        if (ntohs16(eth2->type_be) != ETH_TYPE_IPV4) continue;
-        const ipv4_hdr_t *ip2 = (const ipv4_hdr_t *)(frame_buf + sizeof(eth_hdr_t));
-        if ((ip2->ver_ihl >> 4) != 4 || ip2->proto != IP_PROTO_UDP) continue;
-        uint16_t ip_hdr_len2 = (uint16_t)((ip2->ver_ihl & 0x0FU) * 4U);
-        const udp_hdr_t *udp2 = (const udp_hdr_t *)((const uint8_t *)ip2 + ip_hdr_len2);
-        if (ntohs16(udp2->src_port_be) != 67 || ntohs16(udp2->dst_port_be) != 68) continue;
-        uint16_t udp_len2 = ntohs16(udp2->len_be);
-        if (udp_len2 < sizeof(udp_hdr_t) + 240) continue;
-        const uint8_t *dhcp2 = (const uint8_t *)udp2 + sizeof(udp_hdr_t);
-        if (dhcp_read32(dhcp2 + 236) != DHCP_MAGIC_COOKIE) continue;
-
-        const uint8_t *opts2 = dhcp2 + 240;
-        uint8_t msg_type = 0;
-        uint32_t opt_len2 = udp_len2 - sizeof(udp_hdr_t) - 240;
-        for (uint32_t oi = 0; oi + 1 < opt_len2; ) {
-            uint8_t tag = opts2[oi];
-            if (tag == 0xFF) break;
-            if (tag == 0) { oi++; continue; }
-            if (oi + 1 >= opt_len2) break;
-            uint8_t olen = opts2[oi + 1];
-            if (oi + 2 + olen > opt_len2) break;
-            const uint8_t *oval = opts2 + oi + 2;
-            if (tag == DHCP_OPT_MSG_TYPE && olen >= 1) msg_type = oval[0];
-            if (tag == DHCP_OPT_SUBNET_MASK && olen >= 4) offered_mask = dhcp_read32(oval);
-            if (tag == DHCP_OPT_ROUTER && olen >= 4) offered_router = dhcp_read32(oval);
-            if (tag == DHCP_OPT_DNS_SERVER && olen >= 4) offered_dns = dhcp_read32(oval);
-            oi += 2 + olen;
-        }
-        if (msg_type == DHCP_MSG_ACK) {
-
-            net_state.ip = offered_ip;
-            if (offered_mask) net_state.netmask = offered_mask;
-            if (offered_router) net_state.gateway = offered_router;
-            if (offered_dns) {
-                net_state.dns = offered_dns;
-            }
-            return 0;
-        }
+        if (!rc) { sched_sleep(1); continue; }
+        if (dhcp_parse_reply(frame, len, xid, &offer) && offer.type == DHCP_MSG_OFFER &&
+            offer.address && offer.server) break;
+        zero_bytes(&offer, sizeof(offer));
     }
-
-    return -1;
+    if (!offer.address || !offer.server) {
+        dhcp_error = "Hotspot did not send a DHCP offer";
+        serial_write("[dhcp] timed out waiting for OFFER\n"); return -1;
+    }
+    dhcp_build(packet, xid, DHCP_MSG_REQUEST, offer.address, offer.server);
+    if (send_udp_packet(broadcast, 0xFFFFFFFFU, 68, 67, packet, sizeof(packet)) != 0) {
+        dhcp_error = "Unable to send DHCP address request"; return -1;
+    }
+    deadline = sched_ticks() + DHCP_WAIT_TICKS;
+    while (sched_ticks() < deadline) {
+        uint16_t len = 0;
+        int rc = net_rx_frame(frame, sizeof(frame), &len);
+        if (rc < 0) break;
+        if (!rc) { sched_sleep(1); continue; }
+        if (!dhcp_parse_reply(frame, len, xid, &ack) || ack.server != offer.server) continue;
+        if (ack.type == 6) { dhcp_error = "Hotspot rejected the DHCP address request"; return -1; }
+        if (ack.type != DHCP_MSG_ACK || (ack.address && ack.address != offer.address)) continue;
+        net_state.ip = offer.address;
+        net_state.netmask = ack.mask ? ack.mask : offer.mask;
+        net_state.gateway = ack.router ? ack.router : offer.router;
+        net_state.dns = ack.dns ? ack.dns : offer.dns;
+        return 0;
+    }
+    dhcp_error = "Hotspot did not acknowledge the DHCP address request";
+    serial_write("[dhcp] timed out waiting for ACK\n"); return -1;
 }
 
 int net_init(void) {

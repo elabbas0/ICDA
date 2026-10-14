@@ -136,6 +136,29 @@ wifi-sim-test:
 	gcc -O0 -g -Wall -Wno-unused-parameter -fno-builtin -I$(IWM_DIR)/tests/host -Ikernel \
 	    -include $(IWM_DIR)/tests/host/rename.h -o /tmp/icda-wifi-sim $(IWM_SIM_SRCS) /tmp/icda-sim-stubs.o
 	/tmp/icda-wifi-sim
+	/tmp/icda-wifi-sim 5
+
+# Host codec graphs exercise routing without touching real audio hardware.
+hda-codec-test:
+	gcc -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Ikernel \
+	    tests/hda-codec.c -o /tmp/icda-hda-codec-test
+	/tmp/icda-hda-codec-test
+
+.PHONY: hda-codec-test
+
+tcp-receive-test:
+	gcc -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Ikernel \
+	    tests/net-tcp-receive.c -o /tmp/icda-tcp-receive-test
+	/tmp/icda-tcp-receive-test
+
+.PHONY: tcp-receive-test
+
+dhcp-test:
+	gcc -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Ikernel \
+	    tests/net-dhcp.c -o /tmp/icda-net-dhcp-test
+	/tmp/icda-net-dhcp-test
+
+.PHONY: dhcp-test
 
 sock.o: kernel/net/sock.c kernel/net/sock.h kernel/net/net.h kernel/drivers/net/net_drv.h kernel/syscall/uaccess.h
 	$(CC) $(CFLAGS) -c kernel/net/sock.c -o sock.o
@@ -504,9 +527,10 @@ assistantd.o: userspace/assistantd.c userspace/settings_store.h $(SURFER_HEADERS
 	cp -f /tmp/icda-assistantd.o assistantd.o
 
 # the assistant's answers (/sbin/assistantd)
-userspace/assistantd.elf: crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
+userspace/assistantd.elf: crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o userspace/user.ld Makefile
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-assistantd.elf crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o
-	printf '�' | dd of=/tmp/icda-assistantd.elf bs=1 seek=7 conv=notrunc status=none
+	printf '\377' | dd of=/tmp/icda-assistantd.elf bs=1 seek=7 conv=notrunc status=none
+	@test "$$(od -An -tu1 -j7 -N1 /tmp/icda-assistantd.elf | tr -d ' ')" = 255
 	cp -f /tmp/icda-assistantd.elf userspace/assistantd.elf
 
 # OTA patch daemon (/sbin/updated)

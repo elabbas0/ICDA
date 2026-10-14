@@ -447,9 +447,10 @@ update_scan_snapshot(void)
 		strlcpy(e->sec, node_security(ni), sizeof(e->sec));
 		e->saved = saved_lookup(e->ssid, pmk, &secure);
 		explicit_bzero(pmk, sizeof(pmk));
-		/* one line per SSID: keep the strongest BSS */
+		/* Keep each band visible even when a router shares its SSID. */
 		for (j = 0; j < n; j++)
-			if (strcmp(tmp[j].ssid, e->ssid) == 0)
+			if (strcmp(tmp[j].ssid, e->ssid) == 0 &&
+			    (tmp[j].chan > 14) == (e->chan > 14))
 				break;
 		if (j < n) {
 			if (e->dbm > tmp[j].dbm)
@@ -543,11 +544,15 @@ update_status_snapshot(void)
 		ADD("bssid: %s\n", ether_sprintf(ni->ni_bssid));
 		ADD("channel: %u\n", ieee80211_chan2ieee(ic, ni->ni_chan));
 		ADD("signal: %d dBm\n", node_dbm(ni));
+		ADD("signal-percent: %u\n", ic->ic_max_rssi ?
+		    MIN(100, ni->ni_rssi * 100 / ic->ic_max_rssi) : 0);
 		if (ic->ic_state == IEEE80211_S_RUN &&
 		    ni->ni_txrate < ni->ni_rates.rs_nrates) {
 			int r = ni->ni_rates.rs_rates[ni->ni_txrate] &
 			    IEEE80211_RATE_VAL;
 			ADD("rate: %d%s Mbit/s\n", r / 2, (r & 1) ? ".5" : "");
+			ADD("phy: legacy 802.11%s\n",
+			    IEEE80211_IS_CHAN_5GHZ(ni->ni_chan) ? "a" : "g");
 		}
 		ADD("security: %s\n", (ic->ic_flags & IEEE80211_F_RSNON) ?
 		    "WPA2-PSK (CCMP)" : "open");
@@ -561,6 +566,8 @@ update_status_snapshot(void)
 	ADD("autoconnect: %s\n", autoconnect ? "on" : "off");
 	if (phase_error[0])
 		ADD("error: %s\n", phase_error);
+	else if (dhcp_status == 3)
+		ADD("error: %s\n", net_dhcp_error());
 	else if (ieee80211_icda_last_error[0] && !link_up)
 		ADD("error: %s\n", ieee80211_icda_last_error);
 	if (ic != NULL)
@@ -1177,7 +1184,7 @@ dhcp_thread(void)
 				fmt_ip(ip, sizeof(ip), net_state.ip);
 				printf("wifi: DHCP ok, address %s\n", ip);
 			} else
-				printf("wifi: DHCP failed\n");
+				printf("wifi: DHCP failed: %s\n", net_dhcp_error());
 		}
 		sched_sleep(10);
 	}

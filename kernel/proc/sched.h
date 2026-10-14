@@ -18,6 +18,10 @@ thread_t *sched_create_idle(uint32_t cpu_index);
 void sched_wake_thread(thread_t *thread);
 thread_t *proc_create_sibling_thread(process_t *proc, uint64_t user_rip, uint64_t user_rsp, void (*entry)(void));
 void sched_stop_threads(process_t *proc, thread_t *keep);
+/* Release an exited Linux process's VM only after every CPU has detached. */
+void sched_reap_exited_linux_vms(void);
+/* Caller holds the BKL; true when no CPU executes or has loaded proc's VM. */
+int sched_process_quiescent(const process_t *proc);
 int sched_futex_wait(uint64_t uaddr, uint64_t timeout_ticks);
 int sched_futex_wake(uint64_t uaddr, int n);
 int sched_futex_requeue(uint64_t uaddr, uint64_t uaddr2, int n);

@@ -121,18 +121,20 @@ static inline int user_range_prepare(addr_space_t *as, uint64_t addr,
 
 static inline int user_range_prepare_cur_r(const void *uaddr, uint64_t len) {
     process_t *proc = sched_current_process();
-    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+    if (!proc || proc->kind != PROCESS_USER) {
         return 1;
     }
+    if (!proc->addr_space) return 0;
     return user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)uaddr,
                               len, 0);
 }
 
 static inline int user_range_prepare_cur_w(void *uaddr, uint64_t len) {
     process_t *proc = sched_current_process();
-    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+    if (!proc || proc->kind != PROCESS_USER) {
         return 1;
     }
+    if (!proc->addr_space) return 0;
     return user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)uaddr,
                               len, 1);
 }
@@ -158,12 +160,13 @@ static inline int copy_to_user(void *udst, const void *ksrc, uint64_t len) {
     if (!udst || !ksrc) {
         return -1;
     }
-    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+    if (!proc || proc->kind != PROCESS_USER) {
         for (i = 0; i < len; i++) {
             d[i] = s[i];
         }
         return 0;
     }
+    if (!proc->addr_space) return -1;
     if (!user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)udst,
                             len, 1)) {
         return -1;
@@ -187,12 +190,13 @@ static inline int copy_from_user(void *kdst, const void *usrc, uint64_t len) {
     if (!kdst || !usrc) {
         return -1;
     }
-    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+    if (!proc || proc->kind != PROCESS_USER) {
         for (i = 0; i < len; i++) {
             d[i] = s[i];
         }
         return 0;
     }
+    if (!proc->addr_space) return -1;
     if (!user_range_prepare(proc->addr_space, (uint64_t)(uintptr_t)usrc,
                             len, 0)) {
         return -1;
@@ -217,12 +221,13 @@ static inline uint64_t strnlen_user(const char *usrc, uint64_t max) {
     if (max > UACCESS_MAX_STR) {
         max = UACCESS_MAX_STR;
     }
-    if (!proc || proc->kind != PROCESS_USER || !proc->addr_space) {
+    if (!proc || proc->kind != PROCESS_USER) {
         while (n < max && usrc[n]) {
             n++;
         }
         return (n < max) ? n : (uint64_t)-1;
     }
+    if (!proc->addr_space) return (uint64_t)-1;
     addr = (uint64_t)(uintptr_t)usrc;
     if (addr >= USER_HALF_END) {
         return (uint64_t)-1;

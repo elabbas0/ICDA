@@ -12,6 +12,8 @@ typedef struct {
     int32_t dy;
     uint8_t buttons;   
     int8_t  dz;
+    uint8_t absolute; /* uses former ABI padding; tablets bypass pointer ballistics */
+    uint8_t reserved;
 } mouse_event_t;
 
 void    mouse_init(void);

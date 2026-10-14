@@ -15,7 +15,9 @@
  * first-fit searches.  The heap grows at its top as needed. */
 
 #define KERNEL_HEAP_BASE  0xFFFFFFFF90000000ULL
-#define KERNEL_HEAP_LIMIT 0xFFFFFFFF98000000ULL
+/* Reserve 512 MiB of virtual space, populated only as needed. The static
+ * official Codex executable alone exceeds the former 128 MiB reservation. */
+#define KERNEL_HEAP_LIMIT 0xFFFFFFFFB0000000ULL
 #define HEAP_GROW_PAGES   16ULL
 #define HEAP_ALIGN        16ULL
 

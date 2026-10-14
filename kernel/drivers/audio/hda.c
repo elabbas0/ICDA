@@ -43,6 +43,7 @@
 #define HDA_VERB_GET_CONN_LIST     0xF02
 #define HDA_VERB_SET_SEL_INPUT     0x701
 #define HDA_VERB_SET_POWER_STATE   0x705
+#define HDA_VERB_GET_POWER_STATE   0xF05
 #define HDA_VERB_SET_CONV_STREAM   0x706
 #define HDA_VERB_SET_PIN_CONTROL   0x707
 #define HDA_VERB_SET_EAPD          0x70C
@@ -58,6 +59,7 @@
 #define HDA_WCAP_IN_AMP        (1U << 1)
 #define HDA_WCAP_OUT_AMP       (1U << 2)
 #define HDA_PINCAP_HP_DRV      (1U << 3)
+#define HDA_PINCAP_OUTPUT      (1U << 4)
 #define HDA_PINCAP_EAPD        (1U << 16)
 
 #define HDA_VERB_SET_AMP_GAIN_MUTE 0x300
@@ -105,7 +107,7 @@ static uint8_t hda_dac = 0;
 static int hda_present = 0;
 static uint16_t hda_configured_rate = 0;   /* codec path set up for this rate */
 static int hda_error = 0;
-static int hda_generic_fallback = 0;
+static int hda_amp_count;
 
 
 
@@ -192,6 +194,7 @@ static uint32_t hda_build_cmd(uint8_t codec, uint8_t nid, uint16_t verb, uint16_
            (uint32_t)parm;
 }
 
+#ifndef ICDA_HDA_CODEC_TEST
 static int hda_exec_verb(uint8_t codec, uint8_t nid, uint16_t verb, uint16_t parm, uint32_t *resp_out) {
     uint16_t status;
 
@@ -228,9 +231,25 @@ static int hda_exec_verb(uint8_t codec, uint8_t nid, uint16_t verb, uint16_t par
 
     return -1;
 }
+#endif
 
 static int hda_get_param(uint8_t nid, uint8_t param, uint32_t *resp_out) {
     return hda_exec_verb(hda_codec, nid, HDA_VERB_GET_PARAM, param, resp_out);
+}
+
+static int hda_power_up(uint8_t nid) {
+    if (hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0) != 0) return -1;
+    /* An acknowledged D0 request is not yet an awake codec. Wait for the
+     * actual state before querying its graph or opening its amplifiers. */
+    uint64_t deadline = tsc_us() + 20000;
+    do {
+        uint32_t state = 0;
+        if (hda_exec_verb(hda_codec, nid, HDA_VERB_GET_POWER_STATE, 0, &state) != 0 ||
+            (state & (1U << 8))) return -1;
+        if ((state & 0xF0U) == 0) return 0;
+        udelay(100);
+    } while (tsc_us() < deadline);
+    return -1;
 }
 
 static int hda_widget_type(uint8_t nid, uint8_t *type_out) {
@@ -356,57 +375,20 @@ static int hda_find_dac_path_from(uint8_t nid, uint8_t *visited, hda_path_t *pat
 
 static int hda_pin_priority(uint32_t cfg_default) {
     uint8_t device = (uint8_t)((cfg_default >> 20) & 0x0FU);
+    if (((cfg_default >> 30) & 3U) == 1U) return 0; /* physically disconnected */
     switch (device) {
         case 0x1: return 4; 
         case 0x2: return 3; 
         case 0x0: return 2; 
-        case 0x4: return 1; 
-        case 0x5: return 1; 
+        case 0x4: return 1;
+        case 0x5: return 1;
         default: return 0;
     }
 }
 
-static int hda_find_first_widget(uint8_t wanted_type, uint8_t *nid_out) {
-    uint32_t parm;
-    uint8_t start = 0;
-    uint8_t count = 0;
 
-    if (!nid_out) {
-        return -1;
-    }
-    if (hda_afg == 0) {
-        return -1;
-    }
-    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) {
-        return -1;
-    }
 
-    start = (uint8_t)((parm >> 16) & 0x7FU);
-    count = (uint8_t)(parm & 0x7FU);
-    for (uint8_t i = 0; i < count; i++) {
-        uint8_t nid = (uint8_t)(start + i);
-        uint8_t type = 0;
-        if (hda_widget_type(nid, &type) == 0 && type == wanted_type) {
-            *nid_out = nid;
-            return 0;
-        }
-    }
-    return -1;
-}
 
-static int hda_find_first_widget_global(uint8_t wanted_type, uint8_t *nid_out) {
-    if (!nid_out) {
-        return -1;
-    }
-    for (uint8_t nid = 1; nid < 0x40; nid++) {
-        uint8_t type = 0;
-        if (hda_widget_type(nid, &type) == 0 && type == wanted_type) {
-            *nid_out = nid;
-            return 0;
-        }
-    }
-    return -1;
-}
 
 static int hda_find_output_path(hda_path_t *out_path) {
     uint32_t parm;
@@ -415,6 +397,7 @@ static int hda_find_output_path(hda_path_t *out_path) {
     int best_score = -1;
     hda_path_t best_path = {0};
 
+    hda_afg = 0;
     if (hda_get_param(0, HDA_PARAM_NODE_COUNT, &parm) == 0) {
         start = (uint8_t)((parm >> 16) & 0x7FU);
         count = (uint8_t)(parm & 0x7FU);
@@ -437,15 +420,12 @@ static int hda_find_output_path(hda_path_t *out_path) {
         }
     }
     if (!hda_afg) {
-        hda_afg = 1;
-    }
-    if (!hda_afg) {
         return -1;
     }
 
     /* no function group reset: a real codec does not answer while it resets,
      * and the firmware has initialised it already */
-    if (hda_exec_verb(hda_codec, hda_afg, HDA_VERB_SET_POWER_STATE, 0, 0) != 0) {
+    if (hda_power_up(hda_afg) != 0) {
         return -1;
     }
 
@@ -459,6 +439,7 @@ static int hda_find_output_path(hda_path_t *out_path) {
         uint8_t nid = (uint8_t)(start + i);
         uint8_t type = 0;
         uint32_t cfg = 0;
+        uint32_t pin_caps = 0;
         int score;
         uint8_t visited[256] = {0};
         hda_path_t path = {0};
@@ -470,6 +451,8 @@ static int hda_find_output_path(hda_path_t *out_path) {
             cfg = 0;
         }
         score = hda_pin_priority(cfg);
+        if (!score || hda_get_param(nid, HDA_PARAM_PIN_CAP, &pin_caps) != 0 ||
+            !(pin_caps & HDA_PINCAP_OUTPUT)) continue;
         if (hda_find_dac_path_from(nid, visited, &path) != 0) {
             continue;
         }
@@ -482,34 +465,7 @@ static int hda_find_output_path(hda_path_t *out_path) {
         }
     }
 
-    if (best_score < 0) {
-        
-
-
-
-
-
-        uint8_t fallback_pin = 0;
-        uint8_t fallback_dac = 0;
-
-        if (hda_find_first_widget(HDA_WIDGET_PIN, &fallback_pin) != 0 &&
-            hda_find_first_widget_global(HDA_WIDGET_PIN, &fallback_pin) != 0) {
-            return -1;
-        }
-        if (hda_find_first_widget(HDA_WIDGET_OUTPUT, &fallback_dac) != 0 &&
-            hda_find_first_widget_global(HDA_WIDGET_OUTPUT, &fallback_dac) != 0) {
-            return -1;
-        }
-
-        for (uint8_t i = 0; i < (uint8_t)sizeof(best_path.nodes); i++) {
-            best_path.nodes[i] = 0;
-            best_path.select_index[i] = 0;
-        }
-        best_path.nodes[0] = fallback_pin;
-        best_path.nodes[1] = fallback_dac;
-        best_path.length = 2;
-        best_score = 0;
-    }
+    if (best_score < 0) return -1;
 
     *out_path = best_path;
     hda_pin = best_path.nodes[0];
@@ -519,8 +475,8 @@ static int hda_find_output_path(hda_path_t *out_path) {
 
 /* ---- amplifiers ---------------------------------------------------------------
  * A real codec comes out of reset with its amplifiers muted (QEMU's does not,
- * so sound worked there and nowhere else): every DAC and output pin gets its
- * output amp opened at 0 dB, and every mixer the input that comes from a DAC.
+ * so a working DMA stream alone does not establish audible playback): the
+ * selected routes get their output amps and their exact mixer inputs opened.
  * Other mixer inputs (analog loopback from the microphones) stay muted. */
 #define HDA_WCAP_IN_AMP        (1U << 1)
 #define HDA_WCAP_OUT_AMP       (1U << 2)
@@ -533,38 +489,10 @@ static uint32_t hda_amp_caps(uint8_t nid, uint32_t wcaps, uint8_t which) {
     return caps;
 }
 
-static int hda_open_amps(void) {
-    uint32_t parm = 0;
-    int opened = 0;
-    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) != 0) return 0;
-    for (uint8_t i = 0; i < (uint8_t)(parm & 0x7FU); i++) {
-        uint8_t nid = (uint8_t)(((parm >> 16) & 0x7FU) + i), type;
-        uint32_t wcaps;
-        if (hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, &wcaps) != 0) continue;
-        type = (uint8_t)((wcaps >> 20) & 0x0FU);
-        if ((wcaps & HDA_WCAP_OUT_AMP) && (type == HDA_WIDGET_OUTPUT || type == HDA_WIDGET_PIN ||
-                                           type == HDA_WIDGET_MIXER || type == HDA_WIDGET_SELECTOR)) {
-            uint32_t caps = hda_amp_caps(nid, wcaps, HDA_PARAM_AMP_OUT_CAP);
-            uint16_t gain = (uint16_t)(caps & 0x7FU);              /* the 0 dB step */
-            (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
-                                (uint16_t)(HDA_AMP_SET_OUTPUT | HDA_AMP_SET_BOTH | gain), 0);
-            opened++;
-        }
-        if ((wcaps & HDA_WCAP_IN_AMP) && (type == HDA_WIDGET_MIXER || type == HDA_WIDGET_SELECTOR)) {
-            uint8_t conns[32], n = 0;
-            uint32_t caps = hda_amp_caps(nid, wcaps, HDA_PARAM_AMP_IN_CAP);
-            uint16_t gain = (uint16_t)(caps & 0x7FU);
-            if (hda_get_connections(nid, conns, &n) != 0) continue;
-            for (uint8_t k = 0; k < n && k < 16; k++) {
-                uint8_t src_type;
-                if (hda_widget_type(conns[k], &src_type) != 0 || src_type != HDA_WIDGET_OUTPUT) continue;
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
-                                    (uint16_t)(HDA_AMP_SET_INPUT | HDA_AMP_SET_BOTH | ((uint16_t)k << 8) | gain), 0);
-                opened++;
-            }
-        }
-    }
-    return opened;
+static uint16_t hda_amp_zero_db(uint32_t caps) {
+    uint16_t offset = (uint16_t)(caps & 0x7FU);
+    uint16_t steps = (uint16_t)((caps >> 8) & 0x7FU);
+    return offset < steps ? offset : steps;
 }
 
 /* Realtek processing coefficients, through the vendor widget 0x20 */
@@ -601,47 +529,74 @@ static void hda_codec_finish(void) {
         hda_realtek_coef_clear(0x0a, 1U << 13);
         serial_write("hda: ALC293 speaker amplifier enabled\n");
     }
-    opened = hda_open_amps();
+    opened = hda_amp_count;
     hda_log_hex("hda: amplifiers opened ", (uint32_t)opened);
     hda_log_hex("hda: output pin / dac ", ((uint32_t)hda_pin << 8) | hda_dac);
 }
 
-static int hda_configure_codec_generic(uint16_t sample_rate) {
-    static const uint8_t candidate_dacs[] = { 0x02, 0x03, 0x04, 0x05, 0x06 };
-    static const uint8_t candidate_pins[] = { 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15 };
-    uint8_t stream_id = HDA_STREAM_TAG;
-    uint32_t pin_caps = 0;
-    uint8_t pin_ctl = HDA_PINCTL_OUT_ENABLE;
-
-    hda_format = hda_format_for_rate(sample_rate);
-
-    for (uint32_t i = 0; i < sizeof(candidate_dacs); i++) {
-        uint8_t nid = candidate_dacs[i];
-        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0);
-        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_FORMAT, hda_format, 0);
-        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CHANNELS, 1, 0);
-        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CONV_STREAM, (uint16_t)(stream_id << 4), 0);
+/* Configure only a traced pin-to-DAC route. Sweeping every selector with
+ * index zero afterwards disconnected nonzero routes, and unmuting only mixer
+ * inputs directly connected to a DAC missed routes through another selector. */
+static int hda_configure_route(const hda_path_t *path, uint16_t sample_rate,
+                               uint8_t selected[256]) {
+    uint8_t dac = path->nodes[path->length - 1U];
+    uint8_t pin = path->nodes[0];
+    uint32_t pin_caps = 0, cfg = 0;
+    for (uint8_t i = 0; i < path->length; i++) {
+        uint8_t nid = path->nodes[i];
+        uint32_t caps = 0;
+        if (hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, &caps) != 0) return -1;
+        uint8_t type = (uint8_t)((caps >> 20) & 0x0FU);
+        if (i + 1U < path->length && type != HDA_WIDGET_MIXER &&
+            selected[nid] != 0xFFU && selected[nid] != path->select_index[i]) return -1;
     }
-
-    for (uint32_t i = 0; i < sizeof(candidate_pins); i++) {
-        uint8_t nid = candidate_pins[i];
-        pin_ctl = HDA_PINCTL_OUT_ENABLE;
-        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0);
-        if (hda_get_param(nid, HDA_PARAM_PIN_CAP, &pin_caps) == 0) {
-            if (pin_caps & HDA_PINCAP_HP_DRV) {
-                pin_ctl |= HDA_PINCTL_HP_ENABLE;
+    for (uint8_t i = 0; i < path->length; i++) {
+        uint8_t nid = path->nodes[i], conns[32], n = 0;
+        uint32_t caps = 0;
+        if (hda_get_param(nid, HDA_PARAM_WIDGET_CAPS, &caps) != 0) return -1;
+        uint8_t type = (uint8_t)((caps >> 20) & 0x0FU);
+        if ((caps & (1U << 10)) && hda_power_up(nid) != 0) return -1;
+        if (i + 1U < path->length && type != HDA_WIDGET_MIXER) {
+            if (hda_get_connections(nid, conns, &n) != 0) return -1;
+            if (n > 1 && hda_exec_verb(hda_codec, nid, HDA_VERB_SET_SEL_INPUT,
+                                     path->select_index[i], 0) != 0) return -1;
+            selected[nid] = path->select_index[i];
+        }
+        if (caps & HDA_WCAP_OUT_AMP) {
+            uint16_t gain = hda_amp_zero_db(hda_amp_caps(nid, caps, HDA_PARAM_AMP_OUT_CAP));
+            if (hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                             HDA_AMP_SET_OUTPUT | HDA_AMP_SET_BOTH | gain, 0) != 0) return -1;
+            hda_amp_count++;
+        }
+        if (caps & HDA_WCAP_IN_AMP) {
+            uint32_t acaps = hda_amp_caps(nid, caps, HDA_PARAM_AMP_IN_CAP);
+            uint16_t gain = hda_amp_zero_db(acaps);
+            uint8_t index = i + 1U < path->length ? path->select_index[i] : 0;
+            if (index >= 16) return -1;
+            if (type == HDA_WIDGET_MIXER && (acaps & (1U << 31)) &&
+                hda_get_connections(nid, conns, &n) == 0) {
+                for (uint8_t k = 0; k < n && k < 16; k++) {
+                    if (k == index) continue;
+                    (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                                       HDA_AMP_SET_INPUT | HDA_AMP_SET_BOTH | ((uint16_t)k << 8) | 0x80, 0);
+                }
             }
-            if (pin_caps & HDA_PINCAP_EAPD) {
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_EAPD, HDA_EAPD_ENABLE, 0);
-            }
-            (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_PIN_CONTROL, pin_ctl, 0);
+            if (hda_exec_verb(hda_codec, nid, HDA_VERB_SET_AMP_GAIN_MUTE,
+                             HDA_AMP_SET_INPUT | HDA_AMP_SET_BOTH | ((uint16_t)index << 8) | gain, 0) != 0) return -1;
+            hda_amp_count++;
         }
     }
-
-    hda_dac = candidate_dacs[0];
-    hda_pin = candidate_pins[0];
-    hda_codec_finish();
-    return 0;
+    hda_format = hda_format_for_rate(sample_rate);
+    if (hda_exec_verb(hda_codec, dac, HDA_VERB_SET_FORMAT, hda_format, 0) != 0 ||
+        hda_exec_verb(hda_codec, dac, HDA_VERB_SET_CONV_STREAM, HDA_STREAM_TAG << 4, 0) != 0) return -1;
+    (void)hda_exec_verb(hda_codec, dac, HDA_VERB_SET_CHANNELS, 1, 0);
+    if (hda_get_param(pin, HDA_PARAM_PIN_CAP, &pin_caps) != 0) return -1;
+    (void)hda_exec_verb(hda_codec, pin, HDA_VERB_GET_CFG_DEFAULT, 0, &cfg);
+    uint8_t ctl = HDA_PINCTL_OUT_ENABLE;
+    if (((cfg >> 20) & 0xFU) == 2 && (pin_caps & HDA_PINCAP_HP_DRV)) ctl |= HDA_PINCTL_HP_ENABLE;
+    if ((pin_caps & HDA_PINCAP_EAPD) &&
+        hda_exec_verb(hda_codec, pin, HDA_VERB_SET_EAPD, HDA_EAPD_ENABLE, 0) != 0) return -1;
+    return hda_exec_verb(hda_codec, pin, HDA_VERB_SET_PIN_CONTROL, ctl, 0);
 }
 
 static uint16_t hda_format_for_rate(uint16_t sample_rate) {
@@ -663,88 +618,31 @@ static uint16_t hda_format_for_rate(uint16_t sample_rate) {
     return (uint16_t)(rate_bits | HDA_FMT_BITS_16 | HDA_FMT_CHAN(2));
 }
 
-static int hda_configure_codec_generic(uint16_t sample_rate);
 
 static int hda_configure_codec_path(uint16_t sample_rate) {
-    hda_path_t path = {0};
-    uint8_t conns[32];
-    uint8_t conn_count = 0;
-    uint8_t stream_id = HDA_STREAM_TAG;
-    uint32_t pin_caps = 0;
-    uint8_t pin_ctl = HDA_PINCTL_OUT_ENABLE;
-    uint32_t parm = 0;
-    uint8_t start = 0;
-    uint8_t count = 0;
-
-    if (hda_find_output_path(&path) != 0) {
-        return hda_configure_codec_generic(sample_rate);
-    }
-
-    for (uint8_t i = 0; i < path.length; i++) {
-        (void)hda_exec_verb(hda_codec, path.nodes[i], HDA_VERB_SET_POWER_STATE, 0, 0);
-    }
-
-    for (uint8_t i = 0; i + 1U < path.length; i++) {
-        if (hda_get_connections(path.nodes[i], conns, &conn_count) == 0 && conn_count > 1U) {
-            (void)hda_exec_verb(hda_codec, path.nodes[i], HDA_VERB_SET_SEL_INPUT, path.select_index[i], 0);
-        }
-    }
-
-    hda_format = hda_format_for_rate(sample_rate);
-    if (hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_FORMAT, hda_format, 0) != 0) {
-        /* This codec will not take the format on the node the search picked -
-         * common on real hardware.  The generic setup below sweeps every
-         * plausible DAC and pin instead, and never fails, so prefer it over
-         * writing the device off. */
-        serial_write("hda: dac refused the format, trying the generic path\n");
-        return hda_configure_codec_generic(sample_rate);
-    }
-    (void)hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_CHANNELS, 1, 0);
-    if (hda_exec_verb(hda_codec, hda_dac, HDA_VERB_SET_CONV_STREAM, (uint16_t)(stream_id << 4), 0) != 0) {
-        serial_write("hda: dac refused the converter, trying the generic path\n");
-        return hda_configure_codec_generic(sample_rate);
-    }
-    if (hda_get_param(hda_pin, HDA_PARAM_PIN_CAP, &pin_caps) == 0) {
-        if (pin_caps & HDA_PINCAP_HP_DRV) {
-            pin_ctl |= HDA_PINCTL_HP_ENABLE;
-        }
-        if (pin_caps & HDA_PINCAP_EAPD) {
-            (void)hda_exec_verb(hda_codec, hda_pin, HDA_VERB_SET_EAPD, HDA_EAPD_ENABLE, 0);
-        }
-    }
-    (void)hda_exec_verb(hda_codec, hda_pin, HDA_VERB_SET_PIN_CONTROL, pin_ctl, 0);
-
-    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &parm) == 0) {
-        start = (uint8_t)((parm >> 16) & 0x7FU);
-        count = (uint8_t)(parm & 0x7FU);
+    hda_path_t primary = {0};
+    uint8_t selected[256];
+    uint32_t nodes = 0;
+    for (unsigned i = 0; i < sizeof(selected); i++) selected[i] = 0xFFU;
+    hda_amp_count = 0;
+    if (hda_find_output_path(&primary) != 0 ||
+        hda_configure_route(&primary, sample_rate, selected) != 0) return -1;
+    /* Enable the other connected analog outputs without changing a selector
+     * that the primary speaker path depends on. Do not turn microphone pins
+     * into outputs or invent routes between unrelated widgets. */
+    if (hda_get_param(hda_afg, HDA_PARAM_NODE_COUNT, &nodes) == 0) {
+        uint8_t start = (uint8_t)((nodes >> 16) & 0x7FU);
+        uint8_t count = (uint8_t)(nodes & 0x7FU);
         for (uint8_t i = 0; i < count; i++) {
-            uint8_t nid = (uint8_t)(start + i);
-            uint8_t type = 0;
-            if (hda_widget_type(nid, &type) != 0) {
-                continue;
-            }
-
-            (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_POWER_STATE, 0, 0);
-
-            if (type == HDA_WIDGET_OUTPUT) {
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_FORMAT, hda_format, 0);
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CHANNELS, 1, 0);
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_CONV_STREAM, (uint16_t)(stream_id << 4), 0);
-            } else if (type == HDA_WIDGET_SELECTOR) {
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_SEL_INPUT, 0, 0);
-            } else if (type == HDA_WIDGET_PIN) {
-                uint8_t ctl = HDA_PINCTL_OUT_ENABLE;
-                uint32_t caps_local = 0;
-                if (hda_get_param(nid, HDA_PARAM_PIN_CAP, &caps_local) == 0) {
-                    if (caps_local & HDA_PINCAP_HP_DRV) {
-                        ctl |= HDA_PINCTL_HP_ENABLE;
-                    }
-                    if (caps_local & HDA_PINCAP_EAPD) {
-                        (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_EAPD, HDA_EAPD_ENABLE, 0);
-                    }
-                }
-                (void)hda_exec_verb(hda_codec, nid, HDA_VERB_SET_PIN_CONTROL, ctl, 0);
-            }
+            uint8_t pin = start + i, type = 0, visited[256] = {0};
+            uint32_t cfg = 0, caps = 0;
+            hda_path_t extra = {0};
+            if (pin == hda_pin || hda_widget_type(pin, &type) != 0 || type != HDA_WIDGET_PIN) continue;
+            if (hda_exec_verb(hda_codec, pin, HDA_VERB_GET_CFG_DEFAULT, 0, &cfg) != 0 ||
+                hda_pin_priority(cfg) < 2 || hda_get_param(pin, HDA_PARAM_PIN_CAP, &caps) != 0 ||
+                !(caps & HDA_PINCAP_OUTPUT)) continue;
+            if (hda_find_dac_path_from(pin, visited, &extra) == 0 && extra.length >= 2)
+                (void)hda_configure_route(&extra, sample_rate, selected);
         }
     }
     hda_codec_finish();
@@ -757,45 +655,21 @@ static uint32_t hda_output_stream_base(void) {
     return 0x80U + (0x20U * iss);
 }
 
-static int hda_wait_for_codec_graph(void) {
-    hda_path_t dummy = {0};
-    uint32_t probe_resp = 0;
-
-    
-
-
-
-
-    {
-        int alive = 0;
-        for (uint32_t retry = 0; retry < 8U; retry++) {
-            if (hda_exec_verb(hda_codec, 0, HDA_VERB_GET_PARAM,
-                              HDA_PARAM_NODE_COUNT, &probe_resp) == 0 &&
-                probe_resp != 0xFFFFFFFFU) {
-                alive = 1;
-                break;
-            }
-            for (uint32_t spin = 0; spin < 10000U; spin++) {
-                cpu_relax();
-            }
-        }
-        if (!alive) {
-            return -1;
-        }
+static int hda_choose_codec(uint16_t mask) {
+    int best = 0;
+    uint8_t chosen = 0xFFU, afg = 0, pin = 0, dac = 0;
+    for (uint8_t codec = 0; codec < 15; codec++) {
+        if (!(mask & (1U << codec))) continue;
+        hda_codec = codec;
+        hda_path_t path = {0};
+        uint32_t cfg = 0;
+        if (hda_find_output_path(&path) != 0) continue;
+        if (hda_exec_verb(codec, hda_pin, HDA_VERB_GET_CFG_DEFAULT, 0, &cfg) != 0) continue;
+        int score = hda_pin_priority(cfg);
+        if (score > best) { best = score; chosen = codec; afg = hda_afg; pin = hda_pin; dac = hda_dac; }
     }
-
-    
-
-
-    for (uint32_t attempt = 0; attempt < 4U; attempt++) {
-        if (hda_find_output_path(&dummy) == 0) {
-            return 0;
-        }
-        for (uint32_t spin = 0; spin < 10000U; spin++) {
-            cpu_relax();
-        }
-    }
-    return -1;
+    hda_codec = chosen; hda_afg = afg; hda_pin = pin; hda_dac = dac;
+    return chosen != 0xFFU ? 0 : -1;
 }
 
 static int hda_reset_stream(void) {
@@ -858,7 +732,7 @@ int hda_init(void) {
     hda_afg = 0;
     hda_pin = 0;
     hda_dac = 0;
-    hda_generic_fallback = 0;
+    hda_configured_rate = 0;
     hda_pci = pci_find_class(HDA_CLASS_CODE, HDA_SUBCLASS);
     if (!hda_pci) {
         
@@ -884,11 +758,13 @@ int hda_init(void) {
     if (wait_mask32(HDA_REG_GCTL, HDA_GCTL_CRST, 0) != 0) {
         return hda_fail(5, "hda: controller reset timeout, skipping\n");
     }
+    udelay(100); /* HDA requires at least 100 us with CRST deasserted. */
     mmio_write32(HDA_REG_GCTL, gctl | HDA_GCTL_CRST);
     if (wait_mask32(HDA_REG_GCTL, HDA_GCTL_CRST, HDA_GCTL_CRST) != 0) {
         return hda_fail(6, "hda: controller bring-up timeout, skipping\n");
     }
 
+    udelay(1000); /* allow codec link discovery after reset */
     mmio_write32(HDA_REG_INTCTL, 0);
     mmio_write32(HDA_REG_INTSTS, 0xFFFFFFFFU);
     statests = 0;
@@ -906,20 +782,10 @@ int hda_init(void) {
     }
     mmio_write16(HDA_REG_STATESTS, statests);
 
-    for (uint8_t codec = 0; codec < 15; codec++) {
-        if (statests & (1U << codec)) {
-            hda_codec = codec;
-            break;
-        }
-    }
-
-    if (hda_codec == 0xFFU || hda_codec > 14) {
-        return hda_fail(8, "hda: no usable codec, skipping\n");
-    }
-
-    if (hda_wait_for_codec_graph() != 0) {
-        hda_generic_fallback = 1;
-    }
+    if (hda_choose_codec(statests) != 0)
+        return hda_fail(8, "hda: no connected output codec, skipping\n");
+    if (((mmio_read16(HDA_REG_GCAP) >> 12) & 0x0FU) == 0)
+        return hda_fail(8, "hda: no output stream descriptor, skipping\n");
 
     hda_stream_base = hda_output_stream_base();
     hda_buffer_len = HDA_RING_BYTES;

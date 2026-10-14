@@ -77,6 +77,8 @@ typedef enum {
     IC_SYM_WIFI,
     IC_SYM_LOCK,
     IC_SYM_KEYBOARD,
+    IC_SYM_WIFI_WEAK,
+    IC_SYM_WIFI_MEDIUM,
     IC_SYM_COUNT
 } ic_symbol_t;
 

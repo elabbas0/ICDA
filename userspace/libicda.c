@@ -1324,7 +1324,9 @@ void ic_sound(const char *name) {
 }
 
 void ic_sound_always(const char *name) {
-    if (name && ic_sound_enabled(name)) ic_sound_play(name);
+    /* Explicit feedback for sound switches and the volume preview remains
+     * audible when automatic interface effects are disabled. */
+    if (name) ic_sound_play(name);
 }
 
 void ic_sound_any(const char *name, int variants) {

@@ -196,6 +196,8 @@ typedef struct {
     int32_t  dy;
     uint8_t  buttons;    
     int8_t   dz;
+    uint8_t  absolute;
+    uint8_t  reserved;
 } syscall_mouse_event_t;
 
 void syscall_init(void);

@@ -242,7 +242,7 @@ static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
         uint64_t want = count * PAGE;
         if (first * PAGE + want > size) want = size - first * PAGE;
         uint64_t r0 = tsc_read();
-        if (vfs_node_read_at(n, first * PAGE, buf, want) < 0) {
+        if ((uint64_t)vfs_node_read_at(n, first * PAGE, buf, want) != want) {
             kfree(buf);
             return 0;
         }
@@ -379,34 +379,44 @@ static int populate_page(process_t *p, lx_vma_t *v, uint64_t va) {
  * Anything unexpected - the frames are not available, the read is short, a
  * page is already mapped - falls back to filling the pages one at a time. */
 static void populate_run(process_t *p, lx_vma_t *v, uint64_t from, uint64_t to, uint64_t skip) {
-    uint64_t va[FAULT_AROUND], n = 0, off, phys, size, want, i;
-    uint64_t flags = (v->flags & LXVM_SHARED) ? pte_flags(v->prot)
-                : (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
+    uint64_t a = from, size;
+    uint64_t flags = (v->prot & PROT_WRITE) ? (VMM_FLAGS_USER_RO | VMM_COW) : pte_flags(v->prot);
 
     if (!v->node) return;
-    for (uint64_t a = from; a < to && n < FAULT_AROUND; a += PAGE)
-        if (a != skip && !vmm_virt_to_phys(p->addr_space, a)) va[n++] = a;
-    if (n < 2) return;
-
     size = vfs_node_size(v->node);
-    off = v->off + (from - v->start);
-    if (off >= size) return;
-    want = n * PAGE;
-    if (want > size - off) want = size - off;
-    /* a tail that does not fill whole pages is left to the one-at-a-time path */
-    n = want / PAGE;
-    if (n < 2) return;
-
-    phys = pmm_alloc_contiguous_aligned_below(n, PAGE, ~0ULL);
-    if (!phys) return;
-    if ((uint64_t)vfs_node_read_at(v->node, off, (char *)PHYS_TO_VIRT(phys), n * PAGE) != n * PAGE) {
-        pmm_free_range(phys, n);
+    if (v->flags & LXVM_SHARED) {
+        /* Shared mappings must use the page cache's frames, including when
+         * another mapping already has one of the same file pages. */
+        for (; a < to; a += PAGE)
+            if (a != skip && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
         return;
     }
-    for (i = 0; i < n; i++) {
-        if (vmm_map_page(p->addr_space, va[i], phys + i * PAGE, flags) != 0) {
-            pmm_free_range(phys + (i + 1) * PAGE, n - i - 1);
-            return;
+    while (a < to) {
+        uint64_t begin, n = 0, off, phys;
+        if (a == skip || vmm_virt_to_phys(p->addr_space, a)) { a += PAGE; continue; }
+        begin = a;
+        /* A skipped or already mapped page ends the run. Packing sparse
+         * virtual addresses into one read shifts every subsequent file page. */
+        while (a < to && n < FAULT_AROUND && a != skip && !vmm_virt_to_phys(p->addr_space, a)) {
+            a += PAGE;
+            n++;
+        }
+        off = v->off + (begin - v->start);
+        if (off >= size) continue;
+        if (n > (size - off) / PAGE) n = (size - off) / PAGE;
+        /* Single pages and partial tails are filled on demand. */
+        if (n < 2) continue;
+        phys = pmm_alloc_contiguous_aligned_below(n, PAGE, ~0ULL);
+        if (!phys) continue;
+        if ((uint64_t)vfs_node_read_at(v->node, off, (char *)PHYS_TO_VIRT(phys), n * PAGE) != n * PAGE) {
+            pmm_free_range(phys, n);
+            continue;
+        }
+        for (uint64_t i = 0; i < n; i++) {
+            if (vmm_map_page(p->addr_space, begin + i * PAGE, phys + i * PAGE, flags) != 0) {
+                pmm_free_range(phys + i * PAGE, n - i);
+                break;
+            }
         }
     }
 }

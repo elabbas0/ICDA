@@ -732,6 +732,31 @@ http_req_t *http_request(const char *method, const char *url, const char *conten
     return 0;
 }
 
+http_req_t *http_open_follow(const char *url, const char *extra_headers) {
+    char current[URL_CAP];
+    snprintf(current, sizeof(current), "%s", url);
+    for (int hop = 0; hop < 8; hop++) {
+        http_req_t *r = http_open(current, "GET", extra_headers);
+        uint64_t deadline = icda_ticks() + 3000;
+        if (!r) return 0;
+        while (r->state == HTTP_PENDING && !r->headers_done && icda_ticks() < deadline)
+            http_poll(r, 200);
+        if (!r->headers_done && r->state == HTTP_PENDING) fail(r, "Response headers took too long");
+        if (r->state != HTTP_ERROR && r->headers_done && r->status >= 300 && r->status < 400 && r->location[0]) {
+            char next[URL_CAP];
+            if (url_resolve(current, r->location, next, sizeof(next)) != 0) {
+                fail(r, "Invalid download redirect");
+                return r;
+            }
+            http_free(r);
+            snprintf(current, sizeof(current), "%s", next);
+            continue;
+        }
+        return r;
+    }
+    return 0;
+}
+
 http_req_t *http_get(const char *url, char *final_url, size_t final_cap) {
     return http_request("GET", url, 0, 0, 0, final_url, final_cap);
 }

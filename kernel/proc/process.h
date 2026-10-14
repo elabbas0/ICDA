@@ -136,6 +136,7 @@ typedef struct thread {
     int              event_wait;    /* in sched_event_wait */
     int              nwait_keys;    /* what it waits on (sched_wait_on); -1: anything */
     const void      *wait_keys[16];
+    uint64_t         lx_sigmask;    /* Linux masks belong to threads, inherited by clone/fork */
 } thread_t;
 
 #endif

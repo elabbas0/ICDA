@@ -96,7 +96,6 @@ struct lx_state {
     lx_file_t     *fd[LX_FD_MAX];
     uint8_t        cloexec[LX_FD_MAX];
     lx_sigaction_t sa[LX_NSIG];
-    uint64_t       sigmask;
     uint64_t       pending;
     uint32_t       umask;
     int            term_sig;
@@ -122,7 +121,6 @@ typedef struct {
 } lx_tty_t;
 
 static lx_tty_t ttys[PTY_MAX + 1];
-static uint64_t cur_nr;
 static uint64_t rng_state = 0x2545F4914F6CDD1DULL;
 static uint64_t boot_epoch;
 
@@ -303,6 +301,11 @@ int lxi_interrupted(void) {
 
 static int file_ready(lx_file_t *f, int want_write);
 int lxi_file_ready(lx_file_t *f, int want_write) { return file_ready(f, want_write); }
+void lxi_poll_observe(lx_file_t *f) {
+    int ready = file_ready(f, 1);
+    if (!(ready & 1)) f->poll_in_reset++;
+    if (!(ready & 4)) f->poll_out_reset++;
+}
 
 uint64_t lxi_now_ns(void) { return lx_mono_ns(); }
 uint64_t lxi_realtime_ns(void) { return lx_realtime_ns(); }
@@ -314,14 +317,15 @@ void lx_proc_exit(process_t *proc) {
         if (s->fd[i]) fd_close(s, i);
     }
     if (proc->parent && proc->parent->lx && proc->parent->linux_personality) {
-        proc->parent->lx->pending |= 1ULL << (SIGCHLD - 1);
+        (void)lx_signal(proc->parent, SIGCHLD);
     }
 }
 
 /* ---- signals: queueing ------------------------------------------------- */
 
 static int signal_pending(struct lx_state *s) {
-    return s && (s->pending & ~s->sigmask) != 0;
+    thread_t *t = sched_current_thread();
+    return s && t && (s->pending & ~t->lx_sigmask) != 0;
 }
 
 int lx_signal(process_t *proc, int sig) {
@@ -338,9 +342,18 @@ int lx_signal(process_t *proc, int sig) {
         return sched_kill_process(proc->pid, 128 + SIGKILL);
     }
     s->pending |= 1ULL << (sig - 1);
-    if (proc->main_thread && proc->main_thread->state == THREAD_BLOCKED) {
-        sched_wake_thread(proc->main_thread);
-    }
+    /* A process-directed signal must reach a thread that has not blocked it.
+     * In particular, runtimes often block SIGCHLD in their main thread and
+     * handle it on a reactor thread sleeping in epoll or a futex. */
+    thread_t *start = sched_current_thread(), *t = start;
+    if (start) do {
+        if (t->owner == proc && t->state == THREAD_BLOCKED &&
+            !(t->lx_sigmask & (1ULL << (sig - 1)))) {
+            sched_wake_thread(t);
+            break;
+        }
+        t = t->next;
+    } while (t && t != start);
     return 0;
 }
 
@@ -1361,7 +1374,7 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     return (uint64_t)(int64_t)fd;
 }
 
-static uint64_t file_read(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *offp) {
+static uint64_t file_read_raw(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *offp) {
     if ((f->flags & O_ACCMODE) == O_WRONLY) return ERR(EBADF);
     if (count == 0) return 0;
     if (!user_range_prepare_cur_w(ubuf, count)) return ERR(EFAULT);
@@ -1420,7 +1433,7 @@ static uint64_t file_read(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *of
     return ERR(EBADF);
 }
 
-static uint64_t file_write(lx_file_t *f, const char *ubuf, uint64_t count, uint64_t *offp) {
+static uint64_t file_write_raw(lx_file_t *f, const char *ubuf, uint64_t count, uint64_t *offp) {
     if ((f->flags & O_ACCMODE) == 0 && f->kind == LXF_VFS) return ERR(EBADF);
     if (count == 0) return 0;
     if (!user_range_prepare_cur(ubuf, count)) return ERR(EFAULT);
@@ -1451,6 +1464,18 @@ static uint64_t file_write(lx_file_t *f, const char *ubuf, uint64_t count, uint6
         }
     }
     return ERR(EBADF);
+}
+
+static uint64_t file_read(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *offp) {
+    uint64_t r = file_read_raw(f, ubuf, count, offp);
+    lxi_poll_observe(f);
+    return r;
+}
+
+static uint64_t file_write(lx_file_t *f, const char *ubuf, uint64_t count, uint64_t *offp) {
+    uint64_t r = file_write_raw(f, ubuf, count, offp);
+    lxi_poll_observe(f);
+    return r;
 }
 
 static uint64_t sys_rw(int64_t fd, char *ubuf, uint64_t count, int write) {
@@ -1687,10 +1712,21 @@ static uint64_t sys_fchdir(int64_t fd) {
 }
 
 static uint64_t sys_mkdirat(int64_t dirfd, const char *upath) {
-    char path[LX_PATH_MAX];
+    char path[LX_PATH_MAX], parent[LX_PATH_MAX];
     int64_t rc = at_path(dirfd, upath, path);
     if (rc < 0) return ERR(-rc);
+    uint64_t n = kstrlen(path);
+    while (n > 1 && path[n - 1] == '/') path[--n] = 0;
     if (vfs_resolve(cwd_node(), path)) return ERR(EEXIST);
+    kstrcpy(parent, path, sizeof(parent));
+    while (n > 1 && parent[n - 1] != '/') n--;
+    parent[n > 1 ? n - 1 : 1] = 0;
+    vfs_node_t *dir = vfs_resolve(cwd_node(), parent);
+    /* Rust's create_dir_all retries the parent only on ENOENT. Reporting
+     * EACCES for every VFS failure prevented Codex from creating its state
+     * directories even inside a writable HOME. */
+    if (!dir) return ERR(ENOENT);
+    if (vfs_node_type(dir) != VFS_NODE_DIR) return ERR(ENOTDIR);
     return vfs_mkdir(cwd_node(), path) == 0 ? 0 : ERR(EACCES);
 }
 
@@ -2051,16 +2087,16 @@ static uint64_t sys_rt_sigaction(uint64_t sig, const lx_sigaction_t *uact, lx_si
 }
 
 static uint64_t sys_rt_sigprocmask(uint64_t how, const uint64_t *uset, uint64_t *uold) {
-    struct lx_state *s = lx_get(sched_current_process());
+    thread_t *t = sched_current_thread();
     uint64_t set;
-    if (uold && copy_to_user(uold, &s->sigmask, 8) != 0) return ERR(EFAULT);
+    if (uold && copy_to_user(uold, &t->lx_sigmask, 8) != 0) return ERR(EFAULT);
     if (!uset) return 0;
     if (copy_from_user(&set, uset, 8) != 0) return ERR(EFAULT);
-    if (how == 0) s->sigmask |= set;
-    else if (how == 1) s->sigmask &= ~set;
-    else if (how == 2) s->sigmask = set;
+    if (how == 0) t->lx_sigmask |= set;
+    else if (how == 1) t->lx_sigmask &= ~set;
+    else if (how == 2) t->lx_sigmask = set;
     else return ERR(EINVAL);
-    s->sigmask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    t->lx_sigmask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
     return 0;
 }
 
@@ -2112,6 +2148,7 @@ static int build_sigframe(struct registers *regs, int sig, lx_sigaction_t *sa, u
 
 static uint64_t sys_rt_sigreturn(struct registers *regs) {
     struct lx_state *s = lx_get(sched_current_process());
+    thread_t *t = sched_current_thread();
     uint64_t uc = regs->rsp, g[32], mask;
     if (copy_from_user(g, (const void *)(uc + 40), sizeof(g)) != 0 ||
         copy_from_user(&mask, (const void *)(uc + 296), 8) != 0 || g[16] >= 0x0000800000000000ULL) {
@@ -2127,7 +2164,7 @@ static uint64_t sys_rt_sigreturn(struct registers *regs) {
     regs->rdi = g[8]; regs->rsi = g[9]; regs->rbp = g[10]; regs->rbx = g[11];
     regs->rdx = g[12]; regs->rcx = g[14]; regs->rsp = g[15]; regs->rip = g[16];
     regs->rflags = (g[17] & 0xCD5ULL) | 0x202ULL;
-    s->sigmask = mask & ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    t->lx_sigmask = mask & ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
     return g[13];
 }
 
@@ -2138,7 +2175,7 @@ void lx_after_syscall(struct registers *regs) {
     if (!p || !t || !p->linux_personality || !p->lx || t->user_return_pending) return;
     s = p->lx;
     for (;;) {
-        uint64_t ready = s->pending & ~s->sigmask;
+        uint64_t ready = s->pending & ~t->lx_sigmask;
         int sig = 0;
         lx_sigaction_t *sa;
         uint64_t old_mask;
@@ -2168,17 +2205,19 @@ void lx_after_syscall(struct registers *regs) {
             return;
         }
         if ((int64_t)regs->rax == -EINTR && (sa->flags & SA_RESTART)) {
-            regs->rax = cur_nr;
+            /* lx_syscall records the completed call on this thread before
+             * signal delivery. Other threads may have run while it slept. */
+            regs->rax = t->lx_last_nr[(t->lx_last_pos + 15) & 15];
             regs->rip -= 2;
         }
-        old_mask = s->sigmask;
+        old_mask = t->lx_sigmask;
         if (build_sigframe(regs, sig, sa, old_mask) != 0) {
             s->term_sig = 11;
             user_request_exit_to_kernel(128 + 11);
             return;
         }
-        s->sigmask |= sa->mask;
-        if (!(sa->flags & SA_NODEFER)) s->sigmask |= 1ULL << (sig - 1);
+        t->lx_sigmask |= sa->mask;
+        if (!(sa->flags & SA_NODEFER)) t->lx_sigmask |= 1ULL << (sig - 1);
         if (sa->flags & SA_RESETHAND) sa->handler = 0;
         return;
     }
@@ -2265,6 +2304,7 @@ static uint64_t sys_clone_thread(struct registers *regs, uint64_t flags, uint64_
         return ERR(EAGAIN);
     }
     t->lx_frame = frame;
+    t->lx_sigmask = sched_current_thread()->lx_sigmask;
     t->fs_base = (flags & 0x80000) ? tls : cpu_fs_base();           /* CLONE_SETTLS */
     t->clear_tid = (flags & 0x200000) ? child_tid : 0;              /* CLONE_CHILD_CLEARTID */
     tid = (int32_t)lx_tid(t);
@@ -2328,8 +2368,9 @@ static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out) {
     if (ts[1] >= 1000000000ULL) return ERR(EINVAL);
     when_ns = ts[0] * 1000000000ULL + ts[1];
     if (abs) {
-        uint64_t ticks = sched_ticks();
-        now_ns = (realtime ? now_epoch() * 1000000000ULL : (ticks / 100) * 1000000000ULL) + (ticks % 100) * 10000000ULL;
+        /* Absolute deadlines use the same clock as clock_gettime/vDSO.
+         * Raw TSC-based monotonic time need not start at the PIT tick zero. */
+        now_ns = realtime ? lx_realtime_ns() : lx_mono_ns();
         if (when_ns <= now_ns) return ERR(ETIMEDOUT);
         when_ns -= now_ns;
     }
@@ -2482,6 +2523,7 @@ static uint64_t sys_fork(struct registers *regs, uint64_t flags, uint64_t new_sp
         return ERR(ENOMEM);
     }
     thread->lx_frame = frame;
+    thread->lx_sigmask = sched_current_thread()->lx_sigmask;
     thread->fs_base = cpu_fs_base();
     if ((flags & 0x01000000) && child_tid) { /* CLONE_CHILD_SETTID */
         uint64_t phys;
@@ -2681,7 +2723,7 @@ static uint64_t sys_wait4(int64_t pid, int32_t *ustatus, uint64_t options) {
             if (pid == 0 && q->process_group_id != self->process_group_id) continue;
             if (pid < -1 && q->process_group_id != (uint64_t)(-pid)) continue;
             found = 1;
-            if (q->state == PROCESS_EXITED) {
+            if (q->state == PROCESS_EXITED && sched_process_quiescent(q)) {
                 int32_t status;
                 uint64_t cpid = q->pid;
                 if (q->lx && q->lx->term_sig) status = q->lx->term_sig & 0x7F;
@@ -2741,7 +2783,6 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
     uint64_t a0 = regs->rdi, a1 = regs->rsi, a2 = regs->rdx;
     uint64_t a3 = regs->r10, a4 = regs->r8, a5 = regs->r9;
     if (!p || !lx_get(p)) return ERR(ENOMEM);
-    cur_nr = nr;
     switch (nr) {
         case 0: return sys_rw((int64_t)a0, (char *)a1, a2, 0);
         case 1: return sys_rw((int64_t)a0, (char *)a1, a2, 1);
@@ -3104,6 +3145,10 @@ static void lx_dump(void) {
             serial_write(p->name);
             serial_write(" ");
             serial_write(t->state < 5 ? st[t->state] : "?");
+            serial_write(" sigmask ");
+            dump_num((int64_t)t->lx_sigmask);
+            serial_write(" pending ");
+            dump_num((int64_t)(p->lx ? p->lx->pending : 0));
             if (t->state == THREAD_BLOCKED) {
                 serial_write(" why ");
                 dump_num((int64_t)t->block_reason);
@@ -3133,11 +3178,12 @@ static void lx_dump(void) {
  * where it happened; the program's handler for the signal runs if it has one. */
 int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     process_t *p = sched_current_process();
+    thread_t *t = sched_current_thread();
     struct lx_state *s;
     lx_sigaction_t *sa;
     char where[128];
     (void)addr;
-    if (!p) return 0;
+    if (!p || !t) return 0;
     lxvm_describe(p, regs->rip, where, sizeof(where));
     serial_write("lx: ");
     serial_write(p->name);
@@ -3151,10 +3197,10 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     lx_report_stack(p, regs->rsp);
     if (!p->linux_personality || !(s = p->lx)) return 0;
     sa = &s->sa[sig];
-    if (sa->handler <= 1 || (s->sigmask & (1ULL << (sig - 1)))) return 0;
-    if (build_sigframe(regs, sig, sa, s->sigmask) != 0) return 0;
-    s->sigmask |= sa->mask;
-    if (!(sa->flags & SA_NODEFER)) s->sigmask |= 1ULL << (sig - 1);
+    if (sa->handler <= 1 || (t->lx_sigmask & (1ULL << (sig - 1)))) return 0;
+    if (build_sigframe(regs, sig, sa, t->lx_sigmask) != 0) return 0;
+    t->lx_sigmask |= sa->mask;
+    if (!(sa->flags & SA_NODEFER)) t->lx_sigmask |= 1ULL << (sig - 1);
     if (sa->flags & SA_RESETHAND) sa->handler = 0;
     return 1;
 }

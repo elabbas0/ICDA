@@ -257,6 +257,8 @@ void mouse_irq(struct registers *regs) {
             mouse_buf[mouse_buf_head].dy      = dy;
             mouse_buf[mouse_buf_head].buttons = mouse_btn;
             mouse_buf[mouse_buf_head].dz      = (int8_t)dz;
+            mouse_buf[mouse_buf_head].absolute = 0;
+            mouse_buf[mouse_buf_head].reserved = 0;
             mouse_buf_head = next;
             
 
@@ -279,7 +281,7 @@ uint8_t mouse_buttons(void) { return mouse_btn; }
 
 /* Movement from another pointing device (a USB mouse): the same queue and
  * position as the PS/2 mouse, so everything above sees one mouse. */
-void mouse_inject(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons) {
+static void mouse_enqueue(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons, int absolute) {
     uint32_t next = (mouse_buf_head + 1) % MOUSE_BUF_CAP;
     mouse_x += dx;
     mouse_y += dy;
@@ -295,13 +297,19 @@ void mouse_inject(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons) {
     mouse_buf[mouse_buf_head].dy      = dy;
     mouse_buf[mouse_buf_head].buttons = mouse_btn;
     mouse_buf[mouse_buf_head].dz      = (int8_t)dz;
+    mouse_buf[mouse_buf_head].absolute = (uint8_t)absolute;
+    mouse_buf[mouse_buf_head].reserved = 0;
     mouse_buf_head = next;
     sched_wake_input_waiters();
+}
+
+void mouse_inject(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons) {
+    mouse_enqueue(dx, dy, dz, buttons, 0);
 }
 
 /* An absolute position (a USB tablet: QEMU's pointer), 0..32767 per axis */
 void mouse_inject_abs(int32_t x, int32_t y, int32_t dz, uint8_t buttons) {
     int32_t nx = screen_w > 0 ? (int32_t)((int64_t)x * screen_w / 32768) : x;
     int32_t ny = screen_h > 0 ? (int32_t)((int64_t)y * screen_h / 32768) : y;
-    mouse_inject(nx - mouse_x, ny - mouse_y, dz, buttons);
+    mouse_enqueue(nx - mouse_x, ny - mouse_y, dz, buttons, 1);
 }

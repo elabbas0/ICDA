@@ -36,11 +36,13 @@ static std::string read_file(const char *path) {
 
 static void write_reply(unsigned long seq, const char *state, const std::string &text) {
     std::string out = std::to_string(seq) + " " + state + "\n" + text;
-    std::string tmp = std::string(REPLY);
+    std::string tmp = std::string(REPLY) + ".tmp";
     FILE *f = fopen(tmp.c_str(), "wb");
     if (!f) return;
-    fwrite(out.data(), 1, out.size(), f);
-    fclose(f);
+    bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
+    if (fclose(f) != 0) ok = false;
+    if (ok && rename(tmp.c_str(), REPLY) != 0)
+        fprintf(stderr, "icda-llm: cannot publish reply\n");
 }
 
 static void batch_set_tokens(llama_batch_ext *batch, const llama_token *tokens, int32_t n_tokens, llama_pos pos_0) {
@@ -100,8 +102,8 @@ static bool model_fits(const std::string &path, int n_ctx, std::string &why) {
         char buf[320];
         snprintf(buf, sizeof(buf),
                  "This model needs about %llu MB of memory and this computer has "
-                 "%llu MB free. Close some windows, or put a smaller model in "
-                 "icda-models.",
+                 "%llu MB free. Close some windows, or choose a smaller model in "
+                 "Settings > Assistant.",
                  (unsigned long long)((need + 1023) / 1024),
                  (unsigned long long)(kb / 1024));
         why = buf;
@@ -118,7 +120,7 @@ int main(int argc, char **argv) {
         freopen("/tmp/ai/llm.log", "a", stdout);
     }
     std::string model_path;
-    int n_ctx = 4096, threads = 0;
+    int n_ctx = 2048, threads = 1;
     for (int i = 1; i + 1 < argc; i++) {
         if (!strcmp(argv[i], "-m")) model_path = argv[++i];
         else if (!strcmp(argv[i], "-c")) n_ctx = atoi(argv[++i]);
@@ -128,6 +130,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: icda-llm -m model.gguf [-t threads] [-c context]\n");
         return 1;
     }
+    if (n_ctx < 512 || n_ctx > 8192 || threads < 1 || threads > 32) {
+        write_reply(0, "error", "Invalid context size or thread count");
+        return 1;
+    }
+    write_reply(0, "loading", "Loading the local model");
     {
         // say why before loading, not by dying part way through it
         std::string why;
@@ -168,15 +175,15 @@ int main(int argc, char **argv) {
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     llama_batch_ext *batch = llama_batch_ext_init(ctx);
+    if (!batch) {
+        write_reply(0, "error", "Could not allocate the local model's batch");
+        return 1;
+    }
     const char *tmpl = llama_model_chat_template(model, nullptr);
     fprintf(stderr, "icda-llm: ready (%s)\n", model_path.c_str());
 
     unsigned long done_seq = 0;
-    {   // a request already answered (by an earlier start) is not news; one that
-        // arrived while the model loaded is - assistantd asks right after starting us
-        std::string r = read_file(REPLY);
-        done_seq = strtoul(r.c_str(), nullptr, 10);
-    }
+    write_reply(0, "ready", "");
     for (;;) {
         std::string req = read_file(REQ);
         unsigned long seq = strtoul(req.c_str(), nullptr, 10);
@@ -212,7 +219,12 @@ int main(int argc, char **argv) {
 
         // every request starts from an empty context: the conversation comes with it
         llama_memory_clear(llama_get_memory(ctx), true);
+        llama_sampler_reset(smpl);
         int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), NULL, 0, true, true);
+        if (n_prompt <= 0 || n_prompt + 64 > (int)llama_n_ctx(ctx)) {
+            write_reply(seq, "error", "The question and conversation are too long for the local model");
+            continue;
+        }
         std::vector<llama_token> toks(n_prompt);
         if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), toks.data(), toks.size(), true, true) < 0 ||
             n_prompt + 64 > (int)llama_n_ctx(ctx)) {
@@ -240,11 +252,20 @@ int main(int argc, char **argv) {
             if (llama_vocab_is_eog(vocab, tok)) break;
             char buf[256];
             int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, true);
-            if (n > 0) out.append(buf, n);
+            if (n < 0) {
+                std::vector<char> piece(-n);
+                n = llama_token_to_piece(vocab, tok, piece.data(), piece.size(), 0, true);
+                if (n > 0) out.append(piece.data(), n);
+            } else if (n > 0) out.append(buf, n);
             if (produced % 3 == 0) write_reply(seq, "answer", visible(out));
             tokens = &tok;
             n_tokens = 1;
         }
-        write_reply(seq, failed ? "error" : "done", failed ? std::string("The local model failed while answering") : visible(out));
+        std::string result = visible(out);
+        if (result.find_first_not_of(" \r\n\t") == std::string::npos) {
+            write_reply(seq, "error", "The model produced no visible answer. Choose an instruct model in Settings > Assistant.");
+        } else {
+            write_reply(seq, failed ? "error" : "done", failed ? std::string("The local model failed while answering") : result);
+        }
     }
 }

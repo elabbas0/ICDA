@@ -11,7 +11,7 @@
  * same file, and picks up a change on its next question.
  *
  * A local provider is one served by icda-llm on this machine ("file:auto"
- * finds the first .gguf in an icda-models folder on any drive); a cloud one
+ * selects the Model filename in ICDA's linux/usr/share/icda/models); a cloud one
  * is any OpenAI-compatible endpoint. */
 
 #include "settings_ai.h"
@@ -74,7 +74,7 @@ static const char *const field_label[F_COUNT] = { "Name", "Address", "Model", "A
 static const char *const field_hint[F_COUNT] = {
     "How it appears while it answers",
     "file:auto  or  https://host/v1",
-    "Model name the server expects",
+    "Local: click to choose an installed GGUF; cloud: server model name",
     "Leave empty for a local model"
 };
 
@@ -103,13 +103,16 @@ static struct {
 
 /* ---- the file ------------------------------------------------------------ */
 
-static int is_word(char c) { return c != ' ' && c != '\t' && c != '\n' && c != '\r'; }
+static int is_word(char c) { return c && c != ' ' && c != '\t' && c != '\n' && c != '\r'; }
 
 static int next_word(const char **p, char *out, int cap) {
     int n = 0;
     while (**p == ' ' || **p == '\t') (*p)++;
     if (!is_word(**p)) return 0;
-    while (is_word(**p) && n + 1 < cap) out[n++] = *(*p)++;
+    while (is_word(**p)) {
+        if (n + 1 < cap) out[n++] = **p;
+        (*p)++;
+    }
     out[n] = 0;
     return n;
 }
@@ -169,8 +172,8 @@ static int ai_save(void) {
     n += snprintf_(out + n, sizeof(out) - (size_t)n,
                   "# ICDA assistant: the models it asks, tried in order.\n"
                   "#   <tier> <name> <base url> <model> <api key or ->\n"
-                  "# local answers daily questions (file:auto finds the first .gguf model\n"
-                  "# in an icda-models folder on any drive); cloud answers the complex ones.\n"
+                  "# file:auto selects the Model filename in ICDA's linux/usr/share/icda/models.\n"
+                  "# cloud answers the complex questions.\n"
                   "# Edited in Settings > Assistant.\n");
     for (int i = 0; i < A.count && n < (int)sizeof(out) - 200; i++) {
         const ai_provider_t *v = &A.p[i];
@@ -198,6 +201,53 @@ static ai_provider_t *cur(void) {
     return A.p[A.sel].used ? &A.p[A.sel] : 0;
 }
 
+/* Cycle actual installed filenames, including bundles on an ICDA partition. */
+static void choose_local_model(void) {
+    ai_provider_t *v = cur();
+    static char list[8192];
+    char dir[160], marker[128], first[AI_MODEL] = "";
+    icda_stat_t stat;
+    int after = 0;
+    if (!v) return;
+    ic_strcpy(dir, "/linux/usr/share/icda/models", sizeof(dir));
+    long n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
+    if (n <= 0) for (int i = 0; i < 32; i++) {
+        snprintf_(marker, sizeof(marker), "/volumes/fat32-");
+        char number[12];
+        ic_uint_to_str((uint64_t)i, number, sizeof(number));
+        ic_strlcat(marker, number, sizeof(marker));
+        ic_strlcat(marker, "/ICDACFG.TXT", sizeof(marker));
+        if ((long)icda_stat(marker, &stat) < 0) continue;
+        marker[ic_strlen(marker) - ic_strlen("ICDACFG.TXT")] = 0;
+        ic_strcpy(dir, marker, sizeof(dir));
+        ic_strlcat(dir, "linux/usr/share/icda/models", sizeof(dir));
+        n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
+        if (n > 0) break;
+    }
+    if (n <= 0) return;
+    list[n] = 0;
+    for (char *p = list; *p;) {
+        char *end = ic_strchr(p, '\n');
+        if (end) *end = 0;
+        int len = (int)ic_strlen(p);
+        if (len > 5 && len < AI_MODEL && ic_strcmp(p + len - 5, ".gguf") == 0) {
+            if (!first[0]) ic_strcpy(first, p, sizeof(first));
+            if (after) {
+                ic_strcpy(v->model, p, sizeof(v->model));
+                (void)ai_save();
+                return;
+            }
+            if (ic_strcmp(v->model, p) == 0) after = 1;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    if (first[0]) {
+        ic_strcpy(v->model, first, sizeof(v->model));
+        (void)ai_save();
+    }
+}
+
 static char *cur_field(int f) {
     ai_provider_t *v = cur();
     if (!v) return 0;
@@ -221,7 +271,7 @@ static void ai_add(void) {
     ic_memset(v, 0, sizeof(*v));
     v->used = 1;
     v->cloud = 1;
-    snprintf_(v->name, sizeof(v->name), "provider %d", A.count + 1);
+    snprintf_(v->name, sizeof(v->name), "provider");
     snprintf_(v->url, sizeof(v->url), "https://");
     snprintf_(v->model, sizeof(v->model), "model");
     A.count++;
@@ -393,12 +443,12 @@ static void draw_form(ic_canvas_t *c, ic_rect_t area) {
 
     /* which tier answers the everyday questions */
     {
-        const char *segs[2] = { "Local", "Cloud" };
-        ic_rect_t seg = ic_rect_make(form_x(area), area.y + 4, 176, IC_H_CONTROL_SM);
-        ic_ui_segmented(c, seg, segs, 2, v->cloud ? 1.0f : 0.0f, -1);
+        const char *segs[3] = { "Local", "Cloud", "Codex" };
+        ic_rect_t seg = ic_rect_make(form_x(area), area.y + 4, 240, IC_H_CONTROL_SM);
+        ic_ui_segmented(c, seg, segs, 3, !ic_strcmp(v->url, "codex:chatgpt") ? 2.0f : v->cloud ? 1.0f : 0.0f, -1);
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
-                        ic_rect_make(seg.x + 186, seg.y, form_w(area) - 186, IC_H_CONTROL_SM),
-                        v->cloud ? "Complex questions, research and code"
+                        ic_rect_make(seg.x + 250, seg.y, form_w(area) - 250, IC_H_CONTROL_SM),
+                        !ic_strcmp(v->url, "codex:chatgpt") ? "Your ChatGPT account" : v->cloud ? "Complex questions, research and code"
                                  : "Everyday questions, offline on this machine",
                         p->label_tertiary, IC_ALIGN_LEFT);
     }
@@ -408,9 +458,16 @@ static void draw_form(ic_canvas_t *c, ic_rect_t area) {
         ic_text_draw_in(c, ic_font(IC_FONT_CAPTION_EMPH),
                         ic_rect_make(box.x, box.y - FLD_LABEL_H, box.w, FLD_LABEL_H),
                         field_label[f], p->label_secondary, IC_ALIGN_LEFT);
-        draw_field(c, box, f, cur_field(f), A.editing && A.focus == f);
+        if (f == F_KEY && !ic_strcmp(v->url, "codex:chatgpt"))
+            ic_ui_button(c, box, "Sign in with ChatGPT", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+        else if (f == F_MODEL && !v->cloud && ic_strcmp(v->url, "file:auto") == 0)
+            ic_ui_button(c, box, v->model, IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+        else draw_field(c, box, f, cur_field(f), A.editing && A.focus == f);
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
                         ic_rect_make(box.x, box.y + box.h + FLD_HINT_GAP, box.w, FLD_HINT_H),
+                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_MODEL ? "auto uses your account default; enter an available Codex model ID" :
+                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_KEY ? "Open the assistant to see the sign-in link and one-time code" :
+                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_URL ? "Official Codex CLI, stored inside ICDA" :
                         field_hint[f], p->label_tertiary, IC_ALIGN_LEFT);
     }
 
@@ -458,6 +515,11 @@ int ai_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
     ic_rect_t list = list_rect(area);
     (void)app;
     if (!A.loaded) return 0;
+    if ((ev->type == IC_EV_MOUSE_DOWN || ev->type == IC_EV_MOUSE_MOVE) &&
+        !ic_ui_hit(area, ev->x, ev->y)) {
+        if (ev->type == IC_EV_MOUSE_DOWN) A.editing = 0;
+        return 0;
+    }
 
     if (ev->type == IC_EV_KEY) {
         char *buf = A.editing && A.focus < F_COUNT ? cur_field(A.focus) : 0;
@@ -507,6 +569,42 @@ int ai_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
             }
         }
         if (cur()) {
+            ai_provider_t *v = cur();
+            ic_rect_t tier = ic_rect_make(form_x(area), area.y + 4, 240, IC_H_CONTROL_SM);
+            int choice = ic_ui_segmented_hit(tier, 3, ev->x, ev->y);
+            if (choice >= 0) {
+                v->cloud = choice != 0;
+                if (choice == 2) {
+                    ic_strcpy(v->name, "codex", sizeof(v->name));
+                    ic_strcpy(v->url, "codex:chatgpt", sizeof(v->url));
+                    ic_strcpy(v->model, "auto", sizeof(v->model));
+                    v->key[0] = 0;
+                } else if (!choice) {
+                    ic_strcpy(v->url, "file:auto", sizeof(v->url));
+                    ic_strcpy(v->model, "qwen2.5-0.5b-instruct-q4_k_m.gguf", sizeof(v->model));
+                    v->key[0] = 0;
+                } else if (!ic_strcmp(v->url, "file:auto") || !ic_strcmp(v->url, "codex:chatgpt")) {
+                    ic_strcpy(v->url, "https://", sizeof(v->url));
+                    ic_strcpy(v->model, "model", sizeof(v->model));
+                }
+                (void)ai_save();
+                return 1;
+            }
+            if (!ic_strcmp(v->url, "codex:chatgpt") && ic_ui_hit(field_rect(area, F_KEY), ev->x, ev->y)) {
+                (void)ai_save();
+                (void)icda_mkdir("/tmp"); (void)icda_mkdir("/tmp/ai");
+                /* Let the compositor own the request sequence and show the
+                 * live sign-in code, exactly as a typed assistant request. */
+                (void)icda_write_file("/tmp/ai/open-codex-login", "login", 5);
+                A.editing = 0;
+                return 1;
+            }
+            if (!v->cloud && !ic_strcmp(v->url, "file:auto") &&
+                ic_ui_hit(field_rect(area, F_MODEL), ev->x, ev->y)) {
+                choose_local_model();
+                A.editing = 0;
+                return 1;
+            }
             if (ic_ui_hit(speak_rect(area), ev->x, ev->y)) { ai_toggle_speak(); return 1; }
             for (int f = 0; f < F_COUNT; f++) {
                 if (ic_ui_hit(field_rect(area, f), ev->x, ev->y)) {

@@ -154,7 +154,7 @@ static int usock_ready(lx_file_t *f, int want_write) {
 }
 
 /* queues len bytes from the user (plus files) on the peer */
-static int64_t usock_send(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov, lx_file_t **fds, int nfds,
+static int64_t usock_send_raw(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov, lx_file_t **fds, int nfds,
                           int flags) {
     uint64_t total = 0, done = 0;
     chunk_t *c;
@@ -204,7 +204,7 @@ static int64_t usock_send(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
 }
 
 /* takes queued bytes (and the files that came with them) */
-static int64_t usock_recv(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov, lx_file_t ***fds_out,
+static int64_t usock_recv_raw(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov, lx_file_t ***fds_out,
                           int *nfds_out, int flags, int *truncated) {
     uint64_t want = 0, got = 0, iov_i = 0, iov_off = 0;
     int stream = s->type == SOCK_STREAM;
@@ -261,6 +261,20 @@ static int64_t usock_recv(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_
         if (!want) break;
     }
     return (int64_t)got;
+}
+
+static int64_t usock_send(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov,
+                         lx_file_t **fds, int nfds, int flags) {
+    int64_t r = usock_send_raw(f, s, iov, niov, fds, nfds, flags);
+    lxi_poll_observe(f);
+    return r;
+}
+
+static int64_t usock_recv(lx_file_t *f, usock_t *s, const uint64_t *iov, uint64_t niov,
+                         lx_file_t ***fds, int *nfds, int flags, int *truncated) {
+    int64_t r = usock_recv_raw(f, s, iov, niov, fds, nfds, flags, truncated);
+    lxi_poll_observe(f);
+    return r;
 }
 
 static int64_t usock_read(lx_file_t *f, char *ubuf, uint64_t count) {
@@ -675,6 +689,10 @@ static int64_t evfd_read(lx_file_t *f, char *ubuf, uint64_t count) {
     }
     v = e->semaphore ? 1 : e->count;
     e->count -= v;
+    /* Linux eventfd poll wakeups notify all currently ready directions.
+     * A read can notify writable watchers even when it was already writable. */
+    f->poll_in_reset++;
+    f->poll_out_reset++;
     sched_event_wake_key(e);                /* writers waiting for room */
     return copy_to_user(ubuf, &v, 8) ? -EFAULT : 8;
 }
@@ -692,6 +710,11 @@ static int64_t evfd_write(lx_file_t *f, const char *ubuf, uint64_t count) {
         sched_event_wait();
     }
     e->count += v;
+    /* Mio's Linux waker intentionally leaves the counter unread. Every
+     * successful write must notify EPOLLET watchers, including writes while
+     * the counter is already nonzero; readiness transitions alone lose them. */
+    f->poll_in_reset++;
+    f->poll_out_reset++;
     sched_event_wake_key(e);
     return 8;
 }
@@ -824,7 +847,8 @@ typedef struct {
     lx_file_t *file;        /* not a reference: an entry goes when the descriptor is closed */
     uint32_t   events;
     uint64_t   data;
-    int        was_ready;   /* EPOLLET: report only when it becomes ready */
+    uint32_t   was_ready;   /* EPOLLET: independent edges for IN, OUT, HUP, ERR */
+    uint64_t   in_reset, out_reset;
     int        disabled;    /* EPOLLONESHOT after a report */
 } epent_t;
 
@@ -868,12 +892,21 @@ static uint32_t ep_poll_bits(epent_t *x) {
     return got & (x->events | EPOLLERR | EPOLLHUP);
 }
 
+static uint32_t ep_pending(epent_t *x, uint32_t bits) {
+    if (x->in_reset != x->file->poll_in_reset) x->was_ready &= ~EPOLLIN;
+    if (x->out_reset != x->file->poll_out_reset) x->was_ready &= ~EPOLLOUT;
+    x->in_reset = x->file->poll_in_reset;
+    x->out_reset = x->file->poll_out_reset;
+    x->was_ready &= bits;
+    return (x->events & EPOLLET) ? bits & ~x->was_ready : bits;
+}
+
 static int epoll_ready(lx_file_t *f, int want_write) {
     epoll_t *ep = (epoll_t *)f->obj;
     (void)want_write;
     epoll_prune(ep);
     for (int i = 0; i < ep->n; i++)
-        if (!ep->e[i].disabled && ep_poll_bits(&ep->e[i])) return 1;
+        if (!ep->e[i].disabled && ep_pending(&ep->e[i], ep_poll_bits(&ep->e[i]))) return 1;
     return 0;
 }
 
@@ -930,6 +963,8 @@ int64_t lxi_epoll_ctl(int64_t epfd, int op, int64_t fd, const void *uev) {
         ep->e[at].events = *(uint32_t *)ev;
         ep->e[at].data = *(uint64_t *)(ev + 4);
         ep->e[at].was_ready = 0;
+        ep->e[at].in_reset = tf->poll_in_reset;
+        ep->e[at].out_reset = tf->poll_out_reset;
         ep->e[at].disabled = 0;
         return 0;
     case 2:                                              /* EPOLL_CTL_DEL */
@@ -985,16 +1020,12 @@ int64_t lxi_epoll_wait(int64_t epfd, void *uevs, int maxevents, int64_t timeout_
             uint8_t out[12];
             if (x->disabled) continue;
             bits = ep_poll_bits(x);
-            if (!bits) {
-                x->was_ready = 0;
-                continue;
-            }
-            if ((x->events & EPOLLET) && x->was_ready) continue;
-            x->was_ready = 1;
-            if (x->events & EPOLLONESHOT) x->disabled = 1;
+            if (!ep_pending(x, bits)) continue;
             *(uint32_t *)out = bits;
             *(uint64_t *)(out + 4) = x->data;
             if (copy_to_user((uint8_t *)uevs + 12 * got, out, 12) != 0) return got ? got : -EFAULT;
+            x->was_ready |= bits;
+            if (x->events & EPOLLONESHOT) x->disabled = 1;
             got++;
         }
         if (got) return got;
@@ -1172,7 +1203,7 @@ static int inet_ready(lx_file_t *f, int want_write) {
     return r;
 }
 
-static int64_t inet_send(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len, int flags, uint32_t ip, uint16_t port) {
+static int64_t inet_send_raw(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len, int flags, uint32_t ip, uint16_t port) {
     for (;;) {
         int64_t r;
         if (s->udp) {
@@ -1194,7 +1225,7 @@ static int64_t inet_send(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len
     }
 }
 
-static int64_t inet_recv(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len, int flags, uint32_t *ip, uint16_t *port) {
+static int64_t inet_recv_raw(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len, int flags, uint32_t *ip, uint16_t *port) {
     for (;;) {
         int64_t r = s->udp ? sock_k_recvfrom(s->h, (uint8_t *)ubuf, len, ip, port)
                            : sock_syscall(NET_OP_RECV, (uint64_t)s->h, (uint64_t)ubuf, len, 0, 0);
@@ -1210,6 +1241,20 @@ static int64_t inet_recv(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len, int 
         sched_wait_on(&net_wait_key);
         sched_event_wait();
     }
+}
+
+static int64_t inet_send(lx_file_t *f, inet_t *s, const void *ubuf, uint64_t len,
+                         int flags, uint32_t ip, uint16_t port) {
+    int64_t r = inet_send_raw(f, s, ubuf, len, flags, ip, port);
+    lxi_poll_observe(f);
+    return r;
+}
+
+static int64_t inet_recv(lx_file_t *f, inet_t *s, void *ubuf, uint64_t len,
+                         int flags, uint32_t *ip, uint16_t *port) {
+    int64_t r = inet_recv_raw(f, s, ubuf, len, flags, ip, port);
+    lxi_poll_observe(f);
+    return r;
 }
 
 static int64_t inet_read(lx_file_t *f, char *ubuf, uint64_t count) {

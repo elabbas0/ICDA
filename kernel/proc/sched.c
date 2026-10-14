@@ -11,6 +11,7 @@
 #include "../ipc/shm.h"
 #include "../tty/pty.h"
 #include "../fs/vfs.h"
+#include "../linux/lx_vm.h"
 #include "../drivers/console/console.h"
 
 extern void switch_context(thread_t *prev, thread_t *next);
@@ -117,6 +118,38 @@ static int thread_on_a_cpu(const thread_t *t) {
     for (uint32_t i = 0; i < n; i++)
         if (smp_cpus[i].current == t) return 1;
     return 0;
+}
+
+/* A zombie can remain the current thread on a remote CPU until that CPU's
+ * next scheduling point.  State alone therefore cannot prove that its user
+ * address space is safe to release. */
+int sched_process_quiescent(const process_t *proc) {
+    addr_space_t *as;
+    uint32_t n = smp_cpu_count();
+    if (!proc) return 1;
+    as = proc->addr_space;
+    if (n < 1) n = 1;
+    for (uint32_t i = 0; i < n; i++) {
+        thread_t *t = smp_cpus[i].current;
+        if ((t && t->owner == proc) ||
+            (as && smp_cpus[i].active_as == as)) return 0;
+    }
+    return 1;
+}
+
+/* Called after this CPU has installed its next CR3 and published its current
+ * thread.  All process threads are already zombies, so once no CPU reports
+ * one as current, none can be scheduled back into the old address space. */
+void sched_reap_exited_linux_vms(void) {
+    for (process_t *p = process_list; p; p = p->next_all) {
+        addr_space_t *as;
+        if ((p->state != PROCESS_EXITED && p->state != PROCESS_REAPED) ||
+            !p->linux_personality ||
+            !(as = p->addr_space) || !sched_process_quiescent(p)) continue;
+        vmm_destroy_address_space(as);
+        p->addr_space = NULL;
+        lxvm_free(p);
+    }
 }
 
 /* Every tick on the BSP; also drops ended threads from the run ring.  They
@@ -562,6 +595,11 @@ static void schedule_inner(int force) {
         vmm_switch_address_space(next->owner->addr_space);
         pf_set_current_as(next->owner->addr_space);
     }
+
+    /* Reap only after changing CR3 and publishing current_thread_ptr.  The
+     * BKL serializes scheduler state changes; zombie threads cannot become
+     * ready again, and the all-CPU check protects a sibling still in flight. */
+    sched_reap_exited_linux_vms();
 
     prev->fs_base = cpu_fs_base();
     if (next->fs_base != prev->fs_base) cpu_set_fs_base(next->fs_base);

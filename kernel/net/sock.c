@@ -70,6 +70,12 @@ typedef struct {
     int       fin_queued, fin_sent;
     uint8_t  *rbuf;
     uint32_t  rhead, rlen;
+    /* Lazily allocated bitmap for bytes received beyond a gap. They share
+     * rbuf with the readable bytes; the advertised window bounds both. */
+    uint8_t  *rmap;
+    uint32_t  rpending;
+    int       fin_pending;
+    uint32_t  fin_seq;
     int       peer_fin;
     uint64_t  rto_deadline;
     uint32_t  rto;
@@ -373,6 +379,7 @@ static uint8_t *slot_sbuf[SOCK_MAX], *slot_rbuf[SOCK_MAX];
 
 static void sock_release(sock_t *s) {
     for (int i = 0; i < s->qlen; i++) kfree(s->q[(s->qhead + i) % UDP_QUEUE].data);
+    if (s->rmap) kfree(s->rmap);
     zero_bytes(s, sizeof(*s));
 }
 
@@ -381,6 +388,86 @@ static void tcp_fail(sock_t *s, int err) {
     s->state = T_CLOSED;
     s->err = err;
     if (s->user_closed) sock_release(s);
+}
+
+/* A hotspot can deliver later segments before a retransmission closes a
+ * gap. Discarding those segments makes the server retransmit the whole
+ * flight and repeatedly shrink its congestion window. Keep them inside
+ * our existing receive window and ACK only the contiguous prefix. */
+static void tcp_receive(sock_t *s, uint32_t seq, const uint8_t *data,
+                        uint32_t len, int fin) {
+    uint32_t end = seq + len, space = rbuf_free(s);
+    int32_t offset = (int32_t)(seq - s->rcv_nxt);
+    if (s->peer_fin) return;
+    if (offset < 0) {
+        uint32_t skip = (uint32_t)(-(int64_t)offset);
+        if (skip > len) return;
+        data += skip;
+        len -= skip;
+        seq += skip;
+        offset = 0;
+    }
+    if ((uint32_t)offset > space) return;
+    uint32_t take = len < space - (uint32_t)offset ? len : space - (uint32_t)offset;
+    /* Register FIN before closing a gap so buffered bytes past it cannot
+     * overrun the close sequence number. */
+    if (fin && take == len && len + (uint32_t)offset < space && !s->fin_pending) {
+        s->fin_seq = end; s->fin_pending = 1;
+    }
+    if (s->fin_pending) {
+        int32_t until_fin = (int32_t)(s->fin_seq - seq);
+        if (until_fin < 0) return;
+        if (take > (uint32_t)until_fin) take = (uint32_t)until_fin;
+    }
+    if (offset && take && !s->rmap) {
+        s->rmap = (uint8_t *)kmalloc(TCP_RBUF / 8);
+        if (!s->rmap) return;
+        zero_bytes(s->rmap, TCP_RBUF / 8);
+    }
+    uint32_t base = (s->rhead + s->rlen + (uint32_t)offset) % TCP_RBUF;
+    for (uint32_t i = 0; i < take; i++) {
+        uint32_t pos = (base + i) % TCP_RBUF;
+        s->rbuf[pos] = data[i];
+        if (s->rmap) {
+            uint8_t bit = (uint8_t)(1U << (pos & 7));
+            if (!(s->rmap[pos >> 3] & bit)) {
+                s->rmap[pos >> 3] |= bit;
+                s->rpending++;
+            }
+        }
+    }
+    if (!s->rmap) {
+        s->rlen += take;
+        s->rcv_nxt += take;
+    } else {
+        while (s->rpending && s->rlen < TCP_RBUF &&
+               !(s->fin_pending && s->rcv_nxt == s->fin_seq)) {
+            uint32_t pos = (s->rhead + s->rlen) % TCP_RBUF;
+            uint8_t bit = (uint8_t)(1U << (pos & 7));
+            if (!(s->rmap[pos >> 3] & bit)) break;
+            s->rmap[pos >> 3] &= (uint8_t)~bit;
+            s->rpending--;
+            s->rlen++;
+            s->rcv_nxt++;
+        }
+        if (!s->rpending) {
+            kfree(s->rmap);
+            s->rmap = 0;
+        }
+    }
+    /* FIN occupies a sequence number too. Never close across a data gap
+     * or accept a FIN beyond the receive window. */
+    if (s->fin_pending && s->rcv_nxt == s->fin_seq) {
+        if (s->rmap) { kfree(s->rmap); s->rmap = 0; s->rpending = 0; }
+        s->rcv_nxt++;
+        s->peer_fin = 1;
+        s->fin_pending = 0;
+        if (s->state == T_ESTABLISHED) s->state = T_CLOSE_WAIT;
+        else if (s->state == T_FIN_WAIT_1 || s->state == T_FIN_WAIT_2) {
+            s->state = T_TIME_WAIT;
+            s->rto_deadline = now() + TCP_TIMEWAIT;
+        }
+    }
 }
 
 static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
@@ -451,22 +538,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
         s->snd_wnd = (((uint32_t)t[14] << 8) | t[15]) << (s->ws_ok ? s->snd_wscale : 0);
     }
     if (dlen || (flags & TCP_FLAG_FIN)) {
-        if (seq != s->rcv_nxt) trace("ooo", s, seq, s->rcv_nxt);
-        if (seq == s->rcv_nxt && !s->peer_fin) {
-            uint32_t take = dlen < rbuf_free(s) ? dlen : rbuf_free(s);
-            for (uint32_t i = 0; i < take; i++) s->rbuf[(s->rhead + s->rlen + i) % TCP_RBUF] = data[i];
-            s->rlen += take;
-            s->rcv_nxt += take;
-            if ((flags & TCP_FLAG_FIN) && take == dlen) {
-                s->rcv_nxt++;
-                s->peer_fin = 1;
-                if (s->state == T_ESTABLISHED) s->state = T_CLOSE_WAIT;
-                else if (s->state == T_FIN_WAIT_1 || s->state == T_FIN_WAIT_2) {
-                    s->state = T_TIME_WAIT;
-                    s->rto_deadline = now() + TCP_TIMEWAIT;
-                }
-            }
-        }
+        tcp_receive(s, seq, data, dlen, flags & TCP_FLAG_FIN);
         tcp_ack(s);
     }
     tcp_output(s);
@@ -563,6 +635,10 @@ static void rx_pump(void) {
 }
 
 int net_rx_frame(void *buf, uint16_t cap, uint16_t *len_out) {
+    /* DHCP must consume NIC replies before an IP address exists. Existing
+     * application sockets cannot route these through rx_pump(), which waits
+     * for net_ready(). Otherwise reconnecting with a socket open deadlocks. */
+    if (!net_ready()) return net_drv_recv_frame(buf, cap, len_out);
     if (!any_socket() && legacy_len == 0) return net_drv_recv_frame(buf, cap, len_out);
     rx_pump();
     if (legacy_len == 0) return 0;

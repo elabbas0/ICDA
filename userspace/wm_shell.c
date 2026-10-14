@@ -371,7 +371,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
         if (open) ic_gfx_rrect(c, wr.x, wr.y, wr.w, wr.h, IC_R_CONTROL + 2.0f, p->fill_selected_idle);
         else if (b && b->hover == WM_BAR_WIFI)
             ic_gfx_rrect(c, wr.x, wr.y, wr.w, wr.h, IC_R_CONTROL + 2.0f, p->fill_hover);
-        ic_symbol_draw(c, IC_SYM_WIFI, (float)wr.x + (float)wr.w * 0.5f,
+        ic_symbol_draw(c, st == WM_WIFI_ONLINE ? wm_wifi_signal_symbol() : IC_SYM_WIFI, (float)wr.x + (float)wr.w * 0.5f,
                        (float)wr.y + (float)wr.h * 0.5f, 20.0f, open ? p->accent : tint);
         if (st == WM_WIFI_NONE || st == WM_WIFI_OFF) {
             /* slash through the icon */

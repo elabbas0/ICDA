@@ -16,6 +16,7 @@
  * Returns bit 0 when the taskbar icon changed, bit 1 when the flyout did. */
 int  wm_wifi_poll(uint32_t min_ms);
 int  wm_wifi_bar_state(void);
+ic_symbol_t wm_wifi_signal_symbol(void);
 
 void      wm_wifi_open(void);       /* resets the flyout and asks for a scan */
 ic_rect_t wm_wifi_rect(int sw, int sh);

@@ -1954,6 +1954,8 @@ static uint64_t syscall_dispatch_native(struct registers *regs) {
             out->dy      = ev.dy;
             out->buttons = ev.buttons;
             out->dz      = ev.dz;
+            out->absolute = ev.absolute;
+            out->reserved = 0;
             return 0;
         }
         case SYS_GUI_AVAILABLE: {

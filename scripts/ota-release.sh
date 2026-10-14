@@ -71,12 +71,41 @@ body=$(mktemp)
     # published as linux.pack.part0 ... - a few downloads instead of thousands
     # of HTTPS connections.  Updaters before 1.8.5 skip wpack / wfile lines.
     if [ -d "$LINUXROOT/usr/bin" ]; then
-        perl scripts/ota-webkit.pl "$LINUXROOT" "$CACHE" "$PART" \
-            linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
-            linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
-            loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
-            loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \
-            loose:linux/usr/bin/icda-stt=userspace/llm/out/icda-stt
+        set -- linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
+               linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
+               loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
+               loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \
+               loose:linux/usr/bin/icda-stt=userspace/llm/out/icda-stt
+        # The official Codex package changes independently of WebKit: its
+        # files are published on their own (lfile lines, the big ones in
+        # parts), so a Codex change does not make every system download the
+        # whole WebKit pack again, and a WebKit change does not repack Codex.
+        for f in bin/codex bin/codex-code-mode-host codex-package.json; do
+            [ -f "$LINUXROOT/usr/$f" ] && set -- "$@" "loose:linux/usr/$f=$LINUXROOT/usr/$f"
+        done
+        for resources in "$LINUXROOT/usr/codex-path" "$LINUXROOT/usr/codex-resources"; do
+            [ -d "$resources" ] || continue
+            # Package paths are pinned and validated by prepare-codex.ps1.
+            resource_list=$(find "$resources" -type f | LC_ALL=C sort)
+            saved_ifs=$IFS
+            IFS='
+'
+            for resource in $resource_list; do
+                rel=${resource#"$LINUXROOT/"}
+                set -- "$@" "loose:linux/$rel=$resource"
+            done
+            IFS=$saved_ifs
+        done
+        for context in "$LINUXROOT"/usr/share/icda/codex/*; do
+            [ -f "$context" ] || continue
+            set -- "$@" "loose:linux/usr/share/icda/codex/${context##*/}=$context"
+        done
+        for model in "$LINUXROOT"/usr/share/icda/models/*; do
+            [ -f "$model" ] || continue
+            case "$model" in *.gguf|*.bin) continue ;; esac
+            set -- "$@" "loose:linux/usr/share/icda/models/${model##*/}=$model"
+        done
+        perl scripts/ota-webkit.pl "$LINUXROOT" "$CACHE" "$PART" "$@"
     fi
 } > "$body"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$body" -out "$body.sig"
@@ -105,9 +134,14 @@ if [ "$PUBLISH" = "--publish" ]; then
     note "hashed $OBJS files"
     # WebKit: the pack in pieces, linux.pack.part0 ... (the host's file size limit)
     if grep -q '^wpack ' "$OUT/manifest.txt"; then
+        PACK_SHA=$(awk '$1 == "wpack" { print $4 }' "$OUT/manifest.txt")
+        PACK_PIECES=$(awk '$1 == "wpack" { print $5 }' "$OUT/manifest.txt")
         # the pieces' git objects are kept with the cached pack: hashed again
         # only when the pack changed or the objects are gone
-        if [ -f "$CACHE/blobs.txt" ] && (while read -r k blob; do git cat-file -e "$blob" 2>/dev/null || exit 1; done < "$CACHE/blobs.txt"); then
+        if [ -f "$CACHE/blobs.txt" ] && [ -f "$CACHE/blobs-stamp" ] &&
+           [ "$(cat "$CACHE/blobs-stamp")" = "$PACK_SHA" ] &&
+           [ "$(wc -l < "$CACHE/blobs.txt" | tr -d ' ')" = "$PACK_PIECES" ] &&
+           (while read -r k blob; do git cat-file -e "$blob" 2>/dev/null || exit 1; done < "$CACHE/blobs.txt"); then
             echo "[ota] WebKit pieces: cached objects"
         else
             tmp=$(mktemp -d)
@@ -124,6 +158,7 @@ if [ "$PUBLISH" = "--publish" ]; then
                 progress "webkit pieces" "$PIECES_DONE" "$PIECES_TOTAL" \
                     "${p##*/p}  $(wc -c < "$p" | tr -d ' ') bytes"
             done
+            printf '%s' "$PACK_SHA" > "$CACHE/blobs-stamp"
             note "webkit pieces: $PIECES_TOTAL hashed"
             rm -rf "$tmp"
         fi
@@ -131,9 +166,20 @@ if [ "$PUBLISH" = "--publish" ]; then
             GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,linux.pack.part$k"
         done < "$CACHE/blobs.txt"
         # files kept out of the pack (lfile lines): each at its own path
-        [ -f "$CACHE/loose.txt" ] && while IFS="$(printf '\t')" read -r rel src; do
-            blob=$(git hash-object -w "$src")
-            GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
+        # ("parts N": over the host's size limit, published as REL.part0 ...)
+        [ -f "$CACHE/loose.txt" ] && while IFS="$(printf '\t')" read -r rel src parts; do
+            if [ "${parts:-0}" -gt 0 ]; then
+                tmp=$(mktemp -d)
+                split -b "$PART" -d -a 1 "$src" "$tmp/p"
+                for p in "$tmp"/p*; do
+                    blob=$(git hash-object -w "$p")
+                    GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel.part${p##*/p}"
+                done
+                rm -rf "$tmp"
+            else
+                blob=$(git hash-object -w "$src")
+                GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
+            fi
         done < "$CACHE/loose.txt"
     fi
     tree=$(GIT_INDEX_FILE="$idx" git write-tree)
@@ -141,6 +187,16 @@ if [ "$PUBLISH" = "--publish" ]; then
     commit=$(GIT_AUTHOR_NAME=elabbas0 GIT_AUTHOR_EMAIL=arkanabak09@gmail.com \
              GIT_COMMITTER_NAME=elabbas0 GIT_COMMITTER_EMAIL=arkanabak09@gmail.com \
              git commit-tree "$tree" -m "ICDA $VERSION OTA release" -m "$NOTES")
+    # The push is the one step that runs for a long time over a slow link, and
+    # it is the one step that does not need this shell: OTA_COMMIT_ONLY stops
+    # here and leaves the commit in .verify/ota-commit, for the caller to push
+    # with a native git (a Cygwin fork under load dies with "couldn't create
+    # signal pipe", which is what a half-finished push looks like afterwards).
+    if [ -n "${OTA_COMMIT_ONLY:-}" ]; then
+        printf '%s' "$commit" > .verify/ota-commit
+        echo "[ota] prepared $VERSION ($commit) - not pushed (OTA_COMMIT_ONLY)"
+        exit 0
+    fi
     spin "pushing" "$OUT.push.log" git push -f origin "$commit:refs/heads/ota"
     rm -f "$OUT.push.log"
     echo "[ota] published $VERSION ($commit)"

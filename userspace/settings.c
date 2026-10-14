@@ -28,13 +28,13 @@
 #define GROUP_GAP     IC_SP_6
 #define ROW_H         IC_H_ROW_TALL
 
-enum { PANE_WIFI = 0, PANE_ASSISTANT, PANE_APPEARANCE, PANE_MOTION, PANE_SOUND, PANE_KEYBOARD, PANE_TIME, PANE_UPDATES, PANE_ABOUT, PANE_COUNT };
+enum { PANE_WIFI = 0, PANE_ASSISTANT, PANE_APPEARANCE, PANE_MOTION, PANE_SOUND, PANE_KEYBOARD, PANE_MOUSE, PANE_TIME, PANE_UPDATES, PANE_ABOUT, PANE_COUNT };
 
 static const char *const pane_titles[PANE_COUNT] = {
-    "Wi-Fi", "Assistant", "Appearance", "Motion & Display", "Sound", "Keyboard", "Date & Time", "Updates", "About"
+    "Wi-Fi", "Assistant", "Appearance", "Motion & Display", "Sound", "Keyboard", "Mouse", "Date & Time", "Updates", "About"
 };
 static const ic_symbol_t pane_symbols[PANE_COUNT] = {
-    IC_SYM_WIFI, IC_SYM_ACTIVITY, IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_KEYBOARD, IC_SYM_GLOBE, IC_SYM_RELOAD, IC_SYM_INFO
+    IC_SYM_WIFI, IC_SYM_ACTIVITY, IC_SYM_SUN, IC_SYM_ACTIVITY, IC_SYM_SPEAKER, IC_SYM_KEYBOARD, IC_SYM_ACTIVITY, IC_SYM_GLOBE, IC_SYM_RELOAD, IC_SYM_INFO
 };
 
 
@@ -284,6 +284,34 @@ static void draw_toggles(ic_app_t *app, ic_canvas_t *c, int pane) {
     }
 }
 
+static const int mouse_speeds[] = { 25, 50, 75, 100, 150, 200, 300 };
+static const char *const mouse_speed_labels[] = { "25%", "50%", "75%", "100%", "150%", "200%", "300%" };
+static const char *const mouse_smooth_labels[] = { "Off", "Low", "Medium", "High" };
+
+static ic_rect_t mouse_control(ic_app_t *app, int i) {
+    ic_rect_t r = ic_rect_make(content_x(), GROUP_Y + i * 80, content_w(app), 80);
+    return ic_rect_make(r.x + IC_SP_3, r.y + 38, r.w - IC_SP_3 * 2, IC_H_CONTROL_SM);
+}
+
+static void draw_mouse(ic_app_t *app, ic_canvas_t *c) {
+    const char *titles[] = { "Sensitivity", "Smoothing", "Pointer enhancement (acceleration)" };
+    ic_rect_t g = ic_rect_make(content_x(), GROUP_Y, content_w(app), 240);
+    ic_ui_group(c, g);
+    for (int i = 0; i < 3; i++) {
+        ic_rect_t r = ic_rect_make(g.x, g.y + i * 80, g.w, 80);
+        ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r.x + IC_SP_3, r.y + 8, r.w - IC_SP_3 * 2, 22),
+                        titles[i], ic_palette()->label, IC_ALIGN_LEFT);
+    }
+    int speed = 3;
+    for (int i = 0; i < 7; i++) if (mouse_speeds[i] == st.s.mouse_speed) speed = i;
+    ic_ui_segmented(c, mouse_control(app, 0), mouse_speed_labels, 7, (float)speed, -1);
+    ic_ui_segmented(c, mouse_control(app, 1), mouse_smooth_labels, 4, (float)st.s.mouse_smooth, -1);
+    const char *accel[] = { "Off", "On" };
+    ic_ui_segmented(c, mouse_control(app, 2), accel, 2, (float)st.s.mouse_accel, -1);
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(g.x, g.y + g.h + 12, g.w, 40),
+                    "Changes apply immediately. Tablets keep absolute positioning.", ic_palette()->label_secondary, IC_ALIGN_LEFT);
+}
+
 static ic_rect_t tz_group(ic_app_t *app) {
     return group_rect(app, GROUP_Y, 2);
 }
@@ -393,6 +421,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     else if (st.pane == PANE_KEYBOARD) keys_pane_draw(app, c, wifi_area(app));
     else if (st.pane == PANE_ASSISTANT) ai_pane_draw(app, c, wifi_area(app));
     else if (st.pane == PANE_APPEARANCE) draw_appearance(app, c);
+    else if (st.pane == PANE_MOUSE) draw_mouse(app, c);
     else if (st.pane == PANE_ABOUT) draw_about(app, c);
     else if (st.pane == PANE_TIME) draw_time(app, c);
     else draw_toggles(app, c, st.pane);
@@ -537,6 +566,19 @@ static void click(ic_app_t *app, int x, int y) {
         else if (ic_ui_hit(tz_button_rect(app, 1), x, y)) set_tz(st.s.tz_minutes + 30);
         return;
     }
+    if (st.pane == PANE_MOUSE) {
+        for (int i = 0; i < 3; i++) {
+            int n = i == 0 ? 7 : i == 1 ? 4 : 2;
+            int v = ic_ui_segmented_hit(mouse_control(app, i), n, x, y);
+            if (v < 0) continue;
+            if (i == 0) st.s.mouse_speed = mouse_speeds[v];
+            else if (i == 1) st.s.mouse_smooth = v;
+            else st.s.mouse_accel = v;
+            save();
+            return;
+        }
+        return;
+    }
     if (st.pane == PANE_APPEARANCE) {
         int seg = ic_ui_segmented_hit(segmented_rect(app), 2, x, y);
         if (seg >= 0) {
@@ -648,6 +690,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (ic_streq(argv[i], "wifi")) start_pane = PANE_WIFI;
         else if (ic_streq(argv[i], "updates")) start_pane = PANE_UPDATES;
+        else if (ic_streq(argv[i], "mouse")) start_pane = PANE_MOUSE;
     }
     if (ic_app_run(&desc, 0) != 0) {
         icda_write("settings requires the desktop (Ctrl+Alt+F1)\n");

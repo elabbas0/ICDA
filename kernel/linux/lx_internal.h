@@ -46,6 +46,7 @@ typedef struct lx_file {
     char       *mem;
     uint64_t    mem_len;
     uint64_t    proc_pid;
+    uint64_t    poll_in_reset, poll_out_reset; /* readiness clears or explicit poll notifications */
     const lx_fops_t *ops;                   /* LXF_OBJ */
     void       *obj;
 } lx_file_t;
@@ -62,6 +63,7 @@ lx_file_t *lxi_fd_file(int64_t fd);                          /* current process;
 void       lxi_wait_on_file(lx_file_t *f);
 int64_t    lxi_fd_install(lx_file_t *f, int cloexec);        /* takes the reference; fd or -errno */
 int        lxi_file_ready(lx_file_t *f, int want_write);
+void       lxi_poll_observe(lx_file_t *f); /* remember unready states after I/O */
 int        lxi_interrupted(void);                            /* a signal is waiting */
 uint64_t   lxi_now_ns(void);                                 /* monotonic */
 uint64_t   lxi_realtime_ns(void);

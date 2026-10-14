@@ -316,10 +316,8 @@ static void row_text_fit(ic_canvas_t *c, ic_rect_t r, ic_symbol_t sym, ic_color_
     ic_ui_row_text(c, r, sym, tint, t, s);
 }
 
-static ic_color_t signal_tint(int pct) {
-    if (pct >= 60) return IC_RGB(0x30D158);
-    if (pct >= 35) return IC_RGB(IC_TINT_ORANGE);
-    return IC_RGB(0xFF453A);
+static ic_symbol_t signal_symbol(int pct) {
+    return pct >= 60 ? IC_SYM_WIFI : pct >= 35 ? IC_SYM_WIFI_MEDIUM : IC_SYM_WIFI_WEAK;
 }
 
 static void status_text(char *title, int tcap, char *sub, int scap) {
@@ -436,7 +434,7 @@ static void draw_networks(ic_canvas_t *c, ic_rect_t a) {
         ic_ui_group_row(c, r, i, count, i == w.hover_row ? 1.0f : 0.0f);
         sub[0] = 0;
         ic_strlcat(sub, n->sec, sizeof(sub));
-        ic_strlcat(sub, "  -  channel ", sizeof(sub));
+        ic_strlcat(sub, n->chan > 14 ? "  -  5 GHz, channel " : "  -  2.4 GHz, channel ", sizeof(sub));
         ic_uint_to_str((uint64_t)n->chan, num, sizeof(num));
         ic_strlcat(sub, num, sizeof(sub));
         ic_strlcat(sub, "  -  ", sizeof(sub));
@@ -459,7 +457,7 @@ static void draw_networks(ic_canvas_t *c, ic_rect_t a) {
                            ic_palette()->label_secondary);
             right -= 22;
         }
-        row_text_fit(c, ic_rect_make(r.x, r.y, right - r.x, r.h), IC_SYM_WIFI, signal_tint(n->pct),
+        row_text_fit(c, ic_rect_make(r.x, r.y, right - r.x, r.h), signal_symbol(n->pct), ic_palette()->label_secondary,
                        n->ssid, sub);
     }
     if (w.nnets > vis) {

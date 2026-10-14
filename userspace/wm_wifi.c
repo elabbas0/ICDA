@@ -25,6 +25,7 @@ typedef struct {
     char ssid[33];
     char sec[12];
     int  pct;
+    int  chan;
     int  saved;
 } net_t;
 
@@ -35,6 +36,7 @@ static struct {
     char     error[100];
     net_t    nets[NET_MAX];
     int      nnets;
+    int      signal;
     uint32_t last_poll;
     int      polled;
     /* flyout */
@@ -77,6 +79,7 @@ static void parse_report(const char *r) {
     int i = 0, in_nets = 0;
     w.state[0] = w.ssid[0] = w.ip[0] = w.error[0] = 0;
     w.nnets = 0;
+    w.signal = 0;
     while (r[i]) {
         int s = i, e;
         while (r[i] && r[i] != '\n') i++;
@@ -93,7 +96,7 @@ static void parse_report(const char *r) {
             n = &w.nets[w.nnets];
             n->pct = parse_int(r, &p); if (r[p] == '\t') p++;
             (void)parse_int(r, &p); if (r[p] == '\t') p++;
-            (void)parse_int(r, &p); if (r[p] == '\t') p++;
+            n->chan = parse_int(r, &p); if (r[p] == '\t') p++;
             for (f = p; f < e && r[f] != '\t'; f++) {}
             copy_value(n->sec, sizeof(n->sec), r + p, f - p);
             p = f + 1;
@@ -116,6 +119,10 @@ static void parse_report(const char *r) {
             FIELD("ssid", w.ssid);
             FIELD("ip", w.ip);
             FIELD("error", w.error);
+            if (c - s == 14 && ic_memcmp(r + s, "signal-percent", 14) == 0) {
+                int value_pos = c + 2;
+                w.signal = parse_int(r, &value_pos);
+            }
 #undef FIELD
         }
     }
@@ -143,6 +150,10 @@ int wm_wifi_bar_state(void) {
     return WM_WIFI_IDLE;
 }
 
+ic_symbol_t wm_wifi_signal_symbol(void) {
+    return w.signal >= 60 ? IC_SYM_WIFI : w.signal >= 35 ? IC_SYM_WIFI_MEDIUM : IC_SYM_WIFI_WEAK;
+}
+
 /* cheap fingerprint of what the flyout shows */
 static uint32_t view_hash(void) {
     uint32_t h = 2166136261u;
@@ -161,6 +172,7 @@ int wm_wifi_poll(uint32_t min_ms) {
     static char report[REPORT_CAP];
     uint32_t now = ic_time_ms();
     int bar_before = wm_wifi_bar_state();
+    ic_symbol_t signal_before = wm_wifi_signal_symbol();
     uint32_t view_before = view_hash();
     int changed = 0;
 
@@ -175,7 +187,7 @@ int wm_wifi_poll(uint32_t min_ms) {
         report[n > 0 ? n : 0] = 0;
         parse_report(report);
     }
-    if (wm_wifi_bar_state() != bar_before) changed |= 1;
+    if (wm_wifi_bar_state() != bar_before || wm_wifi_signal_symbol() != signal_before) changed |= 1;
     if (view_hash() != view_before) changed |= 2;
     return changed;
 }
@@ -225,10 +237,8 @@ static ic_rect_t foot_btn(ic_rect_t f, int which) {
 
 /* ---- drawing ------------------------------------------------------------ */
 
-static ic_color_t signal_tint(int pct) {
-    if (pct >= 60) return IC_RGB(0x30D158);
-    if (pct >= 35) return IC_RGB(IC_TINT_ORANGE);
-    return IC_RGB(0xFF453A);
+static ic_symbol_t signal_symbol(int pct) {
+    return pct >= 60 ? IC_SYM_WIFI : pct >= 35 ? IC_SYM_WIFI_MEDIUM : IC_SYM_WIFI_WEAK;
 }
 
 static void status_text(char *title, int tcap, char *sub, int scap) {
@@ -291,7 +301,7 @@ void wm_wifi_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratch
         int right = r.x + r.w - IC_SP_2;
         if (w.hover == i || pending)
             ic_gfx_rrect(c, r.x, r.y + 2, r.w, r.h - 4, IC_R_CONTROL, p->fill_hover);
-        ic_symbol_draw(c, IC_SYM_WIFI, (float)(r.x + 18), (float)(r.y + r.h / 2), 16.0f, signal_tint(n->pct));
+        ic_symbol_draw(c, signal_symbol(n->pct), (float)(r.x + 18), (float)(r.y + r.h / 2), 16.0f, p->label_secondary);
         if (here) {
             ic_symbol_draw(c, IC_SYM_CHECK, (float)right - 8.0f, (float)(r.y + r.h / 2), 14.0f, p->accent);
             right -= 22;
@@ -304,10 +314,12 @@ void wm_wifi_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratch
         ic_text_draw_in(c, ic_font(here ? IC_FONT_BODY_EMPH : IC_FONT_BODY),
                         ic_rect_make(r.x + 36, r.y, right - r.x - 40, r.h / 2 + 6),
                         n->ssid, p->label, IC_ALIGN_LEFT);
+        char detail[72];
+        ic_strcpy(detail, n->chan > 14 ? "5 GHz - " : "2.4 GHz - ", sizeof(detail));
+        ic_strlcat(detail, here ? "Connected" : n->saved ? "Saved" : ic_streq(n->sec, "open") ? "Open" : n->sec, sizeof(detail));
         ic_text_draw_in(c, ic_font(IC_FONT_CAPTION),
                         ic_rect_make(r.x + 36, r.y + r.h / 2 + 2, right - r.x - 40, r.h / 2 - 4),
-                        here ? "Connected" : n->saved ? "Saved" :
-                        ic_streq(n->sec, "open") ? "Open" : n->sec,
+                        detail,
                         p->label_secondary, IC_ALIGN_LEFT);
     }
 

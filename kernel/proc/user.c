@@ -864,12 +864,9 @@ __attribute__((noreturn)) void user_thread_finish(void) {
 
     vmm_switch_address_space(vmm_kernel_address_space());
     pf_set_current_as(vmm_kernel_address_space());
-    if (proc && proc->linux_personality && proc->addr_space) {
-        vmm_destroy_address_space(proc->addr_space);
-        proc->addr_space = 0;
-        lxvm_free(proc);
-    }
-
+    /* The scheduler releases the Linux address space after every CPU has
+     * switched away from this process.  A sibling may still be in user mode
+     * on another CPU even though exit_group already marked it zombie. */
     user_exit_code = proc ? proc->exit_code : (uint64_t)-1;
     sched_yield();
     for (;;) {
