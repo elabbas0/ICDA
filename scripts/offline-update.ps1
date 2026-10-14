@@ -62,10 +62,17 @@ try {
     # volume after a temporary type change, restored in finally.
     Set-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -GptType $basicGuid
     $changedType=$true
-    $mount="$($DriveLetter):\"
-    Add-PartitionAccessPath -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -AccessPath $mount
+    # Windows may assign a letter immediately after the type change.
+    # Reuse it instead of attempting a second letter for the same volume.
+    $activePart=Get-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber
+    $activeLetter=[string]$activePart.DriveLetter
+    if($activeLetter -notmatch '^[A-Z]$') {
+        $activeLetter=$DriveLetter
+        Add-PartitionAccessPath -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -AccessPath "$($activeLetter):\"
+    }
+    $mount="$($activeLetter):\"
     $mounted=$true
-    if((Get-Volume -DriveLetter $DriveLetter).FileSystem -ne 'FAT32'){throw 'ICDA system volume is not FAT32'}
+    if((Get-Volume -DriveLetter $activeLetter).FileSystem -ne 'FAT32'){throw 'ICDA system volume is not FAT32'}
     if (!(Test-Path -LiteralPath (Checked-Child $mount 'ICDACFG.TXT')) -or
         !(Test-Path -LiteralPath (Checked-Child $mount 'EFI/ICDA/KERNEL.BIN')) -or
         !(Test-Path -LiteralPath (Checked-Child $mount 'SYSTEM/sbin/init.app'))) {
@@ -107,6 +114,32 @@ try {
             Move-Item -LiteralPath $staged -Destination $target -Force
             if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $file.sha256){throw "Installed file verification failed: $($file.target)"}
             $result.copied++; $result.verified++
+        }
+        # An older staged OTA or trial boot must not undo this verified
+        # offline installation. Preserve its metadata in the backup first.
+        $pendingPath=Checked-Child $mount 'UPDATE/PENDING.TXT'
+        if(Test-Path -LiteralPath $pendingPath) {
+            $saved=Checked-Child $backup 'UPDATE/PENDING.TXT'
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $saved) | Out-Null
+            Copy-Item -LiteralPath $pendingPath -Destination $saved
+            Remove-Item -LiteralPath $pendingPath
+            $result.pending='older pending OTA backed up and cancelled'
+        }
+        $envPath=Checked-Child $mount 'EFI/ICDA/GRUBENV'
+        if(Test-Path -LiteralPath $envPath) {
+            $envBytes=[IO.File]::ReadAllBytes($envPath)
+            $envText=[Text.Encoding]::ASCII.GetString($envBytes)
+            if($envBytes.Length -ne 1024 -or !$envText.StartsWith("# GRUB Environment Block`n")) {
+                throw 'Unexpected ICDA GRUB environment format'
+            }
+            if($envText -match '(?m)^icda_trial=[^\r\n]*') {
+                $saved=Checked-Child $backup 'EFI/ICDA/GRUBENV'
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $saved) | Out-Null
+                Copy-Item -LiteralPath $envPath -Destination $saved
+                $reset=[regex]::Replace($envText,'(?m)^icda_trial=[^\r\n]*','icda_trial=0')
+                [IO.File]::WriteAllBytes($envPath,[Text.Encoding]::ASCII.GetBytes($reset.PadRight(1024,'#')))
+                $result.trial='reset after verified offline install'
+            }
         }
         $result.status='installed'
         if($ChatGPTAuthCache) {
