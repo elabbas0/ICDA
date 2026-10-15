@@ -1,6 +1,6 @@
 # System files shipped in \SYSTEM on the ICDA partition and updated by OTA
 # patches: <path under SYSTEM> <build output>.  The installed kernel embeds
-# only /sbin/init.app; everything else here is loaded from \SYSTEM at boot.
+# init and a fallback shell; files here override those seeds at boot.
 apps/hello.app        userspace/hello.icx
 apps/pid.app          userspace/pid.icx
 apps/ticker.app       userspace/ticker.icx
@@ -11,6 +11,7 @@ apps/curl.app         userspace/curl.app
 apps/wm.app           userspace/wm.app
 apps/desktop.app      userspace/desktop.app
 apps/terminal.app     userspace/terminal.app
+apps/shell.app        userspace/shell.app
 apps/taskman.app      userspace/taskman.app
 apps/browser.app      userspace/browser.app
 apps/settings.app     userspace/settings.app

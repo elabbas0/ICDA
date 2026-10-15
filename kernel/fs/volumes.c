@@ -3,6 +3,7 @@
 #include "fatfs.h"
 #include "exfatfs.h"
 #include "ntfsfs.h"
+#include "persistfs.h"
 #include "../drivers/storage/partition.h"
 #include "../memory/heap.h"
 
@@ -594,6 +595,13 @@ static volume_t *claim_slot(uint8_t *id) {
     return 0;
 }
 
+static int partition_writable(const partition_info_t *part, int fs_writable) {
+    if (!fs_writable || !part || !part->device || !part->device->write || part->role == PARTITION_ROLE_EFI) return 0;
+    if (part->role != PARTITION_ROLE_SYSTEM) return 1;
+    int active = persistfs_active_partition();
+    return active >= 0 && partition_get((uint32_t)active) == part;
+}
+
 static int mount_part(const partition_info_t *part, const char *mount_path) {
     volume_t *m;
     uint8_t id = 0;
@@ -657,8 +665,7 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
     m->dev = part->device;
     m->start = part->start_lba;
     m->sectors = part->sector_count;
-    m->writable = fs_writable && part->device->write && part->role != PARTITION_ROLE_EFI &&
-                  part->role != PARTITION_ROLE_SYSTEM;
+    m->writable = partition_writable(part, fs_writable);
     copy_text(m->path, mount_path, sizeof(m->path));
     (void)vfs_detach_tree(mount_path);
     if (vfs_import_node(mount_path, VFS_NODE_DIR, 1, 0, 0, 0, 0, 0) == 0 && vfs_set_mount(mount_path, id) == 0) {

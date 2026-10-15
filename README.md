@@ -78,6 +78,9 @@ CLI, `codex login --device-auth` to sign in with ChatGPT, or
 `codex --version` to check the installation. Its own `/model` command and
 `--model` option select an account model. The launcher keeps stdin/stdout
 attached to Terminal and enables live web search and full system-file access.
+It runs in foreground mode (`--no-daemon`) on ICDA.
+Installed-system test results and screenshots are in the
+[1.8.25 verification report](docs/verification/codex-1.8.25/README.md).
 The built-in assistant has no Codex provider or Codex commands.
 
 Prepare the verified official package with

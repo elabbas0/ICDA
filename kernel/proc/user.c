@@ -680,7 +680,7 @@ static int resolve_interpreter_path(const char *token0, const char *token1,
     return 0;
 }
 
-static int build_shebang_argv(const char *script_path, const char *argline,
+static int build_shebang_argv(const char *script_path,
                               char *interp_path, uint64_t interp_cap,
                               char *arg_storage, uint64_t arg_storage_cap,
                               char **argv_out, uint64_t *argc_out) {
@@ -692,8 +692,6 @@ static int build_shebang_argv(const char *script_path, const char *argline,
     uint64_t i = 2;
     uint64_t line_len = 0;
     uint64_t argc = 0;
-    uint64_t extra_argc = 0;
-    char *extra_argv[USER_ARG_MAX];
 
     if (argc_out) *argc_out = 0;
     if (!script_path || !interp_path || !arg_storage || !argv_out || !argc_out) return -1;
@@ -720,22 +718,18 @@ static int build_shebang_argv(const char *script_path, const char *argline,
     }
 
     copy_cstr(parse_input, shebang_storage, sizeof(parse_input));
-    if (split_words(parse_input, shebang_storage, sizeof(shebang_storage), tokens, 4, &token_count) != 0 || token_count == 0) {
+    /* Interpreter arguments must survive this function: the recursive spawn
+     * uses argv after our local shebang buffers have gone out of scope. */
+    if (split_words(parse_input, arg_storage, arg_storage_cap, tokens, 4, &token_count) != 0 || token_count == 0) {
         return -1;
     }
     if (resolve_interpreter_path(tokens[0], token_count > 1 ? tokens[1] : 0, interp_path, interp_cap) != 0) {
         return -1;
     }
 
+    uint64_t first_arg = (basename_eq(tokens[0], "env") && token_count > 1) ? 2 : 1;
+    for (uint64_t n = first_arg; n < token_count; n++) argv_out[argc++] = tokens[n];
     argv_out[argc++] = (char *)script_path;
-    if (argline && *argline) {
-        if (split_words(argline, arg_storage, arg_storage_cap, extra_argv, USER_ARG_MAX - 1, &extra_argc) != 0) {
-            return -1;
-        }
-        for (uint64_t n = 0; n < extra_argc; n++) {
-            argv_out[argc++] = extra_argv[n];
-        }
-    }
     *argc_out = argc;
     return 0;
 }
@@ -764,7 +758,7 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
     }
 
     if (image_size >= 2 && image[0] == '#' && image[1] == '!') {
-        if (build_shebang_argv(path, 0, interp_path, sizeof(interp_path),
+        if (build_shebang_argv(path, interp_path, sizeof(interp_path),
                                shebang_arg_storage, sizeof(shebang_arg_storage),
                                shebang_argv, &shebang_argc) != 0) {
             return -1;

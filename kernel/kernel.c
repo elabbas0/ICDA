@@ -419,7 +419,6 @@ void kernel_main(void *multiboot_info) {
     }
     bootstage_set(17, "initramfs");
     (void)vfs_mkdir(vfs_root(), "/home");
-    lx_init();
     boot_prefix("storage");
     console_write("ramfs online, seeded files=", CONSOLE_STYLE_INFO);
     console_write_dec64(initramfs_file_count(), CONSOLE_STYLE_INFO);
@@ -429,7 +428,6 @@ void kernel_main(void *multiboot_info) {
 
     (void)partition_scan_all();
     bootstage_set(18, "partitions");
-    (void)fat32_mount_detected();
     boot_prefix("storage");
     console_write("block devices=", CONSOLE_STYLE_INFO);
     console_write_dec64(block_count(), CONSOLE_STYLE_INFO);
@@ -472,7 +470,13 @@ void kernel_main(void *multiboot_info) {
     }
 
     bootstage_set(20, "mounts");
-    boot_line("storage", "automatic volume import deferred; use mount <partition> <path>");
+    /* Identify ICDA's persistent partition before mounting volumes so only
+     * that system partition is writable for installed runtimes and models. */
+    (void)fat32_mount_detected();
+    boot_line("storage", "detected volumes mounted");
+    /* The installed kernel gets BusyBox from SYSTEM, not initramfs. Seed
+     * /bin/sh and the applet entry points only after that binary is present. */
+    lx_init();
 
     
 

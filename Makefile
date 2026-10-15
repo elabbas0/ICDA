@@ -320,7 +320,7 @@ exfatfs.o: kernel/fs/exfatfs.c kernel/fs/exfatfs.h
 ntfsfs.o: kernel/fs/ntfsfs.c kernel/fs/ntfsfs.h
 	$(CC) $(CFLAGS) -c kernel/fs/ntfsfs.c -o ntfsfs.o
 
-volumes.o: kernel/fs/volumes.c kernel/fs/volumes.h kernel/fs/fatfs.h kernel/fs/exfatfs.h kernel/fs/ntfsfs.h kernel/fs/vfs.h
+volumes.o: kernel/fs/volumes.c kernel/fs/volumes.h kernel/fs/fatfs.h kernel/fs/exfatfs.h kernel/fs/ntfsfs.h kernel/fs/vfs.h kernel/fs/persistfs.h
 	$(CC) $(CFLAGS) -c kernel/fs/volumes.c -o volumes.o
 
 exfat.o: kernel/fs/exfat.c kernel/fs/exfat.h kernel/fs/vfs.h kernel/drivers/storage/partition.h

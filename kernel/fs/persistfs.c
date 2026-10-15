@@ -483,7 +483,8 @@ int persistfs_init(void) {
             }
             persistfs_log_partition(i, "ICDA system partition");
             kfree(bundle);
-            /* in memory only: keeps the volume importer from also mounting it writable */
+            /* Mark the verified ICDA system partition in memory. The volume
+             * importer permits system writes only to this active partition. */
             partition_mark_system(i);
             persistfs_available = 1;
             persistfs_entries_loaded = loaded;
