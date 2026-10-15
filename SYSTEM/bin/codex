@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/busybox sh
 # Interactive official Codex CLI; stdin/stdout stay attached to Terminal.
 export HOME=/home PATH=/bin:/usr/bin:/sbin SHELL=/bin/sh TERM=xterm-256color
 export SSL_CERT_FILE=/etc/ssl/certs.pem CODEX_CA_CERTIFICATE=/etc/ssl/certs.pem
@@ -14,4 +14,4 @@ mkdir -p "$CODEX_HOME" "$CODEX_SQLITE_HOME"
 for file in AGENTS.md CURRENT_TASK.md; do
     if [ ! -f "/home/$file" ]; then cp "/usr/share/icda/codex/$file" "/home/$file"; fi
 done
-exec "$runtime/usr/bin/codex" --no-alt-screen --search --sandbox danger-full-access --ask-for-approval never "$@"
+exec "$runtime/usr/bin/codex" --no-daemon --disable shell_snapshot --no-alt-screen --search --sandbox danger-full-access --ask-for-approval never "$@"
