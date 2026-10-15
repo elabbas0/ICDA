@@ -72,7 +72,7 @@ typedef struct {
     uint32_t  rcv_nxt;
     uint32_t  cwnd, ssthresh;
     uint8_t  *sbuf;
-    uint32_t  slen;           /* bytes in sbuf, starting at snd_una */
+    uint32_t  shead, slen;    /* queued bytes start at shead / snd_una */
     int       fin_queued, fin_sent;
     uint8_t  *rbuf;
     uint32_t  rhead, rlen;
@@ -360,7 +360,7 @@ static void tcp_output(sock_t *s) {
         if (chunk > wnd - flight) chunk = wnd - flight;
         {
             uint8_t seg[TCP_MSS];
-            for (uint32_t i = 0; i < chunk; i++) seg[i] = s->sbuf[(off + i) % TCP_SBUF];
+            for (uint32_t i = 0; i < chunk; i++) seg[i] = s->sbuf[(s->shead + off + i) % TCP_SBUF];
             tcp_send(s, s->snd_nxt, TCP_FLAG_ACK | TCP_FLAG_PSH, seg, (uint16_t)chunk);
         }
         if (s->snd_una == s->snd_nxt) arm_rto(s);
@@ -549,6 +549,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
             uint32_t data_acked = acked;
             if (s->fin_sent && ack == s->snd_nxt) data_acked--;
             if (data_acked > s->slen) data_acked = s->slen;
+            s->shead = (s->shead + data_acked) % TCP_SBUF;
             s->slen -= data_acked;
             s->snd_una = ack;
             s->retries = 0;
@@ -890,7 +891,7 @@ static int64_t op_send(sock_t *s, const uint8_t *ubuf, uint64_t len) {
         if (n > sizeof(chunk)) n = sizeof(chunk);
         if (n > TCP_SBUF - s->slen) n = TCP_SBUF - s->slen;
         if (copy_from_user(chunk, ubuf + done, n) != 0) return done ? (int64_t)done : -EFAULT_;
-        for (uint64_t i = 0; i < n; i++) s->sbuf[(s->slen + i) % TCP_SBUF] = chunk[i];
+        for (uint64_t i = 0; i < n; i++) s->sbuf[(s->shead + s->slen + i) % TCP_SBUF] = chunk[i];
         s->slen += (uint32_t)n;
         done += n;
     }

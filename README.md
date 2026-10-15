@@ -95,6 +95,9 @@ into Terminal with **Ctrl+Shift+V**, or into Surfer's address bar with
 **Ctrl+V**. Terminal also accepts OSC 52 clipboard writes from CLI programs.
 [Clipboard verification and screenshots](docs/verification/clipboard-1.8.27/README.md).
 
+The 1.8.28 TCP send-buffer fix and authentication test limits are documented
+in the [network verification report](docs/verification/auth-network-1.8.28/README.md).
+
 Prepare the verified official package with
 `powershell -ExecutionPolicy Bypass -File scripts/prepare-codex.ps1`.
 The package lives in ICDA's `linux/usr`, credentials in its own

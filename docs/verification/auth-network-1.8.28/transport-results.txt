@@ -1,0 +1,3 @@
+ICDA transport fixture listening on port 19080
+FAIL round=0 received=65536 mismatch=14600
+PASS verified 1048576 upload bytes over persistent TCP
