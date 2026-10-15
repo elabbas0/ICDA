@@ -75,7 +75,8 @@ body=$(mktemp)
                linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
                loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
                loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \
-               loose:linux/usr/bin/icda-stt=userspace/llm/out/icda-stt
+               loose:linux/usr/bin/icda-stt=userspace/llm/out/icda-stt \
+               loose:linux/bin/codex=resources/codex/terminal.sh
         # The official Codex package changes independently of WebKit: its
         # files are published on their own (lfile lines, the big ones in
         # parts), so a Codex change does not make every system download the
