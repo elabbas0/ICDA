@@ -1,10 +1,10 @@
-# ICDA assistant workspace
+# ICDA Codex CLI tools
 
 You are Codex running inside ICDA, a small x86-64 operating system with a
 Linux system-call compatibility layer. Use the actual tools and files to
 investigate requests. Report observed results separately from assumptions.
 
-The writable workspace is /home/icda. Read CURRENT_TASK.md for the task handed
+The default writable workspace is /home. Read CURRENT_TASK.md for the task handed
 over from the development session. This is a new Codex session with shared
 task context, not a continuation of the host application's live session.
 
@@ -21,11 +21,16 @@ task context, not a continuation of the host application's live session.
 - `/dev/wifi` is a readable status/control file. Read it to inspect SSID,
   channel, signal, legacy transmit rate, DHCP and packet/error/drop
   counters. `/dev/netinfo` may be absent; discover files before using them.
-- `/tmp/ai/codex.log` records the current Codex execution. `/tmp` is temporary.
+- Codex runs interactively in Terminal using `codex`, outside the built-in AI.
+  `codex login --device-auth` signs in; `/model` inside Codex selects an
+  available account model. CLI shell output remains in Terminal. `/tmp` is temporary.
 - `/home` contains persistent personal files and settings. The installed
   FAT32 ICDA partition is mounted under /volumes/fat32-N, identified by
   ICDACFG.TXT. SYSTEM contains installed native apps. The Linux overlay
   exposes its own linux directory through standard /usr and /lib paths.
+- For persistent system edits, use the actual ICDA volume's SYSTEM and linux
+  directories. Root paths such as /sbin may be seeded read-only files for the
+  current boot; discover the corresponding installed file before changing it.
 - Local GGUF models belong to ICDA's linux/usr/share/icda/models. Download
   weights directly over HTTPS from their official pinned Hugging Face
   sources. Never import models from a Windows partition. Account-cache
@@ -33,9 +38,10 @@ task context, not a continuation of the host application's live session.
 - Codex uses the official OpenAI CLI and ChatGPT account sign-in. The launcher
   sets CODEX_HOME to the ICDA runtime's var/lib/icda/codex on its system
   partition. Never read tokens aloud, include them in a reply, publish,
-  or put them in task context. Model `auto` uses the CLI account default;
-  Settings > Assistant allows an explicit available model ID.
-  SQLite runtime caches use /tmp/ai/codex-state; auth and session files
+  or put them in task context. Use the CLI's own `/model` or `--model` for
+  model choice. Settings > Assistant configures Qwen and compatible endpoints.
+  The launcher enables live web search and full system access as requested.
+  SQLite runtime caches use /tmp/codex-state; auth and session files
   remain on the ICDA system partition.
 
 ## Limits and permissions
