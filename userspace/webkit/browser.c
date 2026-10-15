@@ -562,6 +562,31 @@ static void key(uint32_t keysym, uint32_t mods) {
         if (keysym == 0xff1b) { addr_focus = 0; sync_addr(); compose(); return; }
         if (mods & M_CTRL) {
             if (keysym == 'a') { addr_all = 1; compose(); }
+            else if (keysym == 'c' || keysym == 'x') {
+                FILE *clip = fopen("/home/.clipboard", "wb");
+                if (!clip) { set_status("Could not copy address", 3000); return; }
+                int copied = fwrite(addr, 1, n, clip) == n;
+                if (fclose(clip)) copied = 0;
+                if (!copied) { set_status("Could not copy address", 3000); return; }
+                if (keysym == 'x') { addr[0] = 0; addr_all = 0; compose(); }
+            } else if (keysym == 'v') {
+                char text[sizeof addr];
+                FILE *clip = fopen("/home/.clipboard", "rb");
+                if (!clip) { set_status("Clipboard is empty", 3000); return; }
+                size_t got = fread(text, 1, sizeof text, clip), used = 0;
+                int failed = ferror(clip);
+                fclose(clip);
+                for (size_t i = 0; i < got; i++)
+                    if ((unsigned char)text[i] >= 32 && text[i] != 127) text[used++] = text[i];
+                size_t at = addr_all ? 0 : n;
+                if (failed || got == sizeof text || used >= sizeof addr - at) {
+                    set_status("Clipboard address is too long", 3000); return;
+                }
+                if (used) {
+                    memcpy(addr + at, text, used); addr[at + used] = 0;
+                    addr_all = 0; compose();
+                }
+            }
             return;
         }
         if (keysym == 0xff08) {

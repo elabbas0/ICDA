@@ -90,6 +90,11 @@ Fresh sign-in startup and callback tests are in the
 [1.8.26 verification report](docs/verification/codex-1.8.26/README.md).
 The built-in assistant has no Codex provider or Codex commands.
 
+In Terminal, drag across text and press **Ctrl+Shift+C** to copy it. Paste
+into Terminal with **Ctrl+Shift+V**, or into Surfer's address bar with
+**Ctrl+V**. Terminal also accepts OSC 52 clipboard writes from CLI programs.
+[Clipboard verification and screenshots](docs/verification/clipboard-1.8.27/README.md).
+
 Prepare the verified official package with
 `powershell -ExecutionPolicy Bypass -File scripts/prepare-codex.ps1`.
 The package lives in ICDA's `linux/usr`, credentials in its own

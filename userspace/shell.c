@@ -554,7 +554,9 @@ static void print_prompt(void) {
     {
         uint64_t x, y;
         if ((long)icda_console_cursor(&x, &y) < 0) {
-            icda_write("\x1b[1;32micda\x1b[0m:\x1b[1;34m");
+            /* Interactive Linux children can leave bracketed paste enabled
+             * after interruption. This shell reads plain input at its prompt. */
+            icda_write("\x1b[?2004l\x1b[1;32micda\x1b[0m:\x1b[1;34m");
             icda_write(cwd);
             icda_write("\x1b[0m$ ");
             return;

@@ -8,6 +8,8 @@
 #define TERM_MAX_ROWS 120
 #define TERM_HISTORY  2000
 #define TERM_SHELL    "/apps/shell.app"
+#define TERM_CLIP_CAP 16384
+#define TERM_OSC_CAP (4 * ((TERM_CLIP_CAP + 2) / 3) + 16)
 
 enum { ATTR_BOLD = 1, ATTR_INVERSE = 2, ATTR_UNDERLINE = 4 };
 
@@ -20,6 +22,7 @@ typedef struct {
 
 typedef struct {
     term_cell_t cells[TERM_MAX_COLS];
+    int wrapped;
 } term_line_t;
 
 enum { PS_NORMAL = 0, PS_ESC, PS_CSI, PS_OSC, PS_OSC_ESC, PS_CHARSET };
@@ -41,6 +44,11 @@ static struct {
     int         nparams;
     int         private_mode;
     int         bracketed_paste;
+    char        osc[TERM_OSC_CAP];
+    int         osc_len, osc_overflow;
+    int         selecting, selection_anchor, selection_end;
+    char        input[TERM_CLIP_CAP + 256];
+    int         input_off, input_len;
 
     long        pty;
     uint64_t    pid;
@@ -70,7 +78,7 @@ static int cell_h(void) {
 }
 
 static ic_rect_t content_rect(ic_app_t *app) {
-    return ic_rect_make(TERM_PAD, TERM_PAD, app->width - 2 * TERM_PAD, app->height - 2 * TERM_PAD);
+    return ic_rect_make(TERM_PAD, TERM_PAD, app->width - 2 * TERM_PAD, app->height - 2 * TERM_PAD - cell_h());
 }
 
 static term_line_t *line_at(int index_from_oldest) {
@@ -95,10 +103,18 @@ static void push_line(void) {
     term_line_t *l = &term.lines[term.head];
     term.head = (term.head + 1) % TERM_HISTORY;
     if (term.count < TERM_HISTORY) term.count++;
+    else {
+        term.selection_anchor -= term.cols;
+        term.selection_end -= term.cols;
+        if (term.selection_anchor < 0 || term.selection_end < 0)
+            term.selection_anchor = term.selection_end = term.selecting = 0;
+    }
+    l->wrapped = 0;
     clear_cells(l->cells, TERM_MAX_COLS);
 }
 
 static void term_reset_screen(void) {
+    term.selection_anchor = term.selection_end = term.selecting = 0;
     term.head = 0;
     term.count = 0;
     term.fg = DEFAULT_FG;
@@ -134,6 +150,7 @@ static void line_feed(void) {
 static void put_char(uint32_t ch) {
     term_cell_t *c;
     if (term.wrap_pending) {
+        screen_line(term.cy)->wrapped = 1;
         term.cx = 0;
         line_feed();
         term.wrap_pending = 0;
@@ -328,6 +345,74 @@ static int utf8_put(char *out, uint32_t cp) {
     return 4;
 }
 
+static int base64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* OSC 52 writes the same clipboard used by Editor and Surfer. Clipboard
+ * read/query requests are deliberately ignored; programs cannot read it. */
+static void finish_osc(void) {
+    static char decoded[TERM_CLIP_CAP];
+    int start = 3, out = 0;
+    if (term.osc_overflow || term.osc_len < 4 || term.osc[0] != '5' ||
+        term.osc[1] != '2' || term.osc[2] != ';') return;
+    if (term.osc[start] == 'c') start++;
+    if (start >= term.osc_len || term.osc[start++] != ';') return;
+    int len = term.osc_len - start;
+    if (len % 4) return;
+    for (int i = start; i < term.osc_len; i += 4) {
+        int a = base64_value(term.osc[i]), b = base64_value(term.osc[i + 1]);
+        int pad2 = term.osc[i + 2] == '=', pad3 = term.osc[i + 3] == '=';
+        int c = pad2 ? 0 : base64_value(term.osc[i + 2]);
+        int d = pad3 ? 0 : base64_value(term.osc[i + 3]);
+        int n = pad2 ? 1 : pad3 ? 2 : 3;
+        if (a < 0 || b < 0 || c < 0 || d < 0 || (pad2 && !pad3) ||
+            ((pad2 || pad3) && i + 4 != term.osc_len) || out + n > TERM_CLIP_CAP ||
+            (pad2 && (b & 15)) || (pad3 && !pad2 && (c & 3))) return;
+        decoded[out++] = (char)((a << 2) | (b >> 4));
+        if (n > 1) decoded[out++] = (char)((b << 4) | (c >> 2));
+        if (n > 2) decoded[out++] = (char)((c << 6) | d);
+    }
+    for (int i = 0; i < out; i++) if (!decoded[i]) return;
+    (void)ic_clipboard_set(decoded, (uint64_t)out);
+}
+
+static int selected(int line, int col) {
+    int a = term.selection_anchor, b = term.selection_end;
+    if (a > b) { int t = a; a = b; b = t; }
+    int pos = line * term.cols + col;
+    return pos >= a && pos < b;
+}
+
+static int copy_selection(void) {
+    static char clip[TERM_CLIP_CAP];
+    int a = term.selection_anchor, b = term.selection_end, n = 0;
+    if (a > b) { int t = a; a = b; b = t; }
+    if (a == b || a < 0 || b > term.count * term.cols) return 0;
+    for (int pos = a; pos < b;) {
+        int row = pos / term.cols, from = pos % term.cols;
+        int end = (row + 1) * term.cols < b ? (row + 1) * term.cols : b;
+        int to = end - row * term.cols;
+        term_line_t *line = line_at(row);
+        while (to > from && line->cells[to - 1].ch == ' ') to--;
+        for (int col = from; col < to; col++) {
+            if (n + 4 > TERM_CLIP_CAP) return -1;
+            n += utf8_put(clip + n, line->cells[col].ch);
+        }
+        if (end < b && !line->wrapped) {
+            if (n == TERM_CLIP_CAP) return -1;
+            clip[n++] = '\n';
+        }
+        pos = end;
+    }
+    return ic_clipboard_set(clip, (uint64_t)n) < 0 ? -1 : 1;
+}
+
 static void feed(char ch) {
     unsigned char c = (unsigned char)ch;
     switch (term.state) {
@@ -340,6 +425,7 @@ static void feed(char ch) {
             for (int i = 0; i < 16; i++) term.params[i] = 0;
         } else if (c == ']') {
             term.state = PS_OSC;
+            term.osc_len = term.osc_overflow = 0;
         } else if (c == '(' || c == ')') {
             term.state = PS_CHARSET;
         } else if (c == '7') {
@@ -365,10 +451,13 @@ static void feed(char ch) {
         term.state = PS_NORMAL;
         return;
     case PS_OSC:
-        if (c == 7) term.state = PS_NORMAL;
+        if (c == 7) { finish_osc(); term.state = PS_NORMAL; }
         else if (c == 27) term.state = PS_OSC_ESC;
+        else if (term.osc_len < TERM_OSC_CAP) term.osc[term.osc_len++] = (char)c;
+        else term.osc_overflow = 1;
         return;
     case PS_OSC_ESC:
+        if (c == '\\') finish_osc();
         term.state = PS_NORMAL;
         return;
     case PS_CSI:
@@ -394,6 +483,7 @@ static void feed(char ch) {
     case '\n':
     case 11:
     case 12:
+        screen_line(term.cy)->wrapped = 0;
         term.cx = 0;
         term.wrap_pending = 0;
         line_feed();
@@ -424,8 +514,28 @@ static void feed_str(const char *s) {
     while (*s) feed(*s++);
 }
 
+static void flush_input(void) {
+    if (term.pty <= 0 || term.exited || term.input_off == term.input_len) return;
+    long n = icda_pty_io(term.pty, ICDA_PTY_WRITE, term.input + term.input_off,
+                        (uint64_t)(term.input_len - term.input_off));
+    if (n > 0 && n <= term.input_len - term.input_off) term.input_off += (int)n;
+    if (term.input_off == term.input_len) term.input_off = term.input_len = 0;
+}
+
 static void pty_send(const char *s, int n) {
-    if (term.pty > 0 && !term.exited) icda_pty_io(term.pty, ICDA_PTY_WRITE, (void *)s, (uint64_t)n);
+    if (term.pty <= 0 || term.exited || n <= 0) return;
+    flush_input();
+    if (term.input_off) {
+        for (int i = term.input_off; i < term.input_len; i++) term.input[i - term.input_off] = term.input[i];
+        term.input_len -= term.input_off;
+        term.input_off = 0;
+    }
+    if ((uint64_t)n > sizeof(term.input) - (uint64_t)term.input_len) {
+        (void)ic_notify("Terminal", "Input busy", "Wait for the current paste to finish.");
+        return;
+    }
+    for (int i = 0; i < n; i++) term.input[term.input_len++] = s[i];
+    flush_input();
 }
 
 static void pty_send_str(const char *s) {
@@ -441,6 +551,7 @@ static void layout(ic_app_t *app) {
     if (cols < 10) cols = 10;
     if (rows < 3) rows = 3;
     if (cols == term.cols && rows == term.rows) return;
+    term.selection_anchor = term.selection_end = term.selecting = 0;
     if (term.count == 0) {
         term.cols = cols;
         term.rows = rows;
@@ -499,12 +610,13 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
         while (x0 < term.cols) {
             term_cell_t *s = &l->cells[x0];
             int inv = (s->attr & ATTR_INVERSE) != 0;
+            int sel = selected(top_index + row, x0);
             int x1 = x0 + 1;
             char run[TERM_MAX_COLS * 4 + 1];
             int n = 0, used = 0, cells = 0;
             ic_color_t fc, bc;
             while (x1 < term.cols && l->cells[x1].fg == s->fg && l->cells[x1].bg == s->bg &&
-                   l->cells[x1].attr == s->attr) {
+                   l->cells[x1].attr == s->attr && selected(top_index + row, x1) == sel) {
                 x1++;
             }
             fc = ansi_color(s->fg, 1);
@@ -515,7 +627,8 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
                 fc = bc;
                 bc = t;
             }
-            if (inv || s->bg != DEFAULT_BG) {
+            if (sel) { fc = p->label_on_accent; bc = p->accent; }
+            if (inv || sel || s->bg != DEFAULT_BG) {
                 ic_gfx_fill(c, r.x + 5 + x0 * cw, y, (x1 - x0) * cw, ch, bc);
             }
             for (int x = x0; x < x1; x++) {
@@ -533,6 +646,9 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
             x0 = x1;
         }
     }
+
+    static const char hint[] = "Drag to select | Ctrl+Shift+C copy | Ctrl+Shift+V paste";
+    ic_text_draw_n(c, f, r.x + 5, r.y + r.h + base, hint, sizeof(hint) - 1, p->label_secondary);
 
     if (term.view_offset == 0 && term.cursor_visible && !term.exited && ic_app_caret_visible(app)) {
         int x = r.x + 5 + term.cx * cw;
@@ -555,7 +671,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
 }
 
 static void paste_clipboard(void) {
-    char clip[2048];
+    static char clip[TERM_CLIP_CAP + 1];
     long n = ic_clipboard_get(clip, sizeof(clip));
     for (long k = 0; k < n; k++) {
         if (!term.bracketed_paste && clip[k] == '\n') clip[k] = '\r';
@@ -570,7 +686,11 @@ static void paste_clipboard(void) {
 static void send_key(const ic_event_t *ev) {
     uint32_t k = ev->key;
     char b[2];
-    if ((ev->mods & IC_MOD_CTRL) && (ev->mods & IC_MOD_SHIFT) && k == 'v') {
+    if ((ev->mods & IC_MOD_CTRL) && (ev->mods & IC_MOD_SHIFT) && (k == 'c' || k == 'C')) {
+        if (copy_selection() < 0) (void)ic_notify("Terminal", "Could not copy", "Select less text and try again.");
+        return;
+    }
+    if ((ev->mods & IC_MOD_CTRL) && (ev->mods & IC_MOD_SHIFT) && (k == 'v' || k == 'V')) {
         paste_clipboard();
         return;
     }
@@ -607,6 +727,7 @@ static void send_key(const ic_event_t *ev) {
 }
 
 static void start_shell(ic_app_t *app) {
+    term.input_off = term.input_len = 0;
     term.exited = 0;
     if (term.pty <= 0) term.pty = icda_pty_open();
     term.pid = 0;
@@ -629,6 +750,7 @@ static void tick(ic_app_t *app) {
     long n;
     int got = 0;
     if (term.pty <= 0) return;
+    flush_input();
     while ((n = icda_pty_io(term.pty, ICDA_PTY_READ, buf, sizeof(buf))) > 0) {
         for (long i = 0; i < n; i++) feed(buf[i]);
         got = 1;
@@ -666,6 +788,17 @@ static void clamp_view(void) {
     if (term.view_offset > max_view_offset()) term.view_offset = max_view_offset();
 }
 
+static int selection_position(ic_app_t *app, int x, int y) {
+    ic_rect_t r = content_rect(app);
+    int row = (y - r.y) / cell_h();
+    int col = (x - r.x - 5 + cell_w() / 2) / cell_w();
+    if (row < 0) row = 0;
+    if (row >= term.rows) row = term.rows - 1;
+    if (col < 0) col = 0;
+    if (col > term.cols) col = term.cols;
+    return (term.count - term.rows - term.view_offset + row) * term.cols + col;
+}
+
 static void event(ic_app_t *app, const ic_event_t *ev) {
     ic_rect_t r = content_rect(app);
     switch (ev->type) {
@@ -675,6 +808,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         ic_app_set_cursor(app, ic_ui_hit(r, ev->x, ev->y) && !term.hover_scroll ? IC_CURSOR_TEXT
                                                                                : IC_CURSOR_ARROW);
         if (term.dragging_scroll) scrollbar_drag(app, ev->y);
+        else if (term.selecting) term.selection_end = selection_position(app, ev->x, ev->y);
         break;
     }
     case IC_EV_MOUSE_DOWN:
@@ -683,9 +817,14 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             scrollbar_drag(app, ev->y);
         } else if (ev->button == GUI_BTN_RIGHT) {
             paste_clipboard();
+        } else if (ev->button == GUI_BTN_LEFT && ic_ui_hit(r, ev->x, ev->y)) {
+            term.selection_anchor = term.selection_end = selection_position(app, ev->x, ev->y);
+            term.selecting = 1;
         }
         break;
     case IC_EV_MOUSE_UP:
+        if (term.selecting) term.selection_end = selection_position(app, ev->x, ev->y);
+        term.selecting = 0;
         term.dragging_scroll = 0;
         break;
     case IC_EV_MOUSE_LEAVE:
@@ -696,6 +835,8 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         clamp_view();
         break;
     case IC_EV_KEY:
+        if ((ev->mods & IC_MOD_CTRL) && (ev->mods & IC_MOD_SHIFT) &&
+            (ev->key == 'c' || ev->key == 'C')) { send_key(ev); break; }
         if ((ev->mods & IC_MOD_SHIFT) && (ev->key == IC_KEY_PAGE_UP || ev->key == IC_KEY_PAGE_DOWN)) {
             term.view_offset += ev->key == IC_KEY_PAGE_UP ? term.rows - 1 : -(term.rows - 1);
             clamp_view();

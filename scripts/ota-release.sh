@@ -71,7 +71,9 @@ body=$(mktemp)
     # published as linux.pack.part0 ... - a few downloads instead of thousands
     # of HTTPS connections.  Updaters before 1.8.5 skip wpack / wfile lines.
     if [ -d "$LINUXROOT/usr/bin" ]; then
-        set -- linux/usr/bin/icda-webkit=userspace/webkit/out/icda-webkit \
+        # Ship browser chrome separately. Keep the root's legacy WebKit
+        # launcher in its existing pack so UI fixes do not replace that pack.
+        set -- loose:linux/usr/bin/icda-surfer=userspace/webkit/out/icda-webkit \
                linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
                loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
                loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \
