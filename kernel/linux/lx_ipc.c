@@ -1173,6 +1173,8 @@ typedef struct {
     uint32_t peer_ip;       /* wire order */
     uint16_t peer_port;     /* host order */
     int      shut_wr;
+    uint32_t local_ip;
+    int      listening;
 } inet_t;
 
 static const lx_fops_t inet_ops;
@@ -1344,6 +1346,7 @@ static int64_t inet_connect(lx_file_t *f, inet_t *s, const void *uaddr, uint64_t
     s->connected = 1;
     s->peer_ip = ip;
     s->peer_port = port;
+    if (!s->local_ip && ((const uint8_t *)&ip)[0] == 127) s->local_ip = 0x0100007f;
     if (f->flags & LX_O_NONBLOCK) return -EINPROGRESS;
     for (;;) {
         int64_t st = sock_syscall(NET_OP_STATUS, (uint64_t)s->h, 0, 0, 0, 0);
@@ -1368,6 +1371,8 @@ static int64_t inet_sockopt(inet_t *s, int level, int opt, void *uval, uint32_t 
         v = 65536;
     } else if (level == 1 && opt == 39) {
         v = 2;
+    } else if (level == 1 && opt == 30) {
+        v = s->listening;
     }
     if (have < n) n = have;
     if (copy_to_user(uval, &v, n) || copy_to_user(ulen, &n, 4)) return -EFAULT;
@@ -1452,6 +1457,7 @@ static int64_t inet_dispatch(int op, int64_t fd, uint64_t a, uint64_t b, uint64_
         return r;
     }
     case IN_SHUTDOWN:
+        { int64_t r = sock_k_shutdown(s->h, (int)a); if (r < 0) return r; }
         if (a == 1 || a == 2) s->shut_wr = 1;
         return 0;
     case IN_GETSOCKOPT: return inet_sockopt(s, (int)a, (int)b, (void *)c, (uint32_t *)d);
@@ -1466,10 +1472,54 @@ static int64_t inet_dispatch(int op, int64_t fd, uint64_t a, uint64_t b, uint64_
             if (!s->connected) return -107;
             return write_sin((void *)a, (uint32_t *)b, s->peer_ip, s->peer_port);
         }
-        return write_sin((void *)a, (uint32_t *)b, 0, lport);
+        return write_sin((void *)a, (uint32_t *)b, s->local_ip, lport);
     }
-    case IN_BIND: return 0;                                  /* the stack picks the local port */
-    case IN_LISTEN: case IN_ACCEPT: return -EOPNOTSUPP;      /* no servers yet */
+    case IN_BIND: {
+        uint32_t ip;
+        uint16_t port;
+        int64_t r = read_sin((const void *)a, b, &ip, &port);
+        if (r < 0) return r;
+        r = sock_k_bind(s->h, ip, port);
+        if (!r) s->local_ip = ip;
+        return r;
+    }
+    case IN_LISTEN: {
+        int64_t r = sock_k_listen(s->h, (int)a);
+        if (!r) s->listening = 1;
+        return r;
+    }
+    case IN_ACCEPT: {
+        uint32_t ip;
+        uint16_t port;
+        int64_t h;
+        if ((int)c & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
+        for (;;) {
+            h = sock_k_accept(s->h, &ip, &port);
+            if (h != -EAGAIN) break;
+            if (f->flags & LX_O_NONBLOCK) return -EAGAIN;
+            if (lxi_interrupted()) return -EINTR;
+            sched_wait_on(&net_wait_key);
+            sched_event_wait();
+        }
+        if (h < 0) return h;
+        int64_t r = write_sin((void *)a, (uint32_t *)b, ip, port);
+        inet_t *child = r < 0 ? 0 : (inet_t *)zalloc(sizeof(inet_t));
+        if (!child) {
+            (void)sock_syscall(NET_OP_CLOSE, (uint64_t)h, 0, 0, 0, 0);
+            return r < 0 ? r : -ENOMEM;
+        }
+        child->h = h;
+        child->connected = 1;
+        child->peer_ip = ip;
+        child->peer_port = port;
+        child->local_ip = s->local_ip ? s->local_ip : 0x0100007f;
+        lx_file_t *cf = lxi_file_new(&inet_ops, child, 2 | ((c & SOCK_NONBLOCK) ? LX_O_NONBLOCK : 0));
+        if (!cf) { inet_release(child); return -ENOMEM; }
+        r = lxi_fd_install(cf, (c & SOCK_CLOEXEC) != 0);
+        if (r < 0) lxi_file_unref(cf);
+        lxi_poll_observe(f);
+        return r;
+    }
     }
     return -EINVAL;
 }

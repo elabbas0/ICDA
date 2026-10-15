@@ -59,6 +59,12 @@ void    sock_proc_exit(struct process *proc);
 int64_t sock_k_ready(int64_t h);
 int64_t sock_k_recvfrom(int64_t h, uint8_t *ubuf, uint64_t cap, uint32_t *ip, uint16_t *port);
 int64_t sock_k_names(int64_t h, uint16_t *lport, uint32_t *rip, uint16_t *rport);
+/* Local TCP listeners for browser OAuth callbacks. Remote listeners are not
+ * exposed: only connections to 127.0.0.0/8 enter the accept queue. */
+int64_t sock_k_bind(int64_t h, uint32_t ip, uint16_t port);
+int64_t sock_k_listen(int64_t h, int backlog);
+int64_t sock_k_accept(int64_t h, uint32_t *ip, uint16_t *port);
+int64_t sock_k_shutdown(int64_t h, int how);
 
 /* Shared receive path: frames the socket layer does not consume are kept
  * for the older blocking fetchers in net.c. */

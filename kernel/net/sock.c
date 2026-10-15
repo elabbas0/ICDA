@@ -38,10 +38,13 @@
 #define ETIMEDOUT_   110
 #define ENOTCONN_    107
 #define EHOSTUNREACH_ 113
+#define EADDRINUSE_   98
+#define EADDRNOTAVAIL_ 99
+#define EOPNOTSUPP_   95
 
 enum {
     T_FREE = 0, T_ARP, T_SYN_SENT, T_ESTABLISHED, T_FIN_WAIT_1, T_FIN_WAIT_2,
-    T_CLOSE_WAIT, T_LAST_ACK, T_TIME_WAIT, T_CLOSED
+    T_CLOSE_WAIT, T_LAST_ACK, T_TIME_WAIT, T_CLOSED, T_LISTEN
 };
 
 typedef struct {
@@ -59,6 +62,9 @@ typedef struct {
     uint64_t  owner;
     uint32_t  rip;
     uint16_t  rport, lport;
+    uint32_t  bind_ip;
+    int       bound, loopback, loop_peer;
+    int       pending_head, pending_tail, pending_next, pending_count, backlog, pending_listener;
     uint8_t   mac[6];
     uint64_t  arp_deadline;
     /* TCP */
@@ -378,6 +384,32 @@ static void tcp_output(sock_t *s) {
 static uint8_t *slot_sbuf[SOCK_MAX], *slot_rbuf[SOCK_MAX];
 
 static void sock_release(sock_t *s) {
+    if (s->pending_listener) {
+        sock_t *listener = &socks[s->pending_listener - 1];
+        int prev = 0;
+        for (int h = listener->pending_head; h; h = socks[h - 1].pending_next) {
+            if (&socks[h - 1] == s) {
+                if (prev) socks[prev - 1].pending_next = s->pending_next;
+                else listener->pending_head = s->pending_next;
+                if (listener->pending_tail == h) listener->pending_tail = prev;
+                listener->pending_count--;
+                break;
+            }
+            prev = h;
+        }
+    }
+    if (s->loop_peer) {
+        sock_t *peer = &socks[s->loop_peer - 1];
+        peer->loop_peer = 0;
+        peer->peer_fin = 1;
+        sched_event_wake_key(&net_wait_key);
+    }
+    while (s->pending_head) {
+        sock_t *child = &socks[s->pending_head - 1];
+        s->pending_head = child->pending_next;
+        child->pending_listener = 0;
+        sock_release(child);
+    }
     for (int i = 0; i < s->qlen; i++) kfree(s->q[(s->qhead + i) % UDP_QUEUE].data);
     if (s->rmap) kfree(s->rmap);
     zero_bytes(s, sizeof(*s));
@@ -718,7 +750,8 @@ void sock_tick(void) {
     if (!any_socket()) return;
     rx_pump();
     for (int i = 0; i < SOCK_MAX; i++) {
-        if (socks[i].type == SOCK_TCP && socks[i].state) tcp_timer(&socks[i]);
+        if (socks[i].type == SOCK_TCP && socks[i].state &&
+            !socks[i].loopback && socks[i].state != T_LISTEN) tcp_timer(&socks[i]);
     }
 }
 
@@ -772,7 +805,41 @@ static int64_t op_socket(uint64_t type) {
 }
 
 static int64_t op_connect(sock_t *s, uint32_t ip, uint16_t port) {
-    if (s->type != SOCK_TCP || s->rport) return -EINVAL_;
+    if (s->type != SOCK_TCP || s->rport || s->state == T_LISTEN) return -EINVAL_;
+    if (((const uint8_t *)&ip)[0] == 127) {
+        sock_t *listener = 0;
+        for (int i = 0; i < SOCK_MAX; i++) {
+            sock_t *candidate = &socks[i];
+            if (candidate->state == T_LISTEN && candidate->lport == port &&
+                (!candidate->bind_ip || candidate->bind_ip == ip)) {
+                listener = candidate;
+                break;
+            }
+        }
+        if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED_;
+        int64_t h = op_socket(SOCK_TCP);
+        if (h < 0) return h;
+        sock_t *child = &socks[h - 1];
+        child->owner = listener->owner;
+        child->state = s->state = T_ESTABLISHED;
+        child->loopback = s->loopback = 1;
+        child->bind_ip = ip;
+        child->lport = listener->lport;
+        child->rip = s->bind_ip ? s->bind_ip : 0x0100007f;
+        child->rport = s->lport;
+        child->loop_peer = (int)(s - socks) + 1;
+        child->pending_listener = (int)(listener - socks) + 1;
+        s->loop_peer = (int)h;
+        s->bind_ip = child->rip;
+        s->rip = ip;
+        s->rport = port;
+        if (listener->pending_tail) socks[listener->pending_tail - 1].pending_next = (int)h;
+        else listener->pending_head = (int)h;
+        listener->pending_tail = (int)h;
+        listener->pending_count++;
+        sched_event_wake_key(&net_wait_key);
+        return 0;
+    }
     if (!net_ready()) return -EHOSTUNREACH_;
     ntrace("connect", ip, port, s->lport);
     s->rip = ip;
@@ -800,6 +867,21 @@ static int64_t op_send(sock_t *s, const uint8_t *ubuf, uint64_t len) {
     uint8_t chunk[512];
     uint64_t done = 0;
     if (s->type != SOCK_TCP) return -EINVAL_;
+    if (s->loopback) {
+        if (s->fin_queued || !s->loop_peer) return -EPIPE_;
+        sock_t *peer = &socks[s->loop_peer - 1];
+        while (done < len && peer->rlen < TCP_RBUF) {
+            uint64_t n = len - done;
+            if (n > sizeof(chunk)) n = sizeof(chunk);
+            if (n > TCP_RBUF - peer->rlen) n = TCP_RBUF - peer->rlen;
+            if (copy_from_user(chunk, ubuf + done, n)) return done ? (int64_t)done : -EFAULT_;
+            for (uint64_t i = 0; i < n; i++) peer->rbuf[(peer->rhead + peer->rlen + i) % TCP_RBUF] = chunk[i];
+            peer->rlen += (uint32_t)n;
+            done += n;
+        }
+        sched_event_wake_key(&net_wait_key);
+        return done || !len ? (int64_t)done : -EAGAIN_;
+    }
     if (s->state == T_CLOSED) return s->err ? -s->err : -ENOTCONN_;
     if (s->fin_queued) return -EPIPE_;
     if (s->state == T_ARP || s->state == T_SYN_SENT) return -EAGAIN_;
@@ -831,7 +913,8 @@ static int64_t op_recv(sock_t *s, uint8_t *ubuf, uint64_t cap) {
         done += n;
     }
     if (done) {
-        if (s->last_wnd < TCP_MSS * 2 && rbuf_free(s) >= TCP_RBUF / 2) tcp_ack(s);
+        if (s->loopback) sched_event_wake_key(&net_wait_key);
+        else if (s->last_wnd < TCP_MSS * 2 && rbuf_free(s) >= TCP_RBUF / 2) tcp_ack(s);
         return (int64_t)done;
     }
     if (s->peer_fin) return 0;
@@ -843,6 +926,10 @@ static int64_t op_close(int64_t h) {
     sock_t *s = sock_get(h);
     if (!s) return -EBADF_;
     s->user_closed = 1;
+    if (s->loopback || s->state == T_LISTEN) {
+        sock_release(s);
+        return 0;
+    }
     if (s->type == SOCK_TCP && (s->state == T_ESTABLISHED || s->state == T_CLOSE_WAIT)) {
         s->fin_queued = 1;
         tcp_output(s);
@@ -871,6 +958,14 @@ static int64_t op_status(sock_t *s) {
 static uint16_t ready_mask(sock_t *s) {
     uint16_t m = 0;
     if (!s) return NET_POLL_ERR;
+    if (s->state == T_LISTEN) return s->pending_head ? NET_POLL_IN : 0;
+    if (s->loopback) {
+        if (s->rlen || s->peer_fin) m |= NET_POLL_IN;
+        if (s->peer_fin) m |= NET_POLL_HUP;
+        if (!s->loop_peer) m |= NET_POLL_HUP;
+        else if (!s->fin_queued && socks[s->loop_peer - 1].rlen < TCP_RBUF) m |= NET_POLL_OUT;
+        return m;
+    }
     if (s->type == SOCK_UDP) return (uint16_t)((s->qlen ? NET_POLL_IN : 0) | NET_POLL_OUT);
     if (s->rlen || s->peer_fin) m |= NET_POLL_IN;
     if (s->peer_fin) m |= NET_POLL_HUP;
@@ -982,6 +1077,10 @@ void sock_proc_exit(struct process *proc) {
     for (int i = 0; proc && i < SOCK_MAX; i++) {
         sock_t *s = &socks[i];
         if (!s->state || s->owner != proc->pid || s->user_closed) continue;
+        if (s->loopback || s->state == T_LISTEN) {
+            sock_release(s);
+            continue;
+        }
         s->user_closed = 1;
         if (s->type == SOCK_TCP && (s->state == T_ESTABLISHED || s->state == T_CLOSE_WAIT)) {
             s->fin_queued = 1;
@@ -994,6 +1093,64 @@ void sock_proc_exit(struct process *proc) {
 }
 
 /* ---- for the Linux personality's AF_INET sockets (kernel/linux/lx_ipc.c) -- */
+
+int64_t sock_k_bind(int64_t h, uint32_t ip, uint16_t port) {
+    sock_t *s = sock_get(h);
+    if (!s) return -EBADF_;
+    if (s->bound || s->rport || s->state != T_CLOSED) return -EINVAL_;
+    if (ip && ((const uint8_t *)&ip)[0] != 127 && ip != net_state.ip) return -EADDRNOTAVAIL_;
+    if (!port) port = s->lport;
+    for (int i = 0; i < SOCK_MAX; i++) {
+        sock_t *other = &socks[i];
+        if (other != s && other->state && other->type == s->type && other->lport == port &&
+            (!other->bind_ip || !ip || other->bind_ip == ip)) return -EADDRINUSE_;
+    }
+    s->bind_ip = ip;
+    s->lport = port;
+    s->bound = 1;
+    return 0;
+}
+
+int64_t sock_k_listen(int64_t h, int backlog) {
+    sock_t *s = sock_get(h);
+    if (!s) return -EBADF_;
+    if (s->type != SOCK_TCP) return -EOPNOTSUPP_;
+    if (s->state != T_CLOSED && s->state != T_LISTEN) return -EINVAL_;
+    if (s->bind_ip && ((const uint8_t *)&s->bind_ip)[0] != 127) return -EOPNOTSUPP_;
+    s->backlog = backlog > 0 ? (backlog < SOCK_MAX ? backlog : SOCK_MAX) : 1;
+    s->bound = 1;
+    s->state = T_LISTEN;
+    return 0;
+}
+
+int64_t sock_k_accept(int64_t h, uint32_t *ip, uint16_t *port) {
+    sock_t *s = sock_get(h);
+    if (!s) return -EBADF_;
+    if (s->state != T_LISTEN) return -EINVAL_;
+    if (!s->pending_head) return -EAGAIN_;
+    int child_h = s->pending_head;
+    sock_t *child = &socks[child_h - 1];
+    s->pending_head = child->pending_next;
+    if (!s->pending_head) s->pending_tail = 0;
+    s->pending_count--;
+    child->pending_next = 0;
+    child->pending_listener = 0;
+    if (ip) *ip = child->rip;
+    if (port) *port = child->rport;
+    return child_h;
+}
+
+int64_t sock_k_shutdown(int64_t h, int how) {
+    sock_t *s = sock_get(h);
+    if (!s) return -EBADF_;
+    if (how < 0 || how > 2) return -EINVAL_;
+    if (s->loopback && (how == 1 || how == 2)) {
+        s->fin_queued = 1;
+        if (s->loop_peer) socks[s->loop_peer - 1].peer_fin = 1;
+        sched_event_wake_key(&net_wait_key);
+    }
+    return 0;
+}
 
 int64_t sock_k_ready(int64_t h) {
     rx_pump();

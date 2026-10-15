@@ -9,6 +9,7 @@ uint64_t sched_ticks(void) { return 123; }
 void *kmalloc(size_t n) { return malloc(n); }
 void kfree(void *p) { free(p); }
 void serial_write(const char *s) { (void)s; }
+void sched_event_wake_key(const void *key) { (void)key; }
 static uint32_t ack_sent;
 int net_drv_send_frame(const void *frame, uint16_t len) {
     assert(len >= 54);

@@ -79,8 +79,15 @@ CLI, `codex login --device-auth` to sign in with ChatGPT, or
 `--model` option select an account model. The launcher keeps stdin/stdout
 attached to Terminal and enables live web search and full system-file access.
 It runs in foreground mode (`--no-daemon`) on ICDA.
+For ChatGPT sign-in from a phone or another computer, run
+`codex login --device-auth`, open the displayed link there, and enter the
+one-time code. Enable device-code login in ChatGPT's Security settings if
+required. Browser sign-in (`codex login`) returns to `localhost:1455` on
+ICDA, so that flow must finish in a browser on ICDA itself.
 Installed-system test results and screenshots are in the
 [1.8.25 verification report](docs/verification/codex-1.8.25/README.md).
+Fresh sign-in startup and callback tests are in the
+[1.8.26 verification report](docs/verification/codex-1.8.26/README.md).
 The built-in assistant has no Codex provider or Codex commands.
 
 Prepare the verified official package with
