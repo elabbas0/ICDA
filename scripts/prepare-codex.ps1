@@ -63,7 +63,12 @@ foreach ($file in $source.files) {
 }
 $context = Join-Path $LinuxRoot 'usr/share/icda/codex'
 New-Item -ItemType Directory -Force -Path $context | Out-Null
+$oldLauncher=Join-Path $context 'assistant.sh'
+if(Test-Path -LiteralPath $oldLauncher){Remove-Item -LiteralPath $oldLauncher}
 Get-ChildItem -LiteralPath (Join-Path $repo 'resources/codex') -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $context $_.Name) -Force
 }
+$bin=Join-Path $LinuxRoot 'bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'resources/codex/terminal.sh') -Destination (Join-Path $bin 'codex') -Force
 Write-Host "Verified official Codex $($source.version) package ($($source.files.Count) files), prepared inside $LinuxRoot."

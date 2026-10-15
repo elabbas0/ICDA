@@ -571,6 +571,14 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, data, size) != 0) {
         return -1;
     }
+    /* Mounted files already live on disk. Keeping a second, growing RAM copy
+     * makes streaming a model exhaust the kernel heap after a few chunks. */
+    if (node->mount_id && vfs_external_hook) {
+        if (node->data) kfree(node->data);
+        node->data = 0; node->cap = 0; node->size = size; node->lazy = 1;
+        node->modified = vfs_tick++;
+        return 0;
+    }
 
     next = (char *)kmalloc((size_t)(size + 1));
     if (!next) {
@@ -634,6 +642,13 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
     if (external_range(VFS_EXT_WRITE_AT, node, data, size, off) != 0) {
         return -1;
     }
+    if (node->mount_id && vfs_external_hook) {
+        if (node->data) kfree(node->data);
+        node->data = 0; node->cap = 0; node->lazy = 1;
+        if (new_end > node->size) node->size = new_end;
+        node->modified = vfs_tick++;
+        return 0;
+    }
     if (node->lazy) {
         if (new_end > node->size) node->size = new_end;
         node->modified = vfs_tick++;
@@ -665,6 +680,12 @@ int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
     }
     if (external_range(VFS_EXT_TRUNCATE, node, 0, len, 0) != 0) {
         return -1;
+    }
+    if (node->mount_id && vfs_external_hook) {
+        if (node->data) kfree(node->data);
+        node->data = 0; node->cap = 0; node->size = len; node->lazy = 1;
+        node->modified = vfs_tick++;
+        return 0;
     }
     if (node->lazy) {
         node->size = len;

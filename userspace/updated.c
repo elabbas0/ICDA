@@ -61,7 +61,6 @@ typedef struct {
     int      webkit;     /* an lfile or wfile line */
     int      packed;     /* a wfile line: its bytes are at pack_off in the WebKit pack */
     uint64_t pack_off;
-    char     source_url[384]; /* model weights come directly from their publisher */
 } entry_t;
 
 typedef struct {
@@ -141,21 +140,8 @@ static int parse_manifest(const char *text, manifest_t *m) {
                 snprintf(m->version, sizeof(m->version), "%s", line + 8);
             } else if (strncmp(line, "notes ", 6) == 0) {
                 snprintf(m->notes, sizeof(m->notes), "%s", line + 6);
-            } else if (strncmp(line, "model ", 6) == 0 && m->count < MAX_FILES) {
-                /* Older updaters skip this line and first install the new client. */
-                char *f[4];
-                if (fields(line + 6, f, 4) == 4 &&
-                    strncmp(f[0], "linux/usr/share/icda/models/", 27) == 0 &&
-                    strlen(f[0]) < sizeof(m->files[0].rel) && strlen(f[2]) == 64 &&
-                    strlen(f[3]) < sizeof(m->files[0].source_url) &&
-                    (!strncmp(f[3], "http://", 7) || !strncmp(f[3], "https://", 8))) {
-                    entry_t *e = &m->files[m->count++];
-                    snprintf(e->rel, sizeof(e->rel), "%s", f[0]);
-                    e->size = strtoull(f[1], 0, 10);
-                    snprintf(e->sha, sizeof(e->sha), "%s", f[2]);
-                    snprintf(e->source_url, sizeof(e->source_url), "%s", f[3]);
-                    e->webkit = 1;
-                }
+            } else if (strncmp(line, "model ", 6) == 0) {
+                /* Legacy catalog metadata only. Assistant owns all weight downloads. */
             } else if (strncmp(line, "wpack ", 6) == 0) {
                 /* wpack REL SIZE SHA256 PARTS */
                 char *f[4];
@@ -245,32 +231,8 @@ static void to_hex(const uint8_t d[32], char out[65]) {
     out[64] = 0;
 }
 
-static int model_present_at(const char *path, uint64_t size) {
-    icda_stat_t st;
-    char magic[4];
-    return (long)icda_stat(path, &st) >= 0 && st.size == size &&
-           (long)icda_read_file(path, magic, sizeof(magic)) == 4 &&
-           memcmp(magic, "GGUF", 4) == 0;
-}
-
-/* A legacy updater stores the catalog before it can download its model rows. */
-static int model_installed(const entry_t *e) {
-    char path[320], marker[128];
-    icda_stat_t st;
-    if (!e->source_url[0]) return 1;
-    snprintf(path, sizeof(path), "/%s", e->rel);
-    if (model_present_at(path, e->size)) return 1;
-    for (int i = 0; i < 32; i++) {
-        snprintf(marker, sizeof(marker), "/volumes/fat32-%d/ICDACFG.TXT", i);
-        if ((long)icda_stat(marker, &st) < 0) continue;
-        snprintf(path, sizeof(path), "/volumes/fat32-%d/%s", i, e->rel);
-        if (model_present_at(path, e->size)) return 1;
-    }
-    return 0;
-}
-
 static int entry_current(const entry_t *e, const entry_t *old) {
-    return old && strcmp(old->sha, e->sha) == 0 && model_installed(e);
+    return old && strcmp(old->sha, e->sha) == 0;
 }
 
 /* compares dotted versions; <0, 0, >0 */
@@ -315,8 +277,7 @@ static int download(const entry_t *e) {
     sha256_init(&ctx);
     st = HTTP_DONE;
     for (int part = 0; part < (e->parts > 0 ? e->parts : 1) && st == HTTP_DONE; part++) {
-    if (e->source_url[0]) snprintf(url, sizeof(url), "%s", e->source_url);
-    else if (e->parts > 0) snprintf(url, sizeof(url), "%s%s.part%d", OTA_BASE, e->rel, part);
+    if (e->parts > 0) snprintf(url, sizeof(url), "%s%s.part%d", OTA_BASE, e->rel, part);
     else snprintf(url, sizeof(url), "%s%s", OTA_BASE, e->rel);
     r = http_open_follow(url, 0);
     if (!r) {
@@ -504,9 +465,8 @@ static void check(void) {
         int missing = 0;
         for (int i = 0; i < want.count && !missing; i++) {
             const entry_t *old;
-            /* Model rows describe optional, user-selected HTTP downloads.
-             * They must never make a same-version system update fetch a model. */
-            if (!want.files[i].webkit || want.files[i].source_url[0]) continue;
+            /* Check runtime files even for a same-version repair. */
+            if (!want.files[i].webkit) continue;
             old = find(&have, want.files[i].rel);
             if (!entry_current(&want.files[i], old)) missing = 1;
         }
@@ -531,10 +491,6 @@ static void check(void) {
     for (int i = 0; i < want.count; i++) {
         const entry_t *old = find(&have, want.files[i].rel);
         pack_need[i] = 0;
-        /* The manifest carries pinned model sources for the model picker.
-         * Downloading every listed weight as part of an OS update can add
-         * more than 1.5 GB; the assistant fetches a chosen model on demand. */
-        if (want.files[i].source_url[0]) continue;
         if (hotfix && !want.files[i].webkit) continue;
         if (entry_current(&want.files[i], old)) continue;
         if (want.files[i].packed) pack_need[i] = 1, packed_need = 1;
@@ -548,7 +504,6 @@ static void check(void) {
     for (int i = 0; i < want.count; i++) {
         const entry_t *e = &want.files[i];
         const entry_t *old = find(&have, e->rel);
-        if (e->source_url[0]) continue;
         if (entry_current(e, old)) continue;
         if (hotfix && !e->webkit) continue;
         if (e->packed) continue;                            /* from the pack, below */

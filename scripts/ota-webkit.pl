@@ -26,7 +26,9 @@ find({ no_chdir => 1, wanted => sub {
     $src{"linux/$rel"} = $_;
 } }, $root);
 # Model bytes are downloaded by ICDA over HTTP(S) from the official source,
-# never packed or uploaded to GitHub. Older updaters ignore the model rows.
+# never packed or uploaded to GitHub. Model rows are compatibility metadata:
+# 1.8.23 uses them to preserve installed weights during an upgrade, while newer
+# updaters ignore them entirely. The assistant owns all model downloads.
 my $catalog = "$root/usr/share/icda/models/sources.json";
 if (-f $catalog) {
     open my $in, '<', $catalog or die "$catalog: $!";

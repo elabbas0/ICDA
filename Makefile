@@ -522,7 +522,7 @@ updated.o: userspace/updated.c $(SURFER_HEADERS) userspace/surfer/crypto/ed25519
 	$(CC) $(SURFER_CFLAGS) -c userspace/updated.c -o /tmp/icda-updated.o
 	cp -f /tmp/icda-updated.o updated.o
 
-assistantd.o: userspace/assistantd.c userspace/settings_store.h $(SURFER_HEADERS)
+assistantd.o: userspace/assistantd.c userspace/model_catalog.h userspace/settings_store.h $(SURFER_HEADERS)
 	$(CC) $(SURFER_CFLAGS) -c userspace/assistantd.c -o /tmp/icda-assistantd.o
 	cp -f /tmp/icda-assistantd.o assistantd.o
 
@@ -534,6 +534,15 @@ userspace/assistantd.elf: crt1.o assistantd.o $(SURFER_NET_OBJS) libc.o userspac
 	cp -f /tmp/icda-assistantd.elf userspace/assistantd.elf
 
 # OTA patch daemon (/sbin/updated)
+model-install.o: userspace/model-install.c userspace/model_catalog.h $(SURFER_HEADERS)
+	$(CC) $(SURFER_CFLAGS) -c userspace/model-install.c -o /tmp/icda-model-install.o
+	cp -f /tmp/icda-model-install.o model-install.o
+
+userspace/model-install.elf: crt1.o model-install.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-model-install.elf crt1.o model-install.o $(SURFER_NET_OBJS) libc.o
+	printf '\377' | dd of=/tmp/icda-model-install.elf bs=1 seek=7 conv=notrunc status=none
+	cp -f /tmp/icda-model-install.elf userspace/model-install.elf
+
 userspace/updated.elf: crt1.o updated.o surfer_ed25519.o $(SURFER_NET_OBJS) libc.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-updated.elf crt1.o updated.o surfer_ed25519.o $(SURFER_NET_OBJS) libc.o
 	printf '\377' | dd of=/tmp/icda-updated.elf bs=1 seek=7 conv=notrunc status=none
@@ -1041,7 +1050,7 @@ settings_keys.o: userspace/settings_keys.c userspace/settings_keys.h userspace/s
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_keys.c -o /tmp/icda-settings_keys.o
 	cp -f /tmp/icda-settings_keys.o settings_keys.o
 
-settings_ai.o: userspace/settings_ai.c userspace/settings_ai.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h Makefile
+settings_ai.o: userspace/settings_ai.c userspace/model_catalog.h userspace/settings_ai.h $(IC_HEADERS) userspace/icda_sys.h userspace/settings_store.h Makefile
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/settings_ai.c -o /tmp/icda-settings_ai.o
 	cp -f /tmp/icda-settings_ai.o settings_ai.o
 
@@ -1254,7 +1263,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/assistantd.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/assistantd.elf userspace/model-install.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)
@@ -1265,7 +1274,7 @@ endif
 user_programs_slim.o: kernel/proc/user_programs.asm userspace/init.app
 	$(ASM) -f elf64 -DCI_IMAGE=0 -DSLIM=1 kernel/proc/user_programs.asm -o user_programs_slim.o
 
-user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox resources/ssl/cacert.pem
+user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox resources/ssl/cacert.pem resources/codex/terminal.sh resources/codex/AGENTS.md resources/codex/CURRENT_TASK.md
 	$(ASM) -f elf64 -DCI_IMAGE=$(CI_IMAGE) kernel/proc/user_programs.asm -o user_programs.o
 
 kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o xhci.o vt.o \

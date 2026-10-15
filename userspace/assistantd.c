@@ -23,6 +23,7 @@
 #include "http.h"
 #include "icda_sys.h"
 #include "settings_store.h"
+#include "model_catalog.h"
 
 #define CONF_PATH   "/home/.config/ai.conf"
 #define REQ_PATH    "/tmp/ai/request"
@@ -58,7 +59,6 @@ static const char conf_default[] =
     "# Free cloud tiers are rate-limited and may train on what you send: keep\n"
     "# private things out of them.\n"
     "local qwen       file:auto   qwen2.5-0.5b-instruct-q4_k_m.gguf   -\n"
-    "cloud codex      codex:chatgpt auto -\n"
     "# answers read aloud (offline voice): speak on / speak off\n"
     "speak on\n"
     "# Free keys:  console.groq.com   aistudio.google.com   openrouter.ai\n"
@@ -103,10 +103,15 @@ static void load_conf(void) {
             word(&p, v->url, sizeof(v->url)) && word(&p, v->model, sizeof(v->model)) && word(&p, v->key, sizeof(v->key))) {
             v->cloud = strcmp(tier, "cloud") == 0;
             if (strcmp(v->key, "-") == 0) v->key[0] = 0;
-            if (!strstr(v->key, "YOUR_KEY")) nprov++;
+            if (!strstr(v->key, "YOUR_KEY") && strcmp(v->url, "codex:chatgpt")) nprov++;
         }
         while (*p && *p != '\n') p++;
         if (*p) p++;
+    }
+    if (!nprov) {
+        provider_t *v = &prov[nprov++]; memset(v, 0, sizeof(*v));
+        strcpy(v->name, "qwen"); strcpy(v->url, "file:auto");
+        strcpy(v->model, icda_models[0].name);
     }
 }
 
@@ -806,7 +811,7 @@ static int llm_start(const provider_t *v, char *err, size_t errcap) {
         }
         snprintf(rel, sizeof(rel), "usr/share/icda/models/%s", name);
         if (!find_system_file(rel, model, sizeof(model))) {
-            snprintf(err, errcap, "%s: %s is not installed in ICDA. Open Settings > Updates to download the models, then restart.", v->name, name);
+            snprintf(err, errcap, "%s: %s is not installed in ICDA. Download it in Settings > Assistant, or use /model install 0.5b (or 1.5b).", v->name, name);
             return -1;
         }
     } else {
@@ -963,121 +968,6 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
     }
 }
 
-/* The official Codex CLI uses ChatGPT sign-in and executes real tools. */
-static void codex_plain(char *text) {
-    char *out = text;
-    for (char *p = text; *p;) {
-        if ((unsigned char)*p == 27 && p[1] == '[') {
-            p += 2;
-            while (*p && !(*p >= '@' && *p <= '~')) p++;
-            if (*p) p++;
-        } else if (*p == '\r') p++;
-        else *out++ = *p++;
-    }
-    *out = 0;
-}
-
-static void codex_context(void) {
-    static char text[12000];
-    const char *files[] = { "AGENTS.md", "CURRENT_TASK.md" };
-    (void)icda_mkdir("/home/icda");
-    for (int i = 0; i < 2; i++) {
-        char source[256], dest[160], rel[160];
-        icda_stat_t st;
-        snprintf(dest, sizeof(dest), "/home/icda/%s", files[i]);
-        if ((long)icda_stat(dest, &st) >= 0) continue;
-        snprintf(source, sizeof(source), "/usr/share/icda/codex/%s", files[i]);
-        if ((long)icda_stat(source, &st) < 0) {
-            snprintf(rel, sizeof(rel), "usr/share/icda/codex/%s", files[i]);
-            if (!find_system_file(rel, source, sizeof(source))) continue;
-        }
-        long n = (long)icda_read_file(source, text, sizeof(text));
-        if (n > 0) (void)icda_write_file(dest, text, (uint64_t)n);
-    }
-}
-
-static int ask_codex(const provider_t *v, const char *q, const char *mode,
-                     char *err, size_t errcap) {
-    static char prompt[24000], log[32000];
-    char bin[256], script[256], args[600], when[96];
-    icda_stat_t st;
-    if (!find_system_file("usr/bin/codex", bin, sizeof(bin))) {
-        snprintf(err, errcap, "Codex is not installed. Apply the ICDA offline update first.");
-        return -1;
-    }
-    snprintf(script, sizeof(script), "/usr/share/icda/codex/assistant.sh");
-    if ((long)icda_stat(script, &st) < 0 &&
-        !find_system_file("usr/share/icda/codex/assistant.sh", script, sizeof(script))) {
-        snprintf(err, errcap, "The Codex launcher is missing from ICDA.");
-        return -1;
-    }
-    codex_context();
-    (void)icda_write_file("/tmp/ai/codex.exit", "", 0);
-    (void)icda_write_file("/tmp/ai/codex.answer", "", 0);
-    (void)icda_write_file("/tmp/ai/codex.log", "", 0);
-    (void)icda_write_file("/tmp/ai/codex.pid", "", 0);
-    (void)icda_write_file("/tmp/ai/codex.model", v->model, strlen(v->model));
-    today(when, sizeof(when));
-    size_t n = (size_t)snprintf(prompt, sizeof(prompt),
-        "You are the Codex assistant inside ICDA. Read AGENTS.md and CURRENT_TASK.md "
-        "in your workspace for available tools and the active task. Current date: %s.\n", when);
-    for (int i = 0; i < nhist; i++) {
-        put(prompt, sizeof(prompt), &n, "\nUser: "); put(prompt, sizeof(prompt), &n, hist[i].q);
-        put(prompt, sizeof(prompt), &n, "\nAssistant: "); put(prompt, sizeof(prompt), &n, hist[i].a);
-    }
-    put(prompt, sizeof(prompt), &n, "\nUser: "); put(prompt, sizeof(prompt), &n, q);
-    if ((long)icda_write_file("/tmp/ai/codex.prompt", prompt, n) < 0) {
-        snprintf(err, errcap, "Could not write the Codex prompt."); return -1;
-    }
-    snprintf(args, sizeof(args), "sh %s %s %s", script, mode, bin);
-    long pid = (long)icda_spawn_args("/bin/busybox", args);
-    if (pid < 0) { snprintf(err, errcap, "Could not start Codex."); return -1; }
-    uint64_t start = icda_ticks(), last = 0;
-    for (;;) {
-        char done[32];
-        long got = (long)icda_read_file("/tmp/ai/codex.log", log, sizeof(log) - 1);
-        if (got > 0) log[got] = 0; else log[0] = 0;
-        codex_plain(log);
-        long d = (long)icda_read_file("/tmp/ai/codex.exit", done, sizeof(done) - 1);
-        if (d > 0) {
-            done[d] = 0;
-            if (!strcmp(mode, "ask") && done[0] == '0') {
-                long a = (long)icda_read_file("/tmp/ai/codex.answer", answer, sizeof(answer) - 1);
-                if (a > 0) { answer[a] = 0; return 0; }
-                snprintf(err, errcap, "Codex finished without a response. See /tmp/ai/codex.log.");
-                return -1;
-            }
-            if (strcmp(mode, "ask") && done[0] == '0') {
-                snprintf(answer, sizeof(answer), "%s", log[0] ? log : "Codex completed.");
-                return 0;
-            }
-            snprintf(err, errcap, "Codex: %.300s", log[0] ? log : "The runtime stopped without an answer.");
-            return -1;
-        }
-        icda_proc_info_t info;
-        if ((long)icda_proc_info((uint64_t)pid, &info) < 0 || info.state >= 5) {
-            snprintf(err, errcap, "Codex launcher stopped: %.270s", log[0] ? log : "See /tmp/ai/codex.log.");
-            return -1;
-        }
-        if (icda_ticks() - start > 60000) {
-            char id[32]; uint64_t child = 0;
-            long len = (long)icda_read_file("/tmp/ai/codex.pid", id, sizeof(id) - 1);
-            if (len > 0) { id[len] = 0; for (char *p = id; *p >= '0' && *p <= '9'; p++) child = child * 10 + (unsigned)(*p - '0'); }
-            if (child) (void)icda_kill(child, 1);
-            (void)icda_kill((uint64_t)pid, 1);
-            snprintf(err, errcap, "Codex timed out after ten minutes. See /tmp/ai/codex.log."); return -1;
-        }
-        if (icda_ticks() - last >= 50) {
-            last = icda_ticks();
-            if (!strcmp(mode, "login") && log[0]) {
-                snprintf(answer, sizeof(answer), "%s", log);
-                reply("answer"); /* URL/code appear while the login is pending. */
-            } else reply("thinking");
-        }
-        rem_check(); icda_sleep(10);
-    }
-}
-
 /* code, research, long questions - or the user said so */
 static int complex_question(const char **q) {
     static const char *const words[] = { "code", "program", "function", "debug", "compile", "research", "compare",
@@ -1102,6 +992,30 @@ static void remember_answer(const char *q) {
     nhist++;
 }
 
+/* Model installation belongs to the assistant, independently of OTA. */
+static int model_command(const char *q) {
+    if (strncmp(q, "/model", 6) || (q[6] && q[6] != ' ')) return 0;
+    q += 6; while (*q == ' ') q++;
+    cur_name = "Qwen installer";
+    if (!strncmp(q, "install", 7) && (!q[7] || q[7] == ' ')) {
+        const char *name = q + 7; while (*name == ' ') name++;
+        if (!*name) { name = icda_models[0].name; for (int i=0;i<nprov;i++) if (!prov[i].cloud) {name=prov[i].model;break;} }
+        if (!strcmp(name, "0.5b")) name=icda_models[0].name;
+        if (!strcmp(name, "1.5b")) name=icda_models[1].name;
+        int valid=0; for(unsigned i=0;i<ICDA_MODEL_COUNT;i++) if(!strcmp(name,icda_models[i].name)) valid=1;
+        if (!valid) { strcpy(answer,"Choose /model install 0.5b or /model install 1.5b."); reply("error"); return 1; }
+        long pid=(long)icda_spawn_args("/sbin/model-install",name);
+        snprintf(answer,sizeof(answer),"%s",pid<0 ? "Could not start the Qwen installer." : "Downloading model from official Hugging Face. Use /model status or Settings > Assistant to follow progress. The download is verified before installation.");
+        reply(pid<0 ? "error":"done");
+    } else if (!strcmp(q,"status")) {
+        long n=(long)icda_read_file("/tmp/ai/model-install.status",answer,sizeof(answer)-1);
+        if(n>0) answer[n]=0; else strcpy(answer,"No model download yet. Use /model install 0.5b or /model install 1.5b.");
+        reply("done");
+    } else {
+        strcpy(answer,"Qwen downloads: /model install 0.5b (469 MiB) or /model install 1.5b (1066 MiB). Models come directly from official Hugging Face and are stored on ICDA. Use /model status for progress, or choose a model in Settings > Assistant."); reply("done");
+    }
+    return 1;
+}
 static void handle(const char *question) {
     char err[400], errs[800];
     static char spoken[Q_MAX];
@@ -1131,24 +1045,7 @@ static void handle(const char *question) {
     cur_name = "";
     answer[0] = 0;
     reply("thinking");
-    if (!strncmp(q, "/codex", 6) && (!q[6] || q[6] == ' ')) {
-        provider_t selected = {0};
-        strcpy(selected.name, "codex"); strcpy(selected.url, "codex:chatgpt");
-        strcpy(selected.model, "auto"); selected.cloud = 1;
-        for (int i = 0; i < nprov; i++) if (!strcmp(prov[i].url, "codex:chatgpt")) { selected = prov[i]; break; }
-        q += 6; while (*q == ' ') q++;
-        const char *mode = !strcmp(q, "login") ? "login" :
-                           !strcmp(q, "status") ? "status" :
-                           !strcmp(q, "version") ? "version" : "ask";
-        cur_name = "codex";
-        if (!q[0]) { strcpy(answer, "Use /codex <task>, /codex login, /codex status or /codex version. Choose the Codex model in Settings > Assistant."); reply("done"); return; }
-        if (ask_codex(&selected, q, mode, err, sizeof(err))) { snprintf(answer, sizeof(answer), "%s", err); reply("error"); }
-        else {
-            if (!strcmp(mode, "ask")) remember_answer(q);
-            reply("done");
-        }
-        return;
-    }
+    if (model_command(q)) return;
     /* reminders and timers need no model */
     if (try_reminder(q)) {
         cur_name = "reminders";
@@ -1175,8 +1072,7 @@ static void handle(const char *question) {
             if (prov[i].cloud != want_cloud) continue;
             cur_name = prov[i].name;
             reply("thinking");
-            if ((!strcmp(prov[i].url, "codex:chatgpt") ? ask_codex(&prov[i], asked, "ask", err, sizeof(err)) :
-                 strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
+            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
                                                        : ask(&prov[i], asked, err, sizeof(err))) == 0) {
                 /* remembered for the conversation */
                 remember_answer(q);

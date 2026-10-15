@@ -109,10 +109,13 @@ typedef struct {
     uint8_t  line;
     uint8_t  cc[19];
 } lx_termios_t;
+typedef struct { lx_termios_t t; uint32_t ispeed, ospeed; } lx_termios2_t;
+_Static_assert(sizeof(lx_termios_t) == 36 && sizeof(lx_termios2_t) == 44, "Linux terminal ABI");
 
 typedef struct {
     int          init;
     lx_termios_t t;
+    uint32_t     ispeed, ospeed;
     uint64_t     fg_pgrp;
     char         line[1024];
     uint32_t     len;
@@ -386,6 +389,7 @@ static lx_tty_t *tty_get(int pty) {
         t->t.iflag = 0x100 | 0x400;               /* ICRNL IXON */
         t->t.oflag = 0x1 | 0x4;                   /* OPOST ONLCR */
         t->t.cflag = 0xBF;                        /* B38400 CS8 CREAD */
+        t->ispeed = t->ospeed = 38400;
         t->t.lflag = 0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x200 | 0x800 | 0x8000;
         t->t.cc[0] = 3;
         t->t.cc[1] = 0x1C;
@@ -527,9 +531,25 @@ static uint64_t tty_ioctl(lx_file_t *f, uint64_t req, uint64_t arg) {
     int pty = cur_pty();
     lx_tty_t *t = tty_get(pty);
     process_t *proc = sched_current_process();
-    (void)f;
     if (!t) return ERR(ENOTTY);
     switch (req) {
+        case 0x5421: { /* FIONBIO */
+            int32_t nonblock;
+            if (copy_from_user(&nonblock, (const void *)arg, sizeof(nonblock))) return ERR(EFAULT);
+            if (nonblock) f->flags |= O_NONBLOCK; else f->flags &= ~O_NONBLOCK;
+            return 0;
+        }
+        case 0x802C542A: { /* TCGETS2: rustix/crossterm use the extended ABI. */
+            lx_termios2_t value = { t->t, t->ispeed, t->ospeed };
+            return copy_to_user((void *)arg, &value, sizeof(value)) ? ERR(EFAULT) : 0;
+        }
+        case 0x402C542B: case 0x402C542C: case 0x402C542D: { /* TCSETS2/W2/F2 */
+            lx_termios2_t value;
+            if (copy_from_user(&value, (const void *)arg, sizeof(value))) return ERR(EFAULT);
+            t->t = value.t; t->ispeed = value.ispeed; t->ospeed = value.ospeed;
+            if (!(t->t.lflag & 0x2)) t->ready = 0;
+            return 0;
+        }
         case 0x5401: /* TCGETS */
             return copy_to_user((void *)arg, &t->t, sizeof(t->t)) ? ERR(EFAULT) : 0;
         case 0x5402: case 0x5403: case 0x5404: /* TCSETS* */
@@ -567,6 +587,7 @@ static uint64_t tty_ioctl(lx_file_t *f, uint64_t req, uint64_t arg) {
             return copy_to_user((void *)arg, &n, 4) ? ERR(EFAULT) : 0;
         }
         default:
+            log_hex("lx: unsupported tty ioctl ", req);
             return ERR(EINVAL);
     }
 }

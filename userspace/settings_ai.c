@@ -16,6 +16,7 @@
 
 #include "settings_ai.h"
 #include "settings_store.h"
+#include "model_catalog.h"
 
 #define AI_CONF     "/home/.config/ai.conf"
 #define AI_MAX      12
@@ -74,7 +75,7 @@ static const char *const field_label[F_COUNT] = { "Name", "Address", "Model", "A
 static const char *const field_hint[F_COUNT] = {
     "How it appears while it answers",
     "file:auto  or  https://host/v1",
-    "Local: click to choose an installed GGUF; cloud: server model name",
+    "Local: click to choose Qwen 0.5B or 1.5B; cloud: server model name",
     "Leave empty for a local model"
 };
 
@@ -98,6 +99,7 @@ static struct {
     int           save_failed;
     int           speak;
     int           loaded;
+    char          download_status[256];
     ic_tween_t    reveal;
 } A;
 
@@ -152,6 +154,7 @@ static void ai_load(void) {
                 next_word(&q, v->url, sizeof(v->url)) &&
                 next_word(&q, v->model, sizeof(v->model)) &&
                 next_word(&q, v->key, sizeof(v->key))) {
+                if (ic_strcmp(v->url, "codex:chatgpt") == 0) goto next;
                 if (ic_strcmp(v->key, "-") == 0) v->key[0] = 0;
                 A.count++;
             } else {
@@ -201,53 +204,14 @@ static ai_provider_t *cur(void) {
     return A.p[A.sel].used ? &A.p[A.sel] : 0;
 }
 
-/* Cycle actual installed filenames, including bundles on an ICDA partition. */
+/* Choose from the downloadable pinned catalog, including absent models. */
 static void choose_local_model(void) {
-    ai_provider_t *v = cur();
-    static char list[8192];
-    char dir[160], marker[128], first[AI_MODEL] = "";
-    icda_stat_t stat;
-    int after = 0;
-    if (!v) return;
-    ic_strcpy(dir, "/linux/usr/share/icda/models", sizeof(dir));
-    long n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
-    if (n <= 0) for (int i = 0; i < 32; i++) {
-        snprintf_(marker, sizeof(marker), "/volumes/fat32-");
-        char number[12];
-        ic_uint_to_str((uint64_t)i, number, sizeof(number));
-        ic_strlcat(marker, number, sizeof(marker));
-        ic_strlcat(marker, "/ICDACFG.TXT", sizeof(marker));
-        if ((long)icda_stat(marker, &stat) < 0) continue;
-        marker[ic_strlen(marker) - ic_strlen("ICDACFG.TXT")] = 0;
-        ic_strcpy(dir, marker, sizeof(dir));
-        ic_strlcat(dir, "linux/usr/share/icda/models", sizeof(dir));
-        n = (long)icda_list_dir(dir, list, sizeof(list) - 1);
-        if (n > 0) break;
-    }
-    if (n <= 0) return;
-    list[n] = 0;
-    for (char *p = list; *p;) {
-        char *end = ic_strchr(p, '\n');
-        if (end) *end = 0;
-        int len = (int)ic_strlen(p);
-        if (len > 5 && len < AI_MODEL && ic_strcmp(p + len - 5, ".gguf") == 0) {
-            if (!first[0]) ic_strcpy(first, p, sizeof(first));
-            if (after) {
-                ic_strcpy(v->model, p, sizeof(v->model));
-                (void)ai_save();
-                return;
-            }
-            if (ic_strcmp(v->model, p) == 0) after = 1;
-        }
-        if (!end) break;
-        p = end + 1;
-    }
-    if (first[0]) {
-        ic_strcpy(v->model, first, sizeof(v->model));
-        (void)ai_save();
-    }
+    ai_provider_t *v=cur(); if(!v) return;
+    unsigned next=0;
+    for(unsigned i=0;i<ICDA_MODEL_COUNT;i++) if(!ic_strcmp(v->model,icda_models[i].name)) next=(i+1)%ICDA_MODEL_COUNT;
+    ic_strcpy(v->model,icda_models[next].name,sizeof(v->model));
+    (void)ai_save();
 }
-
 static char *cur_field(int f) {
     ai_provider_t *v = cur();
     if (!v) return 0;
@@ -362,6 +326,12 @@ static ic_rect_t btn_rect(ic_rect_t list, int b) {
 void ai_pane_enter(void) {
     ic_memset(&A, 0, sizeof(A));
     ai_load();
+    if (!A.count) {
+        ai_provider_t *v=&A.p[A.count++]; ic_memset(v,0,sizeof(*v)); v->used=1;
+        ic_strcpy(v->name,"qwen",sizeof(v->name)); ic_strcpy(v->url,"file:auto",sizeof(v->url));
+        ic_strcpy(v->model,icda_models[0].name,sizeof(v->model));
+    }
+    (void)ai_save();
     A.sel = A.count ? 0 : -1;
     A.focus = F_NAME;
     ic_tween_set(&A.reveal, 1.0f);
@@ -372,7 +342,10 @@ void ai_pane_leave(void) {
 }
 
 void ai_pane_tick(ic_app_t *app) {
-    (void)app;
+    char status[256]; long n=(long)icda_read_file("/tmp/ai/model-install.status",status,sizeof(status)-1);
+    if(n<0) n=0;
+    status[n]=0;
+    if(ic_strcmp(status,A.download_status)) {ic_strcpy(A.download_status,status,sizeof(A.download_status));ic_app_invalidate(app);}
 }
 
 static void draw_provider_list(ic_canvas_t *c, ic_rect_t list) {
@@ -443,12 +416,12 @@ static void draw_form(ic_canvas_t *c, ic_rect_t area) {
 
     /* which tier answers the everyday questions */
     {
-        const char *segs[3] = { "Local", "Cloud", "Codex" };
+        const char *segs[2] = { "Local", "Cloud" };
         ic_rect_t seg = ic_rect_make(form_x(area), area.y + 4, 240, IC_H_CONTROL_SM);
-        ic_ui_segmented(c, seg, segs, 3, !ic_strcmp(v->url, "codex:chatgpt") ? 2.0f : v->cloud ? 1.0f : 0.0f, -1);
+        ic_ui_segmented(c, seg, segs, 2, v->cloud ? 1.0f : 0.0f, -1);
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
                         ic_rect_make(seg.x + 250, seg.y, form_w(area) - 250, IC_H_CONTROL_SM),
-                        !ic_strcmp(v->url, "codex:chatgpt") ? "Your ChatGPT account" : v->cloud ? "Complex questions, research and code"
+                        v->cloud ? "Complex questions, research and code"
                                  : "Everyday questions, offline on this machine",
                         p->label_tertiary, IC_ALIGN_LEFT);
     }
@@ -457,18 +430,19 @@ static void draw_form(ic_canvas_t *c, ic_rect_t area) {
         ic_rect_t box = field_rect(area, f);
         ic_text_draw_in(c, ic_font(IC_FONT_CAPTION_EMPH),
                         ic_rect_make(box.x, box.y - FLD_LABEL_H, box.w, FLD_LABEL_H),
-                        field_label[f], p->label_secondary, IC_ALIGN_LEFT);
-        if (f == F_KEY && !ic_strcmp(v->url, "codex:chatgpt"))
-            ic_ui_button(c, box, "Sign in with ChatGPT", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
-        else if (f == F_MODEL && !v->cloud && ic_strcmp(v->url, "file:auto") == 0)
-            ic_ui_button(c, box, v->model, IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+                        (!v->cloud && f == F_KEY) ? "Install selected Qwen model" : field_label[f], p->label_secondary, IC_ALIGN_LEFT);
+        if (f == F_KEY && !v->cloud)
+            ic_ui_button(c, box, "Download from Hugging Face", IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+        else if (f == F_MODEL && !v->cloud && ic_strcmp(v->url, "file:auto") == 0) {
+            const char *label = v->model;
+            for (unsigned i = 0; i < ICDA_MODEL_COUNT; i++)
+                if (!ic_strcmp(v->model, icda_models[i].name)) label = icda_models[i].label;
+            ic_ui_button(c, box, label, IC_SYM_NONE, IC_BUTTON_DEFAULT, IC_STATE_NORMAL);
+        }
         else draw_field(c, box, f, cur_field(f), A.editing && A.focus == f);
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE),
                         ic_rect_make(box.x, box.y + box.h + FLD_HINT_GAP, box.w, FLD_HINT_H),
-                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_MODEL ? "auto uses your account default; enter an available Codex model ID" :
-                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_KEY ? "Open the assistant to see the sign-in link and one-time code" :
-                        !ic_strcmp(v->url, "codex:chatgpt") && f == F_URL ? "Official Codex CLI, stored inside ICDA" :
-                        field_hint[f], p->label_tertiary, IC_ALIGN_LEFT);
+                        !v->cloud && f == F_KEY ? (A.download_status[0] ? A.download_status : "Official Qwen source; verified download; no restart needed") : field_hint[f], p->label_tertiary, IC_ALIGN_LEFT);
     }
 
     if (speak_rect(area).y + IC_H_CONTROL <= area.y + area.h) {
@@ -571,33 +545,26 @@ int ai_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
         if (cur()) {
             ai_provider_t *v = cur();
             ic_rect_t tier = ic_rect_make(form_x(area), area.y + 4, 240, IC_H_CONTROL_SM);
-            int choice = ic_ui_segmented_hit(tier, 3, ev->x, ev->y);
+            int choice = ic_ui_segmented_hit(tier, 2, ev->x, ev->y);
             if (choice >= 0) {
                 v->cloud = choice != 0;
-                if (choice == 2) {
-                    ic_strcpy(v->name, "codex", sizeof(v->name));
-                    ic_strcpy(v->url, "codex:chatgpt", sizeof(v->url));
-                    ic_strcpy(v->model, "auto", sizeof(v->model));
-                    v->key[0] = 0;
-                } else if (!choice) {
+                if (!choice) {
                     ic_strcpy(v->url, "file:auto", sizeof(v->url));
                     ic_strcpy(v->model, "qwen2.5-0.5b-instruct-q4_k_m.gguf", sizeof(v->model));
                     v->key[0] = 0;
-                } else if (!ic_strcmp(v->url, "file:auto") || !ic_strcmp(v->url, "codex:chatgpt")) {
+                } else if (!ic_strcmp(v->url, "file:auto")) {
                     ic_strcpy(v->url, "https://", sizeof(v->url));
                     ic_strcpy(v->model, "model", sizeof(v->model));
                 }
                 (void)ai_save();
                 return 1;
             }
-            if (!ic_strcmp(v->url, "codex:chatgpt") && ic_ui_hit(field_rect(area, F_KEY), ev->x, ev->y)) {
+            if (!v->cloud && ic_ui_hit(field_rect(area,F_KEY),ev->x,ev->y)) {
                 (void)ai_save();
                 (void)icda_mkdir("/tmp"); (void)icda_mkdir("/tmp/ai");
-                /* Let the compositor own the request sequence and show the
-                 * live sign-in code, exactly as a typed assistant request. */
-                (void)icda_write_file("/tmp/ai/open-codex-login", "login", 5);
-                A.editing = 0;
-                return 1;
+                long pid=(long)icda_spawn_args("/sbin/model-install",v->model);
+                if(pid<0) ic_strcpy(A.download_status,"Could not start model installer",sizeof(A.download_status));
+                A.editing=0; return 1;
             }
             if (!v->cloud && !ic_strcmp(v->url, "file:auto") &&
                 ic_ui_hit(field_rect(area, F_MODEL), ev->x, ev->y)) {

@@ -19,13 +19,14 @@ bin/pid.elf           userspace/pid.elf
 bin/argc.elf          userspace/argc.elf
 bin/libctest.elf      userspace/libctest.elf
 bin/busybox           resources/linux/busybox
-usr/share/icda/codex/assistant.sh resources/codex/assistant.sh
+bin/codex             resources/codex/terminal.sh
 usr/share/icda/codex/AGENTS.md resources/codex/AGENTS.md
 usr/share/icda/codex/CURRENT_TASK.md resources/codex/CURRENT_TASK.md
 bin/fetch             userspace/fetch.elf
 sbin/init.app         userspace/init.app
 sbin/updated          userspace/updated.elf
 sbin/assistantd       userspace/assistantd.elf
+sbin/model-install    userspace/model-install.elf
 etc/ssl/certs.pem     resources/ssl/cacert.pem
 # interface sounds (tools/soundgen renders them)
 usr/share/sounds/ai_end.wav             resources/audio/ai_end.wav

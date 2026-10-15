@@ -34,6 +34,10 @@ global userprog_updated_start
 global userprog_updated_end
 global userprog_assistantd_start
 global userprog_assistantd_end
+global userprog_model_install_start, userprog_model_install_end
+global userprog_codex_cli_start, userprog_codex_cli_end
+global userprog_codex_agents_start, userprog_codex_agents_end
+global userprog_codex_task_start, userprog_codex_task_end
 global userprog_cacert_start
 global userprog_cacert_end
 global userprog_ticker_start
@@ -130,6 +134,27 @@ userprog_assistantd_start:
     incbin "userspace/assistantd.elf"
 %endif
 userprog_assistantd_end:
+
+userprog_model_install_start:
+%if SLIM == 0
+    incbin "userspace/model-install.elf"
+%endif
+userprog_model_install_end:
+userprog_codex_cli_start:
+%if SLIM == 0
+    incbin "resources/codex/terminal.sh"
+%endif
+userprog_codex_cli_end:
+userprog_codex_agents_start:
+%if SLIM == 0
+    incbin "resources/codex/AGENTS.md"
+%endif
+userprog_codex_agents_end:
+userprog_codex_task_start:
+%if SLIM == 0
+    incbin "resources/codex/CURRENT_TASK.md"
+%endif
+userprog_codex_task_end:
 
 userprog_cacert_start:
 %if SLIM == 0

@@ -13,7 +13,7 @@ $linux=(Resolve-Path -LiteralPath $LinuxRoot).ProviderPath
 $files=New-Object 'System.Collections.Generic.List[object]'
 $lines=New-Object 'System.Collections.Generic.List[string]'
 $lines.Add('icda-ota 1'); $lines.Add("version $version")
-$lines.Add('notes Offline update: official Codex with ChatGPT login and ICDA tools, hotspot rate/TCP fixes, and WebKit/Linux runtime repairs.')
+$lines.Add('notes Offline update: terminal-only Codex, Assistant-owned verified Qwen downloads, and terminal and storage fixes.')
 function Add-Source([string]$rootKind,[string]$relative,[string]$target) {
     $base=if($rootKind -eq 'linux'){$linux}else{$payload}
     $path=Join-Path $base $relative

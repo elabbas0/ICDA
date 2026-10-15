@@ -263,14 +263,6 @@ static void tick_card_fade(uint64_t t) {
 }
 
 int wm_ai_tick(void) {
-    char action[8];
-    if ((long)icda_read_file("/tmp/ai/open-codex-login", action, sizeof(action)) > 0) {
-        (void)icda_write_file("/tmp/ai/open-codex-login", "", 0);
-        wm_ai_open();
-        ic_strcpy(A.q, "/codex login", sizeof(A.q));
-        send_request();
-        return WM_AI_REDRAW_ALL;
-    }
     uint64_t t;
     float want, want_speed;
     if (!A.shown) return WM_AI_KEEP;

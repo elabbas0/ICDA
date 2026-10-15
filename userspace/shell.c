@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define SHELL_LINE_CAP 128
+#define SHELL_LINE_CAP 2048
 #define SHELL_BUF_CAP 1024
 #define SHELL_HISTORY_CAP 16
 #define SHELL_EDIT_BUF_CAP 4096
@@ -566,7 +566,7 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi webkit run exit\n");
+    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi webkit codex run exit\n");
 }
 
 static void shell_pwd(void) {
@@ -1378,6 +1378,13 @@ static void shell_dispatch(char *line) {
     }
     if (str_eq(line, "wifi")) { shell_wifi(arg); return; }
     if (str_eq(line, "webkit")) { shell_webkit(arg); return; }
+    if (str_eq(line, "codex")) {
+        char args[SHELL_LINE_CAP + 64];
+        copy_text(args,"sh /bin/codex",sizeof(args));
+        if(arg && *arg) {append_text(args," ",sizeof(args));append_text(args,arg,sizeof(args));}
+        if(shell_spawn_and_wait("/bin/busybox",args)<0) icda_write("Could not start Codex CLI.\n");
+        return;
+    }
     if (str_eq(line, "run")) { shell_run_path(arg); return; }
     if (str_eq(line, "exit")) icda_exit(0);
     if (!shell_try_exec_command(line, arg)) {

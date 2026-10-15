@@ -73,63 +73,35 @@ make qemu
 
 ## Local assistant and input
 
-The assistant can also run the official OpenAI Codex CLI with a ChatGPT
-account. Prepare its pinned, SHA-256-verified Linux package using
+Codex runs only in Terminal. Type `codex` to open the official interactive
+CLI, `codex login --device-auth` to sign in with ChatGPT, or
+`codex --version` to check the installation. Its own `/model` command and
+`--model` option select an account model. The launcher keeps stdin/stdout
+attached to Terminal and enables live web search and full system-file access.
+The built-in assistant has no Codex provider or Codex commands.
+
+Prepare the verified official package with
 `powershell -ExecutionPolicy Bypass -File scripts/prepare-codex.ps1`.
-The executable is installed in ICDA's own `linux/usr/bin/codex`, together
-with the official tool helpers and resources; no local
-OpenAI model weights or Windows partition are needed. The CLI software
-comes from OpenAI's release; Qwen model weights still download directly
-from official Hugging Face URLs.
+The package lives in ICDA's `linux/usr`, credentials in its own
+`linux/var/lib/icda/codex`, and temporary SQLite data in `/tmp/codex-state`.
+No Windows model files are used. `/home/AGENTS.md` describes BusyBox and
+ICDA storage; this is a separate CLI session with its own history.
 
-In Settings > Assistant, add a provider and choose **Codex**. Click **Sign
-in with ChatGPT** to open the assistant with the device sign-in link and
-one-time code. Device login must be enabled in your ChatGPT security
-settings. Enter `auto` in Model for the account default, or an available
-Codex model ID. You can also type `/codex login`, `/codex status`,
-`/codex version`, or `/codex <task>` in the assistant.
+For the built-in Qwen assistant, open **Settings > Assistant**, select
+**Local**, and click **Model** to choose Qwen 2.5 0.5B (469 MiB) or 1.5B
+(1066 MiB). Click **Download from Hugging Face** to download only that model.
+Progress appears in the Assistant pane. The selected file is streamed from
+Qwen's official pinned HTTPS URL to ICDA's own partition, checked against its
+expected byte size and SHA-256 hash, and renamed into place after verification.
+Existing model files are preserved on failure. No restart is required.
+Interrupted connections reconnect and resume with HTTP ranges. The model still
+needs enough free RAM to run; insufficient memory is reported in the assistant.
 
-Codex receives the current task handoff and BusyBox tool instructions in
-`/home/icda/AGENTS.md` and `CURRENT_TASK.md`. This is a new Codex session
-using shared context. This owner's integration grants system tool access;
-the CLI uses `danger-full-access` because ICDA lacks Linux sandbox namespaces.
-Credentials stay in ICDA's own `linux/var/lib/icda/codex` on the installed
-system partition; never include them in an update bundle. The offline
-updater can privately reuse an existing ChatGPT Codex sign-in with
-`-ChatGPTAuthCache "$env:USERPROFILE/.codex/auth.json"`, using OpenAI's
-documented auth-cache fallback. It preserves an existing ICDA sign-in.
-Runtime diagnostics are in `/tmp/ai/codex.log`. Codex needs an internet
-connection and account access; the local Qwen option remains offline.
-
-The local assistant runs `icda-llm` with GGUF models kept on the ICDA system
-partition, under `linux/usr/share/icda/models`. It does not search Windows
-partitions for models. The default is Qwen2.5 0.5B Instruct Q4_K_M from
-[Qwen's official repository](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF).
-
-Prepare the runtime and model bundle on Windows:
-
-```powershell
-& 'C:/Program Files/Git/bin/bash.exe' userspace/llm/build.sh
-powershell -ExecutionPolicy Bypass -File scripts/prepare-ai.ps1 -IncludeLargerModel
-```
-
-Omit `-IncludeLargerModel` for only the smaller model. Downloads use pinned
-revisions and verified SHA-256 hashes. The optional Qwen2.5 1.5B model needs
-more RAM. `scripts/build-deploy.sh` includes the prepared runtime and models;
-the dual-boot installer copies them into ICDA's own `linux` directory. Existing
-systems can copy the bundle's `linux` directory to their ICDA system partition.
-
-In Settings > Assistant, select a local provider, use `file:auto` for Address,
-and click Model to cycle installed GGUF files. Changes apply on the next
-question. The runner restarts when the model changes. Diagnostics are in
-`/tmp/ai/llm.log`; failures appear in the assistant instead of leaving it silent.
-
-OTA releases contain signed model URLs and checksums. ICDA downloads model
-weights directly over HTTP(S) from Qwen's official Hugging Face repositories;
-model weights are excluded from the GitHub OTA payload. Existing updaters
-first install the new downloader. After restarting, use Settings > Updates >
-Check now to download the models, then restart to install them in ICDA.
-
+The assistant also supports `/model install 0.5b`, `/model install 1.5b`,
+and `/model status`. Choose the downloaded model in Assistant settings before
+asking it a question. OS updates and offline bundles never fetch or include
+Qwen weight files; the updater ignores legacy model metadata rows. Developer
+builds can still prepare model assets using `scripts/prepare-ai.ps1`.
 Settings > Mouse controls sensitivity, smoothing, and pointer enhancement
 (acceleration), applied while the desktop is running. Relative PS/2 and USB
 mice use these controls; absolute tablets retain their screen coordinates.

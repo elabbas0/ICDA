@@ -40,6 +40,7 @@ static struct {
     int         params[16];
     int         nparams;
     int         private_mode;
+    int         bracketed_paste;
 
     long        pty;
     uint64_t    pid;
@@ -56,6 +57,7 @@ static struct {
 #define DEFAULT_BG 0
 
 static const ic_face_t *mono(void) { return ic_font(IC_FONT_MONO); }
+static void pty_send_str(const char *s);
 
 static int cell_w(void) {
     int w = ic_text_measure(mono(), "0");
@@ -186,6 +188,12 @@ static void sgr(void) {
         else if (p == 49) term.bg = DEFAULT_BG;
         else if (p >= 90 && p <= 97) term.fg = (uint8_t)(p - 90 + 8);
         else if (p >= 100 && p <= 107) term.bg = (uint8_t)(p - 100 + 8);
+        else if ((p == 38 || p == 48) && i + 4 < term.nparams && term.params[i + 1] == 2) {
+            /* Consume RGB parameters together; never interpret RGB values as
+             * unrelated SGR modes in this terminal's sixteen-color palette. */
+            if (p == 38) term.fg = DEFAULT_FG; else term.bg = DEFAULT_BG;
+            i += 4;
+        }
         else if ((p == 38 || p == 48) && i + 2 < term.nparams && term.params[i + 1] == 5) {
             int v = term.params[i + 2];
             uint8_t idx = (uint8_t)(v < 16 ? v : 7);
@@ -252,6 +260,17 @@ static void csi_dispatch(char f) {
     case 'S': for (int i = 0; i < n; i++) scroll_up_region(term.scroll_top, term.scroll_bot); break;
     case 'T': for (int i = 0; i < n; i++) scroll_down_region(term.scroll_top, term.scroll_bot); break;
     case 'm': sgr(); break;
+    case 'n':
+        if (!term.private_mode && param(0,0) == 6) {
+            char report[40], number[16];
+            ic_strcpy(report,"\x1b[",sizeof(report));
+            ic_uint_to_str((uint64_t)term.cy+1,number,sizeof(number)); ic_strlcat(report,number,sizeof(report));
+            ic_strlcat(report,";",sizeof(report));
+            ic_uint_to_str((uint64_t)term.cx+1,number,sizeof(number)); ic_strlcat(report,number,sizeof(report));
+            ic_strlcat(report,"R",sizeof(report)); pty_send_str(report);
+        } else if (!term.private_mode && param(0,0) == 5) pty_send_str("\x1b[0n");
+        break;
+    case 'c': if (!term.private_mode) pty_send_str("\x1b[?1;2c"); break;
     case 's': term.saved_cx = term.cx; term.saved_cy = term.cy; break;
     case 'u': term.cx = term.saved_cx; term.cy = term.saved_cy; clamp_cursor(); break;
     case 'r':
@@ -265,7 +284,10 @@ static void csi_dispatch(char f) {
         break;
     case 'h':
     case 'l':
-        if (term.private_mode && param(0, 0) == 25) term.cursor_visible = f == 'h';
+        if (term.private_mode) for (int i = 0; i < term.nparams; i++) {
+            if (term.params[i] == 25) term.cursor_visible = f == 'h';
+            if (term.params[i] == 2004) term.bracketed_paste = f == 'h';
+        }
         break;
     default:
         break;
@@ -536,9 +558,13 @@ static void paste_clipboard(void) {
     char clip[2048];
     long n = ic_clipboard_get(clip, sizeof(clip));
     for (long k = 0; k < n; k++) {
-        if (clip[k] == '\n') clip[k] = '\r';
+        if (!term.bracketed_paste && clip[k] == '\n') clip[k] = '\r';
     }
-    if (n > 0) pty_send(clip, (int)n);
+    if (n > 0) {
+        if (term.bracketed_paste) pty_send_str("\x1b[200~");
+        pty_send(clip, (int)n);
+        if (term.bracketed_paste) pty_send_str("\x1b[201~");
+    }
 }
 
 static void send_key(const ic_event_t *ev) {
