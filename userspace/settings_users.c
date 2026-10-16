@@ -258,7 +258,7 @@ void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
         if (can_change_pw())
             ic_ui_button(c, part(area, P_NEWKEY), "New recovery key", IC_SYM_LOCK, IC_BUTTON_DEFAULT, st(1, P_NEWKEY));
         if (can_remove())
-            ic_ui_button(c, part(area, P_REMOVE), U.confirm_remove ? "Click again to remove" : "Remove account",
+            ic_ui_button(c, part(area, P_REMOVE), U.confirm_remove ? "Click to confirm" : "Remove",
                          IC_SYM_TRASH, IC_BUTTON_DESTRUCTIVE, st(1, P_REMOVE));
         below = part(area, P_REMOVE).y + IC_H_CONTROL + 14;
     } else {

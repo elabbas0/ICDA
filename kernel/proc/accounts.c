@@ -6,6 +6,7 @@
 #include "../memory/heap.h"
 #include "../syscall/uaccess.h"
 #include "../drivers/serial/serial.h"
+#include "../cpu/smp.h"
 
 /* One line per account in /etc/icda/users:
  *   name:uid:flags:has_password:rounds:salt(hex):hash(hex):home
@@ -125,6 +126,12 @@ static void pbkdf2(const char *pw, const uint8_t salt[16], uint32_t rounds, uint
     sha256_update(&c, u, 32);
     sha256_final(&c, u);
     for (int i = 0; i < 32; i++) out[i] = u[i];
+    /* A fifth of a second of hashing that touches nothing shared: done
+     * without the kernel lock, so the other CPUs - the Wi-Fi driver above all
+     * - carry on meanwhile (account calls themselves take turns, see
+     * accounts_syscall). */
+    int had_lock = this_cpu()->bkl_held;
+    if (had_lock) bkl_exit();
     for (uint32_t r = 1; r < rounds; r++) {
         c = in;
         sha256_update(&c, u, 32);
@@ -134,6 +141,7 @@ static void pbkdf2(const char *pw, const uint8_t salt[16], uint32_t rounds, uint
         sha256_final(&c, u);
         for (int i = 0; i < 32; i++) out[i] ^= u[i];
     }
+    if (had_lock) (void)bkl_enter();
 }
 
 static void set_password(account_t *a, const char *pw) {
@@ -490,7 +498,7 @@ static void strengthen(account_t *a, const char *pw) {
     (void)save();
 }
 
-int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+static int64_t accounts_call(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
     process_t *p = sched_current_process();
     char name[NAME_CAP], pw[PASS_CAP], pw2[PASS_CAP], key[32];
     int64_t rc = -E_INVAL;
@@ -696,5 +704,17 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
     wipe(pw, sizeof(pw));
     wipe(pw2, sizeof(pw2));
     wipe(key, sizeof(key));
+    return rc;
+}
+
+/* One call at a time: hashing yields the CPU part way (see pbkdf2), and a
+ * second call meanwhile could change the table under the first. */
+int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+    static int busy;
+    int64_t rc;
+    if (busy) return -11;                       /* EAGAIN: try again */
+    busy = 1;
+    rc = accounts_call(op, a, b, c, d, e);
+    busy = 0;
     return rc;
 }
