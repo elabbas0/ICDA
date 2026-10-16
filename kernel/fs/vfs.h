@@ -37,6 +37,38 @@ typedef int (*vfs_dir_loader_fn)(uint8_t mount_id, const char *path, uint64_t re
  * as the ELF loader need room for it; streaming model reads remain lazy. */
 #define VFS_LAZY_LOAD_MAX (512ULL * 1024ULL * 1024ULL)
 
+/* ---- users ---------------------------------------------------------------
+ * Who a call runs for (kernel/proc/accounts.c fills it in).  No credentials -
+ * the kernel itself, or the session manager before anyone signed in - may do
+ * anything.  A signed-in user sees their own home as /home, cannot enter
+ * other users' homes, internal disks (unless an administrator) or
+ * /etc/icda, and may change only their home, /tmp (their own files there)
+ * and removable disks. */
+#define VFS_NOBODY 0xFFFFFFFFu
+
+typedef struct {
+    uint32_t    uid;
+    uint8_t     admin;
+    vfs_node_t *home;           /* the real directory shown as /home */
+    vfs_node_t *cfg;            /* and the one shown as /cfg (settings) */
+} vfs_cred_t;
+
+enum { VFS_VOL_REMOVABLE = 0, VFS_VOL_SYSTEM = 1, VFS_VOL_INTERNAL = 2 };
+
+void vfs_set_cred_hook(const vfs_cred_t *(*fn)(void));
+void vfs_set_home_owner_hook(uint32_t (*fn)(vfs_node_t *dir));   /* VFS_NOBODY: not a home */
+void vfs_set_volume_class_hook(int (*fn)(uint8_t mount_id));
+/* the kernel acting for itself inside a user's call (installing, accounts) */
+void vfs_kernel_begin(void);
+void vfs_kernel_end(void);
+/* 1 if the last failure was a permission refusal (and clears it) */
+int vfs_last_denied(void);
+/* a directory as the calling user sees it (their home as /home) */
+int vfs_user_path(vfs_node_t *node, char *buf, size_t size);
+uint32_t vfs_node_owner(vfs_node_t *node);
+vfs_node_t *vfs_node_parent(vfs_node_t *node);
+int vfs_may_modify(vfs_node_t *node);   /* may the caller change it */
+
 int vfs_init(void);
 void vfs_set_external_hook(vfs_external_fn fn);
 int vfs_set_mount(const char *path, uint8_t mount_id);

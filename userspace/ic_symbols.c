@@ -430,6 +430,19 @@ static void sym_build(sym_mask_t *m, ic_symbol_t sym) {
         sym_line(m, -0.15f, -0.04f, -0.15f, -0.02f);
         sym_line(m, 0.15f, -0.04f, 0.15f, -0.02f);
         break;
+    case IC_SYM_SIGN_OUT: {
+        /* the door's frame, open on the right, and an arrow out of it */
+        static const float frame[] = { 0.04f, -0.34f, -0.30f, -0.34f, -0.30f, 0.34f, 0.04f, 0.34f };
+        sym_poly(m, frame, 4, 0);
+        sym_line(m, -0.08f, 0.0f, 0.34f, 0.0f);
+        sym_line(m, 0.34f, 0.0f, 0.20f, -0.14f);
+        sym_line(m, 0.34f, 0.0f, 0.20f, 0.14f);
+        break;
+    }
+    case IC_SYM_USER:
+        sym_ring(m, 0.0f, -0.14f, 0.16f);
+        sym_arc(m, 0.0f, 0.38f, 0.30f, -PI, 0.0f);
+        break;
     case IC_SYM_NONE:
     case IC_SYM_COUNT:
     default:

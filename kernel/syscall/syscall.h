@@ -111,7 +111,8 @@ typedef enum {
     SYS_VFS_RENAME        = 79,
     SYS_NET               = 80,
     SYS_AUDIO_MIX         = 81,
-    SYS_SYS_STATS         = 82
+    SYS_SYS_STATS         = 82,
+    SYS_ACCOUNT           = 83     /* accounts and signing in (kernel/proc/accounts.h) */
 } syscall_number_t;
 
 /* SYS_AUDIO_MIX operations (rdi) */

@@ -2025,12 +2025,12 @@ static void init(ic_app_t *app) {
  * system's own partition or a disk - pages are WebKit's.  Started with the
  * URL; this engine stays for systems without it and for --classic. */
 static int start_webkit(const char *url) {
-    static const char *const vols[] = { "fat32", "exfat", "ntfs" };
+    static const char *const vols[] = { "fat32", "exfat", "ntfs", "usb" };
     static const char *const programs[] = { "icda-surfer", "icda-webkit" };
     char path[96];
     icda_stat_t st;
     for (unsigned program = 0; program < sizeof(programs) / sizeof(programs[0]); program++) {
-      for (int v = -1; v < 3; v++) {
+      for (int v = -1; v < 4; v++) {
         for (int i = 0; i < (v < 0 ? 1 : 8); i++) {
             if (v < 0) snprintf(path, sizeof path, "/linux/usr/bin/%s", programs[program]);
             else snprintf(path, sizeof path, "/volumes/%s-%d/linux/usr/bin/%s", vols[v], i, programs[program]);

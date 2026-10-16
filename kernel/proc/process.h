@@ -68,7 +68,10 @@ typedef struct process {
 
 
 
-    uint32_t ex_uid;
+    uint32_t ex_uid;            /* 0: the system (or nobody signed in yet) */
+    uint8_t  ex_admin;
+    struct vfs_node *ex_home;   /* the user's home, shown to them as /home */
+    struct vfs_node *ex_cfg;    /* their settings folder, shown as /cfg */
     uint64_t ex_token;
     int      ex_session_leader;
     

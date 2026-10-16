@@ -420,6 +420,7 @@ void wm_bar_draw(ic_canvas_t *c, int sw, int sh, const wm_bar_t *b,
 #define WM_LAUNCH_ICON    44
 
 char wm_launch_query[WM_LAUNCH_QUERY_CAP];
+char wm_launch_user[32];
 
 static int wm_lower(int c) {
     return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
@@ -466,10 +467,11 @@ static ic_rect_t wm_launch_footer(ic_rect_t panel) {
     return ic_rect_make(panel.x, panel.y + panel.h - WM_LAUNCH_FOOT_H, panel.w, WM_LAUNCH_FOOT_H);
 }
 
-static ic_rect_t wm_launch_power_button(ic_rect_t panel, int restart) {
+/* the footer's buttons from the right: 0 shut down, 1 restart, 2 sign out, 3 lock */
+static ic_rect_t wm_launch_power_button(ic_rect_t panel, int slot) {
     ic_rect_t foot = wm_launch_footer(panel);
     int size = 32;
-    int x = foot.x + foot.w - WM_LAUNCH_PAD - size - (restart ? size + IC_SP_1 : 0);
+    int x = foot.x + foot.w - WM_LAUNCH_PAD - size - slot * (size + IC_SP_1);
     return ic_rect_make(x, foot.y + (foot.h - size) / 2, size, size);
 }
 
@@ -483,6 +485,8 @@ int wm_launcher_hit(int sw, int sh, int mx, int my) {
             if (ic_ui_hit(ic_rect_inset(wm_launch_tile(panel, k), 4, 2), mx, my)) return vis[k];
         }
     }
+    if (ic_ui_hit(wm_launch_power_button(panel, 3), mx, my)) return WM_LAUNCH_LOCK;
+    if (ic_ui_hit(wm_launch_power_button(panel, 2), mx, my)) return WM_LAUNCH_SIGN_OUT;
     if (ic_ui_hit(wm_launch_power_button(panel, 1), mx, my)) return WM_LAUNCH_RESTART;
     if (ic_ui_hit(wm_launch_power_button(panel, 0), mx, my)) return WM_LAUNCH_SHUTDOWN;
     return WM_LAUNCH_NONE;
@@ -545,7 +549,7 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
         int block = fh->cap_h + 6 + fc->cap_h;
         int top = foot.y + (foot.h - block) / 2;
         int x = foot.x + WM_LAUNCH_PAD + 6;
-        ic_text_draw(c, fh, x, top + fh->cap_h, "ICDA", p->label);
+        ic_text_draw(c, fh, x, top + fh->cap_h, wm_launch_user[0] ? wm_launch_user : "ICDA", p->label);
         ic_text_draw(c, fc, x, top + fh->cap_h + 6 + fc->cap_h, ic_version_label(),
                      p->label_secondary);
     }
@@ -556,6 +560,10 @@ void wm_launcher_draw(ic_canvas_t *c, int sw, int sh, int hover,
                           hover == WM_LAUNCH_RESTART ? IC_STATE_HOVER : IC_STATE_NORMAL);
         ic_ui_icon_button(c, pb, IC_SYM_POWER,
                           hover == WM_LAUNCH_SHUTDOWN ? IC_STATE_HOVER : IC_STATE_NORMAL);
+        ic_ui_icon_button(c, wm_launch_power_button(panel, 2), IC_SYM_SIGN_OUT,
+                          hover == WM_LAUNCH_SIGN_OUT ? IC_STATE_HOVER : IC_STATE_NORMAL);
+        ic_ui_icon_button(c, wm_launch_power_button(panel, 3), IC_SYM_LOCK,
+                          hover == WM_LAUNCH_LOCK ? IC_STATE_HOVER : IC_STATE_NORMAL);
     }
 }
 
@@ -617,6 +625,8 @@ void wm_boot_overlay_draw(ic_canvas_t *c, int sw, int sh, float t) {
 ic_rect_t wm_launcher_item_rect(int sw, int sh, int item) {
     ic_rect_t panel = wm_launcher_rect(sw, sh);
     if (item == WM_LAUNCH_RESTART) return wm_launch_power_button(panel, 1);
+    if (item == WM_LAUNCH_SIGN_OUT) return wm_launch_power_button(panel, 2);
+    if (item == WM_LAUNCH_LOCK) return wm_launch_power_button(panel, 3);
     if (item == WM_LAUNCH_SHUTDOWN) return wm_launch_power_button(panel, 0);
     if (item >= 0) {
         int vis[WM_LAUNCH_MAX_APPS];

@@ -9,8 +9,17 @@ for root in /linux /volumes/fat32-*/linux; do
     if [ -f "$root/usr/bin/codex" ]; then runtime=$root; break; fi
 done
 if [ -z "$runtime" ]; then echo 'Codex CLI is missing from the ICDA system partition.'; exit 1; fi
-export CODEX_HOME="$runtime/var/lib/icda/codex"
+# Each user's sign-in stays in their own home: on the system partition every
+# account could read it.  The owner's earlier sign-in moves here once.
+export CODEX_HOME=/home/.codex
 mkdir -p "$CODEX_HOME" "$CODEX_SQLITE_HOME"
+legacy="$runtime/var/lib/icda/codex"
+if [ "$(id -u)" = 1000 ] && [ -f "$legacy/auth.json" ] && [ ! -f "$CODEX_HOME/auth.json" ]; then
+    for file in auth.json config.toml; do
+        [ -f "$legacy/$file" ] && cp "$legacy/$file" "$CODEX_HOME/$file"
+    done
+    [ -f "$CODEX_HOME/auth.json" ] && rm -f "$legacy/auth.json"
+fi
 for file in AGENTS.md CURRENT_TASK.md; do
     if [ ! -f "/home/$file" ]; then cp "/usr/share/icda/codex/$file" "/home/$file"; fi
 done

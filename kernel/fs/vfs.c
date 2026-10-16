@@ -22,6 +22,7 @@ struct vfs_node {
     struct vfs_node *parent;
     struct vfs_node *first_child;
     struct vfs_node *next_sibling;
+    uint32_t owner;             /* who made it (VFS_NOBODY: the system, or not known) */
 };
 
 static vfs_node_t *vfs_root_node = 0;
@@ -33,6 +34,12 @@ static vfs_external_fn vfs_external_hook = 0;
 static vfs_loader_fn vfs_loader_hook = 0;
 static vfs_dir_loader_fn vfs_dir_loader_hook = 0;
 static void ensure_children(vfs_node_t *dir);
+
+static const vfs_cred_t *(*vfs_cred_hook)(void);
+static uint32_t (*vfs_home_owner_hook)(vfs_node_t *dir);
+static int (*vfs_volume_class_hook)(uint8_t mount_id);
+static int vfs_kernel_depth;
+static int vfs_denied_flag;
 
 static uint64_t str_len(const char *text) {
     uint64_t len = 0;
@@ -112,6 +119,7 @@ static vfs_node_t *new_node(const char *name, uint8_t type, uint8_t readonly) {
     node->modified = node->created;
     node->type = type;
     node->readonly = readonly;
+    node->owner = VFS_NOBODY;
     return node;
 }
 
@@ -132,6 +140,97 @@ static vfs_node_t *find_child(vfs_node_t *dir, const char *name) {
     }
 
     return 0;
+}
+
+/* ---- users: who may do what ----------------------------------------------- */
+
+enum { VFS_OP_READ, VFS_OP_CREATE, VFS_OP_MODIFY };   /* look, add to a directory, change or remove */
+
+static const vfs_cred_t *cred(void) {
+    return vfs_kernel_depth || !vfs_cred_hook ? 0 : vfs_cred_hook();
+}
+
+static uint32_t home_uid(vfs_node_t *dir) {
+    return vfs_home_owner_hook ? vfs_home_owner_hook(dir) : VFS_NOBODY;
+}
+
+/* What a user may do with node n; where it lies decides (the saved image
+ * keeps no owners or modes, so an older kernel still reads it). */
+static int may_access(vfs_node_t *n, const vfs_cred_t *c, int op) {
+    vfs_node_t *top = n, *second = 0;
+    if (!c) return 1;
+    if (n == vfs_root_node) return op == VFS_OP_READ;
+    while (top->parent && top->parent != vfs_root_node) {
+        second = top;
+        top = top->parent;
+    }
+    if (!top->parent) return 0;                         /* not in the tree */
+    /* a home: its user's alone (the folder itself stays put) */
+    if (str_eq(top->name, "home") || str_eq(top->name, "cfg"))  /* the owner's (others see their own) */
+        return home_uid(top) == c->uid && !(op == VFS_OP_MODIFY && n == top);
+    if (str_eq(top->name, "users")) {
+        if (!second) return op == VFS_OP_READ;        /* /users lists the homes */
+        return home_uid(second) == c->uid && !(op == VFS_OP_MODIFY && n == second);
+    }
+    if (str_eq(top->name, "tmp")) {
+        /* shared; what is there belongs to whoever made it */
+        if (op != VFS_OP_MODIFY) return 1;
+        return n != top && (n->owner == c->uid || n->owner == VFS_NOBODY);
+    }
+    if (str_eq(top->name, "volumes")) {
+        int cls;
+        if (!second) return op == VFS_OP_READ;
+        cls = vfs_volume_class_hook ? vfs_volume_class_hook(second->mount_id) : VFS_VOL_INTERNAL;
+        if (cls == VFS_VOL_REMOVABLE) return 1;
+        if (cls == VFS_VOL_SYSTEM) return op == VFS_OP_READ || c->admin;
+        return c->admin;                                /* internal disks: Windows, other systems */
+    }
+    if (str_eq(top->name, "etc") && second && str_eq(second->name, "icda")) return 0;   /* accounts */
+    return op == VFS_OP_READ;                           /* the system: read only */
+}
+
+static int allowed(vfs_node_t *n, int op) {
+    const vfs_cred_t *c = cred();
+    if (may_access(n, c, op)) return 1;
+    vfs_denied_flag = 1;
+    return 0;
+}
+
+/* One step of a walk into child `part`: the caller's home answers to
+ * /home, and the top two levels are where access is decided. */
+static vfs_node_t *step_into(vfs_node_t *node, const char *part, const vfs_cred_t *c) {
+    vfs_node_t *child;
+    if (c && node == vfs_root_node) {
+        if (c->home && str_eq(part, "home")) return c->home;
+        if (c->cfg && str_eq(part, "cfg")) return c->cfg;     /* their settings */
+    }
+    child = find_child(node, part);
+    if (child && c && (node == vfs_root_node || node->parent == vfs_root_node) &&
+        !may_access(child, c, VFS_OP_READ)) {
+        vfs_denied_flag = 1;
+        return 0;
+    }
+    return child;
+}
+
+static vfs_node_t *step_up(vfs_node_t *node, const vfs_cred_t *c) {
+    if (c && ((c->home && node == c->home) || (c->cfg && node == c->cfg))) return vfs_root_node;   /* ".." of /home, /cfg */
+    return node->parent ? node->parent : node;
+}
+
+void vfs_set_cred_hook(const vfs_cred_t *(*fn)(void)) { vfs_cred_hook = fn; }
+void vfs_set_home_owner_hook(uint32_t (*fn)(vfs_node_t *dir)) { vfs_home_owner_hook = fn; }
+void vfs_set_volume_class_hook(int (*fn)(uint8_t mount_id)) { vfs_volume_class_hook = fn; }
+void vfs_kernel_begin(void) { vfs_kernel_depth++; }
+void vfs_kernel_end(void) { if (vfs_kernel_depth) vfs_kernel_depth--; }
+uint32_t vfs_node_owner(vfs_node_t *node) { return node ? node->owner : VFS_NOBODY; }
+vfs_node_t *vfs_node_parent(vfs_node_t *node) { return node ? node->parent : 0; }
+int vfs_may_modify(vfs_node_t *node) { return node && may_access(node, cred(), VFS_OP_MODIFY); }
+
+int vfs_last_denied(void) {
+    int d = vfs_denied_flag;
+    vfs_denied_flag = 0;
+    return d;
 }
 
 static void append_child(vfs_node_t *dir, vfs_node_t *child) {
@@ -187,7 +286,8 @@ static int component_was_truncated(const char *path, uint64_t part_cap) {
     return 0;
 }
 
-static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf, uint64_t leaf_cap, int create_dirs) {
+static vfs_node_t *resolve_parent_as(vfs_node_t *cwd, const char *path, char *leaf, uint64_t leaf_cap, int create_dirs,
+                                     const vfs_cred_t *c) {
     vfs_node_t *node = (*path == '/') ? vfs_root_node : cwd;
     char part[256];
 
@@ -223,9 +323,7 @@ static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf,
             continue;
         }
         if (str_eq(part, "..")) {
-            if (node->parent) {
-                node = node->parent;
-            }
+            node = step_up(node, c);
             path = next;
             continue;
         }
@@ -233,8 +331,8 @@ static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf,
             return 0;
         }
 
-        vfs_node_t *child = find_child(node, part);
-        if (!child && create_dirs) {
+        vfs_node_t *child = step_into(node, part, c);
+        if (!child && create_dirs && !c) {
             child = new_node(part, VFS_NODE_DIR, 0);
             if (!child) {
                 return 0;
@@ -250,6 +348,16 @@ static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf,
     }
 
     return 0;
+}
+
+/* the caller's view (public calls) */
+static vfs_node_t *resolve_parent(vfs_node_t *cwd, const char *path, char *leaf, uint64_t leaf_cap, int create_dirs) {
+    return resolve_parent_as(cwd, path, leaf, leaf_cap, create_dirs, cred());
+}
+
+/* the kernel's own view (importing, mounting) */
+static vfs_node_t *resolve_parent_raw(vfs_node_t *cwd, const char *path, char *leaf, uint64_t leaf_cap, int create_dirs) {
+    return resolve_parent_as(cwd, path, leaf, leaf_cap, create_dirs, 0);
 }
 
 int vfs_init(void) {
@@ -294,7 +402,17 @@ int vfs_flush(int force) {
     return vfs_sync_hook();
 }
 
+static vfs_node_t *resolve_as(vfs_node_t *cwd, const char *path, const vfs_cred_t *c);
+
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path) {
+    return resolve_as(cwd, path, cred());
+}
+
+static vfs_node_t *resolve_raw(vfs_node_t *cwd, const char *path) {
+    return resolve_as(cwd, path, 0);
+}
+
+static vfs_node_t *resolve_as(vfs_node_t *cwd, const char *path, const vfs_cred_t *c) {
     vfs_node_t *node = (*path == '/') ? vfs_root_node : cwd;
     char part[256];
 
@@ -319,9 +437,7 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path) {
             continue;
         }
         if (str_eq(part, "..")) {
-            if (node->parent) {
-                node = node->parent;
-            }
+            node = step_up(node, c);
             path = skip_slash(path);
             continue;
         }
@@ -329,7 +445,7 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path) {
             return 0;
         }
 
-        node = find_child(node, part);
+        node = step_into(node, part, c);
         if (!node) {
             return 0;
         }
@@ -374,6 +490,26 @@ int vfs_getcwd(vfs_node_t *node, char *buf, size_t size) {
     }
 
     buf[out] = '\0';
+    return 0;
+}
+
+/* As the caller sees it: inside their home the path starts /home. */
+int vfs_user_path(vfs_node_t *node, char *buf, size_t size) {
+    const vfs_cred_t *c = cred();
+    char real[512], home[512];
+    uint64_t hn;
+    if (!c || !c->home || vfs_getcwd(node, real, sizeof(real)) != 0 ||
+        vfs_getcwd(c->home, home, sizeof(home)) != 0) {
+        return vfs_getcwd(node, buf, size);
+    }
+    hn = str_len(home);
+    for (uint64_t i = 0; i < hn; i++) {
+        if (real[i] != home[i]) return vfs_getcwd(node, buf, size);
+    }
+    if (real[hn] != 0 && real[hn] != '/') return vfs_getcwd(node, buf, size);
+    if (5 + str_len(real + hn) + 1 > size) return -1;
+    copy_bytes(buf, "/home", 5);
+    copy_bytes(buf + 5, real + hn, str_len(real + hn) + 1);
     return 0;
 }
 
@@ -466,7 +602,7 @@ int vfs_mkdir(vfs_node_t *cwd, const char *path) {
     vfs_node_t *parent = resolve_parent(cwd, path, leaf, sizeof(leaf), 0);
     vfs_node_t *node;
 
-    if (!parent || !valid_name(leaf) || find_child(parent, leaf)) {
+    if (!parent || !valid_name(leaf) || find_child(parent, leaf) || !allowed(parent, VFS_OP_CREATE)) {
         return -1;
     }
     if (external_op(VFS_EXT_MKDIR, parent, leaf, 0, 0) != 0) {
@@ -477,6 +613,7 @@ int vfs_mkdir(vfs_node_t *cwd, const char *path) {
     if (!node) {
         return -1;
     }
+    node->owner = cred() ? cred()->uid : VFS_NOBODY;
     append_child(parent, node);
     parent->modified = vfs_tick++;
     return vfs_sync();
@@ -497,6 +634,9 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
         return node->type == VFS_NODE_FILE ? 0 : -1;
     }
 
+    if (!allowed(parent, VFS_OP_CREATE)) {
+        return -1;
+    }
     if (external_op(VFS_EXT_WRITE, parent, leaf, "", 0) != 0) {
         return -1;
     }
@@ -504,6 +644,7 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
     if (!node) {
         return -1;
     }
+    node->owner = cred() ? cred()->uid : VFS_NOBODY;
     append_child(parent, node);
     parent->modified = vfs_tick++;
     return vfs_sync();
@@ -526,7 +667,8 @@ int vfs_remove(vfs_node_t *cwd, const char *path) {
     vfs_node_t *parent;
     vfs_node_t **link;
 
-    if (!node || node == vfs_root_node || !node->parent || subtree_has_readonly(node)) {
+    if (!node || node == vfs_root_node || !node->parent || subtree_has_readonly(node) ||
+        !allowed(node, VFS_OP_MODIFY)) {
         return -1;
     }
     for (vfs_node_t *p = cwd; p; p = p->parent) {
@@ -565,7 +707,7 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
         node = vfs_resolve(cwd, path);
     }
 
-    if (!node || node->type != VFS_NODE_FILE || node->readonly) {
+    if (!node || node->type != VFS_NODE_FILE || node->readonly || !allowed(node, VFS_OP_MODIFY)) {
         return -1;
     }
     if (node->mount_id && external_op(VFS_EXT_WRITE, node->parent, node->name, data, size) != 0) {
@@ -626,7 +768,7 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
                       uint64_t size) {
     uint64_t new_end;
 
-    if (!node || node->type != VFS_NODE_FILE || node->readonly) {
+    if (!node || node->type != VFS_NODE_FILE || node->readonly || !allowed(node, VFS_OP_MODIFY)) {
         return -1;
     }
     if (!data && size != 0) {
@@ -672,7 +814,7 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
 }
 
 int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
-    if (!node || node->type != VFS_NODE_FILE || node->readonly) {
+    if (!node || node->type != VFS_NODE_FILE || node->readonly || !allowed(node, VFS_OP_MODIFY)) {
         return -1;
     }
     if (len == node->size) {
@@ -712,7 +854,7 @@ int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
         return -1;
     }
 
-    parent = resolve_parent(vfs_root_node, path, leaf, sizeof(leaf), 1);
+    parent = resolve_parent_raw(vfs_root_node, path, leaf, sizeof(leaf), 1);
     if (!parent || !valid_name(leaf)) {
         return -1;
     }
@@ -761,7 +903,7 @@ int vfs_import_node(const char *path, uint8_t type, uint8_t readonly, const char
         return -1;
     }
 
-    parent = resolve_parent(vfs_root_node, path, leaf, sizeof(leaf), 1);
+    parent = resolve_parent_raw(vfs_root_node, path, leaf, sizeof(leaf), 1);
     if (!parent || !valid_name(leaf)) {
         return -1;
     }
@@ -886,14 +1028,14 @@ int vfs_import_ref(const char *path, uint8_t type, uint64_t size, uint8_t readon
     vfs_node_t *node;
     if (type == VFS_NODE_DIR) {
         if (vfs_import_node(path, VFS_NODE_DIR, readonly, 0, 0, 0, 0, 0) != 0) return -1;
-        node = vfs_resolve(vfs_root_node, path);
+        node = resolve_raw(vfs_root_node, path);
         if (!node) return -1;
         node->lazy_dir = 1;
         node->ext_ref = ref;
         return 0;
     }
     if (vfs_import_lazy(path, size, readonly) != 0) return -1;
-    node = vfs_resolve(vfs_root_node, path);
+    node = resolve_raw(vfs_root_node, path);
     if (!node) return -1;
     node->ext_ref = ref;
     return 0;
@@ -902,7 +1044,7 @@ int vfs_import_ref(const char *path, uint8_t type, uint64_t size, uint8_t readon
 int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {
     vfs_node_t *node;
     if (vfs_import_node(path, VFS_NODE_FILE, readonly, "", 0, 0, 0, 0) != 0) return -1;
-    node = vfs_resolve(vfs_root_node, path);
+    node = resolve_raw(vfs_root_node, path);
     if (!node) return -1;
     if (node->data) kfree(node->data);
     node->data = 0;
@@ -913,14 +1055,14 @@ int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {
 }
 
 int vfs_set_mount(const char *path, uint8_t mount_id) {
-    vfs_node_t *node = vfs_resolve(vfs_root_node, path);
+    vfs_node_t *node = resolve_raw(vfs_root_node, path);
     if (!node || node->type != VFS_NODE_DIR) return -1;
     node->mount_id = mount_id;
     return 0;
 }
 
 int vfs_detach_tree(const char *path) {
-    vfs_node_t *node = vfs_resolve(vfs_root_node, path);
+    vfs_node_t *node = resolve_raw(vfs_root_node, path);
     vfs_node_t **link;
     if (!node || node == vfs_root_node || !node->parent) return -1;
     link = &node->parent->first_child;
@@ -968,7 +1110,8 @@ int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
     char *name;
 
     if (!node || !dest || node == vfs_root_node || !node->parent || !valid_name(leaf) ||
-        dest->type != VFS_NODE_DIR || subtree_has_readonly(node) || dest->readonly) {
+        dest->type != VFS_NODE_DIR || subtree_has_readonly(node) || dest->readonly ||
+        !allowed(node, VFS_OP_MODIFY) || !allowed(dest, VFS_OP_CREATE)) {
         return -1;
     }
     for (vfs_node_t *p = dest; p; p = p->parent) {
@@ -978,7 +1121,8 @@ int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
     existing = find_child(dest, leaf);
     if (existing == node) return 0;
     if (existing) {
-        if (existing->type != node->type || existing->first_child || existing->readonly) return -1;
+        if (existing->type != node->type || existing->first_child || existing->readonly ||
+            !allowed(existing, VFS_OP_MODIFY)) return -1;
     }
     if (node->mount_id) {
         char src[512], dst[512];

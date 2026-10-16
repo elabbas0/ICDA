@@ -21,6 +21,7 @@
 #include "wm_wifi.h"
 #include "wm_panels.h"
 #include "wm_assistant.h"
+#include "wm_login.h"
 #include "shortcuts.h"
 
 #define MAX_WINDOWS 16
@@ -2707,6 +2708,97 @@ static void wm_intro_sequence(void) {
     mark_dirty_full();
 }
 
+/* ---- sign-in and lock (wm_login.c) -----------------------------------------
+ * They take the whole display and all input until they are done: the
+ * wallpaper, the card, the pointer; nothing of the session shows through. */
+
+static void login_frame(void) {
+    uint32_t *saved_fb = real_fb;
+    copy_pixels(back_buffer, desktop_layer, scr_w * scr_h * wm_scale * wm_scale);
+    wm_login_draw(&scene, scr_w, scr_h, blur_scratch, BLUR_SCRATCH_PX);
+    if (gpu_info.flip_active) {
+        real_fb = (uint32_t *)((uint8_t *)saved_fb +
+            (uint64_t)wm_flip_page * (uint64_t)fb_info.pitch * (uint64_t)fb_info.height);
+    }
+    draw_cursor_into_bb(scr_w, scr_h, mouse_x, mouse_y);
+    blit_region(0, 0, scr_w, scr_h);
+    restore_cursor_scene(scr_w, scr_h, mouse_x, mouse_y);
+    icda_gpu_present_flags(wm_settings.vsync ? 1ULL : 0ULL);
+    if (gpu_info.flip_active) {
+        wm_flip_page ^= 1;
+        real_fb = saved_fb;
+    }
+}
+
+/* WM_LOGIN_DONE when signed in (or unlocked), WM_LOGIN_SIGN_OUT from the lock screen */
+static int login_screen(int mode) {
+    int result = WM_LOGIN_KEEP, dirty = 1;
+    uint8_t buttons = mouse_buttons;
+    if (wm_login_begin(mode) == WM_LOGIN_NONE) return WM_LOGIN_DONE;
+    set_cursor_shape(CUR_ARROW);
+    for (;;) {
+        icda_mouse_event_t mev;
+        long key;
+        int moved = 0;
+        while (icda_input_read_mouse(&mev) == 0) {
+            uint8_t prev = buttons;
+            pointer_input(&mev);
+            if (mouse_x < 0) mouse_x = 0;
+            if (mouse_y < 0) mouse_y = 0;
+            if (mouse_x >= scr_w) mouse_x = scr_w - 1;
+            if (mouse_y >= scr_h) mouse_y = scr_h - 1;
+            buttons = mev.buttons;
+            moved = 1;
+            if ((buttons & 1) && !(prev & 1)) {
+                result = wm_login_click(scr_w, scr_h, mouse_x, mouse_y);
+                if (result >= WM_LOGIN_DONE) goto done;
+                if (result == WM_LOGIN_REDRAW) dirty = 1;
+            }
+        }
+        moved |= pointer_settle();
+        if (moved && wm_login_hover(scr_w, scr_h, mouse_x, mouse_y) == WM_LOGIN_REDRAW) dirty = 1;
+        for (int n = 0; n < 16 && (key = icda_read_char_timeout(1)) >= 0; n++) {   /* 0 would wait for ever */
+            result = wm_login_key(key);
+            if (result >= WM_LOGIN_DONE) goto done;
+            if (result == WM_LOGIN_REDRAW) dirty = 1;
+        }
+        if (wm_login_tick() == WM_LOGIN_REDRAW) dirty = 1;
+        if (dirty || moved) login_frame();
+        dirty = 0;
+    }
+done:
+    mouse_buttons = buttons;
+    wm_login_end();
+    return result;
+}
+
+/* who is signed in, for the start menu's footer */
+static void session_name(void) {
+    char buf[64];
+    long n = icda_account_whoami(buf, sizeof(buf));
+    int i = 0;
+    for (; n > 0 && i < n && buf[i] != ' ' && i < (int)sizeof(wm_launch_user) - 1; i++) wm_launch_user[i] = buf[i];
+    wm_launch_user[i] = 0;
+}
+
+/* Sign out: the user's programs end, then this desktop; init starts the next
+ * one at the sign-in screen. */
+static void sign_out(void) {
+    launcher_set(0);
+    (void)icda_sync();
+    (void)icda_account_logout();
+    icda_exit(0);
+}
+
+static void lock_screen(void) {
+    launcher_set(0);
+    wifi_set(0);
+    panel_set(0);
+    if (wm_ai_is_open()) wm_ai_close();
+    if (login_screen(WM_LOGIN_LOCK) == WM_LOGIN_SIGN_OUT) sign_out();
+    mark_dirty_full();
+}
+
 static void wm_power_sequence(int restart) {
     uint64_t t0;
     uint32_t dur = wm_settings.boot_anim ? 700u : 0u;
@@ -2946,6 +3038,10 @@ static void handle_launcher_click(int hit) {
         launcher_set(0);
     } else if (hit == WM_LAUNCH_SHUTDOWN || hit == WM_LAUNCH_RESTART) {
         wm_power_sequence(hit == WM_LAUNCH_RESTART);
+    } else if (hit == WM_LAUNCH_LOCK) {
+        lock_screen();
+    } else if (hit == WM_LAUNCH_SIGN_OUT) {
+        sign_out();
     }
 }
 
@@ -3499,6 +3595,7 @@ static void sc_run(const char *id) {
         mark_dirty_ai();
     }
     else if (ic_streq(id, "wifi")) wifi_set(!wifi_open);
+    else if (ic_streq(id, "lock")) lock_screen();
 }
 
 /* Settings > Keyboard is recording: hand the chord to the focused app. */
@@ -3703,6 +3800,15 @@ int main(int argc, char **argv) {
     ic_tween_set(&launcher_fade, 0.0f);
     ic_tween_set(&wifi_fade, 0.0f);
     ic_tween_set(&panel_fade, 0.0f);
+
+    /* Sign in first: the settings, the desktop and every program started
+     * after this are the user's (their /home and /cfg). */
+    build_desktop_layer();
+    (void)login_screen(WM_LOGIN_SIGNIN);
+    session_name();
+    icda_settings_load(&wm_settings);
+    ic_palette_reload();
+
     wm_panels_init();
     wm_ai_init();
     ic_tween_set(&ctx_fade, 0.0f);

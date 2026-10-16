@@ -42,14 +42,16 @@ int init_main(int argc, char **argv) {
     /* OTA patches in the background (absent on systems without \SYSTEM) */
     (void)icda_spawn("/sbin/updated");
 
-    pid = icda_spawn(target);
-    if ((long)pid < 0) {
-        icda_write("init: spawn failed\n");
-        return 1;
+    /* The session: the desktop signs a user in and ends when they sign out;
+     * the next one starts at the sign-in screen.  The text shell runs once. */
+    for (;;) {
+        pid = icda_spawn(target);
+        if ((long)pid < 0) {
+            icda_write("init: spawn failed\n");
+            return 1;
+        }
+        code = icda_waitpid(pid);
+        if (!gui) return code;
+        icda_sleep(50);                 /* a desktop that keeps failing still gives way */
     }
-    
-
-
-    code = icda_waitpid(pid);
-    return code;
 }

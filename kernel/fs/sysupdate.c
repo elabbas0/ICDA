@@ -22,6 +22,8 @@
 #include "../crypto/sha256.h"
 #include "version.h"
 #include "../cpu/tsc.h"
+#include "../proc/sched.h"
+#include "../proc/process.h"
 
 #define ENV_PATH      "/EFI/ICDA/GRUBENV"
 #define KERNEL_PATH   "/EFI/ICDA/KERNEL.BIN"
@@ -614,6 +616,13 @@ uint64_t sysupdate_write_user(const char *buf, uint64_t len) {
     head[n] = 0;
     body = n < len ? buf + n + 1 : buf + len;
     body_len = n < len ? len - n - 1 : 0;
+
+    /* Staging system files is the updater's (the system's) alone; a signed-in
+     * user may ask for a check and confirm a boot. */
+    if (!seq(head, "check") && !seq(head, "confirm")) {
+        process_t *p = sched_current_process();
+        if (p && p->kind == PROCESS_USER && p->ex_uid) return (uint64_t)-1;
+    }
 
     if (sstarts(head, "status ")) {
         scopy(status_text, sizeof(status_text), head + 7);

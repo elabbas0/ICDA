@@ -79,6 +79,8 @@ typedef enum {
     IC_SYM_KEYBOARD,
     IC_SYM_WIFI_WEAK,
     IC_SYM_WIFI_MEDIUM,
+    IC_SYM_SIGN_OUT,       /* a door with an arrow leaving it */
+    IC_SYM_USER,           /* a head and shoulders */
     IC_SYM_COUNT
 } ic_symbol_t;
 

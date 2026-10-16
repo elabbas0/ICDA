@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "../proc/accounts.h"
 #include "../drivers/serial/serial.h"
 
 #include "../drivers/display/framebuffer.h"
@@ -523,7 +524,7 @@ static uint64_t sys_getcwd(char *buf, uint64_t cap) {
     if (!user_range_prepare_cur_w(buf, cap)) {
         return (uint64_t)-U_EFAULT;
     }
-    if (vfs_getcwd(proc->cwd ? proc->cwd : vfs_root(), buf, (size_t)cap) != 0) {
+    if (vfs_user_path(proc->cwd ? proc->cwd : vfs_root(), buf, (size_t)cap) != 0) {
         return (uint64_t)-1;
     }
     return str_len(buf);
@@ -970,7 +971,15 @@ static uint64_t sys_proc_info(uint64_t pid, syscall_proc_info_t *out) {
     return 0;
 }
 
+/* Another user's programs (and the system's) are an administrator's to stop. */
+static int may_control(uint64_t pid) {
+    process_t *self = sched_current_process(), *t = sched_find_process(pid);
+    if (!t || !self || accounts_caller_is_admin()) return 1;
+    return t->ex_uid == self->ex_uid;
+}
+
 static uint64_t sys_kill(uint64_t pid, uint64_t exit_code) {
+    if (!may_control(pid)) return (uint64_t)-1;
     return sched_kill_process(pid, exit_code) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -1088,10 +1097,12 @@ static uint64_t sys_power(uint64_t action) {
 }
 
 static uint64_t sys_suspend(uint64_t pid) {
+    if (!may_control(pid)) return (uint64_t)-1;
     return sched_suspend_process(pid) == 0 ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_resume(uint64_t pid) {
+    if (!may_control(pid)) return (uint64_t)-1;
     return sched_resume_process(pid) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -1742,7 +1753,34 @@ uint64_t syscall_dispatch(struct registers *regs) {
     return syscall_dispatch_native(regs);
 }
 
+static uint64_t syscall_dispatch_calls(struct registers *regs);
+
+/* Disks and installing are for administrators; what such a call then does
+ * to the file tree it does as the kernel. */
+static int admin_only(uint64_t nr) {
+    switch (nr) {
+    case SYS_INSTALL_SYSTEM: case SYS_MOUNT: case SYS_FORMAT_DEVICE: case SYS_FORMAT_PARTITION:
+    case SYS_INSTALL_DEVICE: case SYS_INSTALL_PARTITIONS: case SYS_SET_PARTITION_ROLE: case SYS_DISK_EDIT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static uint64_t syscall_dispatch_native(struct registers *regs) {
+    uint64_t rc;
+    if (regs->rax == SYS_ACCOUNT) {
+        return (uint64_t)accounts_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8);
+    }
+    if (!admin_only(regs->rax)) return syscall_dispatch_calls(regs);
+    if (!accounts_caller_is_admin()) return (uint64_t)-1;
+    vfs_kernel_begin();
+    rc = syscall_dispatch_calls(regs);
+    vfs_kernel_end();
+    return rc;
+}
+
+static uint64_t syscall_dispatch_calls(struct registers *regs) {
     switch (regs->rax) {
         case SYS_CONSOLE_WRITE:
             return sys_console_write((const char *)(uintptr_t)regs->rdi);

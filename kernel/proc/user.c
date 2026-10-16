@@ -782,6 +782,9 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
 
     if (current_proc) {
         user_proc->ex_uid = current_proc->ex_uid;
+        user_proc->ex_admin = current_proc->ex_admin;
+        user_proc->ex_home = current_proc->ex_home;
+        user_proc->ex_cfg = current_proc->ex_cfg;
         user_proc->ex_token = current_proc->ex_token;
         user_proc->ex_session_leader = 0;
     }

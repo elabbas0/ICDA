@@ -92,7 +92,8 @@ enum {
     SYS_VFS_RENAME        = 79,
     SYS_NET               = 80,
     SYS_AUDIO_MIX         = 81,
-    SYS_SYS_STATS         = 82
+    SYS_SYS_STATS         = 82,
+    SYS_ACCOUNT           = 83
 };
 
 typedef struct {
@@ -207,6 +208,19 @@ static inline void icda_set_cursor(uint64_t x, uint64_t y) { (void)sys_call2(SYS
 static inline uint64_t icda_storage_info(char *buf, uint64_t cap) { return sys_call2(SYS_STORAGE_INFO, (uint64_t)(uintptr_t)buf, cap); }
 static inline uint64_t icda_play_tone(uint64_t frequency_hz, uint64_t ticks) { return sys_call2(SYS_SOUND_PLAY, frequency_hz, ticks); }
 /* The audio mixer: effects play over everything; streams carry an app's own PCM. */
+/* Accounts (kernel/proc/accounts.h).  List and whoami write "name uid flags\n"
+ * lines, flags from a (administrator), l (signs in by itself), p (has a password). */
+#define ICDA_ACCT_ADMIN     1
+#define ICDA_ACCT_AUTOLOGIN 2
+static inline long icda_account_list(char *buf, uint64_t cap) { return (long)sys_call3(SYS_ACCOUNT, 1, (uint64_t)(uintptr_t)buf, cap); }
+static inline long icda_account_whoami(char *buf, uint64_t cap) { return (long)sys_call3(SYS_ACCOUNT, 2, (uint64_t)(uintptr_t)buf, cap); }
+static inline long icda_account_login(const char *name, const char *password) { return (long)sys_call3(SYS_ACCOUNT, 3, (uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)password); }
+static inline long icda_account_verify(const char *password) { return (long)sys_call2(SYS_ACCOUNT, 4, (uint64_t)(uintptr_t)password); }
+static inline long icda_account_create(const char *name, const char *password, uint32_t flags, const char *my_password) { return (long)sys_call5(SYS_ACCOUNT, 5, (uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)password, flags, (uint64_t)(uintptr_t)my_password); }
+static inline long icda_account_delete(const char *name, const char *my_password, int remove_files) { return (long)sys_call4(SYS_ACCOUNT, 6, (uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)my_password, (uint64_t)remove_files); }
+static inline long icda_account_password(const char *name, const char *my_password, const char *new_password) { return (long)sys_call4(SYS_ACCOUNT, 7, (uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)my_password, (uint64_t)(uintptr_t)new_password); }
+static inline long icda_account_set(const char *name, const char *my_password, uint32_t flags) { return (long)sys_call4(SYS_ACCOUNT, 8, (uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)my_password, flags); }
+static inline long icda_account_logout(void) { return (long)sys_call1(SYS_ACCOUNT, 9); }
 static inline long icda_audio_effect(const char *path, uint32_t volume) { return (long)sys_call4(SYS_AUDIO_MIX, 1, (uint64_t)(uintptr_t)path, volume, 0); }
 static inline long icda_audio_stream_open(uint32_t rate, uint32_t channels) { return (long)sys_call4(SYS_AUDIO_MIX, 2, rate, channels, 0); }
 static inline long icda_audio_stream_write(long id, const int16_t *pcm, uint64_t bytes) { return (long)sys_call4(SYS_AUDIO_MIX, 3, (uint64_t)id, (uint64_t)(uintptr_t)pcm, bytes); }

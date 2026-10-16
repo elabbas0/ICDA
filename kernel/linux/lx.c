@@ -13,6 +13,7 @@
 #include "../memory/vmm.h"
 #include "../proc/sched.h"
 #include "../proc/user.h"
+#include "../proc/accounts.h"
 #include "../syscall/uaccess.h"
 #include "../tty/pty.h"
 #include "lx_vm.h"
@@ -946,6 +947,16 @@ static uint64_t now_epoch(void) {
     return boot_epoch + sched_ticks() / 100;
 }
 
+/* Who owns a file, as a program sees it: the caller for what is in their home
+ * or theirs in /tmp, the system (0) for the rest */
+static uint32_t node_uid(vfs_node_t *node) {
+    process_t *p = sched_current_process();
+    if (!p || !p->ex_uid || !node) return 0;
+    if (vfs_node_owner(node) == p->ex_uid) return p->ex_uid;
+    for (vfs_node_t *n = node; n; n = vfs_node_parent(n)) if (n == p->ex_home) return p->ex_uid;
+    return 0;
+}
+
 static void fill_stat(lx_stat_t *st, int kind, vfs_node_t *node) {
     uint64_t now = now_epoch();
     kzero(st, sizeof(*st));
@@ -955,6 +966,7 @@ static void fill_stat(lx_stat_t *st, int kind, vfs_node_t *node) {
     st->atime = st->mtime = st->ctime = now;
     if (kind == LXF_VFS && node) {
         st->ino = node_ino(node);
+        st->uid = st->gid = node_uid(node);
         if (vfs_node_type(node) == VFS_NODE_DIR) {
             st->mode = 040000 | (vfs_node_readonly(node) ? 0555 : 0755);
             st->nlink = 2;
@@ -1150,7 +1162,14 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
             sb_num(b, q->pid);
             sb_put(b, "\nPPid:\t");
             sb_num(b, q->parent ? q->parent->pid : 0);
-            sb_put(b, "\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n");
+            for (int k = 0; k < 2; k++) {
+                sb_put(b, k ? "Gid:" : "\nUid:");
+                for (int j = 0; j < 4; j++) {
+                    sb_put(b, "\t");
+                    sb_num(b, q->ex_uid);
+                }
+                sb_put(b, "\n");
+            }
             sb_kv(b, "VmRSS:\t", proc_mem_kb(q));
             return;
         }
@@ -1408,6 +1427,7 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     } else {
         if (flags & O_DIRECTORY) return ERR(ENOTDIR);
         if ((flags & O_ACCMODE) != 0 && vfs_node_readonly(node)) return ERR(EROFS);
+        if ((flags & O_ACCMODE) != 0 && !vfs_may_modify(node)) return ERR(EACCES);
         if ((flags & O_TRUNC) && (flags & O_ACCMODE) != 0 && vfs_node_size(node) != 0 &&
             vfs_node_truncate(node, 0) != 0) {
             return ERR(EIO);
@@ -1731,7 +1751,7 @@ static uint64_t sys_ioctl(int64_t fd, uint64_t req, uint64_t arg) {
 static uint64_t sys_getcwd(char *ubuf, uint64_t size) {
     char path[LX_PATH_MAX];
     uint64_t n;
-    if (vfs_getcwd(cwd_node(), path, sizeof(path)) != 0) return ERR(ENAMETOOLONG);
+    if (vfs_user_path(cwd_node(), path, sizeof(path)) != 0) return ERR(ENAMETOOLONG);
     n = kstrlen(path) + 1;
     if (n > size) return ERR(ERANGE);
     return copy_to_user(ubuf, path, n) ? ERR(EFAULT) : n;
@@ -2356,6 +2376,8 @@ static uint64_t sys_kill(int64_t pid, int64_t sig) {
     if (pid > 0) {
         process_t *t = sched_find_process((uint64_t)pid);
         if (!t || t->state == PROCESS_EXITED || t->state == PROCESS_REAPED) return ERR(ESRCH);
+        /* another user's programs, or the system's: administrators only */
+        if (t->ex_uid != self->ex_uid && !accounts_caller_is_admin()) return ERR(EPERM);
         if (sig && lx_signal(t, (int)sig) != 0) return ERR(EPERM);
         return 0;
     }
@@ -2363,6 +2385,7 @@ static uint64_t sys_kill(int64_t pid, int64_t sig) {
         uint64_t group = pid == 0 ? self->process_group_id : (uint64_t)(-pid);
         if (q->kind != PROCESS_USER || q->state == PROCESS_EXITED || q->state == PROCESS_REAPED) continue;
         if (pid == -1 ? (q == self || q->pid <= 1) : q->process_group_id != group) continue;
+        if (q->ex_uid != self->ex_uid && !accounts_caller_is_admin()) continue;
         if (!sig || lx_signal(q, (int)sig) == 0) sent++;
     }
     return sent ? 0 : ERR(ESRCH);
@@ -2662,6 +2685,9 @@ static uint64_t sys_fork(struct registers *regs, uint64_t flags, uint64_t new_sp
     child->lx_phnum = parent->lx_phnum;
     child->lx_entry = parent->lx_entry;
     child->ex_uid = parent->ex_uid;
+    child->ex_admin = parent->ex_admin;
+    child->ex_home = parent->ex_home;
+    child->ex_cfg = parent->ex_cfg;
     child->ex_token = parent->ex_token;
     child->session_id = parent->session_id;
     child->process_group_id = parent->process_group_id;
@@ -3041,7 +3067,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             if (a0 && copy_to_user((void *)a0, tms, sizeof(tms)) != 0) return ERR(EFAULT);
             return sched_ticks();
         }
-        case 102: case 104: case 107: case 108: return 0;
+        case 102: case 104: case 107: case 108: return p->ex_uid;   /* the signed-in user */
         case 105: case 106: case 113: case 114: case 117: case 119: return 0;
         case 109: return sys_setpgid((int64_t)a0, (int64_t)a1);
         case 110: return p->parent ? p->parent->pid : 1;
@@ -3049,7 +3075,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 112: p->session_id = p->pid; p->process_group_id = p->pid; return p->pid;
         case 115: return 0;
         case 118: case 120: {
-            uint32_t ids[3] = { 0, 0, 0 };
+            uint32_t ids[3] = { p->ex_uid, p->ex_uid, p->ex_uid };
             if (copy_to_user((void *)a0, ids, 4) || copy_to_user((void *)a1, ids, 4) || copy_to_user((void *)a2, ids, 4)) {
                 return ERR(EFAULT);
             }

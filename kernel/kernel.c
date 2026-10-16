@@ -61,6 +61,7 @@
 #include "net/net.h"
 #include "firmware/efi.h"
 #include "power/battery.h"
+#include "proc/accounts.h"
 #include "drivers/usb/xhci.h"
 
 #ifndef SERIAL_SHELL_MIRROR
@@ -410,6 +411,7 @@ void kernel_main(void *multiboot_info) {
     if (vfs_init() != 0) {
         boot_halt("storage", "virtual filesystem core failed to initialize");
     }
+    accounts_init();                    /* who may see and change what (kernel/proc/accounts.c) */
     bootstage_set(16, "vfs");
     if (initramfs_init() != 0) {
         boot_halt("storage", "initramfs image is not valid");

@@ -22,6 +22,7 @@ typedef struct {
     uint64_t        sectors;
     uint16_t       *upcase;
     ntfs_t         *ntfs;
+    int             cls;        /* VFS_VOL_REMOVABLE, _SYSTEM or _INTERNAL: who may use it */
 } volume_t;
 
 static volume_t volumes[VOL_MAX];
@@ -614,6 +615,11 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
     }
     m = claim_slot(&id);
     if (!m) return -1;
+    /* USB disks are anyone's; ICDA's system partition is read by all (the Linux
+     * runtime); other internal disks - Windows - are for administrators */
+    m->cls = part->device && part->device->name && part->device->name[0] == 'u' &&
+             part->device->name[1] == 's' && part->device->name[2] == 'b' ? VFS_VOL_REMOVABLE
+           : part->role == PARTITION_ROLE_SYSTEM ? VFS_VOL_SYSTEM : VFS_VOL_INTERNAL;
     if (part->fs_hint == PARTITION_FS_NTFS) {
         ntfs_t *n = (ntfs_t *)kmalloc(sizeof(ntfs_t));
         if (!n || ntfs_mount(n, part->device, part->start_lba, part->sector_count) != 0) {
@@ -683,7 +689,14 @@ static int mount_part(const partition_info_t *part, const char *mount_path) {
     return rc;
 }
 
+/* who may use volume id (the VFS asks for /volumes/<name>) */
+static int volume_class(uint8_t id) {
+    if (id == 0 || id > VOL_MAX || !volumes[id - 1].used) return VFS_VOL_INTERNAL;
+    return volumes[id - 1].cls;
+}
+
 static void install_hooks(void) {
+    vfs_set_volume_class_hook(volume_class);
     fatfs_write_hook = vol_write_hook;
     vfs_set_external_hook(volume_external);
     vfs_set_loader(volume_loader);

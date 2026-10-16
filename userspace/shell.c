@@ -1396,11 +1396,54 @@ static void shell_dispatch(char *line) {
     }
 }
 
+/* A line from the keyboard; the password is not shown. */
+static void sign_in_read(char *buf, int cap, int secret) {
+    int n = 0;
+    for (;;) {
+        long c = icda_read_char();
+        if (c == '\n' || c == '\r') break;
+        if ((c == 8 || c == 127) && n > 0) {
+            n--;
+            if (!secret) icda_write("\b \b");
+            continue;
+        }
+        if (c < 32 || c > 126 || n + 1 >= cap) continue;
+        buf[n++] = (char)c;
+        if (!secret) {
+            char s[2] = { (char)c, 0 };
+            icda_write(s);
+        }
+    }
+    buf[n] = 0;
+    icda_write("\n");
+}
+
+/* The text console (and the shell the kernel falls back to when the desktop
+ * cannot start) signs a user in once accounts exist, as the desktop does:
+ * otherwise Ctrl+Alt+F2 would be a way round every account's privacy.  A
+ * shell started by a signed-in user (Terminal) is theirs already. */
+static void shell_sign_in(void) {
+    char who[96], list[64], name[32], pw[128];
+    if (icda_account_whoami(who, sizeof(who)) > 0) return;
+    if (icda_account_list(list, sizeof(list)) <= 0) return;      /* no accounts yet */
+    icda_clear();
+    for (;;) {
+        icda_write("ICDA sign-in\nname: ");
+        sign_in_read(name, sizeof(name), 0);
+        icda_write("password: ");
+        sign_in_read(pw, sizeof(pw), 1);
+        if (icda_account_login(name, pw) == 0) break;
+        icda_write("That name and password do not match.\n\n");
+    }
+    for (int i = 0; i < (int)sizeof(pw); i++) ((volatile char *)pw)[i] = 0;
+}
+
 uint64_t shell_main(uint64_t argc, char **argv) {
     char line[SHELL_LINE_CAP];
     if (argc > 1 && argv && argv[1] && argv[1][0]) {
         return shell_run_script(argv[1]) == 0 ? 0 : 1;
     }
+    shell_sign_in();
     (void)icda_chdir("/home");
     icda_clear();
     icda_write("icda user shell\n\n");

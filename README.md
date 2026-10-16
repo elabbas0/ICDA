@@ -100,8 +100,9 @@ in the [network verification report](docs/verification/auth-network-1.8.28/READM
 
 Prepare the verified official package with
 `powershell -ExecutionPolicy Bypass -File scripts/prepare-codex.ps1`.
-The package lives in ICDA's `linux/usr`, credentials in its own
-`linux/var/lib/icda/codex`, and temporary SQLite data in `/tmp/codex-state`.
+The package lives in ICDA's `linux/usr`, each user's credentials in their own
+`/home/.codex` (an earlier sign-in moves there once), and temporary SQLite
+data in `/tmp/codex-state`.
 No Windows model files are used. `/home/AGENTS.md` describes BusyBox and
 ICDA storage; this is a separate CLI session with its own history.
 
@@ -137,3 +138,27 @@ pads BOOTP messages to 300 bytes, and receives replies while application
 sockets remain open during reconnection. `make dhcp-test` checks a strict
 hotspot, delayed replies, and malformed packets. Wi-Fi errors distinguish
 a missing DHCP offer from a missing acknowledgement.
+
+## Users
+
+ICDA has user accounts. On the first start the desktop asks for the first
+account: it is the computer's owner and an administrator, and it keeps the
+existing `/home` and `/cfg`, so nothing moves and an older kernel still finds
+them. Leave its password empty to sign in automatically. Add more accounts in
+**Settings > Users**; each change asks for your own password. **Super+L**
+locks the screen, and the start menu's footer has Lock and Sign out. The text
+console (Ctrl+Alt+F2) asks for a name and password too.
+
+Each user sees their own home as `/home` and their own settings as `/cfg`
+(later accounts live in `/users/<name>`), so apps and Linux programs work
+unchanged. The kernel (`kernel/proc/accounts.c`, `kernel/fs/vfs.c`) decides
+what a signed-in user may do: other homes cannot be entered; `/apps`, `/bin`,
+`/etc` and the rest of the system are read-only; `/tmp` files belong to whoever
+made them (it is emptied at each sign-in); USB disks are open to everyone, the
+system partition can be read by all and changed by administrators, and other
+internal disks (Windows) are for administrators only. Formatting, installing,
+disk editing, account changes and stopping other users' programs need an
+administrator. Linux programs see the real user id and an `/etc/passwd` with
+the accounts. Passwords are PBKDF2-HMAC-SHA256 with a per-account salt, kept in
+`/etc/icda/users`, which only the kernel reads. `make vfs-users-test` checks
+the rules on the host.
