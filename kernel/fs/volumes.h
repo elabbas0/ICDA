@@ -9,6 +9,8 @@
 #define VOLUME_NTFS  3
 
 int      volumes_mount_all(void);
+int      volumes_mount_root(const partition_info_t *part);   /* ICDA's partition as "/" */
+const partition_info_t *volumes_root_partition(void);
 uint32_t volumes_count(int fs);
 int      volumes_mount_partition(uint32_t partition_index, const char *mount_path);
 /* 1 if an absolute path is inside the volume mounted from partition p */

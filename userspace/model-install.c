@@ -28,6 +28,14 @@ static int range_matches(const char *headers, uint64_t offset) {
 static int owned_dir(char *dir, size_t cap) {
     icda_stat_t st;
     char marker[128];
+    /* ICDA 1.9: "/" is ICDA's partition and the runtime is /linux */
+    if ((long)icda_stat("/ICDACFG.TXT", &st) >= 0) {
+        const char *parts[] = { "/linux", "/linux/usr", "/linux/usr/share", "/linux/usr/share/icda",
+                                "/linux/usr/share/icda/models" };
+        for (int j = 0; j < 5; j++) (void)icda_mkdir(parts[j]);
+        snprintf(dir, cap, "/linux/usr/share/icda/models");
+        return 0;
+    }
     for (int i = 0; i < 32; i++) {
         snprintf(marker, sizeof(marker), "/volumes/fat32-%d/ICDACFG.TXT", i);
         if ((long)icda_stat(marker, &st) < 0) continue;

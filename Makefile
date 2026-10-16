@@ -167,6 +167,13 @@ vfs-users-test:
 
 .PHONY: vfs-users-test
 
+# "/" on a disk (1.9): lazy folders, the file cache, memory /dev and /tmp
+vfs-rootfs-test:
+	gcc -O1 -Wall -Ikernel tests/vfs-rootfs.c -o /tmp/icda-vfs-rootfs-test
+	/tmp/icda-vfs-rootfs-test
+
+.PHONY: vfs-rootfs-test
+
 sock.o: kernel/net/sock.c kernel/net/sock.h kernel/net/net.h kernel/drivers/net/net_drv.h kernel/syscall/uaccess.h
 	$(CC) $(CFLAGS) -c kernel/net/sock.c -o sock.o
 
@@ -224,6 +231,9 @@ xhci.o: kernel/drivers/usb/xhci.c kernel/drivers/usb/xhci.h kernel/drivers/stora
 
 battery.o: kernel/power/battery.c kernel/power/battery.h kernel/firmware/acpi.h kernel/cpu/smp.h
 	$(CC) $(CFLAGS) -c kernel/power/battery.c -o battery.o
+
+rootfs.o: kernel/fs/rootfs.c kernel/fs/rootfs.h kernel/fs/vfs.h kernel/fs/fatfs.h kernel/fs/volumes.h kernel/fs/persistfs.h
+	$(CC) $(CFLAGS) -c kernel/fs/rootfs.c -o rootfs.o
 
 accounts.o: kernel/proc/accounts.c kernel/proc/accounts.h kernel/proc/process.h kernel/fs/vfs.h kernel/crypto/sha256.h
 	$(CC) $(CFLAGS) -c kernel/proc/accounts.c -o accounts.o
@@ -1295,20 +1305,20 @@ user_programs_slim.o: kernel/proc/user_programs.asm userspace/init.app
 user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox resources/ssl/cacert.pem resources/codex/terminal.sh resources/codex/AGENTS.md resources/codex/CURRENT_TASK.md
 	$(ASM) -f elf64 -DCI_IMAGE=$(CI_IMAGE) kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o xhci.o vt.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o xhci.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o xhci.o vt.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o xhci.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc

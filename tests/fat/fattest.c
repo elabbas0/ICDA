@@ -31,6 +31,29 @@ static fatfs_t vol;
 static char *chunk;
 static long files, failures;
 
+/* read the file back whole and from an odd offset; both must match the source */
+static void verify(const char *src, const char *dst, uint64_t size) {
+    FILE *f = fopen(src, "rb");
+    char *want = malloc(size + 1), *got = 0;
+    uint64_t got_size = 0, off = size > 1234 ? 1234 : 0;
+    fatfs_entry_t e;
+    fatfs_hint_t hint = {0};
+    int bad = !f || fread(want, 1, size, f) != size;
+    if (f) fclose(f);
+    bad = bad || fatfs_read(&vol, dst, &got, &got_size) != 0 || got_size != size || memcmp(got, want, size);
+    free(got);
+    got = malloc(size + 1);
+    bad = bad || fatfs_lookup(&vol, dst, &e) != 0 ||
+          fatfs_read_range(&vol, &e, off, got, size - off, &hint) != (int64_t)(size - off) ||
+          memcmp(got, want + off, size - off);
+    if (bad) {
+        printf("READ BACK FAILED %s\n", dst);
+        failures++;
+    }
+    free(got);
+    free(want);
+}
+
 static int copy_tree(const char *src, char *dst, size_t cap) {
     struct stat st;
     if (stat(src, &st) != 0) return -1;
@@ -66,6 +89,7 @@ static int copy_tree(const char *src, char *dst, size_t cap) {
         } while (off < size);
         fclose(f);
         files++;
+        verify(src, dst, size);
     }
     return 0;
 }

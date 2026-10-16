@@ -23,6 +23,10 @@ struct vfs_node {
     struct vfs_node *first_child;
     struct vfs_node *next_sibling;
     uint32_t owner;             /* who made it (VFS_NOBODY: the system, or not known) */
+    uint8_t ram;                /* kept in memory although its parent is on a disk (/dev, /tmp) */
+    uint8_t cached;             /* a disk file whose bytes are kept (the file cache) */
+    uint64_t used_at;
+    struct vfs_node *cache_prev, *cache_next;
 };
 
 static vfs_node_t *vfs_root_node = 0;
@@ -186,6 +190,8 @@ static int may_access(vfs_node_t *n, const vfs_cred_t *c, int op) {
         return c->admin;                                /* internal disks: Windows, other systems */
     }
     if (str_eq(top->name, "etc") && second && str_eq(second->name, "icda")) return 0;   /* accounts */
+    /* the image an installation from before 1.9 kept everyone's files in */
+    if (str_eq(top->name, "ICDAROOT.OLD") || str_eq(top->name, "ICDAROOT.BIN")) return 0;
     return op == VFS_OP_READ;                           /* the system: read only */
 }
 
@@ -237,7 +243,7 @@ static void append_child(vfs_node_t *dir, vfs_node_t *child) {
     vfs_node_t *tail;
 
     child->parent = dir;
-    if (!child->mount_id) child->mount_id = dir->mount_id;
+    if (!child->mount_id && !child->ram) child->mount_id = dir->mount_id;
     if (!dir->first_child) {
         dir->first_child = child;
         return;
@@ -337,6 +343,8 @@ static vfs_node_t *resolve_parent_as(vfs_node_t *cwd, const char *path, char *le
             if (!child) {
                 return 0;
             }
+            /* made for files kept in memory (seeded ones): not on the disk */
+            if (node->mount_id) child->ram = 1;
             append_child(node, child);
         }
         if (!child || child->type != VFS_NODE_DIR) {
@@ -392,6 +400,11 @@ int vfs_sync(void) {
 
 int vfs_flush(int force) {
     uint64_t now = sched_ticks();
+    static uint64_t trimmed;
+    if (now - trimmed >= 100) {          /* the file cache, once a second */
+        trimmed = now;
+        vfs_cache_trim();
+    }
     if (!vfs_dirty || !vfs_sync_hook) {
         return 0;
     }
@@ -563,9 +576,64 @@ uint8_t vfs_node_is_lazy(vfs_node_t *node) {
     return node ? node->lazy : 0;
 }
 
+/* ---- the file cache -----------------------------------------------------------
+ * A file on a disk is read when a program asks for it and its bytes are kept
+ * only while they are wanted: a whole file read into memory (a program being
+ * started, a settings file) is freed again after VFS_CACHE_IDLE without use,
+ * or sooner, oldest first, while more than VFS_CACHE_MAX bytes are kept.
+ * Disk files are written through, so what is kept is never the only copy.
+ * The idle time also covers a caller still holding vfs_read's pointer. */
+#define VFS_CACHE_IDLE  3000ULL                 /* ticks: 30 s */
+#define VFS_CACHE_MAX   (128ULL * 1024 * 1024)
+
+static vfs_node_t *cache_head, *cache_tail;   /* most recently used first */
+static uint64_t cache_bytes;
+
+static void cache_unlink(vfs_node_t *n) {
+    if (!n->cached) return;
+    if (n->cache_prev) n->cache_prev->cache_next = n->cache_next; else cache_head = n->cache_next;
+    if (n->cache_next) n->cache_next->cache_prev = n->cache_prev; else cache_tail = n->cache_prev;
+    n->cache_prev = n->cache_next = 0;
+    n->cached = 0;
+    cache_bytes -= n->cap;
+}
+
+static void cache_touch(vfs_node_t *n) {
+    if (!n || !n->mount_id || !n->data) return;
+    if (n->cached) cache_unlink(n);
+    n->cache_next = cache_head;
+    n->cache_prev = 0;
+    if (cache_head) cache_head->cache_prev = n; else cache_tail = n;
+    cache_head = n;
+    n->cached = 1;
+    n->used_at = sched_ticks();
+    cache_bytes += n->cap;
+}
+
+/* a disk file's bytes go: read again from the disk when next wanted */
+static void drop_data(vfs_node_t *n) {
+    cache_unlink(n);
+    if (n->data) kfree(n->data);
+    n->data = 0;
+    n->cap = 0;
+    n->lazy = 1;
+}
+
+void vfs_cache_trim(void) {
+    uint64_t now = sched_ticks();
+    while (cache_tail && (now - cache_tail->used_at >= VFS_CACHE_IDLE || cache_bytes > VFS_CACHE_MAX))
+        drop_data(cache_tail);
+}
+
+uint64_t vfs_cache_size(void) { return cache_bytes; }
+
 static int ensure_loaded(vfs_node_t *node) {
     char *buf;
     int64_t got;
+    if (node && !node->lazy) {
+        cache_touch(node);
+        return 0;
+    }
     if (!node || !node->lazy) return 0;
     if (node->size > VFS_LAZY_LOAD_MAX) return -1;
     buf = (char *)kmalloc((size_t)(node->size + 1));
@@ -579,6 +647,7 @@ static int ensure_loaded(vfs_node_t *node) {
     node->data = buf;
     node->cap = node->size;
     node->lazy = 0;
+    cache_touch(node);
     return 0;
 }
 
@@ -716,8 +785,8 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     /* Mounted files already live on disk. Keeping a second, growing RAM copy
      * makes streaming a model exhaust the kernel heap after a few chunks. */
     if (node->mount_id && vfs_external_hook) {
-        if (node->data) kfree(node->data);
-        node->data = 0; node->cap = 0; node->size = size; node->lazy = 1;
+        drop_data(node);
+        node->size = size;
         node->modified = vfs_tick++;
         return 0;
     }
@@ -785,8 +854,7 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
         return -1;
     }
     if (node->mount_id && vfs_external_hook) {
-        if (node->data) kfree(node->data);
-        node->data = 0; node->cap = 0; node->lazy = 1;
+        drop_data(node);
         if (new_end > node->size) node->size = new_end;
         node->modified = vfs_tick++;
         return 0;
@@ -824,8 +892,8 @@ int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
         return -1;
     }
     if (node->mount_id && vfs_external_hook) {
-        if (node->data) kfree(node->data);
-        node->data = 0; node->cap = 0; node->size = len; node->lazy = 1;
+        drop_data(node);
+        node->size = len;
         node->modified = vfs_tick++;
         return 0;
     }
@@ -860,11 +928,15 @@ int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
     }
 
     node = find_child(parent, leaf);
+    /* a file the disk has (1.9: "/" is the disk) is the one used: the copy
+     * built into the kernel only fills in what is missing */
+    if (node && node->mount_id && !node->ram) return 0;
     if (!node) {
         node = new_node(leaf, VFS_NODE_FILE, 1);
         if (!node) {
             return -1;
         }
+        node->ram = 1;                  /* memory, even in a folder on the disk */
         append_child(parent, node);
         parent->modified = vfs_tick++;
     }
@@ -1046,12 +1118,46 @@ int vfs_import_lazy(const char *path, uint64_t size, uint8_t readonly) {
     if (vfs_import_node(path, VFS_NODE_FILE, readonly, "", 0, 0, 0, 0) != 0) return -1;
     node = resolve_raw(vfs_root_node, path);
     if (!node) return -1;
-    if (node->data) kfree(node->data);
-    node->data = 0;
+    drop_data(node);
     node->size = size;
-    node->lazy = 1;
-    node->cap = 0;
     return 0;
+}
+
+/* A directory kept in memory on a disk root (/dev, /tmp, /volumes): its
+ * children are memory too, and nothing in it is written to the disk. */
+int vfs_mkdir_ram(const char *path) {
+    char leaf[256];
+    vfs_node_t *parent = resolve_parent_raw(vfs_root_node, path, leaf, sizeof(leaf), 0);
+    vfs_node_t *node;
+    if (!parent || !valid_name(leaf)) return -1;
+    node = find_child(parent, leaf);
+    if (node) {
+        /* one the disk listed: memory from here on, its disk entries gone */
+        if (node->type != VFS_NODE_DIR) return -1;
+        if (!node->ram) {
+            node->first_child = 0;
+            node->lazy_dir = 0;
+            node->mount_id = 0;
+            node->ram = 1;
+        }
+        return 0;
+    }
+    node = new_node(leaf, VFS_NODE_DIR, 0);
+    if (!node) return -1;
+    node->ram = 1;
+    append_child(parent, node);
+    return 0;
+}
+
+/* "/" itself is the disk: its entries load as they are looked at */
+void vfs_mount_root(uint8_t mount_id, uint64_t ref) {
+    vfs_root_node->mount_id = mount_id;
+    vfs_root_node->ext_ref = ref;
+    vfs_root_node->lazy_dir = 1;
+}
+
+int vfs_root_is_disk(void) {
+    return vfs_root_node && vfs_root_node->mount_id;
 }
 
 int vfs_set_mount(const char *path, uint8_t mount_id) {

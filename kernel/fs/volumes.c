@@ -485,7 +485,7 @@ static int import_ex_dir(exfat_t *v, const exfat_dir_t *dir, const char *path, u
 static int child_path(const import_ctx_t *ctx, const char *name, char *out) {
     if (str_len(name) > VOL_NAME_MAX) return -1;
     copy_text(out, ctx->path, VOL_PATH_CAP);
-    append_text(out, "/", VOL_PATH_CAP);
+    if (!same_text(ctx->path, "/")) append_text(out, "/", VOL_PATH_CAP);   /* the root: "/name" */
     append_text(out, name, VOL_PATH_CAP);
     return str_len(out) + 1 >= VOL_PATH_CAP ? -1 : 0;
 }
@@ -495,8 +495,10 @@ static int fat_import_cb(const fatfs_entry_t *e, void *p) {
     char path[VOL_PATH_CAP];
     if (child_path(ctx, e->name, path) != 0) return 0;
     if (e->attr & FATFS_ATTR_DIR) {
-        if (vfs_import_node(path, VFS_NODE_DIR, ctx->readonly, 0, 0, 0, 0, 0) != 0) return 0;
-        if (e->cluster >= 2) (void)import_fat_dir((fatfs_t *)ctx->vol, e->cluster, path, ctx->depth + 1, ctx->readonly);
+        /* listed when first looked at (volume_dir_loader): a disk with
+         * thousands of folders costs nothing until they are opened */
+        if (e->cluster < 2) return 0;
+        (void)vfs_import_ref(path, VFS_NODE_DIR, 0, ctx->readonly, e->cluster);
     } else {
         /* the first cluster and size go with the node (FAT_REF): reads skip the
          * lookup by name while the file has not been written */
@@ -577,6 +579,15 @@ static int volume_dir_loader(uint8_t id, const char *path, uint64_t ref) {
         return -1;
     }
     m = &volumes[id - 1];
+    if (m->fs == VOLUME_FAT32) {
+        fatfs_t *v = (fatfs_t *)kmalloc(sizeof(fatfs_t));
+        int r = -1;
+        if (!v) return -1;
+        if (fatfs_mount(v, m->dev, m->start, m->sectors) == 0)
+            r = import_fat_dir(v, (uint32_t)ref, path, 0, (uint8_t)!m->writable);
+        kfree(v);
+        return r;
+    }
     if (m->fs != VOLUME_NTFS || !m->ntfs) return -1;
     ctx = (ntfs_ctx_t *)kmalloc(sizeof(ntfs_ctx_t));
     if (!ctx) return -1;
@@ -703,9 +714,50 @@ static void install_hooks(void) {
     vfs_set_dir_loader(volume_dir_loader);
 }
 
+/* ---- the root volume (1.9) ---------------------------------------------------
+ * ICDA's own partition is "/": its folders and files are the system's and
+ * the users', loaded as they are looked at.  It is never mounted again under
+ * /volumes, where its home folders would be outside their owners' privacy. */
+static int root_slot = -1;                 /* volumes[] index of "/" */
+static const partition_info_t *root_part;
+
+int volumes_mount_root(const partition_info_t *part) {
+    volume_t *m;
+    uint8_t id = 0;
+    fatfs_t *v;
+    if (!part || part->fs_hint != PARTITION_FS_FAT32 || root_slot >= 0) return -1;
+    install_hooks();
+    m = claim_slot(&id);
+    if (!m) return -1;
+    v = (fatfs_t *)kmalloc(sizeof(fatfs_t));
+    if (!v || fatfs_mount_part(v, part) != 0) {
+        if (v) kfree(v);
+        return -1;
+    }
+    m->used = 1;
+    m->fs = VOLUME_FAT32;
+    m->dev = part->device;
+    m->start = part->start_lba;
+    m->sectors = part->sector_count;
+    m->writable = part->device && part->device->write;
+    m->cls = VFS_VOL_SYSTEM;
+    m->path[0] = 0;                          /* paths are the volume's own: "/home/..." */
+    vfs_mount_root(id, v->root_cluster);
+    kfree(v);
+    root_slot = (int)id - 1;
+    root_part = part;
+    return 0;
+}
+
+const partition_info_t *volumes_root_partition(void) {
+    return root_part;
+}
+
 int volumes_mount_all(void) {
     install_hooks();
+    if (vfs_root_is_disk()) (void)vfs_mkdir_ram("/volumes");
     for (uint32_t i = 0; i < VOL_MAX; i++) {
+        if ((int)i == root_slot) continue;   /* "/" stays */
         if (volumes[i].used) (void)vfs_detach_tree(volumes[i].path);
         if (volumes[i].upcase) kfree(volumes[i].upcase);
         if (volumes[i].ntfs) {
@@ -722,12 +774,12 @@ int volumes_mount_all(void) {
     volume_counts[VOLUME_FAT32] = 0;
     volume_counts[VOLUME_EXFAT] = 0;
     volume_counts[VOLUME_NTFS] = 0;
-    (void)vfs_mkdir(vfs_root(), "/volumes");
+    if (!vfs_root_is_disk()) (void)vfs_mkdir(vfs_root(), "/volumes");
     for (uint32_t i = 0; i < partition_count(); i++) {
         const partition_info_t *part = partition_get(i);
         char mount_path[64];
         int fs;
-        if (!part) continue;
+        if (!part || part == root_part) continue;     /* "/" is not mounted twice */
         if (part->fs_hint == PARTITION_FS_FAT32) fs = VOLUME_FAT32;
         else if (part->fs_hint == PARTITION_FS_EXFAT) fs = VOLUME_EXFAT;
         else if (part->fs_hint == PARTITION_FS_NTFS) fs = VOLUME_NTFS;

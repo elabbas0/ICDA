@@ -24,6 +24,7 @@
 #include "../cpu/tsc.h"
 #include "../proc/sched.h"
 #include "../proc/process.h"
+#include "rootfs.h"
 
 #define ENV_PATH      "/EFI/ICDA/GRUBENV"
 #define KERNEL_PATH   "/EFI/ICDA/KERNEL.BIN"
@@ -202,10 +203,53 @@ static char *read_text(fatfs_t *v, const char *path) {
     return text;
 }
 
+/* ---- where things are (ICDA 1.9) --------------------------------------------
+ * From 1.9 "/" is ICDA's partition (kernel/fs/rootfs.c): a release's
+ * SYSTEM/x is /x, and the kernel and GRUB's environment are on the EFI
+ * partition when there was room for them.  Releases keep the earlier names,
+ * so systems from before 1.9 still install them. */
+
+/* the boot files' partition: the EFI one, or v */
+static fatfs_t *boot_fs(fatfs_t *v, fatfs_t *esp) {
+    if (rootfs_new_layout() && rootfs_boot_on_esp() && rootfs_esp() && fatfs_mount_part(esp, rootfs_esp()) == 0)
+        return esp;
+    return v;
+}
+
+/* where release file rel lives: its partition, and the path into path */
+static fatfs_t *place(fatfs_t *v, fatfs_t *esp, const char *rel, char *path) {
+    if (rootfs_new_layout()) {
+        if (sstarts(rel, "SYSTEM/")) {
+            join(path, "/", rel + 7);
+            return v;
+        }
+        if (seq(rel, "EFI/ICDA/KERNEL.BIN")) {
+            join(path, "/", rel);
+            return boot_fs(v, esp);
+        }
+    }
+    join(path, "/", rel);
+    return v;
+}
+
+/* a staged file into place on another partition (the kernel to the EFI one) */
+static int copy_across(fatfs_t *from, const char *fp, fatfs_t *to, const char *tp) {
+    char *data = 0;
+    uint64_t size = 0;
+    int rc;
+    if (fatfs_read(from, fp, &data, &size) != 0 || !data) return -1;
+    make_parent(to, tp);
+    rc = fatfs_write(to, tp, data, size);
+    kfree(data);
+    if (rc == 0) (void)fatfs_remove(from, fp);
+    return rc;
+}
+
 /* ---- GRUB environment ------------------------------------------------------- */
 
 static int read_trial(fatfs_t *v) {
-    char *t = read_text(v, ENV_PATH);
+    fatfs_t esp;
+    char *t = read_text(boot_fs(v, &esp), ENV_PATH);
     int value = 0;
     if (!t) return 0;
     for (char *p = t; *p; p++) {
@@ -229,7 +273,10 @@ static int write_trial(fatfs_t *v, int value) {
     b[n++] = (char)('0' + (value % 10));
     b[n++] = '\n';
     /* the rest stays '#' padding, as GRUB expects */
-    return fatfs_write(v, ENV_PATH, b, sizeof(b));
+    {
+        fatfs_t esp;
+        return fatfs_write(boot_fs(v, &esp), ENV_PATH, b, sizeof(b));
+    }
 }
 
 /* ---- state file ---------------------------------------------------------- */
@@ -293,15 +340,19 @@ static void rollback(fatfs_t *v) {
             continue;
         }
         if (!rel_ok(rel)) continue;
-        join(path, "/", rel);
-        join(backup, BACKUP_DIR, rel);
-        if (seq(line, "had")) {
-            if (exists(v, backup)) {
-                make_parent(v, path);
-                (void)fatfs_rename(v, backup, path);
+        {
+            fatfs_t esp;
+            fatfs_t *t = place(v, &esp, rel, path);   /* the backup is beside it, same partition */
+            join(backup, BACKUP_DIR, rel);
+            if (seq(line, "had")) {
+                if (exists(t, backup)) {
+                    make_parent(t, path);
+                    (void)fatfs_rename(t, backup, path);
+                    (void)fatfs_flush(t);
+                }
+            } else if (seq(line, "new")) {
+                (void)fatfs_remove(t, path);
             }
-        } else if (seq(line, "new")) {
-            (void)fatfs_remove(v, path);
         }
     }
     kfree(t);
@@ -370,7 +421,10 @@ static void seed_dir(fatfs_t *v, const char *fat_dir, const char *vfs_dir, int d
 void sysupdate_boot(void) {
     fatfs_t v;
     if (mount(&v) != 0) return;
-    supported = exists(&v, KERNEL_PATH);
+    {
+        fatfs_t esp;
+        supported = exists(boot_fs(&v, &esp), KERNEL_PATH);
+    }
     if (!supported) return;
     trial = read_trial(&v);
     load_state(&v);
@@ -382,7 +436,8 @@ void sysupdate_boot(void) {
     }
     load_pending_version(&v);
     system_files = 0;
-    seed_dir(&v, SYSTEM_DIR, "", 0);
+    /* before 1.9 the system was loaded into memory; from 1.9 it is read from "/" */
+    if (!rootfs_new_layout()) seed_dir(&v, SYSTEM_DIR, "", 0);
     (void)fatfs_flush(&v);
     {
         char n[12];
@@ -517,8 +572,11 @@ void sysupdate_apply(void) {
             char *hash = seq(line, "file") ? split_word(rest) : 0;
             (void)hash;
             if (!rel_ok(rest)) continue;
-            join(path, "/", rest);
-            scat(list, list_cap, exists(&v, path) ? "had " : "new ");
+            {
+                fatfs_t esp;
+                fatfs_t *t = place(&v, &esp, rest, path);
+                scat(list, list_cap, exists(t, path) ? "had " : "new ");
+            }
             scat(list, list_cap, rest);
             scat(list, list_cap, "\n");
         }
@@ -539,16 +597,25 @@ void sysupdate_apply(void) {
         if (!rest || !(is_file || seq(line, "remove"))) continue;
         if (is_file) (void)split_word(rest);
         if (!rel_ok(rest)) continue;
-        join(path, "/", rest);
-        if (exists(&v, path)) {
-            join(other, BACKUP_DIR, rest);
-            make_parent(&v, other);
-            (void)fatfs_rename(&v, path, other);
-        }
-        if (is_file) {
-            join(other, STAGE_DIR, rest);
-            make_parent(&v, path);
-            if (fatfs_rename(&v, other, path) != 0) ulog("could not install ", rest);
+        {
+            fatfs_t esp;
+            fatfs_t *t = place(&v, &esp, rest, path);
+            if (exists(t, path)) {
+                join(other, BACKUP_DIR, rest);       /* beside it: GRUB finds the previous kernel there */
+                make_parent(t, other);
+                if (exists(t, other)) (void)fatfs_remove(t, other);
+                (void)fatfs_rename(t, path, other);
+            }
+            if (is_file) {
+                join(other, STAGE_DIR, rest);
+                if (t == &v) {
+                    make_parent(&v, path);
+                    if (fatfs_rename(&v, other, path) != 0) ulog("could not install ", rest);
+                } else if (copy_across(&v, other, t, path) != 0) {
+                    ulog("could not install ", rest);
+                }
+            }
+            if (t != &v) (void)fatfs_flush(t);
         }
     }
     (void)fatfs_remove(&v, PENDING_PATH);

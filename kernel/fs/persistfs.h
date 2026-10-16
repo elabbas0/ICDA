@@ -15,6 +15,10 @@ int persistfs_live_mode(void);
 int persistfs_active_device(void);
 int persistfs_active_partition(void);
 int persistfs_present(void);
+int persistfs_each_entry(const char *image, uint64_t size,
+                         int (*fn)(const char *path, uint8_t type, const char *data, uint64_t len, void *ctx),
+                         void *ctx);
+void persistfs_set_root_partition(int index);
 uint64_t persistfs_loaded_entries(void);
 
 #endif

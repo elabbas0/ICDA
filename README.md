@@ -143,8 +143,8 @@ a missing DHCP offer from a missing acknowledgement.
 
 ICDA has user accounts. On the first start the desktop asks for the first
 account: it is the computer's owner and an administrator, and it keeps the
-existing `/home` and `/cfg`, so nothing moves and an older kernel still finds
-them. Leave its password empty to sign in automatically. Add more accounts in
+existing `/home` and `/cfg`, so nothing moves. Leave its password empty to
+sign in automatically. Add more accounts in
 **Settings > Users**, each either **Standard** or **Administrator**; each change
 asks for your own password. Every account gets a recovery key, shown once when
 it is made (and renewable in Settings > Users): **Forgot password?** on the
@@ -170,3 +170,24 @@ Passwords and recovery keys are PBKDF2-HMAC-SHA256 (200,000 rounds, older
 hashes strengthened at the next sign-in) with per-account salts, kept in
 `/etc/icda/users`, which only the kernel reads. `make vfs-users-test` checks
 the rules on the host.
+
+## Storage
+
+Since 1.9, `/` is ICDA's own FAT32 partition, holding ordinary files:
+`/apps`, `/bin`, `/etc`, `/usr`, `/linux`, `/home`, `/cfg` and so on. The boot
+files (GRUB, `KERNEL.BIN`, `GRUBENV` and the previous kernel kept for a
+rollback) are on the EFI partition, in `\EFI\ICDA` and `\UPDATE\BACKUP`.
+Folders are listed when they are first opened and files are read when a
+program opens them. Unused file contents are dropped from memory after 30
+seconds, and sooner if the cache passes 128 MB. A write goes straight to the
+disk. `/dev`, `/tmp` and `/volumes` live only in memory, and other disks
+appear under `/volumes`.
+
+Earlier versions kept the whole system in memory, loaded from one image,
+`ICDAROOT.BIN`. The first 1.9 boot moves such an install to real files: it
+unpacks the image onto the partition, moves `\SYSTEM` to `/`, moves the kernel
+to the EFI partition and keeps the old image as `/ICDAROOT.OLD` (which can be
+deleted later). If an update is still on trial, the move waits until the next
+boot. An installation that has been moved can no longer be booted by a kernel
+older than 1.9. The live USB still runs from memory. `make vfs-rootfs-test`
+checks the loading and freeing on the host.

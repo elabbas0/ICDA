@@ -773,27 +773,13 @@ static int fatfs_write_op(fatfs_t *v, const char *path, const void *data, uint64
     return fatfs_flush(v);
 }
 
+static int64_t fatfs_read_range_op(fatfs_t *v, const fatfs_entry_t *e, uint64_t off, void *buf, uint64_t len,
+                                   fatfs_hint_t *hint);
+
 static int fatfs_read_entry_op(fatfs_t *v, const fatfs_entry_t *e, char **data_out) {
-    char *buf;
-    uint8_t *tmp;
-    uint32_t c = e->cluster;
-    uint64_t done = 0;
-    buf = (char *)kmalloc((uint64_t)e->size + 1);
+    char *buf = (char *)kmalloc((uint64_t)e->size + 1);
     if (!buf) return -1;
-    tmp = (uint8_t *)kmalloc(v->cluster_bytes);
-    if (!tmp) {
-        kfree(buf);
-        return -1;
-    }
-    while (done < e->size && valid_cluster(v, c)) {
-        uint64_t take = e->size - done < v->cluster_bytes ? e->size - done : v->cluster_bytes;
-        if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) break;
-        mem_copy(buf + done, tmp, take);
-        done += take;
-        c = fat_get(v, c);
-    }
-    kfree(tmp);
-    if (done < e->size) {
+    if (e->size && fatfs_read_range_op(v, e, 0, buf, e->size, 0) != (int64_t)e->size) {
         kfree(buf);
         return -1;
     }
@@ -905,6 +891,27 @@ static int64_t fatfs_read_range_op(fatfs_t *v, const fatfs_entry_t *e, uint64_t 
     while (done < len && valid_cluster(v, c)) {
         uint64_t in = off + done - pos;
         uint64_t take = v->cluster_bytes - in;
+        if (in == 0 && len - done >= v->cluster_bytes) {
+            /* whole clusters lying one after another on the disk: one read
+             * straight into the caller's buffer instead of one per cluster */
+            uint32_t n = 1, last = c, next = fat_get(v, c);
+            while (next == last + 1 && (uint64_t)(n + 1) * v->cluster_bytes <= len - done && n < 256) {
+                last = next;
+                next = fat_get(v, next);
+                n++;
+            }
+            if (dev_read(v, cluster_lba(v, c), n * v->sectors_per_cluster, out + done) != 0) break;
+            done += (uint64_t)n * v->cluster_bytes;
+            pos += (uint64_t)(n - 1) * v->cluster_bytes;
+            if (hint) {
+                hint->first = e->cluster;
+                hint->cluster = last;
+                hint->off = pos;
+            }
+            c = next;
+            pos += v->cluster_bytes;
+            continue;
+        }
         if (take > len - done) take = len - done;
         if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) break;
         mem_copy(out + done, tmp + in, take);

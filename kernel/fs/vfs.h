@@ -72,6 +72,12 @@ int vfs_may_modify(vfs_node_t *node);   /* may the caller change it */
 int vfs_init(void);
 void vfs_set_external_hook(vfs_external_fn fn);
 int vfs_set_mount(const char *path, uint8_t mount_id);
+/* a disk as "/" (1.9): see kernel/fs/rootfs.c */
+void vfs_mount_root(uint8_t mount_id, uint64_t ref);
+int vfs_root_is_disk(void);
+int vfs_mkdir_ram(const char *path);          /* /dev, /tmp, /volumes on a disk root */
+void vfs_cache_trim(void);                    /* frees disk files read whole and unused */
+uint64_t vfs_cache_size(void);
 int vfs_detach_tree(const char *path);
 void vfs_set_loader(vfs_loader_fn fn);
 void vfs_set_dir_loader(vfs_dir_loader_fn fn);

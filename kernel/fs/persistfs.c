@@ -311,6 +311,48 @@ int persistfs_export_image(char **buffer_out, uint64_t *size_out, uint64_t *entr
     return 0;
 }
 
+/* Each personal entry of an image in turn (the 1.9 move to real files):
+ * fn(path, type, data, size, ctx); a non-zero return stops. */
+int persistfs_each_entry(const char *image, uint64_t size,
+                         int (*fn)(const char *path, uint8_t type, const char *data, uint64_t len, void *ctx),
+                         void *ctx) {
+    const persistfs_header_t *header = (const persistfs_header_t *)image;
+    const uint8_t *buffer = (const uint8_t *)image, *cursor;
+    if (!image || size < sizeof(persistfs_header_t) || header->magic != PERSISTFS_MAGIC ||
+        header->version != PERSISTFS_VERSION || header->bytes_used < sizeof(persistfs_header_t) ||
+        header->bytes_used > size) {
+        return -1;
+    }
+    cursor = buffer + sizeof(persistfs_header_t);
+    for (uint32_t i = 0; i < header->entry_count; i++) {
+        persistfs_entry_t entry;
+        char path[PERSISTFS_PATH_CAP];
+        const char *data = 0;
+        if ((uint64_t)(cursor - buffer) + sizeof(entry) > header->bytes_used) return -1;
+        copy_bytes((char *)&entry, (const char *)cursor, sizeof(entry));
+        cursor += sizeof(entry);
+        if (entry.path_len == 0 || entry.path_len >= sizeof(path)) return -1;
+        if ((uint64_t)(cursor - buffer) + entry.path_len + entry.data_size > header->bytes_used) return -1;
+        copy_bytes(path, (const char *)cursor, entry.path_len);
+        path[entry.path_len] = '\0';
+        cursor += entry.path_len;
+        if (entry.type == VFS_NODE_FILE) {
+            data = (const char *)cursor;
+            cursor += entry.data_size;
+        }
+        if (persistfs_system_path(path)) continue;
+        if (fn(path, entry.type, data, entry.type == VFS_NODE_FILE ? entry.data_size : 0, ctx) != 0) return -1;
+    }
+    return 0;
+}
+
+/* the partition booted from holds no image any more (1.9: "/" is that disk);
+ * the boot log still goes to it */
+void persistfs_set_root_partition(int index) {
+    persistfs_active_partition_index = index;
+    persistfs_available = 0;
+}
+
 int persistfs_import_image(const char *buffer_in, uint64_t size, uint64_t *entries_loaded_out) {
     persistfs_header_t *header;
     uint8_t *buffer = (uint8_t *)buffer_in;
