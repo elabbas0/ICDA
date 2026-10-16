@@ -36,13 +36,12 @@ task context, not a continuation of the host application's live session.
   sources. Never import models from a Windows partition. Account-cache
   imports are performed only by the owner's explicit setup workflow.
 - Codex uses the official OpenAI CLI and ChatGPT account sign-in. The launcher
-  sets CODEX_HOME to the ICDA runtime's var/lib/icda/codex on its system
-  partition. Never read tokens aloud, include them in a reply, publish,
+  sets CODEX_HOME to /home/.codex, in the signed-in user's own home. Never read tokens aloud, include them in a reply, publish,
   or put them in task context. Use the CLI's own `/model` or `--model` for
   model choice. Settings > Assistant configures Qwen and compatible endpoints.
   The launcher enables live web search and full system access as requested.
   SQLite runtime caches use /tmp/codex-state; auth and session files
-  remain on the ICDA system partition.
+  stay in /home/.codex, private to the user.
 
 ## Limits and permissions
 
@@ -52,3 +51,8 @@ stand-ins or claim a tool ran when it failed. Report unsupported sandbox
 features clearly. This system integration uses full access, explicitly authorized
 by the owner for ICDA tools and the current task. Preserve user data, disk
 partitions, boot entries, model files and sign-in credentials.
+
+ICDA has user accounts. You run as the signed-in user: /home and /cfg are
+theirs, other users' homes cannot be entered, and the system (/apps, /bin,
+/etc, /usr, the system partition) is read-only to programs. A refused write
+there is the account policy, not a fault to work around.
