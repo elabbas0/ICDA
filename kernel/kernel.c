@@ -26,6 +26,7 @@
 #include "fs/fat32.h"
 #include "fs/exfat.h"
 #include "fs/initramfs.h"
+#include "fs/rootfs.h"
 #include "fs/install.h"
 #include "fs/bootlog.h"
 #include "fs/sysupdate.h"
@@ -416,7 +417,17 @@ void kernel_main(void *multiboot_info) {
     if (initramfs_init() != 0) {
         boot_halt("storage", "initramfs image is not valid");
     }
-    if (initramfs_populate() != 0) {
+    /* ICDA 1.9: "/" is ICDA's partition, files read as they are opened
+     * (kernel/fs/rootfs.c).  An installation from before 1.9 is moved to
+     * that layout here once it is safe to; until then, and for a live
+     * start, the system is the in-memory one below. */
+    (void)partition_scan_all();
+    if (rootfs_boot(live_installer) == 0) {
+        sysupdate_boot();                   /* a rolled-back update renames files first */
+        if (rootfs_mount() != 0) boot_halt("storage", "the ICDA partition could not be mounted as /");
+        bootstage_set(19, "rootfs");
+    }
+    if (initramfs_populate() != 0) {        /* on a disk root: only what the disk lacks */
         boot_halt("storage", "initramfs could not populate the live filesystem");
     }
     bootstage_set(17, "initramfs");
@@ -428,7 +439,7 @@ void kernel_main(void *multiboot_info) {
     console_write_dec64(initramfs_total_bytes(), CONSOLE_STYLE_INFO);
     console_write("\n", CONSOLE_STYLE_INFO);
 
-    (void)partition_scan_all();
+    /* partitions were found above, before "/" was mounted */
     bootstage_set(18, "partitions");
     boot_prefix("storage");
     console_write("block devices=", CONSOLE_STYLE_INFO);
@@ -438,7 +449,11 @@ void kernel_main(void *multiboot_info) {
     console_write("\n", CONSOLE_STYLE_INFO);
 
     persistfs_set_live_mode(live_installer);
-    if (persistfs_init() == 0 && persistfs_present()) {
+    if (rootfs_active()) {
+        boot_line("storage", "/ is the ICDA partition (files load as they are opened)");
+        bootlog_flush("storage ready");
+        bootlog_start_thread();
+    } else if (persistfs_init() == 0 && persistfs_present()) {
         bootstage_set(19, "persist");
         boot_prefix("storage");
         console_write("persistent state online, loaded entries=", CONSOLE_STYLE_INFO);
