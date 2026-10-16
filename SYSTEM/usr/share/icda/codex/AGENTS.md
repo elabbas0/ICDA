@@ -24,13 +24,11 @@ task context, not a continuation of the host application's live session.
 - Codex runs interactively in Terminal using `codex`, outside the built-in AI.
   `codex login --device-auth` signs in; `/model` inside Codex selects an
   available account model. CLI shell output remains in Terminal. `/tmp` is temporary.
-- `/home` contains persistent personal files and settings. The installed
-  FAT32 ICDA partition is mounted under /volumes/fat32-N, identified by
-  ICDACFG.TXT. SYSTEM contains installed native apps. The Linux overlay
-  exposes its own linux directory through standard /usr and /lib paths.
-- For persistent system edits, use the actual ICDA volume's SYSTEM and linux
-  directories. Root paths such as /sbin may be seeded read-only files for the
-  current boot; discover the corresponding installed file before changing it.
+- `/home` contains persistent personal files and settings. Since ICDA 1.9,
+  `/` is the installed FAT32 ICDA partition itself: /apps, /bin, /etc, /usr
+  and /linux are ordinary files on it, and /tmp, /dev and /volumes live in
+  memory. Other disks appear under /volumes. The Linux overlay exposes the
+  linux directory through standard /usr and /lib paths.
 - Local GGUF models belong to ICDA's linux/usr/share/icda/models. Download
   weights directly over HTTPS from their official pinned Hugging Face
   sources. Never import models from a Windows partition. Account-cache
