@@ -170,7 +170,10 @@ void irq_handler(struct registers* regs) {
         power_tick();
     }
     irq_dispatch(regs, irq);
-    if (took) bkl_exit();
+    if (took) {
+        lx_after_interrupt(regs);   /* the thread now returning to user mode */
+        bkl_exit();
+    }
 }
 
 static void irq_dispatch(struct registers* regs, int irq) {

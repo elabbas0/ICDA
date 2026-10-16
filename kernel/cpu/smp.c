@@ -102,6 +102,31 @@ bkl_stat_t bkl_stats[BKL_WHY_MAX];
 static uint64_t bkl_t0[SMP_MAX_CPUS];
 static uint16_t bkl_reason[SMP_MAX_CPUS];
 
+/* "[bkl] held N ms: reason R, pid P name, entry 0x..." (a kernel thread's
+ * entry function; look it up in the kernel's symbol table) */
+static void log_long_hold(uint64_t ms, int why, uint64_t pid, const char *name, uint64_t entry) {
+    char buf[160];
+    int n = 0;
+    const char *w;
+#define LH_STR(s) do { for (w = (s); *w && n < 110; ) buf[n++] = *w++; } while (0)
+#define LH_DEC(v) do { char t_[24]; int k_ = 0; uint64_t v_ = (v); do { t_[k_++] = (char)('0' + v_ % 10); v_ /= 10; } while (v_); while (k_) buf[n++] = t_[--k_]; } while (0)
+    LH_STR("[bkl] held ");
+    LH_DEC(ms);
+    LH_STR(" ms: reason ");
+    LH_DEC((uint64_t)why);
+    LH_STR(", pid ");
+    LH_DEC(pid);
+    buf[n++] = ' ';
+    LH_STR(name);
+    LH_STR(", entry 0x");
+    for (int s = 44; s >= 0; s -= 4) buf[n++] = "0123456789abcdef"[(entry >> s) & 15];
+    buf[n++] = '\n';
+    buf[n] = 0;
+#undef LH_STR
+#undef LH_DEC
+    serial_write(buf);
+}
+
 void bkl_why(int why) {
     uint32_t i = this_cpu()->index;
     bkl_reason[i] = (uint16_t)(why >= 0 && why < BKL_WHY_MAX ? why : 0);
@@ -140,6 +165,22 @@ void bkl_exit(void) {
         if (d > s->max) {
             s->max = d;
             s->max_pid = c->current && c->current->owner ? c->current->owner->pid : 0;
+        }
+        /* Every other CPU, the Wi-Fi driver among them, waits while the lock
+         * is held: 50 ms is about as long as the adapter's receive ring lasts
+         * at full speed.  Holds that long go to the boot log (the first 200)
+         * with what took the lock, so slow spots on real hardware name
+         * themselves. */
+        if (d > tsc_hz() / 20) {
+            static int long_holds;
+            if (long_holds < 200) {
+                thread_t *t = c->current;
+                long_holds++;
+                log_long_hold(d / (tsc_hz() / 1000), bkl_reason[c->index],
+                              t && t->owner ? t->owner->pid : 0,
+                              t && t->owner ? t->owner->name : "?",
+                              t ? (uint64_t)(uintptr_t)t->entry : 0);
+            }
         }
     }
     c->bkl_held = 0;

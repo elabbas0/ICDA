@@ -137,6 +137,9 @@ typedef struct thread {
     int              nwait_keys;    /* what it waits on (sched_wait_on); -1: anything */
     const void      *wait_keys[16];
     uint64_t         lx_sigmask;    /* Linux masks belong to threads, inherited by clone/fork */
+    uint64_t         lx_pending;    /* signals sent to this thread alone (tgkill, tkill) */
+    uint64_t         lx_suspend_mask;   /* rt_sigsuspend: the mask its handler's return restores */
+    int              lx_in_suspend;
 } thread_t;
 
 #endif

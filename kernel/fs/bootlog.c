@@ -76,9 +76,17 @@ int bootlog_flush(const char *milestone) {
 }
 
 static void bootlog_thread(void) {
-    /* every 3 s for the first 3 minutes */
-    for (int i = 0; i < 60; i++) {
+    /* Every 3 s for the first minute (boot problems), then once a minute
+     * for an hour.  Each save rewrites the whole file under the kernel lock,
+     * long enough for the Wi-Fi adapter's receive ring to overflow: saving
+     * every 3 s for three minutes lost packets in bursts while the first
+     * downloads ran. */
+    for (int i = 0; i < 20; i++) {
         sched_sleep(300);
+        bootlog_flush(0);
+    }
+    for (int i = 0; i < 60; i++) {
+        sched_sleep(6000);
         bootlog_flush(0);
     }
     bootlog_flush("periodic saving stopped");

@@ -28,7 +28,7 @@ CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-pie -no-pie \
          -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -mno-red-zone \
          -DSERIAL_SHELL_MIRROR=$(SERIAL_SHELL_MIRROR) \
          -DCI_SELFTEST=$(CI_SELFTEST) -DCI_IMAGE=$(CI_IMAGE) \
-         -DSERIAL_VERBOSE=$(SERIAL_VERBOSE)
+         -DSERIAL_VERBOSE=$(SERIAL_VERBOSE) $(NET_TEST_CFLAGS)
 
 
 

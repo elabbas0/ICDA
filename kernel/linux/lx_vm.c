@@ -439,10 +439,15 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
             uint64_t from = va & ~(FAULT_AROUND * PAGE - 1), to = from + FAULT_AROUND * PAGE;
             if (from < v->start) from = v->start;
             if (to > v->end) to = v->end;
-            if (v->node) {
-                /* a file: the run is consecutive in the file, so one read */
+            if (v->node && pc_pages + PC_CHUNK > PC_MAX) {
+                /* a file too big for the page cache (a model): the run is
+                 * consecutive in the file, so one read */
                 populate_run(p, v, from, to, va);
             } else {
+                /* the neighbours come from the page cache, which the fault
+                 * just filled with their whole chunk: shared with every other
+                 * process using the library, and read from disk once a boot
+                 * instead of again for each process and each run */
                 for (uint64_t a = from; a < to; a += PAGE)
                     if (a != va && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
             }
@@ -619,8 +624,18 @@ int64_t lxvm_mremap(process_t *p, uint64_t old, uint64_t old_len, uint64_t new_l
 int lxvm_madvise(process_t *p, uint64_t addr, uint64_t len, int advice) {
     uint64_t end = addr + ((len + PAGE - 1) & PAGE_MASK);
     if (addr & (PAGE - 1)) return -E_INVAL;
-    /* MADV_DONTNEED, MADV_FREE: the memory goes; the next touch gets zeroes
-     * (or the file's bytes again) */
+    /* MADV_DONTNEED: the memory goes; the next touch gets zeroes (or the
+     * file's bytes again).  MADV_FREE only allows that: until the memory is
+     * needed the pages stay, so an allocator that frees and reuses a block -
+     * musl's frees every emptied group this way, hundreds of times a second
+     * while a page loads - does not pay a fault and a zeroed page for each
+     * reuse.  Programs accept either outcome, as Linux reclaims lazily too. */
+    if (advice == 4) lxvm_stat.madv_dontneed++;
+    if (advice == 8) lxvm_stat.madv_free++;
+    if (advice == 8 && pmm_free_frames() > pmm_usable_frames() / 4) {
+        lxvm_stat.madv_free_kept++;
+        return 0;
+    }
     if ((advice == 4 || advice == 8) && end > addr) {
         for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v && v->start < end; v = v->next) {
             uint64_t a = v->start > addr ? v->start : addr, b = v->end < end ? v->end : end;

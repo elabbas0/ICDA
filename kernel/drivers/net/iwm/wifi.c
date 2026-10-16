@@ -55,7 +55,7 @@
 #define WIFI_SAVED_PATH		"/home/.wifi-networks"
 #define WIFI_STACK_PAGES	32
 #define FRAME_CAP		1600
-#define RX_SLOTS		128
+#define RX_SLOTS		512	/* frames between the driver and TCP: a burst at full speed */
 #define TX_SLOTS		64
 #define SCAN_MAX		48
 
@@ -131,6 +131,11 @@ static struct frame_slot rx_ring[RX_SLOTS];
 static struct frame_slot tx_ring[TX_SLOTS];
 static volatile uint32_t rx_head, rx_tail, tx_head, tx_tail;
 static uint64_t rx_drops, tx_drops;
+/* the longest the driver thread went without running while connected (ns):
+ * over about 50 ms the adapter's receive ring can fill (/dev/wifi) */
+static uint64_t longest_pause;
+extern int iwm_rx_backlog_max;
+extern uint64_t iwm_rx_near_full;
 
 static inline uint64_t
 irq_save(void)
@@ -579,6 +584,10 @@ update_status_snapshot(void)
 		    (unsigned long long)ic->ic_if.if_oerrors,
 		    (unsigned long long)rx_drops,
 		    (unsigned long long)tx_drops);
+	ADD("receive: longest driver pause %llu ms, ring backlog max %d, "
+	    "ring near full %llu\n",
+	    (unsigned long long)(longest_pause / 1000000ULL),
+	    iwm_rx_backlog_max, (unsigned long long)iwm_rx_near_full);
 #undef ADD
 	f = irq_save();
 	memcpy(status_snap, buf, o + 1);
@@ -1218,9 +1227,14 @@ icda_wifi_main(void)
 	ifp = &sc->sc_ic.ic_if;
 	(void)proc_create_kernel(dhcp_thread);
 
+	uint64_t last_run = 0;
 	for (;;) {
 		uint64_t now = iwm_compat_nsecuptime();
 		int work = 0;
+
+		if (link_up && last_run && now - last_run > longest_pause)
+			longest_pause = now - last_run;
+		last_run = now;
 
 		if (req != REQ_NONE)
 			handle_request();

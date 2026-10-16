@@ -9121,6 +9121,9 @@ iwm_rx_pkt(struct iwm_softc *sc, struct iwm_rx_data *data, struct mbuf_list *ml)
 		m_freem(m0);
 }
 
+int iwm_rx_backlog_max;
+uint64_t iwm_rx_near_full;
+
 void
 iwm_notif_intr(struct iwm_softc *sc)
 {
@@ -9142,6 +9145,15 @@ iwm_notif_intr(struct iwm_softc *sc)
 
 	hw = le16toh(sc->rxq.stat->closed_rb_num) & 0xfff;
 	hw &= (count - 1);
+	{
+		/* how far behind the driver ran (/dev/wifi): a ring that
+		 * fills drops frames the adapter already acknowledged */
+		int backlog = (hw - sc->rxq.cur + count) & (count - 1);
+		if (backlog > iwm_rx_backlog_max)
+			iwm_rx_backlog_max = backlog;
+		if (backlog >= count - 16)
+			iwm_rx_near_full++;
+	}
 	while (sc->rxq.cur != hw) {
 		struct iwm_rx_data *data = &sc->rxq.data[sc->rxq.cur];
 		iwm_rx_pkt(sc, data, &ml);

@@ -275,6 +275,7 @@ static int fd_close(struct lx_state *s, int64_t fd) {
 /* ---- for the other modules (lx_internal.h) ------------------------------ */
 
 static int signal_pending(struct lx_state *s);
+static int restartable(uint16_t nr);
 static int default_ignored(int sig);
 static uint64_t lx_mono_ns(void);
 static uint64_t lx_realtime_ns(void);
@@ -331,7 +332,7 @@ static int signal_pending(struct lx_state *s) {
     thread_t *t = sched_current_thread();
     uint64_t ready;
     if (!s || !t) return 0;
-    ready = s->pending & ~t->lx_sigmask;
+    ready = (s->pending | t->lx_pending) & ~t->lx_sigmask;
     for (int sig = 1; sig < LX_NSIG; sig++) {
         uint64_t bit = 1ULL << (sig - 1);
         lx_sigaction_t *sa;
@@ -369,6 +370,20 @@ int lx_signal(process_t *proc, int sig) {
         }
         t = t->next;
     } while (t && t != start);
+    return 0;
+}
+
+/* A signal for one thread (tgkill, tkill): only that thread takes it.
+ * Process-wide delivery let any thread run the handler - WebKit's garbage
+ * collector suspends a thread by signalling it and checking, in the handler,
+ * that it runs on that thread's stack; delivered elsewhere it suspended the
+ * wrong thread and retried for as long as a minute, the page frozen. */
+static int lx_signal_thread(thread_t *t, int sig) {
+    process_t *proc = t->owner;
+    if (sig == SIGKILL || sig == SIGSTOP) return lx_signal(proc, sig);
+    if (!lx_get(proc)) return -1;
+    t->lx_pending |= 1ULL << (sig - 1);
+    if (t->state == THREAD_BLOCKED && !(t->lx_sigmask & (1ULL << (sig - 1)))) sched_wake_thread(t);
     return 0;
 }
 
@@ -1790,6 +1805,39 @@ static uint64_t sys_renameat(int64_t olddir, const char *uold, int64_t newdir, c
     return vfs_rename(cwd_node(), from, to) == 0 ? 0 : ERR(EXDEV);
 }
 
+/* link(): ICDA's file systems have no hard links, so the new name gets a copy
+ * of the file.  WebKit's disk cache links each stored body into its record;
+ * refused, it stored no bodies at all and every visit downloaded the page's
+ * scripts and images again.  A copy is right for every user that does not
+ * then write through one name expecting to see it through the other. */
+#define LX_LINK_COPY_MAX (64ULL * 1024 * 1024)
+
+static uint64_t sys_linkat(int64_t olddir, const char *uold, int64_t newdir, const char *unew) {
+    char from[LX_PATH_MAX], to[LX_PATH_MAX];
+    vfs_node_t *src;
+    uint64_t size;
+    char *buf;
+    int64_t rc = at_path(olddir, uold, from);
+    if (rc < 0) return ERR(-rc);
+    rc = at_path(newdir, unew, to);
+    if (rc < 0) return ERR(-rc);
+    src = vfs_resolve(cwd_node(), from);
+    if (!src) return ERR(ENOENT);
+    if (vfs_node_type(src) != VFS_NODE_FILE) return ERR(EPERM);
+    if (vfs_resolve(cwd_node(), to)) return ERR(EEXIST);
+    size = vfs_node_size(src);
+    if (size > LX_LINK_COPY_MAX) return ERR(EPERM);
+    buf = (char *)kmalloc(size ? size : 1);
+    if (!buf) return ERR(ENOMEM);
+    if ((uint64_t)vfs_node_read_at(src, 0, buf, size) != size ||
+        vfs_write(cwd_node(), to, buf, size) != 0) {
+        kfree(buf);
+        return ERR(EIO);
+    }
+    kfree(buf);
+    return 0;
+}
+
 static uint64_t sys_faccessat(int64_t dirfd, const char *upath, uint64_t mode) {
     char path[LX_PATH_MAX];
     vfs_node_t *node;
@@ -2201,21 +2249,29 @@ static uint64_t sys_rt_sigreturn(struct registers *regs) {
     return g[13];
 }
 
-void lx_after_syscall(struct registers *regs) {
+static void deliver_signals(struct registers *regs, int after_call) {
     process_t *p = sched_current_process();
     thread_t *t = sched_current_thread();
     struct lx_state *s;
     if (!p || !t || !p->linux_personality || !p->lx || t->user_return_pending) return;
     s = p->lx;
     for (;;) {
-        uint64_t ready = s->pending & ~t->lx_sigmask;
+        uint64_t ready = (s->pending | t->lx_pending) & ~t->lx_sigmask;
         int sig = 0;
         lx_sigaction_t *sa;
         uint64_t old_mask;
-        if (!ready) return;
+        if (!ready) {
+            /* rt_sigsuspend ended without a handler to run: its mask goes */
+            if (t->lx_in_suspend) {
+                t->lx_sigmask = t->lx_suspend_mask;
+                t->lx_in_suspend = 0;
+            }
+            return;
+        }
         while (!(ready & (1ULL << sig))) sig++;
         sig++;
-        s->pending &= ~(1ULL << (sig - 1));
+        if (t->lx_pending & (1ULL << (sig - 1))) t->lx_pending &= ~(1ULL << (sig - 1));
+        else s->pending &= ~(1ULL << (sig - 1));
         sa = &s->sa[sig];
         if (sa->handler == 1) continue;
         if (sa->handler == 0) {
@@ -2237,13 +2293,17 @@ void lx_after_syscall(struct registers *regs) {
             user_request_exit_to_kernel(128 + (uint64_t)sig);
             return;
         }
-        if ((int64_t)regs->rax == -EINTR && (sa->flags & SA_RESTART)) {
+        if (after_call && (int64_t)regs->rax == -EINTR && (sa->flags & SA_RESTART) &&
+            restartable(t->lx_last_nr[(t->lx_last_pos + 15) & 15])) {
             /* lx_syscall records the completed call on this thread before
              * signal delivery. Other threads may have run while it slept. */
             regs->rax = t->lx_last_nr[(t->lx_last_pos + 15) & 15];
             regs->rip -= 2;
         }
-        old_mask = t->lx_sigmask;
+        /* after rt_sigsuspend the handler's return restores the mask from
+         * before the call, not the one the call waited with */
+        old_mask = t->lx_in_suspend ? t->lx_suspend_mask : t->lx_sigmask;
+        t->lx_in_suspend = 0;
         if (build_sigframe(regs, sig, sa, old_mask) != 0) {
             s->term_sig = 11;
             user_request_exit_to_kernel(128 + 11);
@@ -2253,6 +2313,39 @@ void lx_after_syscall(struct registers *regs) {
         if (!(sa->flags & SA_NODEFER)) t->lx_sigmask |= 1ULL << (sig - 1);
         if (sa->flags & SA_RESETHAND) sa->handler = 0;
         return;
+    }
+}
+
+void lx_after_syscall(struct registers *regs) {
+    deliver_signals(regs, 1);
+}
+
+/* An interrupt about to return to a Linux program: pending signals are
+ * delivered here too, as Linux does on every return to user mode.  A thread
+ * busy in its own code makes no system calls, so a signal for it waited -
+ * WebKit's collector, suspending a thread running JavaScript, waited with it. */
+void lx_after_interrupt(struct registers *regs) {
+    process_t *p;
+    thread_t *t;
+    if ((regs->cs & 3) != 3) return;
+    p = sched_current_process();
+    t = sched_current_thread();
+    if (!p || !t || !p->linux_personality || !p->lx) return;
+    if (!((p->lx->pending | t->lx_pending) & ~t->lx_sigmask)) return;
+    deliver_signals(regs, 0);
+}
+
+/* Calls SA_RESTART does not restart on Linux: a handler that ran ends them
+ * with EINTR.  Restarting rt_sigsuspend put a thread WebKit had just resumed
+ * straight back to sleep, and the page waited for it. */
+static int restartable(uint16_t nr) {
+    switch (nr) {
+    case 7: case 23: case 34: case 35: case 128: case 130: case 230:
+    case 232: case 270: case 271: case 281: case 441:
+        return 0;   /* poll select pause nanosleep sigtimedwait sigsuspend
+                     * clock_nanosleep epoll_wait pselect6 ppoll epoll_pwait(2) */
+    default:
+        return 1;
     }
 }
 
@@ -2317,6 +2410,32 @@ static thread_t *lx_thread_of(process_t *p, int64_t tid) {
         t = t->next;
     } while (t && t != start);
     return 0;
+}
+
+/* tgkill(tgid, tid, sig) and tkill(tid, sig): to the one thread */
+static uint64_t sys_tgkill(int64_t tgid, int64_t tid, int64_t sig) {
+    process_t *self = sched_current_process(), *q;
+    thread_t *t;
+    if (sig < 0 || sig >= LX_NSIG) return ERR(EINVAL);
+    q = tgid < 0 || tgid == (int64_t)self->pid ? self : sched_find_process((uint64_t)tgid);
+    t = q ? lx_thread_of(q, tid) : 0;
+    if (!t || !q->linux_personality) return sys_kill(tgid < 0 ? tid : tgid, sig);
+    if (sig && lx_signal_thread(t, (int)sig) != 0) return ERR(EPERM);
+    return 0;
+}
+
+/* rt_sigsuspend: waits with the given mask; the handler that ends the wait
+ * runs with it, and its return restores the mask from before the call */
+static uint64_t sys_rt_sigsuspend(const uint64_t *umask) {
+    thread_t *t = sched_current_thread();
+    process_t *p = sched_current_process();
+    uint64_t mask;
+    if (copy_from_user(&mask, umask, 8) != 0) return ERR(EFAULT);
+    t->lx_suspend_mask = t->lx_sigmask;
+    t->lx_in_suspend = 1;
+    t->lx_sigmask = mask & ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    while (!signal_pending(p->lx)) sched_sleep(1);
+    return ERR(EINTR);
 }
 
 static uint64_t sys_clone_thread(struct registers *regs, uint64_t flags, uint64_t new_sp, uint64_t parent_tid,
@@ -2903,7 +3022,8 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 83: return sys_mkdirat(LX_AT_FDCWD, (const char *)a0);
         case 84: return sys_unlinkat(LX_AT_FDCWD, (const char *)a0, 0x200);
         case 85: return sys_openat(LX_AT_FDCWD, (const char *)a0, O_CREAT | O_WRONLY | O_TRUNC);
-        case 86: case 88: case 133: return ERR(EPERM);
+        case 86: return sys_linkat(LX_AT_FDCWD, (const char *)a0, LX_AT_FDCWD, (const char *)a1);
+        case 88: case 133: return ERR(EPERM);
         case 87: return sys_unlinkat(LX_AT_FDCWD, (const char *)a0, 0);
         case 89: return sys_readlinkat(LX_AT_FDCWD, (const char *)a0, (char *)a1, a2);
         case 90: case 91: case 92: case 93: case 94: return 0;
@@ -2942,7 +3062,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         }
         case 124: return p->session_id ? p->session_id : p->pid;
         case 127: return 0;
-        case 130: while (!signal_pending(p->lx)) sched_sleep(1); return ERR(EINTR);
+        case 130: return sys_rt_sigsuspend((const uint64_t *)a0);
         case 131: return a1 ? zero_user((void *)a1, 24) : 0;
         case 137: case 138: return sys_statfs((uint8_t *)a1);
         case 157: return 0;
@@ -2959,7 +3079,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             return ERR(EINVAL);
         case 160: return 0;
         case 186: return (uint64_t)lx_tid(sched_current_thread());
-        case 200: return sys_kill(lx_thread_of(p, (int64_t)a0) ? (int64_t)p->pid : (int64_t)a0, (int64_t)a1);
+        case 200: return sys_tgkill(-1, (int64_t)(int32_t)a0, (int64_t)a1);
         case 201: {
             uint64_t now = now_epoch();
             if (a0 && copy_to_user((void *)a0, &now, 8) != 0) return ERR(EFAULT);
@@ -2975,7 +3095,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             return 0;
         }
         case 230: return sys_clock_nanosleep(a0, a1, (const uint64_t *)a2);
-        case 234: return sys_kill((int64_t)a0 == (int64_t)p->pid ? (int64_t)p->pid : (int64_t)a1, (int64_t)a2);
+        case 234: return sys_tgkill((int64_t)(int32_t)a0, (int64_t)(int32_t)a1, (int64_t)a2);
         case 257: return sys_openat((int64_t)(int32_t)a0, (const char *)a1, a2);
         case 258: return sys_mkdirat((int64_t)(int32_t)a0, (const char *)a1);
         case 260: case 268: case 280: return 0;
@@ -2983,6 +3103,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
         case 263: return sys_unlinkat((int64_t)(int32_t)a0, (const char *)a1, a2);
         case 264: case 316:
             return sys_renameat((int64_t)(int32_t)a0, (const char *)a1, (int64_t)(int32_t)a2, (const char *)a3);
+        case 265: return sys_linkat((int64_t)(int32_t)a0, (const char *)a1, (int64_t)(int32_t)a2, (const char *)a3);
         case 267: return sys_readlinkat((int64_t)(int32_t)a0, (const char *)a1, (char *)a2, a3);
         case 269: case 439: return sys_faccessat((int64_t)(int32_t)a0, (const char *)a1, a2);
         case 270: return do_select(a0, (uint8_t *)a1, (uint8_t *)a2, (uint8_t *)a3, ts_ticks((const uint64_t *)a4, 0));
@@ -3529,7 +3650,13 @@ static void lx_prof_report(void) {
         dump_num((int64_t)(lxvm_stat.step_cycles[1] / per_us));
         serial_write(", map ");
         dump_num((int64_t)(lxvm_stat.step_cycles[2] / per_us));
-        serial_write("\n");
+        serial_write("\nlxprof madvise: dontneed ");
+        dump_num((int64_t)lxvm_stat.madv_dontneed);
+        serial_write(", free ");
+        dump_num((int64_t)lxvm_stat.madv_free);
+        serial_write(" (kept ");
+        dump_num((int64_t)lxvm_stat.madv_free_kept);
+        serial_write(")\n");
         {
             lxvm_stat_t zero = { 0 };
             lxvm_stat = zero;

@@ -47,7 +47,7 @@ int      lxvm_lookup(process_t *p, uint64_t addr, struct vfs_node **node, uint64
 
 /* profiler counters */
 typedef struct { uint64_t faults, file_faults, present_faults, vmas, find_cycles, populate_cycles, miss_reads, miss_cycles,
-                 pages[3], kind_cycles[3], step_cycles[3]; } lxvm_stat_t;   /* by kind: 0 anonymous, 1 file, 2 memory object */
+                 pages[3], kind_cycles[3], step_cycles[3], madv_dontneed, madv_free, madv_free_kept; } lxvm_stat_t;   /* by kind: 0 anonymous, 1 file, 2 memory object */
 extern lxvm_stat_t lxvm_stat;
 
 #endif

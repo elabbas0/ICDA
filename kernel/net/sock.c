@@ -18,6 +18,7 @@
  * 60 ms - however fast the link */
 #define TCP_RBUF        (256 * 1024)
 #define TCP_RCV_WSCALE  4
+#define TCP_SACK_MAX    8       /* ranges remembered; the first 3 go in each ACK */
 #define TCP_RTO_MIN     30      /* ticks (10 ms each) */
 #define TCP_RTO_MAX     600
 #define TCP_RETRIES     12
@@ -89,6 +90,12 @@ typedef struct {
     uint32_t  last_wnd;
     int       ws_ok;          /* both sides sent a window scale option */
     uint8_t   snd_wscale;     /* the peer's shift for the windows it sends */
+    /* SACK (RFC 2018): the byte ranges received beyond a gap, newest first,
+     * reported in every ACK so the sender resends only the holes, all of
+     * them in one round trip, instead of one segment per round trip */
+    int       sack_ok;
+    int       nsack;
+    uint32_t  sack_l[TCP_SACK_MAX], sack_r[TCP_SACK_MAX];
     /* UDP */
     udp_dgram_t q[UDP_QUEUE];
     int       qhead, qlen;
@@ -300,8 +307,8 @@ static uint32_t rbuf_free(const sock_t *s) {
 }
 
 static void tcp_send(sock_t *s, uint32_t seq, uint8_t flags, const uint8_t *data, uint16_t len) {
-    uint8_t h[28];
-    uint16_t hlen = (flags & TCP_FLAG_SYN) ? 28 : 20;
+    uint8_t h[60];
+    uint16_t hlen = 20;
     uint32_t wnd = rbuf_free(s), field;
     /* a SYN's window is never scaled; without scaling 16 bits is all */
     if ((flags & TCP_FLAG_SYN) || !s->ws_ok) field = wnd > 65535 ? 65535 : wnd;
@@ -317,11 +324,10 @@ static void tcp_send(sock_t *s, uint32_t seq, uint8_t flags, const uint8_t *data
     h[3] = (uint8_t)s->rport;
     wr32be(h + 4, seq);
     wr32be(h + 8, (flags & TCP_FLAG_ACK) ? s->rcv_nxt : 0);
-    h[12] = (uint8_t)((hlen / 4) << 4);
     h[13] = flags;
     h[14] = (uint8_t)(field >> 8);
     h[15] = (uint8_t)field;
-    if (hlen == 28) {
+    if (flags & TCP_FLAG_SYN) {
         h[20] = 2;                    /* MSS */
         h[21] = 4;
         h[22] = (uint8_t)(TCP_MSS >> 8);
@@ -330,7 +336,24 @@ static void tcp_send(sock_t *s, uint32_t seq, uint8_t flags, const uint8_t *data
         h[25] = 3;
         h[26] = 3;
         h[27] = TCP_RCV_WSCALE;
+        h[28] = 1;                    /* NOP NOP, then SACK permitted */
+        h[29] = 1;
+        h[30] = 4;
+        h[31] = 2;
+        hlen = 32;
+    } else if (s->sack_ok && s->nsack && (flags & TCP_FLAG_ACK)) {
+        int n = s->nsack < 3 ? s->nsack : 3;
+        h[20] = 1;
+        h[21] = 1;
+        h[22] = 5;
+        h[23] = (uint8_t)(2 + 8 * n);
+        for (int i = 0; i < n; i++) {
+            wr32be(h + 24 + 8 * i, s->sack_l[i]);
+            wr32be(h + 28 + 8 * i, s->sack_r[i]);
+        }
+        hlen = (uint16_t)(24 + 8 * n);
     }
+    h[12] = (uint8_t)((hlen / 4) << 4);
     s->last_wnd = wnd;
     ip_output(s, IP_PROTO_TCP, h, hlen, data, len);
 }
@@ -422,6 +445,43 @@ static void tcp_fail(sock_t *s, int err) {
     if (s->user_closed) sock_release(s);
 }
 
+/* Records [l, r) as received beyond the gap: merged with the ranges it
+ * touches and moved to the front (RFC 2018 reports the newest first). */
+static void sack_add(sock_t *s, uint32_t l, uint32_t r) {
+    int n = 0;
+    for (int i = 0; i < s->nsack; i++) {
+        uint32_t al = s->sack_l[i], ar = s->sack_r[i];
+        if ((int32_t)(ar - l) >= 0 && (int32_t)(r - al) >= 0) {    /* overlaps or touches */
+            if ((int32_t)(al - l) < 0) l = al;
+            if ((int32_t)(ar - r) > 0) r = ar;
+            continue;
+        }
+        s->sack_l[n] = al;
+        s->sack_r[n] = ar;
+        n++;
+    }
+    if (n == TCP_SACK_MAX) n--;                 /* the oldest goes unreported */
+    for (int i = n; i > 0; i--) {
+        s->sack_l[i] = s->sack_l[i - 1];
+        s->sack_r[i] = s->sack_r[i - 1];
+    }
+    s->sack_l[0] = l;
+    s->sack_r[0] = r;
+    s->nsack = n + 1;
+}
+
+/* Drops what the cumulative acknowledgement now covers. */
+static void sack_trim(sock_t *s) {
+    int n = 0;
+    for (int i = 0; i < s->nsack; i++) {
+        if ((int32_t)(s->sack_r[i] - s->rcv_nxt) <= 0) continue;
+        s->sack_l[n] = (int32_t)(s->sack_l[i] - s->rcv_nxt) < 0 ? s->rcv_nxt : s->sack_l[i];
+        s->sack_r[n] = s->sack_r[i];
+        n++;
+    }
+    s->nsack = n;
+}
+
 /* A hotspot can deliver later segments before a retransmission closes a
  * gap. Discarding those segments makes the server retransmit the whole
  * flight and repeatedly shrink its congestion window. Keep them inside
@@ -468,6 +528,7 @@ static void tcp_receive(sock_t *s, uint32_t seq, const uint8_t *data,
             }
         }
     }
+    if (offset && take) sack_add(s, seq, seq + take);
     if (!s->rmap) {
         s->rlen += take;
         s->rcv_nxt += take;
@@ -486,7 +547,9 @@ static void tcp_receive(sock_t *s, uint32_t seq, const uint8_t *data,
             kfree(s->rmap);
             s->rmap = 0;
         }
+        sack_trim(s);
     }
+    if (!s->rmap) s->nsack = 0;
     /* FIN occupies a sequence number too. Never close across a data gap
      * or accept a FIN beyond the receive window. */
     if (s->fin_pending && s->rcv_nxt == s->fin_seq) {
@@ -523,6 +586,8 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
             s->snd_una = ack;
             s->snd_wnd = ((uint32_t)t[14] << 8) | t[15];      /* a SYN's window is unscaled */
             s->ws_ok = 0;
+            s->sack_ok = 0;
+            s->nsack = 0;
             for (uint16_t o = 20; o < doff; ) {               /* the peer's options */
                 uint8_t kind = t[o];
                 if (kind == 0) break;
@@ -532,6 +597,7 @@ static void tcp_input(sock_t *s, const uint8_t *t, uint16_t tlen) {
                     s->ws_ok = 1;
                     s->snd_wscale = t[o + 2] > 14 ? 14 : t[o + 2];
                 }
+                if (kind == 4 && t[o + 1] == 2) s->sack_ok = 1;
                 o = (uint16_t)(o + t[o + 1]);
             }
             s->state = T_ESTABLISHED;
@@ -654,6 +720,14 @@ static void rx_pump(void) {
         const eth_hdr_t *eth = (const eth_hdr_t *)frame;
         if (rc <= 0) break;
         if (len < sizeof(eth_hdr_t)) continue;
+#ifdef NET_LOSS_TEST
+        /* test builds only: lose bursts of received TCP frames the way a
+         * Wi-Fi receive ring that overflowed does (20 in a row every 1000) */
+        if (ntohs16(eth->type_be) == ETH_TYPE_IPV4 && len > 200 && frame[sizeof(eth_hdr_t) + 9] == IP_PROTO_TCP) {
+            static uint32_t tcp_frames;
+            if (++tcp_frames % 1000 >= 980) continue;
+        }
+#endif
         if (ntohs16(eth->type_be) == ETH_TYPE_ARP) {
             if (arp_input(frame, len)) legacy_push(frame, len);
             continue;
