@@ -145,7 +145,11 @@ ICDA has user accounts. On the first start the desktop asks for the first
 account: it is the computer's owner and an administrator, and it keeps the
 existing `/home` and `/cfg`, so nothing moves and an older kernel still finds
 them. Leave its password empty to sign in automatically. Add more accounts in
-**Settings > Users**; each change asks for your own password. **Super+L**
+**Settings > Users**, each either **Standard** or **Administrator**; each change
+asks for your own password. Every account gets a recovery key, shown once when
+it is made (and renewable in Settings > Users): **Forgot password?** on the
+sign-in screen takes it and sets a new password, and administrators can also
+set other users' passwords. **Super+L**
 locks the screen, and the start menu's footer has Lock and Sign out. The text
 console (Ctrl+Alt+F2) asks for a name and password too.
 
@@ -159,6 +163,10 @@ system partition can be read by all and changed by administrators, and other
 internal disks (Windows) are for administrators only. Formatting, installing,
 disk editing, account changes and stopping other users' programs need an
 administrator. Linux programs see the real user id and an `/etc/passwd` with
-the accounts. Passwords are PBKDF2-HMAC-SHA256 with a per-account salt, kept in
+the accounts. Notifications are per user (the system's are everyone's). Any
+user can install the assistant's models: `/sbin/model-install` runs as the
+system, fetching only the catalog's pinned models and checking their SHA-256.
+Passwords and recovery keys are PBKDF2-HMAC-SHA256 (200,000 rounds, older
+hashes strengthened at the next sign-in) with per-account salts, kept in
 `/etc/icda/users`, which only the kernel reads. `make vfs-users-test` checks
 the rules on the host.

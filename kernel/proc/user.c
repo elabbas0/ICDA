@@ -788,6 +788,16 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
         user_proc->ex_token = current_proc->ex_token;
         user_proc->ex_session_leader = 0;
     }
+    /* System helpers any user may start that run as the system: the model
+     * installer only fetches the catalog's pinned models, checks their
+     * SHA-256 and writes only into the shared models folder, which users
+     * cannot change themselves.  It lives in /sbin, which they cannot replace. */
+    if (cstr_eq(path, "/sbin/model-install")) {
+        user_proc->ex_uid = 0;
+        user_proc->ex_admin = 0;
+        user_proc->ex_home = 0;
+        user_proc->ex_cfg = 0;
+    }
     if (cstr_eq(path, "/sbin/init.app")) {
         user_proc->ex_uid = 0;
         user_proc->ex_session_leader = 1;

@@ -16,6 +16,8 @@ typedef struct {
 /* the form's text fields */
 enum { F_MINE = 0, F_NEWPW, F_ADD_NAME, F_ADD_PW, F_COUNT };
 
+static const char *const type_labels[2] = { "Standard", "Administrator" };
+
 static struct {
     account_t acct[U_MAX];
     int  count, sel;            /* sel == count: the "new account" form */
@@ -28,10 +30,17 @@ static struct {
     int  hover;
     char status[96];
     int  status_bad;
+    char key[ICDA_ACCT_KEY_CAP];   /* a recovery key on show, and whose */
+    char key_for[32];
 } U;
 
 static void wipe_field(int f) {
     for (int i = 0; i < PW_CAP; i++) ((volatile char *)U.field[f])[i] = 0;
+}
+
+static void wipe_key(void) {
+    for (int i = 0; i < (int)sizeof(U.key); i++) ((volatile char *)U.key)[i] = 0;
+    U.key_for[0] = 0;
 }
 
 static void load(void) {
@@ -77,6 +86,7 @@ void users_pane_enter(void) {
 
 void users_pane_leave(void) {
     for (int f = 0; f < F_COUNT; f++) wipe_field(f);
+    wipe_key();
 }
 
 int users_pane_modal(void) {
@@ -108,9 +118,8 @@ static ic_rect_t add_rect(ic_rect_t list) {
 static int fx(ic_rect_t area) { return area.x + list_rect(area).w + IC_SP_4; }
 static int fw(ic_rect_t area) { int w = area.x + area.w - fx(area) - IC_SP_3; return w > 360 ? 360 : w; }
 
-/* parts of the form, by row (each row 52 px: a label and a control) */
-enum { P_TOGGLE_ADMIN = 0, P_TOGGLE_AUTO, P_NEWPW, P_CHANGE, P_REMOVE,
-       P_ADD_NAME, P_ADD_PW, P_ADD_ADMIN, P_CREATE, P_MINE, P_COUNT };
+enum { P_TYPE = 0, P_TOGGLE_AUTO, P_NEWPW, P_CHANGE, P_MINE, P_REMOVE, P_NEWKEY,
+       P_ADD_NAME, P_ADD_PW, P_ADD_TYPE, P_CREATE, P_COUNT };
 
 static ic_rect_t part(ic_rect_t area, int which) {
     int x = fx(area), w = fw(area), y = area.y + 64;
@@ -118,25 +127,26 @@ static ic_rect_t part(ic_rect_t area, int which) {
         switch (which) {
         case P_ADD_NAME:  return ic_rect_make(x, y + 18, w, 30);
         case P_ADD_PW:    return ic_rect_make(x, y + 70, w, 30);
-        case P_ADD_ADMIN: return ic_ui_toggle_rect(x + w - IC_TOGGLE_W, y + 116);
+        case P_ADD_TYPE:  return ic_rect_make(x, y + 112, 240, IC_H_CONTROL_SM + 4);
         case P_MINE:      return ic_rect_make(x, y + 170, w, 30);
         case P_CREATE:    return ic_rect_make(x, y + 214, 140, IC_H_CONTROL);
         default:          return ic_rect_make(0, 0, -1, 0);
         }
     }
     switch (which) {
-    case P_TOGGLE_ADMIN: return ic_ui_toggle_rect(x + w - IC_TOGGLE_W, y + 4);
+    case P_TYPE:         return ic_rect_make(x, y + 4, 240, IC_H_CONTROL_SM + 4);
     case P_TOGGLE_AUTO:  return ic_ui_toggle_rect(x + w - IC_TOGGLE_W, y + 44);
     case P_NEWPW:        return ic_rect_make(x, y + 104, w - 150, 30);
     case P_CHANGE:       return ic_rect_make(x + w - 140, y + 104, 140, 30);
     case P_MINE:         return ic_rect_make(x, y + 170, w, 30);
-    case P_REMOVE:       return ic_rect_make(x, y + 214, 170, IC_H_CONTROL);
+    case P_NEWKEY:       return ic_rect_make(x, y + 214, 160, IC_H_CONTROL);
+    case P_REMOVE:       return ic_rect_make(x + 168, y + 214, w - 168 < 170 ? w - 168 : 170, IC_H_CONTROL);
     default:             return ic_rect_make(0, 0, -1, 0);
     }
 }
 
 /* who may do what here: the kernel decides; this only greys out the rest */
-static int can_admin_toggle(void) { account_t *a = cur(); return a && U.me_admin && !is_owner(U.sel); }
+static int can_set_type(void) { return cur() && U.me_admin && !is_owner(U.sel); }
 static int can_auto_toggle(void) { account_t *a = cur(); return a && (U.me_admin || is_me(a)); }
 static int can_change_pw(void) { account_t *a = cur(); return a && (U.me_admin || is_me(a)); }
 static int can_remove(void) { account_t *a = cur(); return a && U.me_admin && !is_me(a) && !is_owner(U.sel); }
@@ -179,10 +189,21 @@ static ic_state_t st(int enabled, int which) {
     return ic_ui_state(enabled, U.hover == which, 0);
 }
 
+/* Standard or Administrator; greyed when it cannot change */
+static void type_control(ic_canvas_t *c, ic_rect_t r, int admin, int enabled, int which) {
+    const ic_palette_t *p = ic_palette();
+    if (enabled) {
+        ic_ui_segmented(c, r, type_labels, 2, admin ? 1.0f : 0.0f, U.hover == which ? -2 : -1);
+    } else {
+        ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), r, type_labels[admin ? 1 : 0], p->label_secondary,
+                        IC_ALIGN_LEFT);
+    }
+}
+
 void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
     const ic_palette_t *p = ic_palette();
     ic_rect_t list = list_rect(area);
-    int x = fx(area), w = fw(area), y = area.y;
+    int x = fx(area), w = fw(area), y = area.y, below;
     (void)app;
 
     ic_ui_panel(c, list, IC_R_GROUP + 2.0f, IC_ELEV_MENU, 0, 0);
@@ -194,8 +215,8 @@ void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
         ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r.x + 42, r.y + 4, r.w - 48, 16), a->name,
                         p->label, IC_ALIGN_LEFT);
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + 42, r.y + 21, r.w - 48, 14),
-                        is_me(a) ? (a->admin ? "You, administrator" : "You")
-                                 : a->admin ? "Administrator" : "Standard user",
+                        is_me(a) ? (a->admin ? "You, administrator" : "You, standard")
+                                 : a->admin ? "Administrator" : "Standard",
                         p->label_tertiary, IC_ALIGN_LEFT);
     }
     if (U.me_admin)
@@ -211,12 +232,11 @@ void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
         field_box(c, part(area, P_ADD_NAME), F_ADD_NAME, "lowercase letters and digits", 0, 1);
         label(c, x, part(area, P_ADD_PW).y - 18, w, "Password", 0);
         field_box(c, part(area, P_ADD_PW), F_ADD_PW, "optional", 1, 1);
-        label(c, x, part(area, P_ADD_ADMIN).y, w - 50, "Administrator", "Can add accounts and use internal disks");
-        ic_ui_toggle(c, part(area, P_ADD_ADMIN).x, part(area, P_ADD_ADMIN).y, U.add_admin ? 1.0f : 0.0f,
-                     st(1, P_ADD_ADMIN));
+        type_control(c, part(area, P_ADD_TYPE), U.add_admin, 1, P_ADD_TYPE);
         label(c, x, part(area, P_MINE).y - 18, w, "Your password, to confirm", 0);
         field_box(c, part(area, P_MINE), F_MINE, "", 1, 1);
         ic_ui_button(c, part(area, P_CREATE), "Create", IC_SYM_NONE, IC_BUTTON_PRIMARY, st(1, P_CREATE));
+        below = part(area, P_CREATE).y + IC_H_CONTROL + 14;
     } else if (cur()) {
         account_t *a = cur();
         avatar(c, x + 18, y + 26, 18, a->name);
@@ -225,9 +245,7 @@ void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
         ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(x + 46, y + 32, w - 46, 14),
                         is_owner(U.sel) ? "Owner of this computer: files in /home" : "Files in /users",
                         p->label_tertiary, IC_ALIGN_LEFT);
-        label(c, x, part(area, P_TOGGLE_ADMIN).y, w - 50, "Administrator", "Accounts, disks, other users' programs");
-        ic_ui_toggle(c, part(area, P_TOGGLE_ADMIN).x, part(area, P_TOGGLE_ADMIN).y, a->admin ? 1.0f : 0.0f,
-                     st(can_admin_toggle(), P_TOGGLE_ADMIN));
+        type_control(c, part(area, P_TYPE), a->admin, can_set_type(), P_TYPE);
         label(c, x, part(area, P_TOGGLE_AUTO).y, w - 50, "Sign in automatically", "No sign-in screen at startup");
         ic_ui_toggle(c, part(area, P_TOGGLE_AUTO).x, part(area, P_TOGGLE_AUTO).y, a->automatic ? 1.0f : 0.0f,
                      st(can_auto_toggle(), P_TOGGLE_AUTO));
@@ -237,14 +255,24 @@ void users_pane_draw(ic_app_t *app, ic_canvas_t *c, ic_rect_t area) {
                      st(can_change_pw(), P_CHANGE));
         label(c, x, part(area, P_MINE).y - 18, w, "Your password, to confirm changes", 0);
         field_box(c, part(area, P_MINE), F_MINE, "", 1, 1);
+        if (can_change_pw())
+            ic_ui_button(c, part(area, P_NEWKEY), "New recovery key", IC_SYM_LOCK, IC_BUTTON_DEFAULT, st(1, P_NEWKEY));
         if (can_remove())
             ic_ui_button(c, part(area, P_REMOVE), U.confirm_remove ? "Click again to remove" : "Remove account",
                          IC_SYM_TRASH, IC_BUTTON_DESTRUCTIVE, st(1, P_REMOVE));
+        below = part(area, P_REMOVE).y + IC_H_CONTROL + 14;
+    } else {
+        below = y + 64;
     }
     if (U.status[0]) {
-        int sy = part(area, U.sel == U.count ? P_CREATE : P_REMOVE).y + IC_H_CONTROL + 14;
-        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(x, sy, w, 16), U.status,
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(x, below, w, 16), U.status,
                         U.status_bad ? p->danger : p->success, IC_ALIGN_LEFT);
+        below += 22;
+    }
+    if (U.key[0]) {                                     /* shown once: write it down */
+        ic_rect_t box = ic_rect_make(x, below, w, 36);
+        ic_gfx_rrect(c, box.x, box.y, box.w, box.h, 8.0f, p->field);
+        ic_text_draw_in(c, ic_font(IC_FONT_MONO), box, U.key, p->label, IC_ALIGN_CENTER);
     }
 }
 
@@ -261,11 +289,7 @@ static const char *why(long rc) {
 }
 
 static void done(long rc, const char *ok) {
-    if (rc < 0) {
-        say(why(rc), 1);
-    } else {
-        say(ok, 0);
-    }
+    say(rc < 0 ? why(rc) : ok, rc < 0);
     wipe_field(F_MINE);
     load();
 }
@@ -277,12 +301,13 @@ static void set_flags(int admin, int automatic) {
     done(icda_account_set(a->name, U.field[F_MINE], f), "Saved");
 }
 
-static void act(int which) {
+static void act(int which, int seg) {
     account_t *a = cur();
-    U.confirm_remove = which == P_REMOVE ? U.confirm_remove : 0;
+    if (which != P_REMOVE) U.confirm_remove = 0;
+    if (which != P_NEWKEY && which != P_CREATE) wipe_key();
     switch (which) {
-    case P_TOGGLE_ADMIN:
-        if (can_admin_toggle()) set_flags(!a->admin, a->automatic);
+    case P_TYPE:
+        if (can_set_type() && seg >= 0 && seg != a->admin) set_flags(seg, a->automatic);
         break;
     case P_TOGGLE_AUTO:
         if (can_auto_toggle()) set_flags(a->admin, !a->automatic);
@@ -292,6 +317,16 @@ static void act(int which) {
         done(icda_account_password(a->name, U.field[F_MINE], U.field[F_NEWPW]), "Password changed");
         wipe_field(F_NEWPW);
         break;
+    case P_NEWKEY: {
+        long rc;
+        if (!can_change_pw()) break;
+        wipe_key();
+        rc = icda_account_new_key(a->name, U.field[F_MINE], U.key);
+        done(rc, is_me(a) ? "Your new recovery key: write it down. The old one no longer works."
+                          : "Their new recovery key: give it to them. The old one no longer works.");
+        if (rc < 0) wipe_key();
+        break;
+    }
     case P_REMOVE:
         if (!can_remove()) break;
         if (!U.confirm_remove) { U.confirm_remove = 1; say("Their files go too", 1); break; }
@@ -299,18 +334,22 @@ static void act(int which) {
         done(icda_account_delete(a->name, U.field[F_MINE], 1), "Removed");
         U.sel = 0;
         break;
-    case P_ADD_ADMIN:
-        U.add_admin = !U.add_admin;
+    case P_ADD_TYPE:
+        if (seg >= 0) U.add_admin = seg;
         break;
     case P_CREATE: {
-        long rc = icda_account_create(U.field[F_ADD_NAME], U.field[F_ADD_PW], U.add_admin ? ICDA_ACCT_ADMIN : 0,
-                                      U.field[F_MINE]);
-        done(rc, "Account created");
+        long rc;
+        wipe_key();
+        rc = icda_account_create(U.field[F_ADD_NAME], U.field[F_ADD_PW], U.add_admin ? ICDA_ACCT_ADMIN : 0,
+                                 U.field[F_MINE], U.key);
+        done(rc, "Account created. Their recovery key, shown once:");
         if (rc >= 0) {
             wipe_field(F_ADD_NAME);
             wipe_field(F_ADD_PW);
             U.add_admin = 0;
             U.sel = U.count - 1;
+        } else {
+            wipe_key();
         }
         break;
     }
@@ -320,7 +359,7 @@ static void act(int which) {
 }
 
 int users_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
-    static const int clickable[] = { P_TOGGLE_ADMIN, P_TOGGLE_AUTO, P_CHANGE, P_REMOVE, P_ADD_ADMIN, P_CREATE };
+    static const int clickable[] = { P_TOGGLE_AUTO, P_CHANGE, P_REMOVE, P_NEWKEY, P_CREATE };
     static const struct { int part, field; } fields[] = {
         { P_NEWPW, F_NEWPW }, { P_MINE, F_MINE }, { P_ADD_NAME, F_ADD_NAME }, { P_ADD_PW, F_ADD_PW } };
     ic_rect_t list = list_rect(area);
@@ -334,8 +373,8 @@ int users_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
         if (ev->key == IC_KEY_ESCAPE) { U.editing = 0; return 1; }
         if (ev->key == IC_KEY_ENTER) {
             U.editing = 0;
-            if (U.sel == U.count) act(P_CREATE);
-            else if (U.focus == F_NEWPW) act(P_CHANGE);
+            if (U.sel == U.count) act(P_CREATE, -1);
+            else if (U.focus == F_NEWPW) act(P_CHANGE, -1);
             return 1;
         }
         if (ev->key == IC_KEY_TAB) {
@@ -371,6 +410,7 @@ int users_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
         U.focus = F_ADD_NAME;
         U.editing = 1;
         U.status[0] = 0;
+        wipe_key();
         return 1;
     }
     for (int i = 0; i < U.count; i++) {
@@ -379,6 +419,16 @@ int users_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
             U.editing = 0;
             U.confirm_remove = 0;
             U.status[0] = 0;
+            wipe_key();
+            return 1;
+        }
+    }
+    {
+        int which = U.sel == U.count ? P_ADD_TYPE : P_TYPE;
+        ic_rect_t r = part(area, which);
+        int seg = r.w > 0 ? ic_ui_segmented_hit(r, 2, ev->x, ev->y) : -1;
+        if (seg >= 0) {
+            act(which, seg);
             return 1;
         }
     }
@@ -393,7 +443,7 @@ int users_pane_event(ic_app_t *app, const ic_event_t *ev, ic_rect_t area) {
     for (unsigned i = 0; i < sizeof(clickable) / sizeof(clickable[0]); i++) {
         ic_rect_t r = part(area, clickable[i]);
         if (r.w > 0 && ic_ui_hit(r, ev->x, ev->y)) {
-            act(clickable[i]);
+            act(clickable[i], -1);
             return 1;
         }
     }

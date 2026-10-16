@@ -13,7 +13,11 @@
  * salted, slow hash is what stands between it and someone who copies it. */
 #define ACCT_MAX     16
 #define ACCT_PATH    "/etc/icda/users"
-#define ACCT_ROUNDS  30000          /* PBKDF2 rounds: ~30 ms to check a password */
+/* PBKDF2 rounds: about a fifth of a second to check a password here, and as
+ * slow for anyone trying guesses against a copy of the file.  Older hashes
+ * are made again with this many the next time the password is given. */
+#define ACCT_ROUNDS  200000
+#define KEY_CHARS    20             /* a recovery key: 20 of 32 symbols, 100 bits */
 #define NAME_CAP     32
 #define PASS_CAP     128
 
@@ -28,6 +32,11 @@ typedef struct {
     char        home[64];
     vfs_node_t *home_node;
     vfs_node_t *cfg_node;       /* settings: the owner's /cfg, otherwise <home>/.cfg */
+    /* the recovery key: sets a new password when this one is forgotten */
+    int         has_key;
+    uint32_t    krounds;
+    uint8_t     ksalt[16];
+    uint8_t     khash[32];
 } account_t;
 
 static account_t accts[ACCT_MAX];
@@ -137,6 +146,52 @@ static void set_password(account_t *a, const char *pw) {
     pbkdf2(pw ? pw : "", a->salt, a->rounds, a->hash);
 }
 
+/* A new recovery key into out ("ABCD-EFGH-..."), its hash into the account. */
+static void new_key(account_t *a, char *out) {
+    static const char sym[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   /* no I, O, 0, 1 */
+    char plain[KEY_CHARS + 1];
+    int o = 0;
+    for (int i = 0; i < KEY_CHARS; i += 8) {
+        uint64_t r = rand64();
+        for (int j = 0; j < 8 && i + j < KEY_CHARS; j++) plain[i + j] = sym[(r >> (5 * j)) & 31];
+    }
+    plain[KEY_CHARS] = 0;
+    for (int i = 0; i < KEY_CHARS; i++) {
+        if (i && i % 4 == 0) out[o++] = '-';
+        out[o++] = plain[i];
+    }
+    out[o] = 0;
+    for (int i = 0; i < 16; i += 8) {
+        uint64_t r = rand64();
+        for (int j = 0; j < 8; j++) a->ksalt[i + j] = (uint8_t)(r >> (8 * j));
+    }
+    a->krounds = ACCT_ROUNDS;
+    a->has_key = 1;
+    pbkdf2(plain, a->ksalt, a->krounds, a->khash);
+    for (int i = 0; i < KEY_CHARS; i++) ((volatile char *)plain)[i] = 0;
+}
+
+/* A key as typed: any case, with or without dashes and spaces. */
+static int key_ok(const account_t *a, const char *typed) {
+    char plain[KEY_CHARS + 1];
+    uint8_t h[32], diff = 0;
+    int n = 0;
+    if (!a->has_key) return 0;
+    for (int i = 0; typed[i]; i++) {
+        char c = typed[i];
+        if (c == '-' || c == ' ') continue;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        if (n >= KEY_CHARS) return 0;
+        plain[n++] = c;
+    }
+    if (n != KEY_CHARS) return 0;
+    plain[n] = 0;
+    pbkdf2(plain, a->ksalt, a->krounds, h);
+    for (int i = 0; i < KEY_CHARS; i++) ((volatile char *)plain)[i] = 0;
+    for (int i = 0; i < 32; i++) diff |= (uint8_t)(h[i] ^ a->khash[i]);
+    return diff == 0;
+}
+
 static int password_ok(const account_t *a, const char *pw) {
     uint8_t h[32], diff = 0;
     if (!a->has_password) return !pw || !pw[0];
@@ -191,18 +246,19 @@ static void parse(const char *d, uint64_t size) {
     nacct = 0;
     while (p < size && nacct < ACCT_MAX) {
         account_t *a = &accts[nacct];
-        char field[8][96];
+        char field[12][96];
         int f = 0;
         uint64_t k = 0;
-        for (int i = 0; i < 8; i++) field[i][0] = 0;
+        for (int i = 0; i < 12; i++) field[i][0] = 0;
         while (p < size && d[p] != '\n') {
-            if (d[p] == ':' && f < 7) { field[f][k] = 0; f++; k = 0; }
+            if (d[p] == ':' && f < 11) { field[f][k] = 0; f++; k = 0; }
             else if (k + 1 < sizeof(field[0])) field[f][k++] = d[p];
             p++;
         }
         field[f][k] = 0;
         p++;
-        if (f != 7 || slen(field[5]) != 32 || slen(field[6]) != 64 || !field[0][0]) continue;
+        /* 8 fields; 12 with a recovery key */
+        if ((f != 7 && f != 11) || slen(field[5]) != 32 || slen(field[6]) != 64 || !field[0][0]) continue;
         scopy(a->name, field[0], sizeof(a->name));
         a->uid = 0;
         for (const char *s = field[1]; *s >= '0' && *s <= '9'; s++) a->uid = a->uid * 10 + (uint32_t)(*s - '0');
@@ -213,6 +269,16 @@ static void parse(const char *d, uint64_t size) {
         for (int i = 0; i < 16; i++) a->salt[i] = (uint8_t)(hexval(field[5][2 * i]) << 4 | hexval(field[5][2 * i + 1]));
         for (int i = 0; i < 32; i++) a->hash[i] = (uint8_t)(hexval(field[6][2 * i]) << 4 | hexval(field[6][2 * i + 1]));
         scopy(a->home, field[7], sizeof(a->home));
+        a->has_key = f == 11 && field[8][0] == '1';
+        a->krounds = 0;
+        if (f == 11) {
+            for (const char *s = field[9]; *s >= '0' && *s <= '9'; s++) a->krounds = a->krounds * 10 + (uint32_t)(*s - '0');
+        }
+        if (a->has_key) a->has_key = slen(field[10]) == 32 && slen(field[11]) == 64 && a->krounds;
+        if (a->has_key) {
+            for (int i = 0; i < 16; i++) a->ksalt[i] = (uint8_t)(hexval(field[10][2 * i]) << 4 | hexval(field[10][2 * i + 1]));
+            for (int i = 0; i < 32; i++) a->khash[i] = (uint8_t)(hexval(field[11][2 * i]) << 4 | hexval(field[11][2 * i + 1]));
+        }
         if (a->uid < ACCOUNTS_OWNER_UID || !a->rounds || a->home[0] != '/') continue;
         nacct++;
     }
@@ -253,6 +319,14 @@ static int save(void) {
         put_hex(buf, &o, a->hash, 32);
         buf[o++] = ':';
         put_str(buf, &o, a->home);
+        if (a->has_key) {
+            put_str(buf, &o, ":1:");
+            put_dec(buf, &o, a->krounds);
+            buf[o++] = ':';
+            put_hex(buf, &o, a->ksalt, 16);
+            buf[o++] = ':';
+            put_hex(buf, &o, a->khash, 32);
+        }
         buf[o++] = '\n';
     }
     vfs_kernel_begin();
@@ -404,9 +478,21 @@ static void end_programs_of(uint32_t uid, process_t *except) {
     }
 }
 
-int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+/* the recovery key to the caller (cap ACCT_KEY_CAP) */
+static int give_key(uint64_t uout, const char *key) {
+    return uout && copy_to_user((void *)uout, key, slen(key) + 1) ? -1 : 0;
+}
+
+/* a right password from before ACCT_ROUNDS: hashed again, as strong as new ones */
+static void strengthen(account_t *a, const char *pw) {
+    if (a->rounds >= ACCT_ROUNDS) return;
+    set_password(a, pw);
+    (void)save();
+}
+
+int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
     process_t *p = sched_current_process();
-    char name[NAME_CAP], pw[PASS_CAP], pw2[PASS_CAP];
+    char name[NAME_CAP], pw[PASS_CAP], pw2[PASS_CAP], key[32];
     int64_t rc = -E_INVAL;
     if (!p) return -E_PERM;
     load();
@@ -437,6 +523,7 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
             penalty();
             return -E_ACCES;
         }
+        if (b) strengthen(acct, pw);
         wipe(pw, sizeof(pw));
         if (!acct->home_node) resolve_homes();
         if (!acct->home_node) {
@@ -462,6 +549,7 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
         if (!me) return -E_PERM;
         if (get_str(pw, sizeof(pw), a)) return -E_FAULT;
         rc = password_ok(me, pw) ? 0 : -E_ACCES;
+        if (!rc) strengthen(me, pw);
         wipe(pw, sizeof(pw));
         if (rc) penalty();
         return rc;
@@ -502,6 +590,7 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
             n->flags = (uint32_t)c & ACCT_FLAG_ADMIN;
         }
         set_password(n, pw);
+        new_key(n, key);
         nacct++;
         vfs_kernel_begin();
         (void)vfs_mkdir(vfs_root(), "/users");
@@ -509,6 +598,7 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
         vfs_kernel_end();
         resolve_homes();
         rc = save() == 0 ? (int64_t)uid : -E_INVAL;
+        if (rc >= 0 && give_key(e, key)) rc = -E_FAULT;
         break;
     }
     case ACCT_DELETE: {
@@ -565,6 +655,37 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
         rc = save() == 0 ? 0 : -E_INVAL;
         break;
     }
+    case ACCT_RECOVER: {                   /* name, key, new password, key out */
+        account_t *t;
+        char typed[48];
+        if (get_str(name, sizeof(name), a) || get_str(typed, sizeof(typed), b) || get_str(pw, sizeof(pw), c)) {
+            rc = -E_FAULT;
+            break;
+        }
+        t = find(name);
+        if (!t || !key_ok(t, typed)) { wipe(typed, sizeof(typed)); penalty(); rc = -E_ACCES; break; }
+        wipe(typed, sizeof(typed));
+        set_password(t, pw);
+        new_key(t, key);                        /* a used key is spent */
+        rc = save() == 0 ? 0 : -E_INVAL;
+        if (!rc && give_key(d, key)) rc = -E_FAULT;
+        serial_write("[accounts] password set with a recovery key: ");
+        serial_write(t->name);
+        serial_write("\n");
+        break;
+    }
+    case ACCT_NEW_KEY: {                   /* name, caller's password, key out */
+        account_t *t, *me = caller();
+        if (get_str(name, sizeof(name), a) || get_str(pw2, sizeof(pw2), b)) { rc = -E_FAULT; break; }
+        t = find(name);
+        if (!t) { rc = -E_NOENT; break; }
+        if (!me || (t != me && !(me->flags & ACCT_FLAG_ADMIN))) { rc = -E_PERM; break; }
+        if (!caller_proven(pw2)) { rc = -E_ACCES; break; }
+        new_key(t, key);
+        rc = save() == 0 ? 0 : -E_INVAL;
+        if (!rc && give_key(c, key)) rc = -E_FAULT;
+        break;
+    }
     case ACCT_LOGOUT:
         if (!p->ex_uid) return -E_PERM;
         end_programs_of(p->ex_uid, p);
@@ -574,5 +695,6 @@ int64_t accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64
     }
     wipe(pw, sizeof(pw));
     wipe(pw2, sizeof(pw2));
+    wipe(key, sizeof(key));
     return rc;
 }

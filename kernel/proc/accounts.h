@@ -19,18 +19,22 @@ enum {
     ACCT_WHOAMI,        /* buf, cap -> "name uid flags\n", or "" when nobody is signed in */
     ACCT_LOGIN,         /* name, password (0: automatic sign-in) -> 0; only before anyone signed in */
     ACCT_VERIFY,        /* password -> 0 when it is the caller's (the lock screen) */
-    ACCT_CREATE,        /* name, password, flags, caller's password -> uid */
+    ACCT_CREATE,        /* name, password, flags, caller's password, key out -> uid */
     ACCT_DELETE,        /* name, caller's password, remove files -> 0 */
     ACCT_PASSWORD,      /* name, caller's password, new password -> 0 */
     ACCT_SET,           /* name, caller's password, flags -> 0 */
-    ACCT_LOGOUT         /* ends the caller's other programs -> 0 */
+    ACCT_LOGOUT,        /* ends the caller's other programs -> 0 */
+    ACCT_RECOVER,       /* name, recovery key, new password, key out -> 0 (a new key replaces the used one) */
+    ACCT_NEW_KEY        /* name, caller's password, key out -> 0 */
 };
+
+#define ACCT_KEY_CAP 32     /* "XXXX-XXXX-XXXX-XXXX-XXXX" and its end */
 
 #define ACCT_FLAG_ADMIN     1
 #define ACCT_FLAG_AUTOLOGIN 2
 
 void     accounts_init(void);          /* after the file system is up: hooks the VFS */
-int64_t  accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d);
+int64_t  accounts_syscall(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e);
 int      accounts_caller_is_admin(void);   /* the system, or a signed-in administrator */
 const char *accounts_passwd_text(void);    /* /etc/passwd for Linux programs */
 

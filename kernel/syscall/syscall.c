@@ -1770,7 +1770,7 @@ static int admin_only(uint64_t nr) {
 static uint64_t syscall_dispatch_native(struct registers *regs) {
     uint64_t rc;
     if (regs->rax == SYS_ACCOUNT) {
-        return (uint64_t)accounts_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8);
+        return (uint64_t)accounts_syscall(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
     }
     if (!admin_only(regs->rax)) return syscall_dispatch_calls(regs);
     if (!accounts_caller_is_admin()) return (uint64_t)-1;

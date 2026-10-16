@@ -1,4 +1,4 @@
-/* Sign-in, first account and lock screen (see wm_login.h). */
+/* Sign-in, first account, recovery and lock screens (see wm_login.h). */
 #include "wm_login.h"
 #include "ic_ui.h"
 #include "ic_time.h"
@@ -12,10 +12,14 @@ typedef struct {
     int  admin, automatic, password;
 } user_t;
 
-static int mode;
+/* what the card shows */
+enum { V_SETUP, V_SIGNIN, V_LOCK, V_RECOVER, V_KEY };
+
+static int mode, view;
 static user_t users[MAX_USERS];
 static int nusers, sel;
-/* SETUP: name, password, confirm; SIGNIN and LOCK: field 1 is the password */
+/* SETUP: name, password, again; RECOVER: key, password, again;
+ * SIGNIN and LOCK: field 1 is the password */
 static char field[3][FIELD_CAP];
 static int flen[3], focus;
 static char error[96];
@@ -23,14 +27,28 @@ static int caret_on = 1, hover = -1;
 static uint64_t caret_ms;
 static int clock_minute = -1;
 static int esc_state;           /* ESC [ A: the arrow keys */
+/* the recovery key on show, and who signs in once it has been read */
+static char key_shown[ICDA_ACCT_KEY_CAP];
+static char pend_name[32], pend_pw[FIELD_CAP];
 
 enum { HIT_NONE = -1, HIT_FIELD0 = 0, HIT_FIELD1, HIT_FIELD2, HIT_PRIMARY = 10, HIT_SECONDARY, HIT_USER0 = 20 };
 
+static void zero(char *s, int n) {
+    for (int i = 0; i < n; i++) ((volatile char *)s)[i] = 0;
+}
+
 static void wipe(void) {
     for (int f = 0; f < 3; f++) {
-        for (int i = 0; i < FIELD_CAP; i++) ((volatile char *)field[f])[i] = 0;
+        zero(field[f], FIELD_CAP);
         flen[f] = 0;
     }
+}
+
+static void wipe_all(void) {
+    wipe();
+    zero(key_shown, sizeof(key_shown));
+    zero(pend_pw, sizeof(pend_pw));
+    pend_name[0] = 0;
 }
 
 static void load_users(void) {
@@ -61,32 +79,40 @@ static void load_users(void) {
 static void load_me(void) {
     char buf[96];
     long n = icda_account_whoami(buf, sizeof(buf));
+    int k = 0;
     nusers = 0;
     if (n <= 0) return;
-    for (int i = 0, k = 0; i < n && buf[i] != ' ' && k < 31; i++) users[0].name[k++] = buf[i], users[0].name[k] = 0;
+    for (int i = 0; i < n && buf[i] != ' ' && k < 31; i++) users[0].name[k++] = buf[i];
+    users[0].name[k] = 0;
     users[0].password = 0;
     for (int i = 0; i < n; i++) if (buf[i] == 'p') users[0].password = 1;
     nusers = 1;
     sel = 0;
 }
 
-int wm_login_begin(int want) {
+static void go(int v) {
+    view = v;
     wipe();
     error[0] = 0;
-    sel = 0;
-    focus = 1;
     hover = -1;
+    focus = v == V_SIGNIN || v == V_LOCK ? 1 : 0;
+}
+
+int wm_login_begin(int want) {
+    wipe_all();
+    sel = 0;
     esc_state = 0;
     caret_ms = ic_time_ms();
     if (want == WM_LOGIN_LOCK) {
         load_me();
         mode = WM_LOGIN_LOCK;
+        go(V_LOCK);
         return mode;
     }
     load_users();
     if (!nusers) {
         mode = WM_LOGIN_SETUP;
-        focus = 0;
+        go(V_SETUP);
         return mode;
     }
     for (int i = 0; i < nusers; i++) {                      /* the one that signs in by itself */
@@ -96,11 +122,12 @@ int wm_login_begin(int want) {
         }
     }
     mode = WM_LOGIN_SIGNIN;
+    go(V_SIGNIN);
     return mode;
 }
 
 void wm_login_end(void) {
-    wipe();
+    wipe_all();
 }
 
 /* ---- layout ------------------------------------------------------------------- */
@@ -110,20 +137,29 @@ static int user_has_password(void) {
 }
 
 static int nfields(void) {
-    if (mode == WM_LOGIN_SETUP) return 3;
+    if (view == V_SETUP || view == V_RECOVER) return 3;
+    if (view == V_KEY) return 0;
     return user_has_password() ? 1 : 0;
 }
 
-static int first_field(void) { return mode == WM_LOGIN_SETUP ? 0 : 1; }
+static int first_field(void) { return view == V_SETUP || view == V_RECOVER ? 0 : 1; }
+
+static int has_secondary(void) {
+    return view == V_LOCK || view == V_RECOVER || (view == V_SIGNIN && user_has_password());
+}
+
+/* the card's parts from the top: a heading block, fields, the buttons, a message line */
+static int heading_h(void) {
+    switch (view) {
+    case V_SETUP:   return 34 + 40;
+    case V_RECOVER: return 34 + 40;
+    case V_KEY:     return 34 + 44 + 52 + 40;
+    default:        return (view == V_SIGNIN && nusers > 1 ? 92 : 0) + 72 + 30;
+    }
+}
 
 static int card_h(void) {
-    int h = 28;
-    if (mode == WM_LOGIN_SETUP) h += 34 + 40 + 3 * 46 + 8;
-    else h += (mode == WM_LOGIN_SIGNIN && nusers > 1 ? 92 : 0) + 72 + 30 + (user_has_password() ? 46 : 0);
-    h += 40;                                   /* the main button */
-    if (mode == WM_LOGIN_LOCK) h += 40;        /* sign out */
-    h += 30;                                   /* the message line */
-    return h;
+    return 24 + heading_h() + nfields() * 46 + (nfields() == 3 ? 8 : 0) + 40 + (has_secondary() ? 40 : 0) + 30;
 }
 
 static ic_rect_t card_rect(int sw, int sh) {
@@ -137,27 +173,19 @@ static ic_rect_t card_rect(int sw, int sh) {
 static ic_rect_t part_rect(int sw, int sh, int id) {
     ic_rect_t c = card_rect(sw, sh);
     int x = c.x + 24, w = c.w - 48, y = c.y + 24;
-    if (mode == WM_LOGIN_SETUP) {
-        y += 34 + 40;
-        for (int f = 0; f < 3; f++, y += 46) if (id == HIT_FIELD0 + f) return ic_rect_make(x, y, w, 36);
-        y += 8;
-    } else {
-        if (mode == WM_LOGIN_SIGNIN && nusers > 1) {
-            int shown = nusers < 5 ? nusers : 5, gap = 12, aw = 52;
-            int total = shown * aw + (shown - 1) * gap, ax = c.x + (c.w - total) / 2;
-            for (int i = 0; i < shown; i++)
-                if (id == HIT_USER0 + i) return ic_rect_make(ax + i * (aw + gap), y, aw, 76);
-            y += 92;
-        }
-        y += 72 + 30;                          /* the large initial and the name */
-        if (user_has_password()) {
-            if (id == HIT_FIELD1) return ic_rect_make(x, y, w, 36);
-            y += 46;
-        }
+    if (view == V_SIGNIN && nusers > 1) {
+        int shown = nusers < 5 ? nusers : 5, gap = 12, aw = 52;
+        int total = shown * aw + (shown - 1) * gap, ax = c.x + (c.w - total) / 2;
+        for (int i = 0; i < shown; i++)
+            if (id == HIT_USER0 + i) return ic_rect_make(ax + i * (aw + gap), y, aw, 76);
     }
+    y += heading_h();
+    for (int f = first_field(); f < first_field() + nfields(); f++, y += 46)
+        if (id == HIT_FIELD0 + f) return ic_rect_make(x, y, w, 36);
+    if (nfields() == 3) y += 8;
     if (id == HIT_PRIMARY) return ic_rect_make(x, y, w, 34);
     y += 40;
-    if (mode == WM_LOGIN_LOCK && id == HIT_SECONDARY) return ic_rect_make(x, y, w, 34);
+    if (has_secondary() && id == HIT_SECONDARY) return ic_rect_make(x, y, w, 34);
     return ic_rect_make(0, 0, -1, 0);
 }
 
@@ -204,12 +232,19 @@ static ic_state_t state_of(int id) {
     return ic_ui_state(1, hover == id, 0);
 }
 
+static void heading(ic_canvas_t *c, ic_rect_t card, int y, const char *title, const char *text) {
+    const ic_palette_t *p = ic_palette();
+    ic_text_draw_in(c, ic_font(IC_FONT_TITLE2), ic_rect_make(card.x, y, card.w, 30), title, p->label, IC_ALIGN_CENTER);
+    ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(card.x + 24, y + 34, card.w - 48, 36), text,
+                         p->label_secondary, 2);
+}
+
 void wm_login_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratch_len) {
     const ic_palette_t *p = ic_palette();
     ic_rect_t card = card_rect(sw, sh), r;
     ic_datetime_t t;
-    const ic_face_t *body = ic_font(IC_FONT_BODY);
-    int y;
+    int y = card.y + 24;
+    const char *primary = "Sign in", *secondary = 0;
 
     /* the time, large, over the wallpaper */
     if (ic_wallclock(&t) == 0) {
@@ -223,20 +258,35 @@ void wm_login_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratc
     }
 
     ic_ui_panel(c, card, 16.0f, IC_ELEV_WINDOW, scratch, scratch_len);
-    y = card.y + 24;
-    if (mode == WM_LOGIN_SETUP) {
-        ic_text_draw_in(c, ic_font(IC_FONT_TITLE2), ic_rect_make(card.x, y, card.w, 30), "Welcome to ICDA",
-                        p->label, IC_ALIGN_CENTER);
-        ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(card.x + 24, y + 34, card.w - 48, 36),
-                             "Make the first account. It looks after this computer and keeps the files already here.",
-                             p->label_secondary, 2);
+    switch (view) {
+    case V_SETUP:
+        heading(c, card, y, "Welcome to ICDA",
+                "Make the first account. It is an administrator and keeps the files already here.");
         draw_field(c, part_rect(sw, sh, HIT_FIELD0), 0, "Name (lowercase)", 0);
         draw_field(c, part_rect(sw, sh, HIT_FIELD1), 1, "Password (optional)", 1);
         draw_field(c, part_rect(sw, sh, HIT_FIELD2), 2, "Password again", 1);
-        ic_ui_button(c, part_rect(sw, sh, HIT_PRIMARY), "Create account", IC_SYM_NONE, IC_BUTTON_PRIMARY,
-                     state_of(HIT_PRIMARY));
-    } else {
-        if (mode == WM_LOGIN_SIGNIN && nusers > 1) {
+        primary = "Create account";
+        break;
+    case V_RECOVER:
+        heading(c, card, y, "New password", "Type the recovery key you wrote down, then a new password.");
+        draw_field(c, part_rect(sw, sh, HIT_FIELD0), 0, "Recovery key", 0);
+        draw_field(c, part_rect(sw, sh, HIT_FIELD1), 1, "New password", 1);
+        draw_field(c, part_rect(sw, sh, HIT_FIELD2), 2, "New password again", 1);
+        primary = "Set password";
+        secondary = "Back";
+        break;
+    case V_KEY:
+        heading(c, card, y, "Your recovery key",
+                "Write it down and keep it safe. With it you can set a new password if you forget this one.");
+        r = ic_rect_make(card.x + 24, y + 78, card.w - 48, 44);
+        ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 8.0f, p->field);
+        ic_text_draw_in(c, ic_font(IC_FONT_MONO), r, key_shown, p->label, IC_ALIGN_CENTER);
+        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(card.x + 24, y + 130, card.w - 48, 16),
+                        "It is shown only now.", p->label_tertiary, IC_ALIGN_CENTER);
+        primary = "I have written it down";
+        break;
+    default:
+        if (view == V_SIGNIN && nusers > 1) {
             int shown = nusers < 5 ? nusers : 5;
             for (int i = 0; i < shown; i++) {
                 r = part_rect(sw, sh, HIT_USER0 + i);
@@ -253,15 +303,21 @@ void wm_login_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratc
                             p->label, IC_ALIGN_CENTER);
         }
         if (user_has_password()) draw_field(c, part_rect(sw, sh, HIT_FIELD1), 1, "Password", 1);
-        ic_ui_button(c, part_rect(sw, sh, HIT_PRIMARY), mode == WM_LOGIN_LOCK ? "Unlock" : "Sign in",
-                     IC_SYM_NONE, IC_BUTTON_PRIMARY, state_of(HIT_PRIMARY));
-        if (mode == WM_LOGIN_LOCK)
-            ic_ui_button(c, part_rect(sw, sh, HIT_SECONDARY), "Sign out", IC_SYM_POWER, IC_BUTTON_PLAIN,
-                         state_of(HIT_SECONDARY));
+        if (view == V_LOCK) {
+            primary = "Unlock";
+            secondary = "Sign out";
+        } else if (user_has_password()) {
+            secondary = "Forgot password?";
+        }
+        break;
     }
+    ic_ui_button(c, part_rect(sw, sh, HIT_PRIMARY), primary, IC_SYM_NONE, IC_BUTTON_PRIMARY, state_of(HIT_PRIMARY));
+    if (secondary && has_secondary())
+        ic_ui_button(c, part_rect(sw, sh, HIT_SECONDARY), secondary, view == V_LOCK ? IC_SYM_SIGN_OUT : IC_SYM_NONE,
+                     IC_BUTTON_PLAIN, state_of(HIT_SECONDARY));
     if (error[0]) {
-        ic_text_draw_in(c, body, ic_rect_make(card.x + 16, card.y + card.h - 30, card.w - 32, 20), error,
-                        p->danger, IC_ALIGN_CENTER);
+        ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(card.x + 16, card.y + card.h - 30, card.w - 32, 20),
+                        error, p->danger, IC_ALIGN_CENTER);
     }
 }
 
@@ -269,46 +325,85 @@ void wm_login_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratc
 
 static void set_error(const char *s) { error[0] = 0; ic_strlcat(error, s, sizeof(error)); }
 
+static int same_passwords(void) {
+    if (flen[1] == flen[2] && ic_strcmp(field[1], field[2]) == 0) return 1;
+    set_error("The passwords are not the same");
+    focus = 2;
+    return 0;
+}
+
+/* show the key, then sign in as pend_name once it has been read */
+static int show_key(const char *name, const char *pw) {
+    ic_strcpy(pend_name, name, sizeof(pend_name));
+    ic_strcpy(pend_pw, pw, sizeof(pend_pw));
+    go(V_KEY);
+    return WM_LOGIN_REDRAW;
+}
+
 static int submit(void) {
     long rc;
-    if (mode == WM_LOGIN_SETUP) {
+    char key[ICDA_ACCT_KEY_CAP];
+    switch (view) {
+    case V_SETUP:
         if (!flen[0]) { set_error("Choose a name"); focus = 0; return WM_LOGIN_REDRAW; }
-        if (flen[1] != flen[2] || ic_strcmp(field[1], field[2]) != 0) {
-            set_error("The passwords are not the same");
-            focus = 2;
-            return WM_LOGIN_REDRAW;
-        }
-        rc = icda_account_create(field[0], field[1], 0, 0);
+        if (!same_passwords()) return WM_LOGIN_REDRAW;
+        rc = icda_account_create(field[0], field[1], 0, 0, key_shown);
         if (rc < 0) {
             set_error(rc == -17 ? "That name is taken" : rc == -22 ? "Use letters, digits, - and _" : "Could not make the account");
             return WM_LOGIN_REDRAW;
         }
-        if (icda_account_login(field[0], field[1]) != 0) {
+        return show_key(field[0], field[1]);
+    case V_RECOVER:
+        if (!flen[0]) { set_error("Type the recovery key"); focus = 0; return WM_LOGIN_REDRAW; }
+        if (!same_passwords()) return WM_LOGIN_REDRAW;
+        rc = icda_account_recover(users[sel].name, field[0], field[1], key);
+        if (rc < 0) {
+            set_error("That recovery key is not right");
+            zero(field[0], FIELD_CAP);
+            flen[0] = 0;
+            focus = 0;
+            return WM_LOGIN_REDRAW;
+        }
+        ic_strcpy(key_shown, key, sizeof(key_shown));
+        zero(key, sizeof(key));
+        return show_key(users[sel].name, field[1]);
+    case V_KEY:
+        if (icda_account_login(pend_name, pend_pw) != 0) {
+            go(V_SIGNIN);
             set_error("Could not sign in");
             return WM_LOGIN_REDRAW;
         }
-        wipe();
+        wipe_all();
         return WM_LOGIN_DONE;
+    default:
+        break;
     }
     if (nusers <= 0) return WM_LOGIN_KEEP;
     set_error("");
-    rc = mode == WM_LOGIN_LOCK ? icda_account_verify(field[1]) : icda_account_login(users[sel].name, field[1]);
+    rc = view == V_LOCK ? icda_account_verify(field[1]) : icda_account_login(users[sel].name, field[1]);
     if (rc == 0) {
-        wipe();
+        wipe_all();
         return WM_LOGIN_DONE;
     }
     set_error("That password is not right");
-    for (int i = 0; i < FIELD_CAP; i++) ((volatile char *)field[1])[i] = 0;
+    zero(field[1], FIELD_CAP);
     flen[1] = 0;
     focus = 1;
     return WM_LOGIN_REDRAW;
 }
 
+static int secondary(void) {
+    if (view == V_LOCK) return WM_LOGIN_SIGN_OUT;
+    if (view == V_SIGNIN && user_has_password()) { go(V_RECOVER); return WM_LOGIN_REDRAW; }
+    if (view == V_RECOVER) { go(V_SIGNIN); return WM_LOGIN_REDRAW; }
+    return WM_LOGIN_KEEP;
+}
+
 static void select_user(int i) {
-    if (i < 0 || i >= nusers || i >= 5 || i == sel) return;
+    if (view != V_SIGNIN || i < 0 || i >= nusers || i >= 5 || i == sel) return;
     sel = i;
     error[0] = 0;
-    for (int k = 0; k < FIELD_CAP; k++) ((volatile char *)field[1])[k] = 0;
+    zero(field[1], FIELD_CAP);
     flen[1] = 0;
 }
 
@@ -319,21 +414,22 @@ int wm_login_key(long key) {
     if (esc_state == 1) { esc_state = key == '[' ? 2 : 0; if (esc_state) return WM_LOGIN_KEEP; }
     else if (esc_state == 2) {
         esc_state = 0;
-        if (mode == WM_LOGIN_SIGNIN && (key == 'C' || key == 'B')) { select_user(sel + 1); return WM_LOGIN_REDRAW; }
-        if (mode == WM_LOGIN_SIGNIN && (key == 'D' || key == 'A')) { select_user(sel - 1); return WM_LOGIN_REDRAW; }
+        if (key == 'C' || key == 'B') { select_user(sel + 1); return WM_LOGIN_REDRAW; }
+        if (key == 'D' || key == 'A') { select_user(sel - 1); return WM_LOGIN_REDRAW; }
         return WM_LOGIN_KEEP;
     }
     if (key == 27) {
         esc_state = 1;
         if (f >= 0 && f < 3 && flen[f]) {
-            for (int i = 0; i < FIELD_CAP; i++) ((volatile char *)field[f])[i] = 0;
+            zero(field[f], FIELD_CAP);
             flen[f] = 0;
             return WM_LOGIN_REDRAW;
         }
+        if (view == V_RECOVER) { go(V_SIGNIN); return WM_LOGIN_REDRAW; }
         return WM_LOGIN_KEEP;
     }
     if (key == '\n' || key == '\r') {
-        if (mode == WM_LOGIN_SETUP && focus < 2) { focus++; return WM_LOGIN_REDRAW; }
+        if (nfields() == 3 && focus < 2) { focus++; return WM_LOGIN_REDRAW; }
         return submit();
     }
     if (key == '\t') {
@@ -346,7 +442,7 @@ int wm_login_key(long key) {
         return WM_LOGIN_REDRAW;
     }
     if (key < 32 || key > 126 || flen[f] >= FIELD_CAP - 1) return WM_LOGIN_KEEP;
-    if (mode == WM_LOGIN_SETUP && f == 0) {                     /* names: a-z 0-9 - _ */
+    if (view == V_SETUP && f == 0) {                            /* names: a-z 0-9 - _ */
         if (key >= 'A' && key <= 'Z') key += 32;
         if (!((key >= 'a' && key <= 'z') || (key >= '0' && key <= '9') || key == '-' || key == '_') || flen[0] >= 30)
             return WM_LOGIN_KEEP;
@@ -360,7 +456,7 @@ int wm_login_click(int sw, int sh, int x, int y) {
     int h = hit(sw, sh, x, y);
     if (h >= HIT_FIELD0 && h <= HIT_FIELD2) { focus = h; return WM_LOGIN_REDRAW; }
     if (h == HIT_PRIMARY) return submit();
-    if (h == HIT_SECONDARY) return WM_LOGIN_SIGN_OUT;
+    if (h == HIT_SECONDARY) return secondary();
     if (h >= HIT_USER0) { select_user(h - HIT_USER0); return WM_LOGIN_REDRAW; }
     return WM_LOGIN_KEEP;
 }
