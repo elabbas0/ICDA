@@ -43,11 +43,13 @@ static struct {
     char     a[A_MAX];
     char     provider[48];
     uint32_t seq;
-    uint64_t t0;              /* ms, animation clock */
+    uint64_t t0;              /* ms, when the wave last moved */
     uint64_t t_open;          /* ms, when it opened (the card's fade starts here) */
     uint64_t last_frame;      /* ms, the last frame the wave was drawn on */
     float    energy;          /* eased wave amplitude 0..1 */
     float    speed;
+    float    phase;           /* wave position: speed added up over time, so a change
+                                * of speed changes how fast it moves, never where it is */
     int      level;           /* the voice while listening, 0..99 */
     int      shown;           /* drawn: still true while it fades out */
     int      closing;         /* fading out, ignore input */
@@ -99,6 +101,7 @@ void wm_ai_open(void) {
     A.last_frame = 0;
     A.energy = 0.0f;
     A.speed = 0.0f;
+    A.phase = 0.0f;
     A.shown = 1;
     A.closing = 0;
     A.card_dirty = 1;
@@ -288,10 +291,12 @@ int wm_ai_tick(void) {
     want = A.state == ST_INPUT ? 0.45f : A.state == ST_LISTEN ? 0.2f + (float)A.level / 99.0f * 0.8f :
            A.state == ST_LOADING ? 0.5f :
            A.state == ST_THINKING ? 0.8f : A.state == ST_ANSWER ? 1.0f : 0.3f;
-    want_speed = A.state == ST_THINKING ? 2.6f : A.state == ST_ANSWER ? 1.8f :
-                 A.state == ST_LOADING ? 1.5f : 1.0f;
+    want_speed = A.state == ST_THINKING ? 1.1f : A.state == ST_ANSWER ? 0.9f :
+                 A.state == ST_LOADING ? 0.5f : 0.6f;
     A.energy += (want - A.energy) * 0.08f;
     A.speed += (want_speed - A.speed) * 0.05f;
+    if (t > A.t0) A.phase += (float)(t - A.t0) / 1000.0f * A.speed;
+    A.t0 = t;
     /* the whole overlay is one alpha: while it moves, all of it is repainted,
      * but never faster than 60 frames a second either */
     if (A.card_dirty || ic_tween_running(&A.fade)) {
@@ -332,7 +337,7 @@ static void draw_wave(ic_canvas_t *c, int sw, int sh) {
     int s = c->scale > 0 ? c->scale : 1;
     int by0 = (sh - WM_BAR_H - WAVE_H) * s, by1 = (sh - WM_BAR_H) * s, w = sw * s;
     int bx0, by0c, bx1, by1c, x0, x1, y0, y1;
-    float t = (float)(now_ms() - A.t0) / 1000.0f * A.speed;
+    float t = A.phase;
     float mid = (float)(by0 + by1) * 0.5f, half = (float)(by1 - by0) * 0.5f;
     float curve[4];
     /* what the caller lets us touch, never past the canvas itself */

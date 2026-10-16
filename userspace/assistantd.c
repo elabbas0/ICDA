@@ -41,6 +41,10 @@ typedef struct {
 static provider_t prov[MAX_PROV];
 static int nprov;
 static int speak = 1;                /* read answers aloud (ai.conf: speak on / off) */
+static int threads_conf;              /* ai.conf: threads N - the local model's threads, 0: one per core */
+/* ai.conf: "search brave <key>" - Brave's search API (free keys at
+ * api-dashboard.search.brave.com): full web results, news included */
+static char search_key[160];
 
 static struct { char q[Q_MAX], a[A_MAX]; } hist[HIST];
 static int nhist;
@@ -61,6 +65,9 @@ static const char conf_default[] =
     "local qwen       file:auto   qwen2.5-0.5b-instruct-q4_k_m.gguf   -\n"
     "# answers read aloud (offline voice): speak on / speak off\n"
     "speak on\n"
+    "# web search: DuckDuckGo, then Wikipedia.  For full results (news too) add a\n"
+    "# free Brave Search API key from api-dashboard.search.brave.com:\n"
+    "#search brave YOUR_KEY\n"
     "# Free keys:  console.groq.com   aistudio.google.com   openrouter.ai\n"
     "#cloud groq       https://api.groq.com/openai/v1                           llama-3.3-70b-versatile               YOUR_KEY\n"
     "#cloud gemini     https://generativelanguage.googleapis.com/v1beta/openai  gemini-2.5-flash                      YOUR_KEY\n"
@@ -94,11 +101,19 @@ static void load_conf(void) {
     text[n] = 0;
     nprov = 0;
     speak = 1;
+    threads_conf = 0;
+    search_key[0] = 0;
     for (p = text; *p && nprov < MAX_PROV; ) {
         char tier[16];
         provider_t *v = &prov[nprov];
         if (!strncmp(p, "speak ", 6)) {              /* "speak on" / "speak off": answers read aloud */
             speak = strncmp(p + 6, "off", 3) != 0;
+        } else if (!strncmp(p, "threads ", 8)) {
+            threads_conf = atoi(p + 8);
+        } else if (!strncmp(p, "search brave ", 13)) {
+            const char *k = p + 13;
+            word(&k, search_key, sizeof(search_key));
+            if (strstr(search_key, "YOUR_KEY")) search_key[0] = 0;
         } else if (*p != '#' && word(&p, tier, sizeof(tier)) && word(&p, v->name, sizeof(v->name)) &&
             word(&p, v->url, sizeof(v->url)) && word(&p, v->model, sizeof(v->model)) && word(&p, v->key, sizeof(v->key))) {
             v->cloud = strcmp(tier, "cloud") == 0;
@@ -117,9 +132,22 @@ static void load_conf(void) {
 
 /* ---- the reply file ------------------------------------------------------- */
 
+/* the answer as it is shown: a tool call being written is the assistant's
+ * business, not the person's */
+static const char *shown(void) {
+    static char s[A_MAX];
+    const char *p = answer;
+    char *t;
+    while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+    if ((*p == '{' || !strncmp(p, "```", 3) || *p == '<') && (strstr(p, "\"name\"") || strlen(p) < 12)) return "";
+    snprintf(s, sizeof(s), "%s", answer);
+    if ((t = strstr(s, "<tool_call>")) != 0) *t = 0;
+    return s;
+}
+
 static void reply(const char *state) {
     static char out[A_MAX + 256];
-    int n = snprintf(out, sizeof(out), "%u %s %s\n%s", cur_seq, state, cur_name, answer);
+    int n = snprintf(out, sizeof(out), "%u %s %s\n%s", cur_seq, state, cur_name, shown());
     if (n > (int)sizeof(out) - 1) n = (int)sizeof(out) - 1;
     (void)icda_write_file(REPLY_PATH, out, (uint64_t)n);
 }
@@ -225,17 +253,70 @@ static void today(char *out, size_t cap) {
     if (t) fmt_local(t, out, cap);
 }
 
+/* ---- what every model is told ------------------------------------------------- */
+
+/* What ICDA is and how to work in it: a system file, so updates can teach the
+ * assistant more without a new program. */
+#define GUIDE_PATH "/usr/share/icda/assistant/guide.txt"
+
+static const char tools_text[] =
+    "\n\nTools. To use one, reply with only the call, nothing before or after it:\n"
+    "<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/home/notes.txt\"}}\n</tool_call>\n"
+    "Its result comes back inside <tool_response>. Then use another tool or give your answer.\n"
+    "- list_folder {\"path\"}: the files and folders in a folder (folders end with /)\n"
+    "- read_file {\"path\"}: the text of a file\n"
+    "- write_file {\"path\", \"text\"}: create a file, or replace all its text\n"
+    "- append_file {\"path\", \"text\"}: add text to the end of a file\n"
+    "- make_folder {\"path\"}: create a folder\n"
+    "- move {\"from\", \"to\"}: move or rename a file or folder\n"
+    "- web_search {\"query\"}: the top results from the web\n"
+    "- read_webpage {\"url\"}: the text of a web page\n"
+    "- open_app {\"app\", \"target\"}: open Explorer, Terminal, Surfer, Editor, Media, Disk Utility, "
+    "Activity or Settings; target (optional) is a web address for Surfer or a file for Editor\n"
+    "- remind {\"minutes\", \"text\"}: a reminder after that many minutes\n"
+    "- system_info {}: ICDA's version, memory, processors and how long it has been running\n"
+    "Files can be written in /home, /tmp and /volumes. Nothing can be deleted.";
+
+static char sys_prompt[12000];
+
+/* The instructions stay the same from one question to the next - the date
+ * goes with the question instead - so the local model reads them only once. */
+static void build_system(const provider_t *v) {
+    static char guide[8192];
+    long n = (long)icda_read_file(GUIDE_PATH, guide, sizeof(guide) - 1);
+    if (n <= 0) {
+        n = snprintf(guide, sizeof(guide), "You are the assistant built into ICDA (\"I Can Do Anything\"), "
+                     "its own operating system. Answer plainly and briefly. Use your tools to act on the computer.");
+    }
+    guide[n] = 0;
+    snprintf(sys_prompt, sizeof(sys_prompt), "%s%s%s", guide, tools_text,
+             /* Qwen3 reasons at length first: on a laptop that is minutes */
+             strstr(v->model, "Qwen3") || strstr(v->model, "qwen3") ? "\n/no_think" : "");
+}
+
+/* The question as the model gets it: with the time, which changes */
+static void dated(const char *q, char *out, size_t cap) {
+    char when[96];
+    today(when, sizeof(when));
+    snprintf(out, cap, "%s\n\n(Now: %s)", q, when[0] ? when : "unknown");
+}
+
+/* The steps of the current request: what the model said (a tool call) and
+ * what the tool gave back, in turns after the question. */
+#define STEPS     12
+#define STEP_TEXT 8400
+static char step_role[STEPS][12];
+static char step_text[STEPS][STEP_TEXT];
+static int nsteps;
+
 static size_t build_body(const provider_t *v, const char *q, char *body, size_t cap) {
     size_t n = 0;
-    char sys[512], when[96];
-    today(when, sizeof(when));
-    snprintf(sys, sizeof(sys),
-             "You are the assistant built into ICDA, a small operating system. Answer plainly and briefly "
-             "unless asked for detail; no markdown tables. Current date and time: %s.", when);
+    static char asked[Q_MAX + 4200];
+    dated(q, asked, sizeof(asked));
     put(body, cap, &n, "{\"model\":");
     json_str(body, cap, &n, v->model);
     put(body, cap, &n, ",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":");
-    json_str(body, cap, &n, sys);
+    json_str(body, cap, &n, sys_prompt);
     put(body, cap, &n, "}");
     for (int i = 0; i < nhist; i++) {
         put(body, cap, &n, ",{\"role\":\"user\",\"content\":");
@@ -245,14 +326,22 @@ static size_t build_body(const provider_t *v, const char *q, char *body, size_t 
         put(body, cap, &n, "}");
     }
     put(body, cap, &n, ",{\"role\":\"user\",\"content\":");
-    json_str(body, cap, &n, q);
-    put(body, cap, &n, "}]}");
+    json_str(body, cap, &n, asked);
+    put(body, cap, &n, "}");
+    for (int i = 0; i < nsteps; i++) {
+        put(body, cap, &n, ",{\"role\":");
+        json_str(body, cap, &n, step_role[i]);
+        put(body, cap, &n, ",\"content\":");
+        json_str(body, cap, &n, step_text[i]);
+        put(body, cap, &n, "}");
+    }
+    put(body, cap, &n, "]}");
     return n;
 }
 
 /* 0 answered; -1 this provider failed (the next one is tried); err says why */
 static int ask(const provider_t *v, const char *q, char *err, size_t errcap) {
-    static char body[24000], line[16384];
+    static char body[200000], line[16384];
     char url[200], headers[300];
     size_t blen = build_body(v, q, body, sizeof(body)), llen = 0, alen = 0;
     http_req_t *r;
@@ -538,8 +627,9 @@ static void strip_tags(const char *s, size_t n, char *out, size_t cap) {
     out[k] = 0;
 }
 
-/* the top results for query from DuckDuckGo's plain HTML page, as numbered lines */
-static int web_search(const char *query, char *out, size_t cap) {
+/* the top results for query from DuckDuckGo's plain HTML page, as numbered lines
+ * (it answers some requests with a check for robots instead: 0 then) */
+static int ddg_search(const char *query, char *out, size_t cap) {
     char url[700], final[700];
     size_t k = 0, u = 0;
     int found = 0;
@@ -599,6 +689,138 @@ static int web_search(const char *query, char *out, size_t cap) {
     }
     free(page);
     return found;
+}
+
+static void url_encode(const char *s, char *out, size_t cap) {
+    size_t u = 0;
+    for (; *s && u + 4 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_') out[u++] = (char)c;
+        else u += (size_t)snprintf(out + u, cap - u, "%%%02X", c);
+    }
+    out[u] = 0;
+}
+
+/* the body of a GET (following redirects), 0 unless it answered 200 */
+static char *fetch(const char *url, const char *headers, size_t *len) {
+    http_req_t *r = http_open_follow(url, headers);
+    char *body = 0;
+    size_t n = 0, cap = 0;
+    uint64_t t0 = icda_ticks();
+    int st = HTTP_PENDING;
+    if (!r) return 0;
+    while (st == HTTP_PENDING && icda_ticks() - t0 < 2000) {      /* 20 s */
+        st = http_poll(r, 200);
+        if (r->headers_done && r->status != 200) break;
+        if (r->body_len) {
+            if (n + r->body_len + 1 > cap) {
+                size_t want = (n + r->body_len + 1) * 2;
+                char *b = (char *)realloc(body, want);
+                if (!b) break;
+                body = b;
+                cap = want;
+            }
+            memcpy(body + n, r->body, r->body_len);
+            n += r->body_len;
+            r->body_len = 0;
+        }
+        if (n > 1 << 20) break;                                      /* enough */
+    }
+    if (r->status != 200 || !body) {
+        free(body);
+        http_free(r);
+        return 0;
+    }
+    http_free(r);
+    body[n] = 0;
+    *len = n;
+    return body;
+}
+
+/* the next "key": "string" at or after p, unescaped into out; the place after it */
+static const char *next_str(const char *p, const char *key, char *out, size_t cap) {
+    char pat[40];
+    size_t n = 0;
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    out[0] = 0;
+    if (!p || !(p = strstr(p, pat))) return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return p;
+    return json_unescape(p + 1, out, cap, &n);
+}
+
+static int brave_search(const char *query, char *out, size_t cap) {
+    char url[700], q[600], headers[260], title[200], link[300], desc[400], plain[400];
+    size_t len = 0, k = 0;
+    int found = 0;
+    char *body;
+    const char *p;
+    url_encode(query, q, sizeof(q));
+    snprintf(url, sizeof(url), "https://api.search.brave.com/res/v1/web/search?count=5&q=%s", q);
+    snprintf(headers, sizeof(headers), "Accept: application/json\r\nX-Subscription-Token: %s\r\n", search_key);
+    body = fetch(url, headers, &len);
+    if (!body) return 0;
+    p = strstr(body, "\"web\"");
+    while (p && found < 5 && (p = strstr(p, "\"title\"")) != 0) {
+        p = next_str(p, "title", title, sizeof(title));
+        p = next_str(p, "url", link, sizeof(link));
+        p = next_str(p, "description", desc, sizeof(desc));
+        if (!p) break;
+        strip_tags(desc, strlen(desc), plain, sizeof(plain));
+        found++;
+        k += (size_t)snprintf(out + k, cap - k, "%d. %s - %s (%s)\n", found, title, plain, link);
+        if (k >= cap) break;
+    }
+    free(body);
+    return found;
+}
+
+/* Wikipedia: the pages that match, and the start of the best one - not news,
+ * but it always answers, with no key */
+static int wiki_search(const char *query, char *out, size_t cap) {
+    char url[700], q[600], title[200], snip[400], plain[400], first[200];
+    size_t len = 0, k = 0;
+    int found = 0;
+    char *body;
+    const char *p;
+    url_encode(query, q, sizeof(q));
+    snprintf(url, sizeof(url), "https://en.wikipedia.org/w/api.php?action=query&list=search&srlimit=3&format=json&srsearch=%s", q);
+    body = fetch(url, 0, &len);
+    if (!body) return 0;
+    first[0] = 0;
+    p = strstr(body, "\"search\"");
+    while (p && found < 3 && (p = strstr(p, "\"title\"")) != 0) {
+        p = next_str(p, "title", title, sizeof(title));
+        p = next_str(p, "snippet", snip, sizeof(snip));
+        if (!p) break;
+        strip_tags(snip, strlen(snip), plain, sizeof(plain));
+        if (!found) snprintf(first, sizeof(first), "%s", title);
+        found++;
+        k += (size_t)snprintf(out + k, cap - k, "%d. Wikipedia: %s - %s\n", found, title, plain);
+        if (k >= cap) break;
+    }
+    free(body);
+    if (first[0] && k < cap) {
+        static char text[1400];
+        url_encode(first, q, sizeof(q));
+        snprintf(url, sizeof(url), "https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1"
+                 "&explaintext=1&exchars=1000&format=json&titles=%s", q);
+        body = fetch(url, 0, &len);
+        if (body && next_str(strstr(body, "\"pages\""), "extract", text, sizeof(text)) && text[0])
+            k += (size_t)snprintf(out + k, cap - k, "\n%s:\n%s\n", first, text);
+        free(body);
+    }
+    return found;
+}
+
+/* the web's answer to query, from the best source that answers */
+static int web_search(const char *query, char *out, size_t cap) {
+    out[0] = 0;
+    if (search_key[0] && brave_search(query, out, cap)) return 1;
+    if (ddg_search(query, out, cap)) return 1;
+    if (wiki_search(query, out, cap)) return 1;
+    return 0;
 }
 
 /* questions that need the web: "search ...", "look up ...", news, prices ... */
@@ -811,7 +1033,7 @@ static int llm_start(const provider_t *v, char *err, size_t errcap) {
         }
         snprintf(rel, sizeof(rel), "usr/share/icda/models/%s", name);
         if (!find_system_file(rel, model, sizeof(model))) {
-            snprintf(err, errcap, "%s: %s is not installed in ICDA. Download it in Settings > Assistant, or use /model install 0.5b (or 1.5b).", v->name, name);
+            snprintf(err, errcap, "%s: %s is not installed in ICDA. Download it in Settings > Assistant, or use /model install 4b (or 0.5b, 1.5b, 3b).", v->name, name);
             return -1;
         }
     } else {
@@ -836,7 +1058,17 @@ static int llm_start(const provider_t *v, char *err, size_t errcap) {
         snprintf(err, errcap, "%s: icda-llm is not installed (it comes with system updates)", v->name);
         return -1;
     }
-    snprintf(args, sizeof(args), "-m %s -t 1 -c 2048", model);
+    {
+        /* one thread per core: a laptop's second threads per core (hyper-
+         * threading) share the core's arithmetic and only add contention */
+        icda_sys_stats_t st;
+        int threads = 1;
+        if ((long)icda_sys_stats(&st) >= 0 && st.cpus > 1) threads = (int)(st.cpus >= 4 ? st.cpus / 2 : st.cpus);
+        if (threads > 8) threads = 8;
+        if (threads_conf > 0 && threads_conf <= 16) threads = threads_conf;
+        /* room for the guide, the tools and a few steps of a task */
+        snprintf(args, sizeof(args), "-m %s -t %d -c 6144", model, threads);
+    }
     (void)icda_write_file(LREPLY, "", 0);
     (void)icda_write_file(LREQ, "", 0);
     {
@@ -880,23 +1112,25 @@ static void lput(char *out, size_t cap, size_t *n, const char *role, const char 
 #define LLM_ANSWER_MS  120000         /* 2 minutes: once it is loaded */
 
 static int ask_local(const provider_t *v, const char *q, char *err, size_t errcap) {
-    static char req[24000], rep[A_MAX + 64];
-    char sys[400], when[96];
+    static char req[200000], rep[A_MAX + 64], asked[Q_MAX + 4200];
     size_t n;
-    uint64_t t0 = icda_ticks(), last = 0, load_noted = 0;
+    uint64_t t0 = icda_ticks(), last = 0, load_noted = 0, moved = 0;
+    size_t had = 0;
     if (llm_start(v, err, errcap)) return -1;
-    today(when, sizeof(when));
-    snprintf(sys, sizeof(sys), "You are the assistant built into ICDA, a small operating system. "
-             "Answer plainly and briefly. Current date and time: %s.", when);
     lseq = lseq ? lseq + 1 : (uint32_t)icda_ticks();
     if (!lseq) lseq = 1;
     n = (size_t)snprintf(req, sizeof(req), "%u\n", lseq);
-    lput(req, sizeof(req), &n, "system", sys);
-    for (int i = 0; i < nhist; i++) {
+    lput(req, sizeof(req), &n, "system", sys_prompt);
+    /* a small context: the last few answers, shortened */
+    for (int i = nhist > 3 ? nhist - 3 : 0; i < nhist; i++) {
+        char a[700];
+        snprintf(a, sizeof(a), "%s", hist[i].a);
         lput(req, sizeof(req), &n, "user", hist[i].q);
-        lput(req, sizeof(req), &n, "assistant", hist[i].a);
+        lput(req, sizeof(req), &n, "assistant", a);
     }
-    lput(req, sizeof(req), &n, "user", q);
+    dated(q, asked, sizeof(asked));
+    lput(req, sizeof(req), &n, "user", asked);
+    for (int i = 0; i < nsteps; i++) lput(req, sizeof(req), &n, step_role[i], step_text[i]);
     if ((long)icda_write_file(LREQ, req, n) < 0) {
         snprintf(err, errcap, "%s: could not write the local request", v->name);
         return -1;
@@ -933,6 +1167,10 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
             }
             if (s == lseq) {
                 snprintf(answer, sizeof(answer), "%s", p);
+                if (strlen(answer) != had) {          /* it is still writing */
+                    had = strlen(answer);
+                    moved = icda_ticks();
+                }
                 if (strcmp(state, "done") == 0) {
                     (void)icda_write_file("/dev/serial", "ai: local model finished\n", sizeof("ai: local model finished\n") - 1);
                     if (!answer[0]) snprintf(err, errcap, "%s: the model returned an empty answer", v->name);
@@ -949,12 +1187,14 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
                 }
             }
         }
-        /* the first question waits for the model to load */
-        if (waited > (uint64_t)(answer[0] ? LLM_ANSWER_MS : LLM_LOAD_MS)) {
+        /* the first question waits for the model to load; once it writes, the
+         * wait is for the next words - a long load must not count against it */
+        if (answer[0] ? (icda_ticks() - moved) * 10 > (uint64_t)LLM_ANSWER_MS : waited > (uint64_t)LLM_LOAD_MS) {
             snprintf(err, errcap, "%s: the local model did not answer in %d minutes. "
                      "The first question loads the model, which can take a while on a large one; "
                      "ask again once it has finished.", v->name, (int)(waited / 60000));
             llm_stop();
+            if (answer[0] && strlen(answer) + 40 < sizeof(answer)) strcat(answer, " ... (the model stopped answering)");
             return answer[0] ? 0 : -1;
         }
         /* say what the silence is: the model is loading, not stuck */
@@ -965,6 +1205,304 @@ static int ask_local(const provider_t *v, const char *q, char *err, size_t errca
         }
         rem_check();                     /* a long answer must not hold up a reminder */
         icda_sleep(5);
+    }
+}
+
+/* ---- tools: what the assistant can do on the computer ---------------------------- */
+
+/* the value of "key" in a JSON object: a string, unescaped, or a bare number */
+static int json_field(const char *obj, const char *key, char *out, size_t cap) {
+    char pat[40];
+    const char *p;
+    size_t n = 0;
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    out[0] = 0;
+    if (!obj || !(p = strstr(obj, pat))) return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':' || *p == '\n') p++;
+    if (*p == '"') {
+        json_unescape(p + 1, out, cap, &n);
+        return 1;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n' && n + 1 < cap) out[n++] = *p++;
+    out[n] = 0;
+    return n > 0;
+}
+
+/* the tool call in a model's reply - "<tool_call>{...}</tool_call>", or the
+ * bare object small models tend to write - or 0 for a final answer */
+static const char *tool_call(const char *a) {
+    const char *t = strstr(a, "<tool_call>");
+    if (t) return strchr(t, '{');
+    while (*a == ' ' || *a == '\n' || *a == '\r') a++;
+    if (!strncmp(a, "```", 3)) a = strchr(a, '{');
+    if (a && *a == '{' && strstr(a, "\"name\"") && strstr(a, "\"arguments\"")) return a;
+    return 0;
+}
+
+/* a path the person means: their own home unless it says otherwise */
+static int tool_path(const char *in, char *out, size_t cap) {
+    while (*in == ' ') in++;
+    if (!*in || strstr(in, "..")) return -1;
+    if (*in == '~') in++;
+    if (*in == '/') snprintf(out, cap, "%s", in);
+    else snprintf(out, cap, "/home/%s", in);
+    return 0;
+}
+
+static int may_write(const char *p) {
+    return !strncmp(p, "/home/", 6) || !strncmp(p, "/tmp/", 5) || !strncmp(p, "/volumes/", 9);
+}
+
+/* the folders above path, made if missing */
+static void make_parents(const char *path) {
+    char d[400];
+    snprintf(d, sizeof(d), "%s", path);
+    for (char *s = d + 1; *s; s++)
+        if (*s == '/') { *s = 0; (void)icda_mkdir(d); *s = '/'; }
+}
+
+/* the text of a web page, without its markup, scripts and styles */
+static void page_text(const char *html, size_t len, char *out, size_t cap) {
+    size_t k = 0;
+    int space = 0;
+    for (size_t i = 0; i < len && k + 2 < cap; i++) {
+        if (html[i] == '<') {
+            const char *skip = 0;
+            if (!strncmp(html + i, "<script", 7)) skip = "</script>";
+            else if (!strncmp(html + i, "<style", 6)) skip = "</style>";
+            else if (!strncmp(html + i, "<head", 5)) skip = "</head>";
+            if (skip) {
+                const char *e = strstr(html + i, skip);
+                if (!e) break;
+                i = (size_t)(e - html) + strlen(skip) - 1;
+                continue;
+            }
+            while (i < len && html[i] != '>') i++;
+            space = 1;
+            continue;
+        }
+        char c = html[i];
+        if (c == '&') {
+            if (!strncmp(html + i, "&amp;", 5)) { c = '&'; i += 4; }
+            else if (!strncmp(html + i, "&nbsp;", 6)) { c = ' '; i += 5; }
+            else if (!strncmp(html + i, "&quot;", 6)) { c = '"'; i += 5; }
+            else if (!strncmp(html + i, "&#39;", 5)) { c = '\''; i += 4; }
+            else if (!strncmp(html + i, "&lt;", 4)) { c = '<'; i += 3; }
+            else if (!strncmp(html + i, "&gt;", 4)) { c = '>'; i += 3; }
+        }
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') { space = 1; continue; }
+        if (space && k) out[k++] = ' ';
+        space = 0;
+        out[k++] = c;
+    }
+    out[k] = 0;
+}
+
+static const struct { const char *name, *path; } tool_apps[] = {
+    { "explorer", "/apps/desktop.app" }, { "files", "/apps/desktop.app" },
+    { "terminal", "/apps/terminal.app" }, { "surfer", "/apps/browser.app" },
+    { "browser", "/apps/browser.app" }, { "editor", "/apps/editor.app" },
+    { "media", "/apps/media.app" }, { "disk utility", "/apps/diskman.app" },
+    { "activity", "/apps/taskman.app" }, { "settings", "/apps/settings.app" },
+};
+
+/* the files read during this request: only those may be replaced whole */
+#define SEEN_MAX 8
+static char seen[SEEN_MAX][400];
+static int nseen;
+
+static int was_read(const char *path) {
+    for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], path)) return 1;
+    return 0;
+}
+
+/* Runs the call: a short line for the overlay goes to status, what the model
+ * gets back to out (kept short: a small model reads every word of it). */
+static void run_tool(const char *call, char *status, size_t scap, char *out, size_t cap) {
+    static char text[A_MAX];
+    char name[32], a[400], b[400], path[400];
+    const char *args = strstr(call, "\"arguments\"");
+    json_field(call, "name", name, sizeof(name));
+    if (!args) args = call;
+    snprintf(status, scap, "%s", name);
+    out[0] = 0;
+
+    if (!strcmp(name, "list_folder")) {
+        static char list[3000];
+        json_field(args, "path", a, sizeof(a));
+        if (tool_path(a[0] ? a : "/home", path, sizeof(path))) { snprintf(out, cap, "Not a usable path."); return; }
+        snprintf(status, scap, "Looking in %s", path);
+        long n = (long)icda_list_dir(path, list, sizeof(list) - 1);
+        if (n < 0) { snprintf(out, cap, "%s cannot be opened (missing, or not allowed).", path); return; }
+        list[n] = 0;
+        snprintf(out, cap, "%s contains:\n%s", path, n ? list : "(nothing)\n");
+    } else if (!strcmp(name, "read_file")) {
+        icda_stat_t st;
+        json_field(args, "path", a, sizeof(a));
+        if (tool_path(a, path, sizeof(path))) { snprintf(out, cap, "Not a usable path."); return; }
+        snprintf(status, scap, "Reading %s", path);
+        if (!was_read(path) && nseen < SEEN_MAX) snprintf(seen[nseen++], sizeof(seen[0]), "%s", path);
+        long n = (long)icda_read_file(path, text, 2400);
+        if (n < 0) { snprintf(out, cap, "%s cannot be read (missing, or not allowed).", path); return; }
+        text[n] = 0;
+        if ((long)strlen(text) < n) { snprintf(out, cap, "%s is not a text file.", path); return; }
+        (void)icda_stat(path, &st);
+        snprintf(out, cap, "%s%s", text, st.size > (uint64_t)n ? "\n[... the rest of the file is not shown]" : "");
+    } else if (!strcmp(name, "write_file") || !strcmp(name, "append_file")) {
+        int append = name[0] == 'a';
+        icda_stat_t st;
+        json_field(args, "path", a, sizeof(a));
+        json_field(args, "text", text, sizeof(text));
+        if (tool_path(a, path, sizeof(path)) || !may_write(path)) {
+            snprintf(out, cap, "Files can only be written in /home, /tmp or /volumes.");
+            return;
+        }
+        if (!append && (long)icda_stat(path, &st) >= 0 && st.size && !was_read(path)) {
+            /* a small model reaches for write_file to "add" to a list, and
+             * the list was gone: what is there must have been read first */
+            snprintf(out, cap, "%s already has text, which write_file would replace. To add to it use "
+                     "append_file. To change it, read it with read_file first, then write all of the new text.", path);
+            return;
+        }
+        snprintf(status, scap, "%s %s", append ? "Adding to" : "Writing", path);
+        make_parents(path);
+        if ((long)icda_stat(path, &st) >= 0 && !append && st.size) {
+            /* the text it had is kept for this session, in case it was wanted */
+            static char old[65536];
+            long n = (long)icda_read_file(path, old, sizeof(old));
+            const char *base = strrchr(path, '/') + 1;
+            char keep[400];
+            snprintf(keep, sizeof(keep), "/tmp/ai/previous/%s", base);
+            (void)icda_mkdir("/tmp/ai/previous");
+            if (n > 0) (void)icda_write_file(keep, old, (uint64_t)n);
+        }
+        long rc;
+        if (append && (long)icda_stat(path, &st) >= 0) {
+            /* a new line of its own: "milk" and "eggs" must not become "milkeggs" */
+            char lastc = '\n';
+            if (st.size && text[0] != '\n') (void)icda_read_file_at(path, st.size - 1, &lastc, 1);
+            if (lastc != '\n' && (long)icda_write_file_at(path, st.size, "\n", 1) == 1) st.size++;
+            rc = (long)icda_write_file_at(path, st.size, text, strlen(text));
+        } else {
+            rc = (long)icda_write_file(path, text, strlen(text));
+        }
+        snprintf(out, cap, rc < 0 ? "%s could not be written (not allowed, or the disk is full)." :
+                 append ? "Added to %s." : "Saved %s.", path);
+    } else if (!strcmp(name, "make_folder")) {
+        json_field(args, "path", a, sizeof(a));
+        if (tool_path(a, path, sizeof(path)) || !may_write(path)) {
+            snprintf(out, cap, "Folders can only be made in /home, /tmp or /volumes.");
+            return;
+        }
+        snprintf(status, scap, "Making %s", path);
+        make_parents(path);
+        icda_stat_t st;
+        snprintf(out, cap, (long)icda_mkdir(path) >= 0 || (long)icda_stat(path, &st) >= 0 ?
+                 "The folder %s is there." : "%s could not be made.", path);
+    } else if (!strcmp(name, "move")) {
+        char to[400];
+        json_field(args, "from", a, sizeof(a));
+        json_field(args, "to", b, sizeof(b));
+        if (tool_path(a, path, sizeof(path)) || tool_path(b, to, sizeof(to)) || !may_write(path) || !may_write(to)) {
+            snprintf(out, cap, "Only files in /home, /tmp or /volumes can be moved.");
+            return;
+        }
+        snprintf(status, scap, "Moving %s", path);
+        make_parents(to);
+        snprintf(out, cap, icda_rename(path, to) < 0 ? "%s could not be moved to %s." : "Moved %s to %s.", path, to);
+    } else if (!strcmp(name, "web_search")) {
+        json_field(args, "query", a, sizeof(a));
+        snprintf(status, scap, "Searching the web");
+        if (!a[0] || !web_search(a, out, cap)) snprintf(out, cap, "The web search found nothing (or there is no internet).");
+    } else if (!strcmp(name, "read_webpage")) {
+        char final[700];
+        http_req_t *r;
+        json_field(args, "url", a, sizeof(a));
+        if (strncmp(a, "http://", 7) && strncmp(a, "https://", 8)) { snprintf(out, cap, "Give a full web address."); return; }
+        snprintf(status, scap, "Reading a web page");
+        r = http_get(a, final, sizeof(final));
+        if (!r || r->status != 200 || !r->body) {
+            snprintf(out, cap, "The page did not load (HTTP %d).", r ? r->status : 0);
+            if (r) http_free(r);
+            return;
+        }
+        page_text((const char *)r->body, r->body_len, text, 2400);
+        http_free(r);
+        snprintf(out, cap, "%s", text[0] ? text : "The page has no readable text.");
+    } else if (!strcmp(name, "open_app")) {
+        char low[40], target[400];
+        const char *app = 0;
+        json_field(args, "app", a, sizeof(a));
+        if (!a[0]) json_field(args, "name", a, sizeof(a));
+        json_field(args, "target", target, sizeof(target));
+        for (size_t i = 0; a[i] && i + 1 < sizeof(low); i++) { low[i] = (char)(a[i] >= 'A' && a[i] <= 'Z' ? a[i] + 32 : a[i]); low[i + 1] = 0; }
+        for (size_t i = 0; a[0] && i < sizeof(tool_apps) / sizeof(tool_apps[0]); i++)
+            if (!strcmp(low, tool_apps[i].name)) app = tool_apps[i].path;
+        if (!app) { snprintf(out, cap, "There is no app called %s.", a); return; }
+        if (target[0] && target[0] != 'h' && tool_path(target, path, sizeof(path)) == 0) snprintf(target, sizeof(target), "%s", path);
+        snprintf(status, scap, "Opening %s", a);
+        long pid = target[0] ? (long)icda_spawn_args(app, target) : (long)icda_spawn(app);
+        snprintf(out, cap, pid < 0 ? "%s did not open." : "%s is open.", a);
+    } else if (!strcmp(name, "remind")) {
+        long long now = now_local();
+        json_field(args, "minutes", a, sizeof(a));
+        json_field(args, "text", b, sizeof(b));
+        int m = atoi(a);
+        if (m <= 0 || !now || nrem >= REM_MAX) { snprintf(out, cap, "The reminder could not be set."); return; }
+        rem[nrem].due = now + (long long)m * 60;
+        snprintf(rem[nrem].text, sizeof(rem[nrem].text), "%s", b[0] ? b : "Reminder");
+        nrem++;
+        rem_save();
+        snprintf(status, scap, "Setting a reminder");
+        snprintf(out, cap, "Reminder set for %d minutes from now.", m);
+    } else if (!strcmp(name, "system_info")) {
+        icda_sys_stats_t st;
+        char rel[256], *ver;
+        long n = (long)icda_read_file("/etc/icda-release.txt", rel, sizeof(rel) - 1);
+        rel[n > 0 ? n : 0] = 0;
+        ver = strstr(rel, "version ");
+        if (ver) { ver += 8; for (char *e = ver; *e; e++) if (*e == '\n') { *e = 0; break; } }
+        snprintf(status, scap, "Checking the system");
+        if ((long)icda_sys_stats(&st) < 0) memset(&st, 0, sizeof(st));
+        snprintf(out, cap, "ICDA %s; %llu processors; memory %llu MB, %llu MB free; running for %llu minutes.",
+                 ver ? ver : "(version unknown)", (unsigned long long)st.cpus,
+                 (unsigned long long)(st.mem_total >> 20), (unsigned long long)(st.mem_free >> 20),
+                 (unsigned long long)(st.uptime_ticks / 6000));
+    } else {
+        snprintf(out, cap, "There is no tool called %s.", name);
+    }
+}
+
+#define ROUNDS 6
+
+/* A model at work: it answers, or asks for a tool, gets the result and goes
+ * on - until it answers, or ROUNDS tools have run. */
+static int work(const provider_t *v, const char *q, char *err, size_t errcap) {
+    static char result[2600];
+    static char status[120];
+    nsteps = 0;
+    nseen = 0;
+    build_system(v);
+    for (int round = 0;; round++) {
+        const char *call;
+        int rc = strncmp(v->url, "file:", 5) == 0 ? ask_local(v, q, err, errcap) : ask(v, q, err, errcap);
+        if (rc) return rc;
+        call = tool_call(answer);
+        if (!call) return 0;                                 /* the answer */
+        if (round == ROUNDS || nsteps + 2 > STEPS) {
+            snprintf(answer, sizeof(answer), "I stopped after %d steps without finishing. Ask again, more precisely.", ROUNDS);
+            return 0;
+        }
+        snprintf(step_role[nsteps], sizeof(step_role[0]), "assistant");
+        snprintf(step_text[nsteps++], STEP_TEXT, "%s", answer);
+        run_tool(call, status, sizeof(status), result, sizeof(result));
+        cur_name = status;
+        answer[0] = 0;
+        reply("thinking");
+        snprintf(step_role[nsteps], sizeof(step_role[0]), "user");
+        snprintf(step_text[nsteps++], STEP_TEXT, "<tool_response>\n%s\n</tool_response>", result);
+        cur_name = v->name;
     }
 }
 
@@ -1002,17 +1540,19 @@ static int model_command(const char *q) {
         if (!*name) { name = icda_models[0].name; for (int i=0;i<nprov;i++) if (!prov[i].cloud) {name=prov[i].model;break;} }
         if (!strcmp(name, "0.5b")) name=icda_models[0].name;
         if (!strcmp(name, "1.5b")) name=icda_models[1].name;
+        if (!strcmp(name, "3b")) name=icda_models[2].name;
+        if (!strcmp(name, "4b")) name=icda_models[3].name;
         int valid=0; for(unsigned i=0;i<ICDA_MODEL_COUNT;i++) if(!strcmp(name,icda_models[i].name)) valid=1;
-        if (!valid) { strcpy(answer,"Choose /model install 0.5b or /model install 1.5b."); reply("error"); return 1; }
+        if (!valid) { strcpy(answer,"Choose /model install 0.5b, 1.5b, 3b or 4b."); reply("error"); return 1; }
         long pid=(long)icda_spawn_args("/sbin/model-install",name);
         snprintf(answer,sizeof(answer),"%s",pid<0 ? "Could not start the Qwen installer." : "Downloading model from official Hugging Face. Use /model status or Settings > Assistant to follow progress. The download is verified before installation.");
         reply(pid<0 ? "error":"done");
     } else if (!strcmp(q,"status")) {
         long n=(long)icda_read_file("/tmp/ai/model-install.status",answer,sizeof(answer)-1);
-        if(n>0) answer[n]=0; else strcpy(answer,"No model download yet. Use /model install 0.5b or /model install 1.5b.");
+        if(n>0) answer[n]=0; else strcpy(answer,"No model download yet. Use /model install 0.5b, 1.5b, 3b or 4b.");
         reply("done");
     } else {
-        strcpy(answer,"Qwen downloads: /model install 0.5b (469 MiB) or /model install 1.5b (1066 MiB). Models come directly from official Hugging Face and are stored on ICDA. Use /model status for progress, or choose a model in Settings > Assistant."); reply("done");
+        strcpy(answer,"Qwen downloads: /model install 0.5b (469 MiB), 1.5b (1066 MiB), 3b (2007 MiB) or 4b (2382 MiB, the best at using ICDA). Models come directly from official Hugging Face and are stored on ICDA. Use /model status for progress, or choose a model in Settings > Assistant."); reply("done");
     }
     return 1;
 }
@@ -1072,10 +1612,10 @@ static void handle(const char *question) {
             if (prov[i].cloud != want_cloud) continue;
             cur_name = prov[i].name;
             reply("thinking");
-            if ((strncmp(prov[i].url, "file:", 5) == 0 ? ask_local(&prov[i], asked, err, sizeof(err))
-                                                       : ask(&prov[i], asked, err, sizeof(err))) == 0) {
+            if (work(&prov[i], asked, err, sizeof(err)) == 0) {
                 /* remembered for the conversation */
                 remember_answer(q);
+                cur_name = prov[i].name;
                 reply("done");
                 say(answer);
                 return;
@@ -1083,6 +1623,11 @@ static void handle(const char *question) {
             if (strlen(errs) + strlen(err) + 2 < sizeof(errs)) {
                 strcat(errs, err);
                 strcat(errs, "\n");
+            }
+            /* tools already ran: another model would do it all again */
+            if (nsteps) {
+                pass = 2;
+                break;
             }
         }
     }

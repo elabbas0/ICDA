@@ -55,6 +55,7 @@ extern const char userprog_model_install_start[], userprog_model_install_end[];
 extern const char userprog_codex_cli_start[], userprog_codex_cli_end[];
 extern const char userprog_codex_agents_start[], userprog_codex_agents_end[];
 extern const char userprog_codex_task_start[], userprog_codex_task_end[];
+extern const char userprog_ai_guide_start[], userprog_ai_guide_end[];
 extern const char userprog_cacert_start[];
 extern const char userprog_cacert_end[];
 extern const char userprog_ticker_start[];
@@ -165,6 +166,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/bin/codex", 0, 0 },
     { "/usr/share/icda/codex/AGENTS.md", 0, 0 },
     { "/usr/share/icda/codex/CURRENT_TASK.md", 0, 0 },
+    { "/usr/share/icda/assistant/guide.txt", 0, 0 },
     { "/etc/ssl/certs.pem", 0, 0 },
     { "/apps/wm.app", 0, 0 },
     { "/apps/desktop.app", 0, 0 },
@@ -225,6 +227,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_codex_cli_start, userprog_codex_cli_end);
     initramfs_seed_at(&n, userprog_codex_agents_start, userprog_codex_agents_end);
     initramfs_seed_at(&n, userprog_codex_task_start, userprog_codex_task_end);
+    initramfs_seed_at(&n, userprog_ai_guide_start, userprog_ai_guide_end);
     initramfs_seed_at(&n, userprog_cacert_start, userprog_cacert_end);
     initramfs_seed_at(&n, userprog_wm_start, userprog_wm_end);
     initramfs_seed_at(&n, userprog_desktop_start, userprog_desktop_end);

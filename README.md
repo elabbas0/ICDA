@@ -107,8 +107,10 @@ No Windows model files are used. `/home/AGENTS.md` describes BusyBox and
 ICDA storage; this is a separate CLI session with its own history.
 
 For the built-in Qwen assistant, open **Settings > Assistant**, select
-**Local**, and click **Model** to choose Qwen 2.5 0.5B (469 MiB) or 1.5B
-(1066 MiB). Click **Download from Hugging Face** to download only that model.
+**Local**, and click **Model** to choose Qwen 2.5 0.5B (469 MiB), 1.5B
+(1066 MiB) or 3B (2007 MiB), or Qwen3 4B (2382 MiB). The bigger two are
+much better at using ICDA's tools and want about 6 GB of RAM. Click
+**Download from Hugging Face** to download only that model.
 Progress appears in the Assistant pane. The selected file is streamed from
 Qwen's official pinned HTTPS URL to ICDA's own partition, checked against its
 expected byte size and SHA-256 hash, and renamed into place after verification.
@@ -116,7 +118,18 @@ Existing model files are preserved on failure. No restart is required.
 Interrupted connections reconnect and resume with HTTP ranges. The model still
 needs enough free RAM to run; insufficient memory is reported in the assistant.
 
-The assistant also supports `/model install 0.5b`, `/model install 1.5b`,
+The assistant knows ICDA (its apps, files, shortcuts and settings, from
+`/usr/share/icda/assistant/guide.txt`) and acts on the computer with tools:
+it lists, reads and writes files and makes folders (writing only in `/home`,
+`/tmp` and `/volumes`, never deleting; a replaced file's old text is kept in
+`/tmp/ai/previous`), searches the web, reads web pages, opens apps and sets
+reminders. Web search asks DuckDuckGo, and Wikipedia when DuckDuckGo turns
+automated requests away; for full results, news included, add a free Brave
+Search API key to `/home/.config/ai.conf` as `search brave <key>`. Local and cloud models use the same tools, up to six per question.
+The local model uses one thread per processor core and reads the instructions
+only once, so follow-up steps start right away.
+
+The assistant also supports `/model install 0.5b` (or `1.5b`, `3b`, `4b`)
 and `/model status`. Choose the downloaded model in Assistant settings before
 asking it a question. OS updates and offline bundles never fetch or include
 Qwen weight files; the updater ignores legacy model metadata rows. Developer

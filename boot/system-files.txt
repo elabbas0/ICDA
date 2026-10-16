@@ -23,6 +23,7 @@ bin/busybox           resources/linux/busybox
 bin/codex             resources/codex/terminal.sh
 usr/share/icda/codex/AGENTS.md resources/codex/AGENTS.md
 usr/share/icda/codex/CURRENT_TASK.md resources/codex/CURRENT_TASK.md
+usr/share/icda/assistant/guide.txt resources/ai/guide.txt
 bin/fetch             userspace/fetch.elf
 sbin/init.app         userspace/init.app
 sbin/updated          userspace/updated.elf

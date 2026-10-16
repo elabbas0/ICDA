@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
     (void)icda_write_file(PID, id, strlen(id));
     for (unsigned i = 0; argc == 2 && i < ICDA_MODEL_COUNT; i++)
         if (!strcmp(argv[1], icda_models[i].name)) model = &icda_models[i];
-    if (!model) { report("Choose Qwen 0.5B or 1.5B in Settings > Assistant."); return 1; }
+    if (!model) { report("Choose a Qwen model in Settings > Assistant."); return 1; }
     if (owned_dir(dir, sizeof(dir))) { report("Install ICDA to its own system partition before downloading models."); return 1; }
     snprintf(target, sizeof(target), "%s/%s", dir, model->name);
     snprintf(part, sizeof(part), "%s.download", target);

@@ -532,7 +532,10 @@ int64_t lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint
         lxi_file_ref(file);
     }
     insert(p, v);
-    if ((flags & LXVM_POPULATE) && prot)
+    /* MAP_POPULATE is a hint.  For a big file (a model) it meant reading
+     * gigabytes inside this one call, the whole machine stopped meanwhile;
+     * its pages come in on first use instead, a short step at a time. */
+    if ((flags & LXVM_POPULATE) && prot && !(node && size > (64ULL << 20)))
         for (uint64_t va = start; va < start + size; va += PAGE)
             if (!vmm_virt_to_phys(p->addr_space, va)) (void)populate(p, v, va);
     return (int64_t)start;

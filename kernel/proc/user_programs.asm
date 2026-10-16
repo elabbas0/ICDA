@@ -38,6 +38,7 @@ global userprog_model_install_start, userprog_model_install_end
 global userprog_codex_cli_start, userprog_codex_cli_end
 global userprog_codex_agents_start, userprog_codex_agents_end
 global userprog_codex_task_start, userprog_codex_task_end
+global userprog_ai_guide_start, userprog_ai_guide_end
 global userprog_cacert_start
 global userprog_cacert_end
 global userprog_ticker_start
@@ -155,6 +156,11 @@ userprog_codex_task_start:
     incbin "resources/codex/CURRENT_TASK.md"
 %endif
 userprog_codex_task_end:
+userprog_ai_guide_start:
+%if SLIM == 0
+    incbin "resources/ai/guide.txt"
+%endif
+userprog_ai_guide_end:
 
 userprog_cacert_start:
 %if SLIM == 0

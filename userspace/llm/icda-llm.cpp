@@ -151,6 +151,9 @@ int main(int argc, char **argv) {
 
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = 0;
+    // read, not mapped: a few large reads off the disk, and the weights are
+    // the program's own memory rather than gigabytes of page faults
+    mp.load_mode = LLAMA_LOAD_MODE_NONE;
     llama_model *model = llama_model_load_from_file(model_path.c_str(), mp);
     if (!model) {
         write_reply(0, "error", "The local model could not be loaded: " + model_path);
@@ -172,7 +175,7 @@ int main(int argc, char **argv) {
     llama_sampler *smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
     llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.4f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     llama_batch_ext *batch = llama_batch_ext_init(ctx);
     if (!batch) {
@@ -183,6 +186,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "icda-llm: ready (%s)\n", model_path.c_str());
 
     unsigned long done_seq = 0;
+    std::vector<llama_token> cached;          // what the context holds, in order
     write_reply(0, "ready", "");
     for (;;) {
         std::string req = read_file(REQ);
@@ -217,8 +221,6 @@ int main(int argc, char **argv) {
         }
         std::string prompt(fmt.data(), len);
 
-        // every request starts from an empty context: the conversation comes with it
-        llama_memory_clear(llama_get_memory(ctx), true);
         llama_sampler_reset(smpl);
         int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), NULL, 0, true, true);
         if (n_prompt <= 0 || n_prompt + 64 > (int)llama_n_ctx(ctx)) {
@@ -231,10 +233,22 @@ int main(int argc, char **argv) {
             write_reply(seq, "error", "The question and conversation are too long for the local model");
             continue;
         }
+        // What the context already holds is not read again: the instructions and
+        // the conversation so far come with every request, and each step of a
+        // task (a file read, a search) adds only its result to the end.  At a
+        // few dozen tokens a second on a laptop, reading them again was most
+        // of the wait.  At least the last token is decoded, for its logits.
+        int keep = 0;
+        while (keep < (int)cached.size() && keep + 1 < (int)toks.size() && cached[keep] == toks[keep]) keep++;
+        if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, keep, -1)) {
+            llama_memory_clear(llama_get_memory(ctx), true);
+            keep = 0;
+        }
+        cached.assign(toks.begin(), toks.begin() + keep);
         write_reply(seq, "answer", "");
         std::string out;
-        const llama_token *tokens = toks.data();
-        int n_tokens = (int)toks.size(), pos = 0;
+        const llama_token *tokens = toks.data() + keep;
+        int n_tokens = (int)toks.size() - keep, pos = keep;
         llama_token tok;
         int failed = 0;
         for (int produced = 0; produced < 2048; produced++) {
@@ -243,6 +257,7 @@ int main(int argc, char **argv) {
                 int take = n_tokens > 512 ? 512 : n_tokens;
                 batch_set_tokens(batch, tokens, take, pos);
                 if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch) != 0) { failed = 1; break; }
+                cached.insert(cached.end(), tokens, tokens + take);
                 tokens += take;
                 n_tokens -= take;
                 pos += take;
@@ -258,6 +273,8 @@ int main(int argc, char **argv) {
                 if (n > 0) out.append(piece.data(), n);
             } else if (n > 0) out.append(buf, n);
             if (produced % 3 == 0) write_reply(seq, "answer", visible(out));
+            // a tool call is complete: the assistant runs it, nothing after it matters
+            if (out.size() > 12 && out.compare(out.size() - 12, 12, "</tool_call>") == 0) break;
             tokens = &tok;
             n_tokens = 1;
         }
@@ -265,6 +282,7 @@ int main(int argc, char **argv) {
         if (result.find_first_not_of(" \r\n\t") == std::string::npos) {
             write_reply(seq, "error", "The model produced no visible answer. Choose an instruct model in Settings > Assistant.");
         } else {
+            if (failed) { llama_memory_clear(llama_get_memory(ctx), true); cached.clear(); }
             write_reply(seq, failed ? "error" : "done", failed ? std::string("The local model failed while answering") : result);
         }
     }

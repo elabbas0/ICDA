@@ -20,6 +20,9 @@ static int volume_class(uint8_t id) { return id == 1 ? VFS_VOL_REMOVABLE : id ==
 static int can_read(const char *p) { return vfs_resolve(vfs_root(), p) != 0; }
 static int can_write(const char *p) { return vfs_write(vfs_root(), p, "x", 1) == 0; }
 
+static int syncs;
+static int count_sync(void) { syncs++; return 0; }
+
 int main(void) {
     vfs_node_t *root;
     char path[128];
@@ -91,6 +94,14 @@ int main(void) {
 
     who = 0;                                        /* nobody signed in: the system */
     assert(can_read("/users/bob/note") == 0 && can_read("/home/.config/secret") && can_write("/apps/v"));
-    puts("home and settings mapping, private homes, read-only system, /tmp ownership, disk classes and kernel calls passed");
+
+    /* the saved image leaves /tmp and /dev out: changing them saves nothing */
+    vfs_set_sync_hook(count_sync);
+    vfs_flush(1);
+    syncs = 0;
+    assert(!vfs_write(root, "/tmp/status", "50%", 3) && !vfs_mkdir(root, "/tmp/ai") && !vfs_flush(1) && syncs == 0);
+    assert(!vfs_write(root, "/home/kept", "x", 1) && !vfs_flush(1) && syncs == 1);
+    assert(!vfs_rename(root, "/home/kept", "/tmp/kept") && !vfs_flush(1) && syncs == 2);
+    puts("home and settings mapping, private homes, read-only system, /tmp ownership, disk classes and kernel calls, unsaved /tmp passed");
     return 0;
 }

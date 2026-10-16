@@ -985,6 +985,26 @@ static int write_range(fatfs_t *v, uint32_t first, uint64_t pos, const uint8_t *
             rc = -1;
             break;
         }
+        if (src && in == 0 && len >= v->cluster_bytes) {
+            /* whole clusters one after another on the disk: one write for
+             * all of them.  A 192 KB piece of an update or a download was 48
+             * disk commands, the desktop standing still while they ran. */
+            uint32_t idx = (uint32_t)(pos / v->cluster_bytes), n = 1, last = c;
+            while (n < 256 && (uint64_t)(n + 1) * v->cluster_bytes <= len) {
+                uint32_t next = chain_seek(v, first, idx + n);
+                if (next != last + 1) break;
+                last = next;
+                n++;
+            }
+            if (dev_write(v, cluster_lba(v, c), n * v->sectors_per_cluster, src) != 0) {
+                rc = -1;
+                break;
+            }
+            pos += (uint64_t)n * v->cluster_bytes;
+            len -= (uint64_t)n * v->cluster_bytes;
+            src += (uint64_t)n * v->cluster_bytes;
+            continue;
+        }
         if (in != 0 || take != v->cluster_bytes) {
             if (dev_read(v, cluster_lba(v, c), v->sectors_per_cluster, tmp) != 0) {
                 rc = -1;

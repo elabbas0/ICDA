@@ -1442,6 +1442,9 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
     return (uint64_t)(int64_t)fd;
 }
 
+#define LX_READ_MAX   (1ULL << 20)      /* bytes one read() returns at most */
+#define LX_READ_CHUNK (1ULL << 20)      /* read from the file system at once */
+
 static uint64_t file_read_raw(lx_file_t *f, char *ubuf, uint64_t count, uint64_t *offp) {
     if ((f->flags & O_ACCMODE) == O_WRONLY) return ERR(EBADF);
     if (count == 0) return 0;
@@ -1478,12 +1481,16 @@ static uint64_t file_read_raw(lx_file_t *f, char *ubuf, uint64_t count, uint64_t
             size = vfs_node_size(f->node);
             if (off >= size) return 0;
             if (count > size - off) count = size - off;
-            bounce = (char *)kmalloc(count < 65536 ? count : 65536);
+            /* A short read is allowed and every reader loops over it: a model
+             * read as one 300 MB tensor held the kernel for half a minute, and
+             * everything else - the desktop, the mouse - stood still. */
+            if (count > LX_READ_MAX) count = LX_READ_MAX;
+            bounce = (char *)kmalloc(count < LX_READ_CHUNK ? count : LX_READ_CHUNK);
             if (!bounce) return ERR(ENOMEM);
             while (done < count) {
                 uint64_t chunk = count - done;
                 int64_t got;
-                if (chunk > 65536) chunk = 65536;
+                if (chunk > LX_READ_CHUNK) chunk = LX_READ_CHUNK;
                 got = vfs_node_read_at(f->node, off + done, bounce, chunk);
                 if (got <= 0) break;
                 if (copy_to_user(ubuf + done, bounce, (uint64_t)got) != 0) {

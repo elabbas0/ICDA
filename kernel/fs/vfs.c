@@ -398,6 +398,19 @@ int vfs_sync(void) {
     return 0;
 }
 
+/* A change that needs saving: not on a disk (written there already) and not
+ * under /tmp or /dev, which the saved image leaves out anyway.  A download's
+ * status file, rewritten every second, used to save the whole image each
+ * time, and the desktop stood still while it was written. */
+static int sync_after(const vfs_node_t *n) {
+    const vfs_node_t *top = n;
+    if (!n || n->mount_id) return 0;
+    while (top->parent && top->parent != vfs_root_node) top = top->parent;
+    if (top->parent == vfs_root_node && top->name &&
+        (str_eq(top->name, "tmp") || str_eq(top->name, "dev"))) return 0;
+    return vfs_sync();
+}
+
 int vfs_flush(int force) {
     uint64_t now = sched_ticks();
     static uint64_t trimmed;
@@ -685,7 +698,7 @@ int vfs_mkdir(vfs_node_t *cwd, const char *path) {
     node->owner = cred() ? cred()->uid : VFS_NOBODY;
     append_child(parent, node);
     parent->modified = vfs_tick++;
-    return vfs_sync();
+    return sync_after(parent);
 }
 
 int vfs_create(vfs_node_t *cwd, const char *path) {
@@ -716,7 +729,7 @@ int vfs_create(vfs_node_t *cwd, const char *path) {
     node->owner = cred() ? cred()->uid : VFS_NOBODY;
     append_child(parent, node);
     parent->modified = vfs_tick++;
-    return vfs_sync();
+    return sync_after(parent);
 }
 
 static int subtree_has_readonly(vfs_node_t *node) {
@@ -760,7 +773,7 @@ int vfs_remove(vfs_node_t *cwd, const char *path) {
     *link = node->next_sibling;
     node->next_sibling = 0;
     parent->modified = vfs_tick++;
-    return vfs_sync();
+    return sync_after(parent);
 }
 
 int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size) {
@@ -808,7 +821,7 @@ int vfs_write(vfs_node_t *cwd, const char *path, const char *data, uint64_t size
     node->size = size;
     node->lazy = 0;
     node->modified = vfs_tick++;
-    return vfs_sync();
+    return sync_after(node);
 }
 
 static int node_reserve(vfs_node_t *node, uint64_t need) {
@@ -878,7 +891,7 @@ int vfs_node_write_at(vfs_node_t *node, uint64_t off, const char *data,
         node->data[new_end] = 0;
     }
     node->modified = vfs_tick++;
-    return node->mount_id ? 0 : vfs_sync();
+    return sync_after(node);
 }
 
 int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
@@ -910,7 +923,7 @@ int vfs_node_truncate(vfs_node_t *node, uint64_t len) {
     node->size = len;
     if (node->data) node->data[len] = 0;
     node->modified = vfs_tick++;
-    return node->mount_id ? 0 : vfs_sync();
+    return sync_after(node);
 }
 
 int vfs_seed_readonly(const char *path, const char *data, uint64_t size) {
@@ -1211,7 +1224,7 @@ int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
     char leaf[256];
     vfs_node_t *node = vfs_resolve(cwd, from);
     vfs_node_t *dest = resolve_parent(cwd, to, leaf, sizeof(leaf), 0);
-    vfs_node_t *existing;
+    vfs_node_t *existing, *was_in;
     vfs_node_t **link;
     char *name;
 
@@ -1250,9 +1263,10 @@ int vfs_rename(vfs_node_t *cwd, const char *from, const char *to) {
     if (!*link) return -1;
     *link = node->next_sibling;
     node->parent->modified = vfs_tick++;
+    was_in = node->parent;                  /* saved if either end is kept */
     node->next_sibling = 0;
     node->name = name;
     append_child(dest, node);
     dest->modified = vfs_tick++;
-    return node->mount_id ? 0 : vfs_sync();
+    return sync_after(was_in) == 0 && sync_after(node) == 0 ? 0 : -1;
 }
