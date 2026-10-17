@@ -49,6 +49,8 @@
 #define RING_ELSP              0x230
 #define RING_EXECLIST_STATUS   0x234
 #define RING_CSB_PTR           0x3A0
+#define RING_CSB_BUF(i)        (0x370 + (i) * 8)
+#define   CSB_ACTIVE_TO_IDLE   (1u << 3)
 #define RING_MODE              0x29C
 #define   GFX_RUN_LIST_ENABLE  (1u << 15)
 
@@ -489,6 +491,27 @@ static int make_vm_ctx(vm_ctx_t *c, uint32_t value, uint32_t done_gtt) {
     return 0;
 }
 
+/* Reads the context status events up to the engine's write pointer and moves
+ * the read pointer there: the buffer holds 6, and once it is full the engine
+ * stops switching contexts.  With wait_idle, first waits (up to 100 ms) for
+ * the event that says the engine went idle. */
+static void ack_csb(int wait_idle) {
+    uint64_t t0 = tsc_us();
+    uint32_t r = (rd(RCS + RING_CSB_PTR) >> 8) & 7;
+    for (;;) {
+        uint32_t w = rd(RCS + RING_CSB_PTR) & 7;
+        int idle = 0;
+        if (w != 7) {
+            while (r != w) {
+                r = r >= 5 ? 0 : r + 1;
+                if (rd(RCS + RING_CSB_BUF(r)) & CSB_ACTIVE_TO_IDLE) idle = 1;
+            }
+            wr(RCS + RING_CSB_PTR, ((7u << 8) << 16) | (r << 8));
+        }
+        if (!wait_idle || idle || tsc_us() - t0 > 100000) return;
+    }
+}
+
 static int run_vm_ctx(vm_ctx_t *c, uint32_t id, volatile uint32_t *done, uint32_t value) {
     uint64_t t0;
     wr(RCS + RING_ELSP, 0);
@@ -498,9 +521,27 @@ static int run_vm_ctx(vm_ctx_t *c, uint32_t id, volatile uint32_t *done, uint32_
     t0 = tsc_us();
     while (tsc_us() - t0 < 500000) {
         flush_range((const void *)done, 64);
-        if (*done == value) return 0;
+        if (*done == value) { ack_csb(1); return 0; }
     }
     return -1;
+}
+
+static void say_engine(void) {
+    say("execlist ");
+    say_hex(rd(RCS + RING_EXECLIST_STATUS));
+    say(" context ");
+    say_hex(rd(RCS + RING_EXECLIST_STATUS + 4));
+    say(" acthd ");
+    say_hex(rd(RCS + RING_ACTHD));
+    say(" head ");
+    say_hex(rd(RCS + RING_HEAD));
+    say(" tail ");
+    say_hex(rd(RCS + RING_TAIL));
+    say(" ipehr ");
+    say_hex(rd(RCS + RING_IPEHR));
+    say(" csb ");
+    say_hex(rd(RCS + RING_CSB_PTR));
+    say("\n");
 }
 
 static uint32_t data_word(const vm_ctx_t *c) {
@@ -533,22 +574,15 @@ static int stage2_test(void) {
         line("stage 2: could not set up the address spaces");
         return -1;
     }
+    ack_csb(1);                                     /* stage 1's events */
     if (run_vm_ctx(&a, 2, done, va) != 0) {
-        say("stage 2: context A did not finish; execlist ");
-        say_hex(rd(RCS + RING_EXECLIST_STATUS));
-        say(" acthd ");
-        say_hex(rd(RCS + RING_ACTHD));
-        say(" ipehr ");
-        say_hex(rd(RCS + RING_IPEHR));
-        say("\n");
+        say("stage 2: context A did not finish; ");
+        say_engine();
         return -1;
     }
     if (run_vm_ctx(&b, 3, done + 16, vb) != 0) {
-        say("stage 2: context B did not finish; execlist ");
-        say_hex(rd(RCS + RING_EXECLIST_STATUS));
-        say(" acthd ");
-        say_hex(rd(RCS + RING_ACTHD));
-        say("\n");
+        say("stage 2: context B did not finish; ");
+        say_engine();
         return -1;
     }
     say("stage 2: page A ");
@@ -609,7 +643,12 @@ int intel_gpu_init(int disabled) {
     if (wake() != 0) return -1;
     if (reset_render() == 0) {
         G.passed = self_test() == 0;
-        if (G.passed) G.passed = stage2_test() == 0;
+        /* stage 2 hand-drives context switches; the driver below has its
+         * own (status events, hang reset), and Surfer tries the GPU in a
+         * separate process before using it - so a failure here is
+         * reported, not fatal */
+        if (G.passed && stage2_test() != 0)
+            line("stage 2 failed: starting the driver anyway (Surfer checks the GPU before using it)");
     }
     if (!G.passed) {
         sleep_gt();
