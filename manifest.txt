@@ -1,22 +1,22 @@
 icda-ota 1
-version 1.9.1
-notes The assistant now knows ICDA and can act on it: it reads, writes and organizes your files, searches the web, reads web pages, opens apps and sets reminders. New, stronger models: Qwen 2.5 3B and Qwen3 4B (best). The local model uses every processor core and no longer stops after a few words. Fixed: the desktop freezing during downloads and while a model loads. The assistant's wave moves calmly.
+version 1.9.2
+notes First step of graphics acceleration: ICDA now finds Intel graphics (HD/UHD 5xx/6xx), wakes it and tests that it runs commands. Open Terminal and type: cat /dev/gpu - it shows the result. Nothing uses the GPU yet; this release checks that it works on your computer.
 file EFI/ICDA/GRUBX64.EFI 5378048 06cfda53b396a677a0cc213797d00d2f749a8b1a500aad563d9940d82faf7f9c
-file EFI/ICDA/KERNEL.BIN 7317384 89e598e427bd39bdf30bfa51a97691dcf4c55ba05f7e0c55864565d6d5a8f378
-file SYSTEM/apps/browser.app 4157744 c85beae049490e761f93355aadd774c406143a8ca0999cd80944e5d36dd65336
+file EFI/ICDA/KERNEL.BIN 7321792 788fbd72c38b1db732e0b18d77946aeb49ce624d546202578ca50685a64984d2
+file SYSTEM/apps/browser.app 4157744 1c8a7c916deec141e1fa4564b56f28127972d32b946c6b0fa2968eaa7f885aec
 file SYSTEM/apps/curl.app 7792 f6f6ddd922427bf1b606ff903e08874a2d48614bc75c33f3260b71f875018bd7
-file SYSTEM/apps/desktop.app 1205128 1ba331eca75092c23d4f10a5ebafc08a19e71c796a53dc404fbcb4d737ca92fa
-file SYSTEM/apps/diskman.app 1226088 edb311cf841e5eb5f5c95770c371701376e932cbfaf75241f0d6bfcc63cd89ef
-file SYSTEM/apps/editor.app 1205320 ceaacb30e12c0234efc1e75115c8fe93264f4aa46954d665f251bad6efc503f2
+file SYSTEM/apps/desktop.app 1205128 90f72867963055622c4bf02eae00d8517b8109c5e68b7b93ed1e82b1fe214b5a
+file SYSTEM/apps/diskman.app 1226088 e9d4fd798297f37db32fd8aeddfada908e57f5bd2727fc4bd605490da4d19339
+file SYSTEM/apps/editor.app 1205320 8144b3be029257d672152cbab0840b4f9fb837aea4ea3e4186bbcd52ba2c0f93
 file SYSTEM/apps/hello.app 77 257957c619fb838510adcc6e3e177f87c715ff64e7b1feea1ba86cd56c46fc0a
-file SYSTEM/apps/media.app 3119448 05844a7fbad72c024ef8446154596d8a9d2e6f5235dcd82230c394ec14618491
+file SYSTEM/apps/media.app 3119448 94444542f80fa2fd77bdb1cd541ed0a7f48b455a1c21a3ee3b80beb75ebdc5b0
 file SYSTEM/apps/pid.app 137 ca9ace94e952ab453e9324f72b2aaf055d176bf0b8f0a300acb4d2f8ff99b449
-file SYSTEM/apps/settings.app 1257160 15740d74c5262ffc1dcd81dd98df830ea6501eb345bb7aadd5ae1ada0fdd4ce2
+file SYSTEM/apps/settings.app 1257160 9b0bd269cbfe79f9f798b55f3cd2c155586b193e0dbde897245c7853ff721834
 file SYSTEM/apps/shell.app 31832 5a082da1e071a6355a0b43c55a3a7e534a5f137169f427dab286b42b23f8ac68
-file SYSTEM/apps/taskman.app 1196688 26686b9bfdfcdbca28b6fed0a6e68ac450eba7f0ff0e159a1b1beb2138aad220
-file SYSTEM/apps/terminal.app 1201080 77b3d75c233f2968c98a17995e0b6e79aaa6db6e3639663314e6401fe1b4f1a4
+file SYSTEM/apps/taskman.app 1196688 291bfca6efe110d278d09766291108dea64343878ce2cbbf8859931fe2ff8725
+file SYSTEM/apps/terminal.app 1201080 0b4e614ae5a9d3de4109280d8f05f01b59c51f80c09e046975eac2744c5f5d58
 file SYSTEM/apps/ticker.app 236 c26e49849ca88506614873a32d3a3d320f1c4dd21e3eaa974fb7cf5e62a198fa
-file SYSTEM/apps/wm.app 1346160 f5640a3a48ac082e2dd7928a72ea29d74e97d43575fce4b63319ec8d939fefee
+file SYSTEM/apps/wm.app 1346160 28bd7f70e655e9d073c108b69160d17cea96a6c9b21601c3e5d4ea20e5fb2c4d
 file SYSTEM/bin/argc.elf 5232 8b46207a0b9a4972d465c37bc0e9da538e5e17cccdb610c3837c45e7b4984c49
 file SYSTEM/bin/busybox 1982256 3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6
 file SYSTEM/bin/codex 1461 4b7e99066680f1e9017dbfb07ce51a12fdd1c3b69b0b18ce6f4f6c291f83f92d
@@ -28,7 +28,7 @@ file SYSTEM/etc/ssl/certs.pem 188900 a41b5d356aea97a529fe27e0f7316d2f9d946d75927
 file SYSTEM/sbin/assistantd 158456 850644abcf7c04f16d392067427a76b46426156745af0da1526ddfdf255ce734
 file SYSTEM/sbin/init.app 5168 8c8223f8a310ed572517078b623c9040b0fe46ac2d81c229d62449ad27237644
 file SYSTEM/sbin/model-install 118704 eab96905e6ea44e36a5a09232040a1c8d762a00768008ed2df341930298eac42
-file SYSTEM/sbin/updated 131984 f7c788a269ba1157ffe98097892fc5ed52c15e8670e32be3676638bdaae5391b
+file SYSTEM/sbin/updated 131984 4332805649804ed33e5009d332f02f864255543af54d0f2301c61ec5ae19e316
 file SYSTEM/usr/share/icda/assistant/guide.txt 2492 7e1d67afdf490b29ca0a82b8b56cc7c21406820d9df8c05db631a591c316db9f
 file SYSTEM/usr/share/icda/codex/AGENTS.md 3486 61f2a62b3a5502d1d0114ae6cb8c6af801a215d7eaa588261266f3b09a2ed4fa
 file SYSTEM/usr/share/icda/codex/CURRENT_TASK.md 2182 c020f9d585597c84bbbe89621bb5f0d298a405b4b127b5ac771d54cad6755851
@@ -2912,4 +2912,4 @@ wfile linux/usr/share/thumbnailers/librsvg.thumbnailer 158 6191e1ac86fc05020ffbc
 wfile linux/usr/share/udhcpc/default.script 3688 c4e5a7c4783a7a73dec48dee009ee687015d2de7ff86b269679b95bef2c60e13 550129203
 wfile linux/usr/share/xml/fontconfig/fonts.dtd 8254 76afafd572f6194858eef6d28389505d591d8d2a026da46568046554a87c207f 550132891
 wpack linux.pack 550141145 110e459f00f50e3c491e22395b01ffa3a2fe354f004bea479b5e75e8de37712a 6
-signature d1761d20da1e87324b905692cbaf614e0964db9ae30b7520b74039a2f61a2b573663a360f2bfad019773dc1e3d16e118afcfe11954d92a4580fbdb300b299005
+signature 121407d69c20437092e49deac7b2cd579d6fb51c6b2bfc244af1549a1b741dc130f7280b1d738517c13e4b1e149ed4291f2296c60c6ebebea0a781395d2c4706
