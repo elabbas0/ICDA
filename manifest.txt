@@ -1,22 +1,22 @@
 icda-ota 1
-version 1.10.0
-notes Graphics acceleration: ICDA now has a full driver for Intel graphics (HD/UHD 5xx/6xx), and Surfer draws web pages on the GPU. If anything about the GPU does not work on your computer, Surfer goes back to drawing in software by itself. Check the driver in Terminal with: cat /dev/gpu
-file EFI/ICDA/GRUBX64.EFI 5378048 06cfda53b396a677a0cc213797d00d2f749a8b1a500aad563d9940d82faf7f9c
-file EFI/ICDA/KERNEL.BIN 7369560 8a4fa3c4bca9356be59e64814a4fb24ad136d2d3ab889e4bbd22edbca15b1b98
-file SYSTEM/apps/browser.app 4157744 eb6f1050d1bbb5ecfa6b65fd9f1be5f3eb74a1382fcfdc598ff69d19d12c45fe
+version 1.10.1
+notes GPU status in Surfer and Settings > About (with the reason when Surfer draws in software, plus /tmp/surfer.log). Terminal: pipes (grep, head, tail, wc, sort) and &&. New boot menu entry: ICDA without the GPU driver. Safer updates.
+file EFI/ICDA/GRUBX64.EFI 5378048 9678280d53c672f572358ed51d96519ff839bd76be09ee8b82f4514331dadf2e
+file EFI/ICDA/KERNEL.BIN 7357272 aeb8ece5cba3e919cbf609193bfd0ba57aa89c9386f067b29b3103b1bd35c17e
+file SYSTEM/apps/browser.app 4157744 21be8b0e890fe9d64ab07b6d879af5a24e62a0c9bd07d079e554bbc7dd7bfc72
 file SYSTEM/apps/curl.app 7792 f6f6ddd922427bf1b606ff903e08874a2d48614bc75c33f3260b71f875018bd7
-file SYSTEM/apps/desktop.app 1205128 bc2bfdac489cf2f1485fa4a8d682db906a844eeb353fbae53beac9c27c0171ce
-file SYSTEM/apps/diskman.app 1226088 c7c0a473a7088a1b2f4a47935776b49e86b59ce14f281653e90cc2fd57a8ad70
-file SYSTEM/apps/editor.app 1205320 24d8eabb702fb6818ec4f6e53f7d7c48ef632f98e8f935f06be1f05d1c68b093
+file SYSTEM/apps/desktop.app 1205128 f32ef4f10507b0d02de585c1382f1d3f648fff9a14e84a15d3c3089a48c4547b
+file SYSTEM/apps/diskman.app 1226088 b42e9f3055db291547449ea835195587b227ac28562d5dfc8ef4123c79cad50b
+file SYSTEM/apps/editor.app 1205320 0e5482daedbdaf20e6f50de82e32b50ce87dbb25432b97ba24d0095f741ecd58
 file SYSTEM/apps/hello.app 77 257957c619fb838510adcc6e3e177f87c715ff64e7b1feea1ba86cd56c46fc0a
-file SYSTEM/apps/media.app 3119448 edb5ff967551c803fb74dd6161003bb7371cf53f14b1c8cee0f5b84e92197cd6
+file SYSTEM/apps/media.app 3119448 587f7d800d7797dd9b684d0e995b25215803689173a394382e3af96b40a8fd10
 file SYSTEM/apps/pid.app 137 ca9ace94e952ab453e9324f72b2aaf055d176bf0b8f0a300acb4d2f8ff99b449
-file SYSTEM/apps/settings.app 1257160 e57f628c8601df47e85fe62cfc5d400e3367ce00ca46dffdab4d9ac402e06976
-file SYSTEM/apps/shell.app 50264 cf53ee8f6d7f8a4b0cde3178ac73d9b2b1ad58adf6aa7de79d056a87e43b3610
-file SYSTEM/apps/taskman.app 1196688 e9ef620c2e848025ea18232ea62fcae3cd836721137ef4872e055c130dfc33c1
-file SYSTEM/apps/terminal.app 1201080 97f3e0ec84c2e04f542743c943717268cae304844532792b75c27ba0762c8046
+file SYSTEM/apps/settings.app 1257224 00846e2eeddbae05e6e8d0dfc91457efbe6b988263f0c9af97cd46b4eeea6bd1
+file SYSTEM/apps/shell.app 36880 d0a6b94762b7cfdbab54e213cd97d718681a7c6c690cca0a257712127c34ea39
+file SYSTEM/apps/taskman.app 1196688 eda87a7a558ffdafb571d18b2a20c525df62c64c9b9668aa256891c747afb033
+file SYSTEM/apps/terminal.app 1201080 a9b5ae4a0985185dc4b66bbe6a065cae77660f42700a8c6bd9f30a14158105b3
 file SYSTEM/apps/ticker.app 236 c26e49849ca88506614873a32d3a3d320f1c4dd21e3eaa974fb7cf5e62a198fa
-file SYSTEM/apps/wm.app 1346160 68fd8177d4d4e30c41d47ec70065feb59790ec3329a091fb675366a474ccbfd2
+file SYSTEM/apps/wm.app 1346160 c506985cc04eb5c9e489ee108535642b67e0f86568bacf1aa7a0c1ccce873ca5
 file SYSTEM/bin/argc.elf 5232 8b46207a0b9a4972d465c37bc0e9da538e5e17cccdb610c3837c45e7b4984c49
 file SYSTEM/bin/busybox 1982256 3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6
 file SYSTEM/bin/codex 1461 4b7e99066680f1e9017dbfb07ce51a12fdd1c3b69b0b18ce6f4f6c291f83f92d
@@ -28,7 +28,7 @@ file SYSTEM/etc/ssl/certs.pem 188900 a41b5d356aea97a529fe27e0f7316d2f9d946d75927
 file SYSTEM/sbin/assistantd 158456 850644abcf7c04f16d392067427a76b46426156745af0da1526ddfdf255ce734
 file SYSTEM/sbin/init.app 5168 8c8223f8a310ed572517078b623c9040b0fe46ac2d81c229d62449ad27237644
 file SYSTEM/sbin/model-install 118704 eab96905e6ea44e36a5a09232040a1c8d762a00768008ed2df341930298eac42
-file SYSTEM/sbin/updated 131984 c6f23818d6b47723dfaade7ea96a87ad4d3b1ddaf7a3511281c81ac2f7af0e8d
+file SYSTEM/sbin/updated 131984 ac4ec64fe1f91f3fa72e17c5d8deaeeb5232c84bbeb2749147132f8b64beb6bd
 file SYSTEM/usr/share/icda/assistant/guide.txt 2492 7e1d67afdf490b29ca0a82b8b56cc7c21406820d9df8c05db631a591c316db9f
 file SYSTEM/usr/share/icda/codex/AGENTS.md 3486 61f2a62b3a5502d1d0114ae6cb8c6af801a215d7eaa588261266f3b09a2ed4fa
 file SYSTEM/usr/share/icda/codex/CURRENT_TASK.md 2182 c020f9d585597c84bbbe89621bb5f0d298a405b4b127b5ac771d54cad6755851
@@ -52,7 +52,7 @@ file SYSTEM/usr/share/sounds/toggle_off.wav 124552 449554e8ad88f2afa6f4b069312d4
 file SYSTEM/usr/share/sounds/toggle_on.wav 155564 66eabe43516b792969222f7845f9e3746adddf0a1fa882ebc3259522131f57d8
 model linux/usr/share/icda/models/qwen2.5-0.5b-instruct-q4_k_m.gguf 491400032 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf
 model linux/usr/share/icda/models/qwen2.5-1.5b-instruct-q4_k_m.gguf 1117320736 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf
-lfile linux/usr/bin/icda-surfer 979056 ed19fd355335dbbd114a54423dc17c943df26ac5cdc1065d83783cf9a487a9d3
+lfile linux/usr/bin/icda-surfer 979248 2d4409d03925c8ede07b85e63072a54fe9579767c5e3b69469a36f3ab3ff90e8
 lfile linux/usr/bin/icda-llm 6732912 5e72b8c8eca57f3480df12399a76abc46266dc2141da5f1275036fd5233858d1
 lfile linux/usr/bin/icda-say 3991648 cad9aefde86d3d6f11007108e162e96fde550f6aa2575326093212b1d5c24a07
 lfile linux/usr/bin/icda-stt 3498440 5eb7174d1832abc73ef4a41f1f617dcf51b8c9975dd54f67f7c9d8350e95ba4a
@@ -2912,4 +2912,4 @@ wfile linux/usr/share/thumbnailers/librsvg.thumbnailer 158 6191e1ac86fc05020ffbc
 wfile linux/usr/share/udhcpc/default.script 3688 c4e5a7c4783a7a73dec48dee009ee687015d2de7ff86b269679b95bef2c60e13 550129203
 wfile linux/usr/share/xml/fontconfig/fonts.dtd 8254 76afafd572f6194858eef6d28389505d591d8d2a026da46568046554a87c207f 550132891
 wpack linux.pack 550141145 110e459f00f50e3c491e22395b01ffa3a2fe354f004bea479b5e75e8de37712a 6
-signature fd3a0d156c011f28c9182f4160b86975709bad15e085c723f3963bdf0c3efc0984f1c333d5a8da52a9305684e49550a40d538bc7fc09a1bacc9bbc5a61c27f09
+signature 5a057d9913e76cacf9cc27ac4b97717cacadfc392e02e12ddf8e795630e36c84aa21b8440815f59c99c9fc60d7f2cb3de2db2389f6bd732d24da77038c0a3e0e
