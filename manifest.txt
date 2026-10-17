@@ -1,22 +1,22 @@
 icda-ota 1
-version 1.10.2
-notes GPU fix for Surfer: the GPU self-test now handles the GPU's status events (it stalled on the HD 520), and a self-test failure no longer keeps the GPU driver from starting. More detail in cat /dev/gpu if something still fails.
+version 1.10.3
+notes GPU diagnostics: Surfer now keeps its log in /home/.cache/surfer.log (with Mesa's messages), and cat /dev/gpu lists requests the GPU driver turned down. GPU self-test fix.
 file EFI/ICDA/GRUBX64.EFI 5378048 9678280d53c672f572358ed51d96519ff839bd76be09ee8b82f4514331dadf2e
-file EFI/ICDA/KERNEL.BIN 7357352 3eff234c4231a9f15af3ecf7b62fd718665001c2a86b95e479786f87e50a7b7b
-file SYSTEM/apps/browser.app 4157744 fb8e7a7c34da09ff30c53f6e7eef26d31a16cf4348d6814118a94ba8636f0531
+file EFI/ICDA/KERNEL.BIN 7361536 210de4c907e3f01ccb77bb12f268eb51af8a7a1a460beca5bc2b6569790e6283
+file SYSTEM/apps/browser.app 4157744 51a288336c8639778d0447a9a7a8d70c64232db234c135eb75f327b44ecb5b66
 file SYSTEM/apps/curl.app 7792 f6f6ddd922427bf1b606ff903e08874a2d48614bc75c33f3260b71f875018bd7
-file SYSTEM/apps/desktop.app 1205128 315ace0a3a7368e8387cd61ed764b90b71fc91c1e41c51808e24529120a2f1dc
-file SYSTEM/apps/diskman.app 1226088 6ee15a62728f2e04290128f4ef38e5d3a4e48de579408cb1b3eb84b17cc8a8b7
-file SYSTEM/apps/editor.app 1205320 95ff076710407252e23f3dc1a2f9b6910ec2248c922e72a661e6c54c50e2d5f7
+file SYSTEM/apps/desktop.app 1205128 5cfd951994f11ecd6e3be7666dacb71ef312bdd4a69394db524105a0b0f2bae6
+file SYSTEM/apps/diskman.app 1226088 97ff89bf0b80fd70e015254bb4a81aae7ee548b9d2d299ca3deac8e19d77dc18
+file SYSTEM/apps/editor.app 1205320 961ca0eb4d01aa923474d382154c979885c891b43018615811d2d6ee4ab8524a
 file SYSTEM/apps/hello.app 77 257957c619fb838510adcc6e3e177f87c715ff64e7b1feea1ba86cd56c46fc0a
-file SYSTEM/apps/media.app 3119448 fcbb9a84792db35ec022638b9c8cc71ea7cdae0ce93efa6757cf429e2417df25
+file SYSTEM/apps/media.app 3119448 151d502f3f0e149dff9f9d6dd77773d9f002462ad119590ec2767470cdb1b3a5
 file SYSTEM/apps/pid.app 137 ca9ace94e952ab453e9324f72b2aaf055d176bf0b8f0a300acb4d2f8ff99b449
-file SYSTEM/apps/settings.app 1257224 b1cbfe182f432a848de412279adc1400181c5009bbbcd3d650095ce6c82a88ee
+file SYSTEM/apps/settings.app 1257224 35691b76ebac511187f4d007383258fae832077c0a26a7be0380c8ea59b3ba1c
 file SYSTEM/apps/shell.app 36880 d0a6b94762b7cfdbab54e213cd97d718681a7c6c690cca0a257712127c34ea39
-file SYSTEM/apps/taskman.app 1196688 2d4dc7acb7ab33bedd3447096f57efea6c04206b84d99ee99376332b0c7b0aee
-file SYSTEM/apps/terminal.app 1201080 4a31eb2fd5e83598066aeb96be377f41532682f5b21c33154c3f09655012b827
+file SYSTEM/apps/taskman.app 1196688 1de1382bd40be0c54064f52494f0aa5f6b4c0f4a63634dc54b2b4928f997fa0d
+file SYSTEM/apps/terminal.app 1201080 976b979928137b67860af3e8057a19fd59d2d8320b08589ba727415b3f5b6156
 file SYSTEM/apps/ticker.app 236 c26e49849ca88506614873a32d3a3d320f1c4dd21e3eaa974fb7cf5e62a198fa
-file SYSTEM/apps/wm.app 1346160 e69a8632bc52a335138faa67bc48af4ffad77d7bccc55a9934424c90217d367e
+file SYSTEM/apps/wm.app 1346160 4fe3df25fd8a788b6a01daa45a55a65f3ac93e0bde333bbea954821d5284c367
 file SYSTEM/bin/argc.elf 5232 8b46207a0b9a4972d465c37bc0e9da538e5e17cccdb610c3837c45e7b4984c49
 file SYSTEM/bin/busybox 1982256 3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6
 file SYSTEM/bin/codex 1461 4b7e99066680f1e9017dbfb07ce51a12fdd1c3b69b0b18ce6f4f6c291f83f92d
@@ -28,7 +28,7 @@ file SYSTEM/etc/ssl/certs.pem 188900 a41b5d356aea97a529fe27e0f7316d2f9d946d75927
 file SYSTEM/sbin/assistantd 158456 850644abcf7c04f16d392067427a76b46426156745af0da1526ddfdf255ce734
 file SYSTEM/sbin/init.app 5168 8c8223f8a310ed572517078b623c9040b0fe46ac2d81c229d62449ad27237644
 file SYSTEM/sbin/model-install 118704 eab96905e6ea44e36a5a09232040a1c8d762a00768008ed2df341930298eac42
-file SYSTEM/sbin/updated 131984 0b143a56282afdbdb6c4ae0aa76bf97eac4cb87be9ef0ecdf97b54c9206d6cf6
+file SYSTEM/sbin/updated 131984 6e4c8ced4c666e604f0f5ef28b88694754352cba1e0208c0525d5a13b2e3d9d0
 file SYSTEM/usr/share/icda/assistant/guide.txt 2492 7e1d67afdf490b29ca0a82b8b56cc7c21406820d9df8c05db631a591c316db9f
 file SYSTEM/usr/share/icda/codex/AGENTS.md 3486 61f2a62b3a5502d1d0114ae6cb8c6af801a215d7eaa588261266f3b09a2ed4fa
 file SYSTEM/usr/share/icda/codex/CURRENT_TASK.md 2182 c020f9d585597c84bbbe89621bb5f0d298a405b4b127b5ac771d54cad6755851
@@ -52,7 +52,7 @@ file SYSTEM/usr/share/sounds/toggle_off.wav 124552 449554e8ad88f2afa6f4b069312d4
 file SYSTEM/usr/share/sounds/toggle_on.wav 155564 66eabe43516b792969222f7845f9e3746adddf0a1fa882ebc3259522131f57d8
 model linux/usr/share/icda/models/qwen2.5-0.5b-instruct-q4_k_m.gguf 491400032 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf
 model linux/usr/share/icda/models/qwen2.5-1.5b-instruct-q4_k_m.gguf 1117320736 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf
-lfile linux/usr/bin/icda-surfer 979248 2d4409d03925c8ede07b85e63072a54fe9579767c5e3b69469a36f3ab3ff90e8
+lfile linux/usr/bin/icda-surfer 979312 91837b5a0077958052d1cb93d500f937caa60a607d597501f05c5c88036048f8
 lfile linux/usr/bin/icda-llm 6732912 5e72b8c8eca57f3480df12399a76abc46266dc2141da5f1275036fd5233858d1
 lfile linux/usr/bin/icda-say 3991648 cad9aefde86d3d6f11007108e162e96fde550f6aa2575326093212b1d5c24a07
 lfile linux/usr/bin/icda-stt 3498440 5eb7174d1832abc73ef4a41f1f617dcf51b8c9975dd54f67f7c9d8350e95ba4a
@@ -2912,4 +2912,4 @@ wfile linux/usr/share/thumbnailers/librsvg.thumbnailer 158 6191e1ac86fc05020ffbc
 wfile linux/usr/share/udhcpc/default.script 3688 c4e5a7c4783a7a73dec48dee009ee687015d2de7ff86b269679b95bef2c60e13 550129203
 wfile linux/usr/share/xml/fontconfig/fonts.dtd 8254 76afafd572f6194858eef6d28389505d591d8d2a026da46568046554a87c207f 550132891
 wpack linux.pack 550141145 110e459f00f50e3c491e22395b01ffa3a2fe354f004bea479b5e75e8de37712a 6
-signature 96bea1fd305f3819ca315cb92375d22f6563bb52b828d895b00ef3da6698ef0fa8bcf370602cca007e4514c310863e3b6d36f9d56033fd690b4b1bed9d3a150a
+signature d8c0547a7f8720ccb11a2bc369985642da3e8be5d307873fbfb78f56747998d1a46da1a9a4e508506bd2a31e93867f7cedd4b4b49755cf14852e9d0b0b7cc204
