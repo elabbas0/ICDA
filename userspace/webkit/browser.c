@@ -392,8 +392,11 @@ static void touch(const char *path) {
 }
 
 /* /tmp/surfer.log: how Surfer chose to draw and why, kept for the session
- * (Terminal: cat /tmp/surfer.log) */
+ * (Terminal: cat /tmp/surfer.log); also in SURFER_DISK_LOG,
+ * which outlives a restart, with what Mesa said while the GPU was tried */
+#define SURFER_DISK_LOG "/home/.cache/surfer.log"
 static void slog(const char *fmt, ...) {
+    static const char *const logs[] = { "/tmp/surfer.log", SURFER_DISK_LOG };
     char line[400];
     va_list ap;
     FILE *f;
@@ -401,10 +404,11 @@ static void slog(const char *fmt, ...) {
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
     fprintf(stderr, "icda-webkit: %s\n", line);
-    if ((f = fopen("/tmp/surfer.log", "a"))) {
-        fprintf(f, "%s\n", line);
-        fclose(f);
-    }
+    for (int i = 0; i < 2; i++)
+        if ((f = fopen(logs[i], "a"))) {
+            fprintf(f, "%s\n", line);
+            fclose(f);
+        }
 }
 
 /* why pages are drawn in software: the first reason counts */
@@ -453,6 +457,10 @@ static int gpu_probe(void) {
     if (pid == 0) {
         unsigned char px[4] = { 0, 0, 0, 0 };
         GLuint tex, fbo;
+        /* Mesa's and EGL's own messages into the disk log */
+        if (freopen(SURFER_DISK_LOG, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+        setenv("EGL_LOG_LEVEL", "debug", 1);
+        setenv("MESA_DEBUG", "1", 1);
         if (!gpu_start()) _exit(1);
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -1133,6 +1141,10 @@ int main(int argc, char **argv) {
     {
         int want = 1;
         FILE *off;
+        struct stat st;
+        mkdir("/home/.cache", 0755);
+        if (stat(SURFER_DISK_LOG, &st) == 0 && st.st_size > 256 * 1024 && (off = fopen(SURFER_DISK_LOG, "w")))
+            fclose(off);                                             /* kept small */
         slog("---- Surfer starting");
         if (access("/dev/dri/renderD128", F_OK) != 0) {
             want = 0;

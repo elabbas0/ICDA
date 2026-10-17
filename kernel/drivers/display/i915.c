@@ -1100,7 +1100,7 @@ static int64_t syncobj_array(i915_client_t *c, struct drm_syncobj_array *a, int 
     return 0;
 }
 
-int64_t i915_ioctl(i915_client_t *c, uint32_t nr, void *karg) {
+static int64_t ioctl_body(i915_client_t *c, uint32_t nr, void *karg) {
     if (!c) return -ENODEV_;
     switch (nr) {
     case 0x00: {                                     /* VERSION */
@@ -1336,6 +1336,37 @@ int64_t i915_ioctl(i915_client_t *c, uint32_t nr, void *karg) {
     default:
         return -EINVAL_;
     }
+}
+
+/* Requests the driver turned down, each kind once (up to 32), in /dev/gpu:
+ * when Mesa will not start on the GPU, the last of them is usually why */
+static void note_failure(uint32_t nr, uint32_t sub, int64_t err) {
+    static uint32_t seen[32];
+    static int count;
+    static const char hex[] = "0123456789abcdef";
+    char msg[] = "driver turned down request 0x__ (param 0x________) error ___";
+    uint32_t key = (nr << 24) ^ sub;
+    uint64_t e = (uint64_t)(-err);
+    for (int i = 0; i < count; i++) if (seen[i] == key) return;
+    if (count >= 32) return;
+    seen[count++] = key;
+    msg[29] = hex[(nr >> 4) & 15]; msg[30] = hex[nr & 15];
+    for (int i = 0; i < 8; i++) msg[41 + i] = hex[(sub >> (28 - 4 * i)) & 15];
+    msg[57] = (char)('0' + (e / 100) % 10); msg[58] = (char)('0' + (e / 10) % 10); msg[59] = (char)('0' + e % 10);
+    igpu_report(msg);
+}
+
+int64_t i915_ioctl(i915_client_t *c, uint32_t nr, void *karg) {
+    int64_t r = ioctl_body(c, nr, karg);
+    if (r < 0 && r != -EINTR_ && r != -ETIME_) {
+        uint32_t sub = 0;
+        /* the parameter asked about, where there is one */
+        if (nr == 0x46) sub = (uint32_t)((struct i915_getparam *)karg)->param;
+        else if (nr == 0x74 || nr == 0x75) sub = (uint32_t)((struct i915_ctx_param *)karg)->param;
+        else if (nr == 0x0c) sub = (uint32_t)((struct drm_get_cap *)karg)->capability;
+        note_failure(nr, sub, r);
+    }
+    return r;
 }
 
 /* ---- start ------------------------------------------------------------------------------ */

@@ -469,6 +469,8 @@ static int make_vm_ctx(vm_ctx_t *c, uint32_t value, uint32_t done_gtt) {
     r[n++] = done_gtt;
     r[n++] = 0;
     r[n++] = value;
+    r[n++] = MI_ARB_ON_OFF | 1;                                  /* left off, the engine never */
+    r[n++] = MI_NOOP;                                            /* switches to the next context */
 
     build_context_regs(c->regs);
     c->regs[CTX_CONTEXT_CONTROL] = MASKED_ON(CTX_CTRL_INHIBIT_SYN_SWITCH | CTX_CTRL_RESTORE_INHIBIT) |
