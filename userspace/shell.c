@@ -14,6 +14,20 @@
 #define SHELL_SCRIPT_CAP 16384
 
 
+/* "command > file", "command >> file": while a line's output is captured,
+ * what the built-in commands print goes here, and into the file after */
+#define SHELL_CAPTURE_CAP 65536
+static char shell_capture_buf[SHELL_CAPTURE_CAP];
+static uint64_t shell_capture_len;
+static int shell_capturing;
+
+static uint64_t shell_out(const char *text) {
+    if (!shell_capturing) return icda_write(text);
+    for (; *text && shell_capture_len + 1 < SHELL_CAPTURE_CAP; text++) shell_capture_buf[shell_capture_len++] = *text;
+    return 0;
+}
+#define icda_write shell_out
+
 static char shell_history[SHELL_HISTORY_CAP][SHELL_LINE_CAP];
 static uint64_t shell_history_count = 0;
 enum {
@@ -608,8 +622,18 @@ static void shell_cat(const char *path) {
     if (ret == 0 || buf[ret - 1] != '\n') icda_write("\n");
 }
 
+/* echo "text" prints text: one pair of quotes around it is taken off */
 static void shell_echo(const char *text) {
-    if (text && *text) icda_write(text);
+    char buf[SHELL_LINE_CAP];
+    uint64_t n = 0;
+    if (text) while (text[n] && n + 1 < sizeof(buf)) { buf[n] = text[n]; n++; }
+    buf[n] = 0;
+    if (n >= 2 && (buf[0] == '"' || buf[0] == '\'') && buf[n - 1] == buf[0]) {
+        buf[n - 1] = 0;
+        icda_write(buf + 1);
+    } else if (n) {
+        icda_write(buf);
+    }
     icda_write("\n");
 }
 
@@ -1332,7 +1356,56 @@ static void shell_wifi(char *arg) {
                "            forget <ssid>|saved|log [clear]|autoconnect on|off|restart]\n");
 }
 
+static void shell_dispatch_one(char *line);
+
+/* A line, with "> file" (replace) or ">> file" (add to the end) after it
+ * taken off and the command's output put there; a ">" inside quotes is text. */
 static void shell_dispatch(char *line) {
+    char quote = 0, *target = 0;
+    int append = 0;
+    for (uint64_t i = 0; line[i]; i++) {
+        char c = line[i];
+        if (quote) { if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '>') {
+            append = line[i + 1] == '>';
+            line[i] = 0;
+            target = &line[i + 1 + append];
+            break;
+        }
+    }
+    if (!target) { shell_dispatch_one(line); return; }
+    while (*target == ' ' || *target == '\t') target++;
+    {
+        uint64_t n = 0;
+        while (target[n]) n++;
+        while (n && (target[n - 1] == ' ' || target[n - 1] == '\t')) target[--n] = 0;
+        if (n >= 2 && (target[0] == '"' || target[0] == '\'') && target[n - 1] == target[0]) {
+            target[n - 1] = 0;
+            target++;
+        }
+    }
+    if (!*target) { icda_write("missing file name after >\n"); return; }
+    shell_capture_len = 0;
+    shell_capturing = 1;
+    shell_dispatch_one(line);
+    shell_capturing = 0;
+    {
+        icda_stat_t st;
+        long rc;
+        if (append && (long)icda_stat(target, &st) >= 0)
+            rc = (long)icda_write_file_at(target, st.size, shell_capture_buf, shell_capture_len);
+        else
+            rc = (long)icda_write_file(target, shell_capture_buf, shell_capture_len);
+        if (rc < 0) {
+            icda_write("could not write ");
+            icda_write(target);
+            icda_write("\n");
+        }
+    }
+}
+
+static void shell_dispatch_one(char *line) {
     char *arg = 0;
     while (*line == ' ' || *line == '\t') line++;
     for (uint64_t i = 0; line[i]; i++) {

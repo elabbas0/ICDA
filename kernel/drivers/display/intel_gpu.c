@@ -354,6 +354,216 @@ static int self_test(void) {
     return 0;
 }
 
+/* ---- stage 2: address spaces of their own ------------------------------------------
+ *
+ * Each program that uses the GPU gets a context and a 4-level page table
+ * (a "PPGTT", 48-bit like the CPU's): its batches see only what is mapped
+ * there.  The test makes two, maps the same GPU address to a different page
+ * in each, runs an unprivileged batch in each that writes to that address
+ * and checks that each write landed in its own page and nowhere else. */
+
+#define GEN8_PRIVATE_PAT_LO   0x40E0
+#define GEN8_PRIVATE_PAT_HI   0x40E4
+#define PAGE_PRESENT          (1ULL << 0)
+#define PAGE_RW               (1ULL << 1)
+#define PPAT_CACHED           (1ULL << 7)          /* PAT bit: private PAT entry 4, write-back */
+#define CTX_PDP0_UDW          (0x30 + 1)
+#define CTX_PDP0_LDW          (0x32 + 1)
+#define CTX_DESC_LEGACY_64B   (3u << 3)
+#define MI_BATCH_BUFFER_START_GEN8 MI_INSTR(0x31, 1)
+#define   MI_BATCH_PPGTT      (1u << 8)            /* from the context's address space, unprivileged */
+#define MI_BATCH_BUFFER_END   MI_INSTR(0x0a, 0)
+#define MI_ARB_ON_OFF         MI_INSTR(0x08, 0)
+#define GFX_OP_PIPE_CONTROL(len) ((0x3u << 29) | (0x3u << 27) | (0x2u << 24) | ((len) - 2))
+#define   PIPE_CONTROL_CS_STALL         (1u << 20)
+#define   PIPE_CONTROL_TLB_INVALIDATE   (1u << 18)
+#define   PIPE_CONTROL_QW_WRITE         (1u << 14)
+#define   PIPE_CONTROL_GLOBAL_GTT       (1u << 24)
+#define VM_BATCH              0x100000ULL          /* the GPU addresses the test uses */
+#define VM_DATA               0x101000ULL
+
+/* the private PAT, as Linux sets it on gen9: entry 0 write-back LLC (page
+ * tables), 4-7 write-back LLC/eLLC (memory), 3 uncached */
+static void setup_ppat(void) {
+    uint64_t pat = (0x3ULL | (1 << 2)) |                          /* 0: WB, LLC */
+                   ((uint64_t)(0x1 | (2 << 2)) << 8) |              /* 1: WC, LLC/eLLC */
+                   ((uint64_t)0x3 << 16) |                          /* 2: WB (eLLC override) */
+                   ((uint64_t)0x0 << 24);                           /* 3: UC */
+    for (int i = 4; i < 8; i++) pat |= (uint64_t)(0x3 | (2 << 2) | ((i - 4) << 4)) << (i * 8);
+    wr(GEN8_PRIVATE_PAT_LO, (uint32_t)pat);
+    wr(GEN8_PRIVATE_PAT_HI, (uint32_t)(pat >> 32));
+}
+
+static uint64_t page_zeroed(void) {
+    uint64_t p = pmm_alloc();
+    if (p) zero_pages(PHYS_TO_VIRT(p), 1);
+    return p;
+}
+
+typedef struct {
+    uint64_t pml4, pdp, pd, pt, batch, data;            /* physical pages */
+    uint32_t ctx_gtt, ring_gtt;
+    uint32_t *regs, *ring;
+} vm_ctx_t;
+
+/* a context whose batch, at VM_BATCH, stores value at VM_DATA; when its
+ * ring is done it writes value to the GGTT address done_gtt */
+static int make_vm_ctx(vm_ctx_t *c, uint32_t value, uint32_t done_gtt) {
+    const uint64_t pages = CTX_PAGES + RING_PAGES;
+    uint64_t phys, *e;
+    uint32_t *b, *r;
+    int64_t slot;
+    int n = 0;
+
+    c->pml4 = page_zeroed(); c->pdp = page_zeroed(); c->pd = page_zeroed();
+    c->pt = page_zeroed(); c->batch = page_zeroed(); c->data = page_zeroed();
+    if (!c->pml4 || !c->pdp || !c->pd || !c->pt || !c->batch || !c->data) return -1;
+    /* the page table walk for VM_BATCH and VM_DATA: index 0 at every level
+     * above the last, entries 256 and 257 in it */
+    ((uint64_t *)PHYS_TO_VIRT(c->pml4))[0] = c->pdp | PAGE_PRESENT | PAGE_RW;
+    ((uint64_t *)PHYS_TO_VIRT(c->pdp))[0] = c->pd | PAGE_PRESENT | PAGE_RW;
+    ((uint64_t *)PHYS_TO_VIRT(c->pd))[0] = c->pt | PAGE_PRESENT | PAGE_RW;
+    e = (uint64_t *)PHYS_TO_VIRT(c->pt);
+    e[(VM_BATCH >> 12) & 511] = c->batch | PAGE_PRESENT | PAGE_RW | PPAT_CACHED;
+    e[(VM_DATA >> 12) & 511] = c->data | PAGE_PRESENT | PAGE_RW | PPAT_CACHED;
+
+    b = (uint32_t *)PHYS_TO_VIRT(c->batch);
+    b[0] = MI_STORE_DWORD_IMM;                                   /* no GGTT bit: this address space */
+    b[1] = (uint32_t)VM_DATA;
+    b[2] = (uint32_t)(VM_DATA >> 32);
+    b[3] = value;
+    b[4] = MI_BATCH_BUFFER_END;
+    b[5] = MI_NOOP;
+
+    /* the context image and its ring, in the global GTT */
+    phys = pmm_alloc_contiguous(pages);
+    if (!phys) return -1;
+    zero_pages(PHYS_TO_VIRT(phys), pages);
+    slot = free_window(pages);
+    if (slot < 0) return -1;
+    for (uint64_t i = 0; i < pages; i++) G.gsm[slot + i] = (phys + i * 4096) | 1;
+    (void)G.gsm[slot + pages - 1];
+    wr(GFX_FLSH_CNTL, 1);
+    (void)rd(GFX_FLSH_CNTL);
+    c->ctx_gtt = (uint32_t)((uint64_t)slot * 4096);
+    c->ring_gtt = c->ctx_gtt + CTX_PAGES * 4096;
+    c->regs = (uint32_t *)((uint8_t *)PHYS_TO_VIRT(phys) + 4096);
+    c->ring = (uint32_t *)((uint8_t *)PHYS_TO_VIRT(phys) + CTX_PAGES * 4096);
+
+    r = c->ring;
+    r[n++] = GFX_OP_PIPE_CONTROL(6);                             /* forget old translations */
+    r[n++] = PIPE_CONTROL_CS_STALL | PIPE_CONTROL_TLB_INVALIDATE | PIPE_CONTROL_QW_WRITE | PIPE_CONTROL_GLOBAL_GTT;
+    r[n++] = done_gtt + 8;
+    r[n++] = 0;
+    r[n++] = 0;
+    r[n++] = 0;
+    r[n++] = MI_ARB_ON_OFF | 1;
+    r[n++] = MI_BATCH_BUFFER_START_GEN8 | MI_BATCH_PPGTT;
+    r[n++] = (uint32_t)VM_BATCH;
+    r[n++] = (uint32_t)(VM_BATCH >> 32);
+    r[n++] = MI_ARB_ON_OFF;
+    r[n++] = MI_NOOP;
+    r[n++] = MI_STORE_DWORD_IMM | MI_USE_GGTT;                   /* the ring itself: privileged */
+    r[n++] = done_gtt;
+    r[n++] = 0;
+    r[n++] = value;
+
+    build_context_regs(c->regs);
+    c->regs[CTX_CONTEXT_CONTROL] = MASKED_ON(CTX_CTRL_INHIBIT_SYN_SWITCH | CTX_CTRL_RESTORE_INHIBIT) |
+                                   MASKED_OFF(CTX_CTRL_SAVE_INHIBIT | CTX_CTRL_RS_CTX_ENABLE);
+    c->regs[CTX_RING_HEAD] = 0;
+    c->regs[CTX_RING_TAIL] = (uint32_t)n * 4;
+    c->regs[CTX_RING_START] = c->ring_gtt;
+    c->regs[CTX_RING_CTL] = ((RING_PAGES - 1) * 4096) | 1;
+    c->regs[CTX_MI_MODE + 1] = MASKED_OFF(STOP_RING);
+    c->regs[CTX_PDP0_UDW] = (uint32_t)(c->pml4 >> 32);
+    c->regs[CTX_PDP0_LDW] = (uint32_t)c->pml4;
+
+    flush_range(PHYS_TO_VIRT(phys), pages * 4096);
+    flush_range(PHYS_TO_VIRT(c->pml4), 4096);
+    flush_range(PHYS_TO_VIRT(c->pdp), 4096);
+    flush_range(PHYS_TO_VIRT(c->pd), 4096);
+    flush_range(PHYS_TO_VIRT(c->pt), 4096);
+    flush_range(PHYS_TO_VIRT(c->batch), 4096);
+    flush_range(PHYS_TO_VIRT(c->data), 4096);
+    return 0;
+}
+
+static int run_vm_ctx(vm_ctx_t *c, uint32_t id, volatile uint32_t *done, uint32_t value) {
+    uint64_t t0;
+    wr(RCS + RING_ELSP, 0);
+    wr(RCS + RING_ELSP, 0);
+    wr(RCS + RING_ELSP, id);
+    wr(RCS + RING_ELSP, c->ctx_gtt | CTX_DESC_LEGACY_64B | CTX_DESC_PRIVILEGE | CTX_DESC_VALID);
+    t0 = tsc_us();
+    while (tsc_us() - t0 < 500000) {
+        flush_range((const void *)done, 64);
+        if (*done == value) return 0;
+    }
+    return -1;
+}
+
+static uint32_t data_word(const vm_ctx_t *c) {
+    volatile uint32_t *d = (volatile uint32_t *)PHYS_TO_VIRT(c->data);
+    flush_range((const void *)d, 64);
+    return *d;
+}
+
+static int stage2_test(void) {
+    static vm_ctx_t a, b;
+    const uint32_t va = 0xC0DE00A1u, vb = 0xC0DE00B2u;
+    uint64_t done_phys;
+    int64_t slot;
+    volatile uint32_t *done;
+    uint32_t done_gtt;
+
+    setup_ppat();
+    done_phys = page_zeroed();
+    slot = done_phys ? free_window(1) : -1;
+    if (slot < 0) { line("stage 2: no room for the test"); return -1; }
+    G.gsm[slot] = done_phys | 1;
+    (void)G.gsm[slot];
+    wr(GFX_FLSH_CNTL, 1);
+    (void)rd(GFX_FLSH_CNTL);
+    done_gtt = (uint32_t)((uint64_t)slot * 4096);
+    done = (volatile uint32_t *)PHYS_TO_VIRT(done_phys);
+    flush_range((const void *)done, 4096);
+
+    if (make_vm_ctx(&a, va, done_gtt) != 0 || make_vm_ctx(&b, vb, done_gtt + 64)) {
+        line("stage 2: could not set up the address spaces");
+        return -1;
+    }
+    if (run_vm_ctx(&a, 2, done, va) != 0) {
+        say("stage 2: context A did not finish; execlist ");
+        say_hex(rd(RCS + RING_EXECLIST_STATUS));
+        say(" acthd ");
+        say_hex(rd(RCS + RING_ACTHD));
+        say(" ipehr ");
+        say_hex(rd(RCS + RING_IPEHR));
+        say("\n");
+        return -1;
+    }
+    if (run_vm_ctx(&b, 3, done + 16, vb) != 0) {
+        say("stage 2: context B did not finish; execlist ");
+        say_hex(rd(RCS + RING_EXECLIST_STATUS));
+        say(" acthd ");
+        say_hex(rd(RCS + RING_ACTHD));
+        say("\n");
+        return -1;
+    }
+    say("stage 2: page A ");
+    say_hex(data_word(&a));
+    say(", page B ");
+    say_hex(data_word(&b));
+    say("\n");
+    if (data_word(&a) != va || data_word(&b) != vb) {
+        line("stage 2: a batch wrote outside its own address space");
+        return -1;
+    }
+    line("stage 2: two address spaces ran their own batches, each wrote only its own memory");
+    return 0;
+}
+
 int intel_gpu_init(int disabled) {
     uint32_t bar_lo, bar_hi;
     uint64_t bar;
@@ -399,6 +609,7 @@ int intel_gpu_init(int disabled) {
     if (wake() != 0) return -1;
     if (reset_render() == 0) {
         G.passed = self_test() == 0;
+        if (G.passed) G.passed = stage2_test() == 0;
     }
     sleep_gt();
     return G.passed ? 0 : -1;
