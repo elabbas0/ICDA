@@ -611,8 +611,15 @@ int intel_gpu_init(int disabled) {
         G.passed = self_test() == 0;
         if (G.passed) G.passed = stage2_test() == 0;
     }
-    sleep_gt();
-    return G.passed ? 0 : -1;
+    if (!G.passed) {
+        sleep_gt();
+        return -1;
+    }
+    /* the GPU stays awake from here: the Linux driver interface (i915.c)
+     * runs it, and every submission would otherwise wake it first */
+    if (i915_init() == 0) line("Linux graphics driver interface ready: /dev/dri/renderD128");
+    else line("the Linux graphics driver interface did not start");
+    return 0;
 }
 
 uint64_t intel_gpu_node_read(char *buf, uint64_t cap) {
@@ -622,4 +629,24 @@ uint64_t intel_gpu_node_read(char *buf, uint64_t cap) {
     while (n + 1 < cap && n < G.report_len) { buf[n] = G.report[n]; n++; }
     buf[n] = 0;
     return n;
+}
+
+/* ---- for the Linux driver interface (i915.c) ---------------------------------------- */
+
+uint32_t igpu_rd(uint32_t reg) { return rd(reg); }
+void igpu_wr(uint32_t reg, uint32_t v) { wr(reg, v); }
+const pci_device_t *igpu_pci(void) { return G.pci; }
+void igpu_report(const char *s) { line(s); }
+void igpu_flush(const void *p, uint64_t bytes) { flush_range(p, bytes); }
+void igpu_context_regs(uint32_t *regs) { build_context_regs(regs); }
+int igpu_reset_render(void) { return reset_render(); }
+void igpu_setup_ppat(void) { setup_ppat(); }
+
+/* a run of free global GTT entries; the index of the first, or -1 */
+int64_t igpu_ggtt_window(uint64_t pages) { return free_window(pages); }
+void igpu_ggtt_set(uint64_t entry, uint64_t phys) { G.gsm[entry] = phys | 1; }
+void igpu_ggtt_flush(void) {
+    (void)G.gsm[0];
+    wr(GFX_FLSH_CNTL, 1);
+    (void)rd(GFX_FLSH_CNTL);
 }

@@ -293,7 +293,7 @@ static int64_t usock_write(lx_file_t *f, const char *ubuf, uint64_t count) {
 }
 
 static const lx_fops_t usock_ops = {
-    "socket", usock_read, usock_write, usock_ready, usock_release, 0, 0, 0140000, 0
+    "socket", usock_read, usock_write, usock_ready, usock_release, 0, 0, 0140000, 0, 0, 0
 };
 
 static usock_t *usock_new(int type) {
@@ -726,7 +726,7 @@ static int evfd_ready(lx_file_t *f, int want_write) {
 
 static void free_obj(void *obj) { kfree(obj); }
 
-static const lx_fops_t evfd_ops = { "anon_inode:[eventfd]", evfd_read, evfd_write, evfd_ready, free_obj, 0, 0, 0, 0 };
+static const lx_fops_t evfd_ops = { "anon_inode:[eventfd]", evfd_read, evfd_write, evfd_ready, free_obj, 0, 0, 0, 0, 0, 0 };
 
 int64_t lxi_eventfd(uint64_t initval, int flags) {
     evfd_t *e = (evfd_t *)zalloc(sizeof(evfd_t));
@@ -788,7 +788,7 @@ static int tfd_ready(lx_file_t *f, int want_write) {
     return t->next_ns && tfd_now(t) >= t->next_ns ? 1 : 0;
 }
 
-static const lx_fops_t tfd_ops = { "anon_inode:[timerfd]", tfd_read, 0, tfd_ready, free_obj, 0, 0, 0, 0 };
+static const lx_fops_t tfd_ops = { "anon_inode:[timerfd]", tfd_read, 0, tfd_ready, free_obj, 0, 0, 0, 0, 0, 0 };
 
 int64_t lxi_timerfd_create(int clockid, int flags) {
     tfd_t *t = (tfd_t *)zalloc(sizeof(tfd_t));
@@ -910,7 +910,7 @@ static int epoll_ready(lx_file_t *f, int want_write) {
     return 0;
 }
 
-static const lx_fops_t epoll_ops = { "anon_inode:[eventpoll]", 0, 0, epoll_ready, epoll_release, 0, 0, 0, 0 };
+static const lx_fops_t epoll_ops = { "anon_inode:[eventpoll]", 0, 0, epoll_ready, epoll_release, 0, 0, 0, 0, 0, 0 };
 
 int64_t lxi_epoll_create(int flags) {
     epoll_t *ep = (epoll_t *)zalloc(sizeof(epoll_t));
@@ -1128,7 +1128,7 @@ static int64_t mem_read(lx_file_t *f, char *ubuf, uint64_t count) { return mem_r
 static int64_t mem_write(lx_file_t *f, const char *ubuf, uint64_t count) { return mem_rw(f, (char *)ubuf, count, 1); }
 static int mem_ready(lx_file_t *f, int want_write) { (void)f; return 1 | (want_write ? 4 : 0); }
 
-static const lx_fops_t mem_ops = { "memfd", mem_read, mem_write, mem_ready, mem_release, mem_size, mem_truncate, 0100000, mem_frame };
+static const lx_fops_t mem_ops = { "memfd", mem_read, mem_write, mem_ready, mem_release, mem_size, mem_truncate, 0100000, mem_frame, 0, 0 };
 
 int64_t lxi_memfd_create(const char *uname, unsigned flags) {
     memobj_t *m = (memobj_t *)zalloc(sizeof(memobj_t));
@@ -1268,7 +1268,7 @@ static int64_t inet_write(lx_file_t *f, const char *ubuf, uint64_t count) {
 }
 
 static const lx_fops_t inet_ops = {
-    "socket", inet_read, inet_write, inet_ready, inet_release, 0, 0, 0140000, 0
+    "socket", inet_read, inet_write, inet_ready, inet_release, 0, 0, 0140000, 0, 0, 0
 };
 
 static int64_t inet_socket(int type) {

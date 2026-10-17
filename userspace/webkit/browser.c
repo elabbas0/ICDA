@@ -6,7 +6,8 @@
  * ICDA's window manager through the kernel's gateway (gui.c with
  * ICDA_SYS_BASE), the chrome is drawn with ICDA's own graphics and fonts
  * (ic_gfx.c, ic_font.c).  Each tab's web process paints frames into shared
- * memory (WPEBackend-fdo's SHM mode, Mesa's software renderer); the active
+ * memory (WPEBackend-fdo's SHM mode, Mesa's software renderer) or, with ICDA's
+ * GPU driver, on the GPU (EGL mode, Mesa's Intel driver); the active
  * tab's frame is copied under the chrome.
  *
  * Surfer (browser.app) starts this when a Linux root with WebKit is present.
@@ -21,6 +22,14 @@
 #include <wpe/webkit.h>
 #include <wpe/fdo.h>
 #include <wpe/unstable/fdo-shm.h>
+#include <wpe/fdo-egl.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <wayland-server.h>
 #include "gui.h"
 #include "ic_gfx.h"
@@ -47,6 +56,7 @@ typedef struct {
     struct wpe_view_backend_exportable_fdo *exp;
     struct wpe_view_backend *wb;
     struct wpe_view_backend_exportable_fdo_client client;   /* the backend keeps a pointer to it */
+    struct wpe_view_backend_exportable_fdo_egl_client egl_client;   /* the same, on the GPU */
     uint32_t *frame;               /* the last picture, content-area sized */
     int fw, fh;
     char title[160];
@@ -339,6 +349,161 @@ static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer 
     wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(t->exp, buffer);
 }
 
+/* ---- pages drawn on the GPU ------------------------------------------------------------
+ *
+ * With ICDA's Intel GPU driver (/dev/dri/renderD128), the web processes
+ * render with Mesa's Intel driver and hand over each frame as a GPU image
+ * (WPEBackend-fdo's EGL mode); the GPU also turns it back into pixels here
+ * (the image as a texture, read through a framebuffer) for the window.
+ *
+ * Anything going wrong falls back to drawing in software, as before:
+ *   - before WebKit starts, a child process draws a test picture on the GPU;
+ *     a crash, a hang or a wrong pixel means software for this session
+ *   - a web process that crashes while the GPU draws: Surfer restarts
+ *     itself in software for the session (/tmp is emptied at sign-in)
+ *   - a GPU session that did not end cleanly (Surfer itself died): the
+ *     next start uses software */
+
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+#define GPU_OFF_FLAG "/tmp/icda-webkit-software"
+#define GPU_RUN_FLAG "/tmp/icda-webkit-gpu"
+
+static int gpu_mode, gpu_bgra;
+static EGLDisplay egl_dpy = EGL_NO_DISPLAY;
+static GLuint rb_fbo, rb_tex;
+static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target;
+
+static void touch(const char *path) {
+    FILE *f = fopen(path, "w");
+    if (f) fclose(f);
+}
+
+static int gpu_start(void) {
+    PFNEGLGETPLATFORMDISPLAYEXTPROC get_display =
+        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    static const EGLint attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    EGLContext ctx;
+    const char *renderer, *exts;
+    if (!get_display) return 0;
+    egl_dpy = get_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+    if (egl_dpy == EGL_NO_DISPLAY || !eglInitialize(egl_dpy, NULL, NULL) || !eglBindAPI(EGL_OPENGL_ES_API)) return 0;
+    ctx = eglCreateContext(egl_dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, attrs);
+    if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return 0;
+    renderer = (const char *)glGetString(GL_RENDERER);
+    fprintf(stderr, "icda-webkit: GL renderer %s\n", renderer ? renderer : "(none)");
+    if (!renderer || strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe") || strstr(renderer, "Software")) return 0;
+    exts = (const char *)glGetString(GL_EXTENSIONS);
+    gpu_bgra = exts && strstr(exts, "GL_EXT_read_format_bgra") != NULL;
+    image_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!image_target) return 0;
+    glGenTextures(1, &rb_tex);
+    glGenFramebuffers(1, &rb_fbo);
+    glBindTexture(GL_TEXTURE_2D, rb_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    return 1;
+}
+
+/* in a child: the GPU set up and a picture drawn and read back */
+static int gpu_probe(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        unsigned char px[4] = { 0, 0, 0, 0 };
+        GLuint tex, fbo;
+        if (!gpu_start()) _exit(1);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) _exit(2);
+        glClearColor(1.0f, 0.5f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        fprintf(stderr, "icda-webkit: GPU test pixel %d %d %d %d\n", px[0], px[1], px[2], px[3]);
+        _exit(px[0] == 255 && px[1] >= 126 && px[1] <= 129 && px[2] == 0 && px[3] == 255 ? 0 : 3);
+    }
+    if (pid < 0) return 0;
+    for (int i = 0; i < 200; i++) {                  /* 20 s: the first start compiles shaders */
+        int st;
+        if (waitpid(pid, &st, WNOHANG) == pid) {
+            fprintf(stderr, "icda-webkit: GPU test %s\n", WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "passed" : "failed");
+            return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        usleep(100000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    fprintf(stderr, "icda-webkit: GPU test did not finish\n");
+    return 0;
+}
+
+static void gpu_clean_exit(void) {
+    unlink(GPU_RUN_FLAG);
+}
+
+/* Surfer again, drawing in software, at url */
+static void restart_in_software(const char *url) {
+    char self[512];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    char *args[3];
+    fprintf(stderr, "icda-webkit: restarting with software drawing\n");
+    touch(GPU_OFF_FLAG);
+    unlink(GPU_RUN_FLAG);
+    setenv("ICDA_WEBKIT_SOFTWARE", "1", 1);
+    if (n <= 0) exit(1);
+    self[n] = 0;
+    args[0] = self;
+    args[1] = (char *)(url ? url : "");
+    args[2] = NULL;
+    execv(self, args);
+    exit(1);
+}
+
+static void on_export_egl_image(void *data, struct wpe_fdo_egl_exported_image *image) {
+    tab_t *t = tab_of_exp(data);
+    unsigned t0 = now_ms();
+    int w = (int)wpe_fdo_egl_exported_image_get_width(image), h = (int)wpe_fdo_egl_exported_image_get_height(image);
+    EGLImageKHR img = wpe_fdo_egl_exported_image_get_egl_image(image);
+    if (w > 0 && h > 0 && img) {
+        if (t->fw != w || t->fh != h || !t->frame) {
+            free(t->frame);
+            t->frame = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
+            t->fw = w;
+            t->fh = h;
+        }
+        glBindTexture(GL_TEXTURE_2D, rb_tex);
+        image_target(GL_TEXTURE_2D, (GLeglImageOES)img);
+        glBindFramebuffer(GL_FRAMEBUFFER, rb_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rb_tex, 0);
+        if (t->frame && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            uint32_t *p = t->frame;
+            size_t n = (size_t)w * (size_t)h;
+            if (gpu_bgra) {
+                glReadPixels(0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, p);
+                for (size_t i = 0; i < n; i++) p[i] |= 0xFF000000u;
+            } else {
+                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, p);
+                for (size_t i = 0; i < n; i++) {
+                    uint32_t v = p[i];          /* bytes R G B A -> 0xAARRGGBB */
+                    p[i] = 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
+                }
+            }
+        }
+        if (t == tabs[active]) compose();
+        if (!timing_painted) {
+            timing_painted = 1;
+            timing("first picture", "");
+        }
+        frame_stats(t0);
+    }
+    wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
+    wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(t->exp, image);
+}
+
 static void sync_addr(void) {
     if (!addr_focus && ntabs) snprintf(addr, sizeof addr, "%s", tabs[active]->uri);
 }
@@ -392,6 +557,10 @@ static void on_terminated(WebKitWebView *v, WebKitWebProcessTerminationReason re
     char msg[160];
     (void)v; (void)d;
     fprintf(stderr, "icda-webkit: web process %s (reason %d)\n", why, (int)reason);
+    if (gpu_mode && reason == WEBKIT_WEB_PROCESS_CRASHED) {
+        const char *uri = webkit_web_view_get_uri(v);
+        restart_in_software(uri);
+    }
     snprintf(msg, sizeof msg, "The page %s. Press F5 to load it again.", why);
     set_status(msg, 0);
 }
@@ -429,8 +598,13 @@ static int add_tab(const char *url, WebKitWebView *related) {
     t = (tab_t *)calloc(1, sizeof(tab_t));
     if (!t) return -1;
     tabs[ntabs] = t;
-    t->client.export_shm_buffer = on_export_shm_buffer;
-    t->exp = wpe_view_backend_exportable_fdo_create(&t->client, t, (uint32_t)(W / S), (uint32_t)(content_h() / S));
+    if (gpu_mode) {
+        t->egl_client.export_fdo_egl_image = on_export_egl_image;
+        t->exp = wpe_view_backend_exportable_fdo_egl_create(&t->egl_client, t, (uint32_t)(W / S), (uint32_t)(content_h() / S));
+    } else {
+        t->client.export_shm_buffer = on_export_shm_buffer;
+        t->exp = wpe_view_backend_exportable_fdo_create(&t->client, t, (uint32_t)(W / S), (uint32_t)(content_h() / S));
+    }
     t->wb = wpe_view_backend_exportable_fdo_get_view_backend(t->exp);
     backend = webkit_web_view_backend_new(t->wb, NULL, NULL);
     if (related)
@@ -904,8 +1078,30 @@ int main(int argc, char **argv) {
     env_default("XDG_CACHE_HOME", "/home/.cache");
     env_default("XDG_DATA_HOME", "/home/.local/share");
     env_default("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
-    env_default("LIBGL_ALWAYS_SOFTWARE", "1");
-    env_default("GALLIUM_DRIVER", "llvmpipe");
+    /* the GPU when ICDA's driver offers it and it draws correctly here;
+     * Mesa's software renderer otherwise */
+    {
+        int want = access("/dev/dri/renderD128", F_OK) == 0 && access(GPU_OFF_FLAG, F_OK) != 0 &&
+                   !getenv("ICDA_WEBKIT_SOFTWARE");
+        if (want && access(GPU_RUN_FLAG, F_OK) == 0) {
+            fprintf(stderr, "icda-webkit: the last GPU session did not end cleanly\n");
+            touch(GPU_OFF_FLAG);
+            unlink(GPU_RUN_FLAG);
+            want = 0;
+        }
+        if (want && gpu_probe() && gpu_start()) {
+            gpu_mode = 1;
+            touch(GPU_RUN_FLAG);
+            atexit(gpu_clean_exit);
+        } else if (want) {
+            touch(GPU_OFF_FLAG);
+        }
+        fprintf(stderr, "icda-webkit: drawing on the %s\n", gpu_mode ? "GPU" : "CPU (software)");
+    }
+    if (!gpu_mode) {
+        env_default("LIBGL_ALWAYS_SOFTWARE", "1");
+        env_default("GALLIUM_DRIVER", "llvmpipe");
+    }
     env_default("EGL_PLATFORM", "wayland");
     env_default("GSETTINGS_BACKEND", "memory");
     /* no PulseAudio server here: sound goes through icdasink, and probing
@@ -925,7 +1121,8 @@ int main(int argc, char **argv) {
     compose();
 
     wpe_loader_init("libWPEBackend-fdo-1.0.so.1");
-    if (!wpe_fdo_initialize_shm()) {
+    if (gpu_mode && !wpe_fdo_initialize_for_egl_display(egl_dpy)) restart_in_software(url);
+    if (!gpu_mode && !wpe_fdo_initialize_shm()) {
         fprintf(stderr, "icda-webkit: WPEBackend-fdo shared memory mode failed\n");
         return 1;
     }

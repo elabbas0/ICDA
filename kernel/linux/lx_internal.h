@@ -33,6 +33,8 @@ typedef struct lx_fops {
     /* memory objects that mmap shares: the frame for page offset off,
      * allocated (zeroed) on first use; 0 if beyond the object */
     uint64_t (*frame)(void *obj, uint64_t off);
+    int64_t (*ioctl)(struct lx_file *f, uint64_t req, uint64_t arg);   /* minus a Linux errno, or a result */
+    uint64_t rdev;                                            /* device number of a character device */
 } lx_fops_t;
 
 typedef struct lx_file {
@@ -93,5 +95,11 @@ int64_t lxi_timerfd_settime(int64_t fd, int flags, const void *unew, void *uold)
 int64_t lxi_timerfd_gettime(int64_t fd, void *ucur);
 int64_t lxi_memfd_create(const char *uname, unsigned flags);
 lx_file_t *lxi_shared_anon(uint64_t len);     /* MAP_SHARED | MAP_ANONYMOUS: an unnamed memory file (one reference) */
+
+/* lx_drm.c: the GPU's render node, its dma-buf files and /sys entries */
+int        lx_drm_is_node(const char *path);
+lx_file_t *lx_drm_open(uint64_t flags);           /* one reference; 0 if there is no GPU */
+void       lx_drm_path(char *path);                /* /sys device links followed */
+int64_t    lx_drm_readlink(const char *path, char *out, uint64_t cap);
 
 #endif

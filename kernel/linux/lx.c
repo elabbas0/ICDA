@@ -878,6 +878,7 @@ static int64_t at_path(int64_t dirfd, const char *upath, char *out) {
     if (rel[0] == '/') {
         kstrcpy(out, rel, LX_PATH_MAX);
         (void)lx_overlay_path(out);
+        lx_drm_path(out);
         return 0;
     }
     if ((int32_t)dirfd == LX_AT_FDCWD) {
@@ -1008,6 +1009,11 @@ static uint64_t stat_path(const char *path, lx_stat_t *ust) {
         kind = LXF_VFS;
     }
     fill_stat(&st, kind, node);
+    if (lx_drm_is_node(path)) {                    /* the GPU: a character device, 226:128 */
+        st.mode = 020666;
+        st.rdev = (226ULL << 8) | 128;
+        st.size = 0;
+    }
     return copy_to_user(ust, &st, sizeof(st)) ? ERR(EFAULT) : 0;
 }
 
@@ -1021,6 +1027,7 @@ static uint64_t sys_fstat(int64_t fd, lx_stat_t *ust) {
         st.size = f->ops->size ? (int64_t)f->ops->size(f->obj) : 0;
         st.ino = ((uint64_t)(uintptr_t)f->obj >> 4) & 0xFFFFFFFFFFULL;
         st.nlink = 1;
+        st.rdev = f->ops->rdev;
     }
     return copy_to_user(ust, &st, sizeof(st)) ? ERR(EFAULT) : 0;
 }
@@ -1392,6 +1399,13 @@ static uint64_t sys_openat(int64_t dirfd, const char *upath, uint64_t flags) {
         if (fd < 0) file_put(f);
         return (uint64_t)(int64_t)fd;
     }
+    if (lx_drm_is_node(path)) {                    /* the GPU (lx_drm.c) */
+        f = lx_drm_open(flags);
+        if (!f) return ERR(19);   /* ENODEV */
+        fd = fd_alloc(s, 0, f, (flags & O_CLOEXEC) != 0);
+        if (fd < 0) file_put(f);
+        return (uint64_t)(int64_t)fd;
+    }
     kind = dev_kind(path);
     if (kind) {
         f = file_new(kind);
@@ -1749,6 +1763,10 @@ static uint64_t sys_ioctl(int64_t fd, uint64_t req, uint64_t arg) {
         int32_t n = (int32_t)f->pipe->len;
         return copy_to_user((void *)arg, &n, 4) ? ERR(EFAULT) : 0;
     }
+    if (f->kind == LXF_OBJ && f->ops->ioctl) {
+        int64_t r = f->ops->ioctl(f, req, arg);
+        return r < 0 ? ERR(-r) : (uint64_t)r;
+    }
     if (req == 0x5421) return 0; /* FIONBIO */
     return ERR(ENOTTY);
 }
@@ -1888,6 +1906,14 @@ static uint64_t sys_readlinkat(int64_t dirfd, const char *upath, char *ubuf, uin
     int64_t rc = at_path(dirfd, upath, path);
     uint64_t n;
     if (rc < 0) return ERR(-rc);
+    {
+        char link[256];
+        int64_t ln = lx_drm_readlink(path, link, sizeof(link));
+        if (ln >= 0) {
+            if ((uint64_t)ln > size) ln = (int64_t)size;
+            return copy_to_user(ubuf, link, (uint64_t)ln) ? ERR(EFAULT) : (uint64_t)ln;
+        }
+    }
     if (!kstreq(path, "/proc/self/exe")) {
         return vfs_resolve(cwd_node(), path) ? ERR(EINVAL) : ERR(ENOENT);
     }
