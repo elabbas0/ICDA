@@ -223,7 +223,9 @@ static fatfs_t *place(fatfs_t *v, fatfs_t *esp, const char *rel, char *path) {
             join(path, "/", rel + 7);
             return v;
         }
-        if (seq(rel, "EFI/ICDA/KERNEL.BIN")) {
+        /* the kernel and the boot menu (GRUB) live on the EFI partition;
+         * the backup and the rollback go through here too */
+        if (seq(rel, "EFI/ICDA/KERNEL.BIN") || seq(rel, "EFI/ICDA/GRUBX64.EFI")) {
             join(path, "/", rel);
             return boot_fs(v, esp);
         }
@@ -612,7 +614,13 @@ void sysupdate_apply(void) {
                     make_parent(&v, path);
                     if (fatfs_rename(&v, other, path) != 0) ulog("could not install ", rest);
                 } else if (copy_across(&v, other, t, path) != 0) {
-                    ulog("could not install ", rest);
+                    /* on the EFI partition (the kernel, GRUB): the old one
+                     * back, or nothing would start ICDA at all */
+                    char kept[PATH_MAX];
+                    join(kept, BACKUP_DIR, rest);
+                    (void)fatfs_remove(t, path);
+                    if (exists(t, kept)) (void)fatfs_rename(t, kept, path);
+                    ulog("could not install, kept the old one: ", rest);
                 }
             }
             if (t != &v) (void)fatfs_flush(t);

@@ -378,6 +378,22 @@ static void set_tz(int minutes) {
     ic_time_reload_tz();
 }
 
+/* sub somewhere in s */
+static int contains(const char *s, const char *sub) {
+    for (; *s; s++) {
+        const char *a = s, *b = sub;
+        while (*b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+/* the text after "...: " */
+static const char *after_colon(const char *s) {
+    for (; *s; s++) if (s[0] == ':' && s[1] == ' ') return s + 2;
+    return 0;
+}
+
 static void draw_about(ic_app_t *app, ic_canvas_t *c) {
     const ic_palette_t *p = ic_palette();
     const ic_icon_t *icon = ic_icon_builtin("settings");
@@ -394,20 +410,46 @@ static void draw_about(ic_app_t *app, ic_canvas_t *c) {
                     ic_version_label(), p->label_secondary, IC_ALIGN_CENTER);
     y += 36;
     {
-        ic_rect_t g = group_rect(app, y, 3);
-        static const char *const keys[3] = { "Kernel", "Interface", "Typefaces" };
-        static const char *const vals[3] = { "ICDA x86_64", "ICDA design system",
-                                             "Inter, JetBrains Mono" };
+        /* the GPU driver (/dev/gpu) and how Surfer draws (/tmp/surfer-mode,
+         * written by Surfer when it starts) */
+        static char gpu[1024], mode[256];
+        const char *graphics, *surfer, *why = 0;
+        long n = (long)icda_read_file("/dev/gpu", gpu, sizeof(gpu) - 1);
+        gpu[n > 0 ? n : 0] = 0;
+        if (contains(gpu, "driver interface ready")) graphics = "Intel GPU driver running";
+        else if (contains(gpu, "no Intel graphics")) graphics = "No Intel GPU";
+        else if (contains(gpu, "not supported")) graphics = "GPU not supported yet";
+        else if (contains(gpu, "turned off")) graphics = "GPU driver turned off";
+        else if (gpu[0]) graphics = "GPU driver stopped (Terminal: cat /dev/gpu)";
+        else graphics = "Basic display";
+        n = (long)icda_read_file("/tmp/surfer-mode", mode, sizeof(mode) - 1);
+        mode[n > 0 ? n : 0] = 0;
+        if (n > 0 && mode[n - 1] == '\n') mode[n - 1] = 0;
+        if (!mode[0]) surfer = "Not started yet";
+        else if (mode[0] == 'G' && mode[1] == 'P' && mode[2] == 'U') surfer = "Drawing on the GPU";
+        else { surfer = "Drawing in software"; why = after_colon(mode); }
+
+        ic_rect_t g = group_rect(app, y, 5);
+        static const char *const keys[5] = { "Kernel", "Interface", "Typefaces", "Graphics", "Surfer" };
+        const char *vals[5] = { "ICDA x86_64", "ICDA design system", "Inter, JetBrains Mono", graphics, surfer };
         ic_ui_group(c, g);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 5; i++) {
             ic_rect_t r = row_rect(g, i);
             r.h = ROW_H;
-            ic_ui_group_row(c, r, i, 3, 0.0f);
-            ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r.x + IC_SP_3, r.y, r.w / 2, r.h),
+            ic_ui_group_row(c, r, i, 5, 0.0f);
+            ic_text_draw_in(c, ic_font(IC_FONT_BODY), ic_rect_make(r.x + IC_SP_3, r.y, r.w / 3, r.h),
                             keys[i], p->label, IC_ALIGN_LEFT);
             ic_text_draw_in(c, ic_font(IC_FONT_BODY),
-                            ic_rect_make(r.x + r.w / 2, r.y, r.w / 2 - IC_SP_3, r.h), vals[i],
+                            ic_rect_make(r.x + r.w / 3, r.y, r.w * 2 / 3 - IC_SP_3, r.h), vals[i],
                             p->label_secondary, IC_ALIGN_RIGHT);
+        }
+        if (why && *why) {
+            char line[300];
+            ic_strcpy(line, "Surfer draws in software because ", sizeof line);
+            ic_strcat(line, why, sizeof line);
+            ic_strcat(line, ". Details: /tmp/surfer.log", sizeof line);
+            ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(g.x, g.y + g.h + IC_SP_2, g.w, 16),
+                            line, p->label_secondary, IC_ALIGN_LEFT);
         }
     }
 }

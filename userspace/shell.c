@@ -21,7 +21,31 @@ static char shell_capture_buf[SHELL_CAPTURE_CAP];
 static uint64_t shell_capture_len;
 static int shell_capturing;
 
+/* "a && b" runs b only if a worked: a command failed when it said so, the
+ * way every built-in reports a problem */
+static int shell_failed;
+
+static int shell_has(const char *s, const char *sub) {
+    for (; *s; s++) {
+        const char *a = s, *b = sub;
+        while (*b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static void shell_note_failure(const char *t) {
+    const char *u = "usage:", *n = "unknown command";
+    int i = 0;
+    while (u[i] && t[i] == u[i]) i++;
+    if (!u[i]) { shell_failed = 1; return; }
+    i = 0;
+    while (n[i] && t[i] == n[i]) i++;
+    if (!n[i] || shell_has(t, " failed") || shell_has(t, "cannot ") || shell_has(t, "could not")) shell_failed = 1;
+}
+
 static uint64_t shell_out(const char *text) {
+    shell_note_failure(text);
     if (!shell_capturing) return icda_write(text);
     for (; *text && shell_capture_len + 1 < SHELL_CAPTURE_CAP; text++) shell_capture_buf[shell_capture_len++] = *text;
     return 0;
@@ -348,7 +372,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
 
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
-            "help","clear","pwd","cd","ls","cat","mkdir","rm","touch","write","stat","install","sync","storage","mount","play","stop",
+            "help","clear","pwd","cd","ls","cat","grep","head","tail","wc","sort","mkdir","rm","touch","write","stat","install","sync","storage","mount","play","stop",
             "edit","diskman","curl","notify","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
@@ -582,7 +606,11 @@ static void print_prompt(void) {
 }
 
 static void shell_help(void) {
-    icda_write("commands: help clear pwd cd ls cat echo mkdir touch write stat install sync storage mount play stop edit diskman curl wifi webkit codex run exit\n");
+    icda_write("commands: help clear pwd cd ls cat echo grep head tail wc sort mkdir touch write stat install sync\n"
+               "          storage mount play stop edit diskman curl wifi webkit codex run exit\n"
+               "  cmd > file, cmd >> file   output into a file (replace, add to)\n"
+               "  a | b                     a's output is b's input (cat, grep, head, tail, wc, sort)\n"
+               "  a ; b, a && b             one after the other; with &&, b only if a worked\n");
 }
 
 static void shell_pwd(void) {
@@ -606,20 +634,182 @@ static void shell_ls(const char *path) {
     icda_write(buf);
 }
 
+/* ---- filters: a file, or what the command before "|" printed ---------------------- */
+
+static const char *shell_pipe_in;          /* the previous command's output, in a pipeline */
+static uint64_t shell_pipe_len;
+static char shell_text[SHELL_CAPTURE_CAP];
+
+/* the text a filter works on: path's contents, or the piped input; 0 if neither */
+static const char *shell_input(const char *path, const char *cmd) {
+    if (path && *path) {
+        long ret = (long)icda_read_file(path, shell_text, sizeof(shell_text) - 1);
+        if (ret < 0) {
+            icda_write(cmd);
+            icda_write(": cannot read ");
+            icda_write(path);
+            icda_write("\n");
+            return 0;
+        }
+        shell_text[ret] = 0;
+        return shell_text;
+    }
+    if (shell_pipe_in) return shell_pipe_in;
+    icda_write("usage: ");
+    icda_write(cmd);
+    icda_write(" <path>, or after |\n");
+    return 0;
+}
+
+/* each line of text to emit(line, len) */
+static void shell_lines(const char *text, void (*emit)(const char *, uint64_t, void *), void *ctx) {
+    while (*text) {
+        uint64_t n = 0;
+        while (text[n] && text[n] != '\n') n++;
+        emit(text, n, ctx);
+        text += n;
+        if (*text == '\n') text++;
+    }
+}
+
+static void shell_put_line(const char *s, uint64_t n) {
+    char line[SHELL_LINE_CAP];
+    if (n >= sizeof(line)) n = sizeof(line) - 1;
+    for (uint64_t i = 0; i < n; i++) line[i] = s[i];
+    line[n] = '\n';
+    line[n + 1 < sizeof(line) ? n + 1 : n] = 0;
+    icda_write(line);
+}
+
 static void shell_cat(const char *path) {
-    char buf[SHELL_BUF_CAP];
-    long ret;
-    if (!path || !*path) {
-        icda_write("usage: cat <path>\n");
-        return;
+    const char *text = shell_input(path, "cat");
+    uint64_t n;
+    if (!text) return;
+    icda_write(text);
+    n = 0;
+    while (text[n]) n++;
+    if (n && text[n - 1] != '\n') icda_write("\n");
+}
+
+static char shell_lower(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c; }
+
+typedef struct { const char *pat; int icase, invert; uint64_t hits; } grep_ctx_t;
+
+static void grep_line(const char *s, uint64_t n, void *p) {
+    grep_ctx_t *g = (grep_ctx_t *)p;
+    int found = 0;
+    for (uint64_t i = 0; i < n && !found; i++) {
+        uint64_t k = 0;
+        while (g->pat[k] && i + k < n &&
+               (g->icase ? shell_lower(s[i + k]) == shell_lower(g->pat[k]) : s[i + k] == g->pat[k])) k++;
+        if (!g->pat[k]) found = 1;
     }
-    ret = (long)icda_read_file(path, buf, sizeof(buf));
-    if (ret < 0) {
-        icda_write("cat failed\n");
-        return;
+    if (!g->pat[0]) found = 1;
+    if (found != g->invert) { shell_put_line(s, n); g->hits++; }
+}
+
+/* grep [-i] [-v] text [path]: the lines with text in them */
+static void shell_grep(char *arg) {
+    grep_ctx_t g = { 0, 0, 0, 0 };
+    char *path = 0;
+    const char *text;
+    while (arg && arg[0] == '-' && (arg[1] == 'i' || arg[1] == 'v') && (arg[2] == ' ' || !arg[2])) {
+        if (arg[1] == 'i') g.icase = 1; else g.invert = 1;
+        arg += 2;
+        while (*arg == ' ') arg++;
     }
-    icda_write(buf);
-    if (ret == 0 || buf[ret - 1] != '\n') icda_write("\n");
+    if (!arg || !*arg) { icda_write("usage: grep [-i] [-v] <text> [path]\n"); return; }
+    if (*arg == '"' || *arg == '\'') {                 /* "a quoted pattern" */
+        char q = *arg++;
+        g.pat = arg;
+        while (*arg && *arg != q) arg++;
+        if (*arg) *arg++ = 0;
+    } else {
+        g.pat = arg;
+        while (*arg && *arg != ' ') arg++;
+        if (*arg) *arg++ = 0;
+    }
+    while (*arg == ' ') arg++;
+    path = *arg ? arg : 0;
+    if (!(text = shell_input(path, "grep"))) return;
+    shell_lines(text, grep_line, &g);
+}
+
+typedef struct { uint64_t n, at, total; } count_ctx_t;
+static void count_line(const char *s, uint64_t n, void *p) { (void)s; (void)n; ((count_ctx_t *)p)->total++; }
+static void head_line(const char *s, uint64_t n, void *p) {
+    count_ctx_t *c = (count_ctx_t *)p;
+    if (c->at++ < c->n) shell_put_line(s, n);
+}
+static void tail_line(const char *s, uint64_t n, void *p) {
+    count_ctx_t *c = (count_ctx_t *)p;
+    if (c->at++ >= c->total - (c->total < c->n ? c->total : c->n)) shell_put_line(s, n);
+}
+
+/* head/tail [-n N] [path]: the first or last N lines (10) */
+static void shell_head_tail(char *arg, int tail) {
+    count_ctx_t c = { 10, 0, 0 };
+    const char *text;
+    if (arg && arg[0] == '-' && arg[1] == 'n') {
+        arg += 2;
+        while (*arg == ' ') arg++;
+        c.n = 0;
+        while (*arg >= '0' && *arg <= '9') c.n = c.n * 10 + (uint64_t)(*arg++ - '0');
+        while (*arg == ' ') arg++;
+    }
+    if (!(text = shell_input(arg && *arg ? arg : 0, tail ? "tail" : "head"))) return;
+    if (tail) shell_lines(text, count_line, &c);
+    shell_lines(text, tail ? tail_line : head_line, &c);
+}
+
+/* wc [path]: lines, words, bytes */
+static void shell_wc(const char *path) {
+    const char *text = shell_input(path, "wc");
+    uint64_t lines = 0, words = 0, bytes = 0;
+    int in_word = 0;
+    if (!text) return;
+    for (const char *p = text; *p; p++, bytes++) {
+        if (*p == '\n') lines++;
+        if (*p == ' ' || *p == '\n' || *p == '\t') in_word = 0;
+        else if (!in_word) { in_word = 1; words++; }
+    }
+    write_uint(lines); icda_write(" lines, ");
+    write_uint(words); icda_write(" words, ");
+    write_uint(bytes); icda_write(" bytes\n");
+}
+
+/* sort [path]: the lines in order */
+static void shell_sort(const char *path) {
+    static const char *line[2048];
+    static uint64_t len[2048];
+    const char *text = shell_input(path, "sort");
+    uint64_t n = 0;
+    if (!text) return;
+    while (*text && n < 2048) {
+        uint64_t k = 0;
+        while (text[k] && text[k] != '\n') k++;
+        line[n] = text;
+        len[n++] = k;
+        text += k;
+        if (*text == '\n') text++;
+    }
+    for (uint64_t i = 1; i < n; i++) {                 /* insertion sort: a few thousand lines at most */
+        const char *l = line[i];
+        uint64_t ln = len[i], j = i;
+        while (j > 0) {
+            const char *a = line[j - 1];
+            uint64_t an = len[j - 1], k = 0;
+            while (k < an && k < ln && a[k] == l[k]) k++;
+            /* a after l: a longer with l as its start, or larger where they differ */
+            if (!(k < an && (k == ln || (unsigned char)a[k] > (unsigned char)l[k]))) break;
+            line[j] = line[j - 1];
+            len[j] = len[j - 1];
+            j--;
+        }
+        line[j] = l;
+        len[j] = ln;
+    }
+    for (uint64_t i = 0; i < n; i++) shell_put_line(line[i], len[i]);
 }
 
 /* echo "text" prints text: one pair of quotes around it is taken off */
@@ -648,6 +838,7 @@ static int shell_spawn_and_wait(const char *path, const char *args) {
     if ((long)code < 0) {
         return -2;
     }
+    if (code != 0) shell_failed = 1;          /* for "a && b" */
     icda_write("pid=");
     write_uint(pid);
     icda_write(" ");
@@ -1360,21 +1551,46 @@ static void shell_dispatch_one(char *line);
 
 /* A line, with "> file" (replace) or ">> file" (add to the end) after it
  * taken off and the command's output put there; a ">" inside quotes is text. */
-static void shell_dispatch(char *line) {
-    char quote = 0, *target = 0;
-    int append = 0;
+/* "a | b | c": each command's output is the next one's input (filters read
+ * it: cat, grep, head, tail, wc, sort); "> file" or ">> file" at the end
+ * takes the last output.  A "|" or ">" inside quotes is text. */
+static char shell_pipe_buf[2][SHELL_CAPTURE_CAP];
+
+static void shell_run_pipeline(char *line) {
+    char quote = 0, *target = 0, *segs[8];
+    int append = 0, nseg = 0;
+    segs[nseg++] = line;
     for (uint64_t i = 0; line[i]; i++) {
         char c = line[i];
         if (quote) { if (c == quote) quote = 0; continue; }
         if (c == '"' || c == '\'') { quote = c; continue; }
-        if (c == '>') {
+        if (c == '|' && nseg < 8) {
+            line[i] = 0;
+            segs[nseg++] = &line[i + 1];
+        } else if (c == '>') {
             append = line[i + 1] == '>';
             line[i] = 0;
             target = &line[i + 1 + append];
             break;
         }
     }
-    if (!target) { shell_dispatch_one(line); return; }
+    shell_pipe_in = 0;
+    shell_pipe_len = 0;
+    for (int s = 0; s < nseg; s++) {
+        int last = s == nseg - 1, capture = !last || target;
+        if (capture) { shell_capture_len = 0; shell_capturing = 1; }
+        shell_dispatch_one(segs[s]);
+        shell_capturing = 0;
+        if (!last) {
+            char *buf = shell_pipe_buf[s & 1];
+            for (uint64_t k = 0; k < shell_capture_len; k++) buf[k] = shell_capture_buf[k];
+            buf[shell_capture_len] = 0;
+            shell_pipe_in = buf;
+            shell_pipe_len = shell_capture_len;
+        }
+    }
+    shell_pipe_in = 0;
+    if (!target) return;
     while (*target == ' ' || *target == '\t') target++;
     {
         uint64_t n = 0;
@@ -1386,10 +1602,6 @@ static void shell_dispatch(char *line) {
         }
     }
     if (!*target) { icda_write("missing file name after >\n"); return; }
-    shell_capture_len = 0;
-    shell_capturing = 1;
-    shell_dispatch_one(line);
-    shell_capturing = 0;
     {
         icda_stat_t st;
         long rc;
@@ -1405,9 +1617,36 @@ static void shell_dispatch(char *line) {
     }
 }
 
+/* "a ; b" runs both, "a && b" runs b only if a worked; outside quotes */
+static void shell_dispatch(char *line) {
+    char quote = 0, *start = line;
+    int need_ok = 0;
+    for (uint64_t i = 0;; i++) {
+        char c = line[i];
+        int sep;
+        if (c && quote) { if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        sep = !c || c == ';' ? 1 : (c == '&' && line[i + 1] == '&') ? 2 : 0;
+        if (!sep) continue;
+        line[i] = 0;
+        if (!need_ok || !shell_failed) {
+            shell_failed = 0;
+            shell_run_pipeline(start);
+        }
+        if (!c) break;
+        need_ok = sep == 2;
+        i += (uint64_t)sep - 1;
+        start = &line[i + 1];
+    }
+}
+
 static void shell_dispatch_one(char *line) {
     char *arg = 0;
+    uint64_t end = 0;
     while (*line == ' ' || *line == '\t') line++;
+    /* "cat f.txt | sort" leaves "cat f.txt ": the space is not part of the name */
+    while (line[end]) end++;
+    while (end && (line[end - 1] == ' ' || line[end - 1] == '\t')) line[--end] = 0;
     for (uint64_t i = 0; line[i]; i++) {
         if (line[i] == ' ' || line[i] == '\t') {
             line[i] = 0;
@@ -1423,6 +1662,11 @@ static void shell_dispatch_one(char *line) {
     if (str_eq(line, "cd")) { if ((long)icda_chdir((arg && *arg) ? arg : "/") < 0) icda_write("cd failed\n"); return; }
     if (str_eq(line, "ls")) { shell_ls(arg); return; }
     if (str_eq(line, "cat")) { shell_cat(arg); return; }
+    if (str_eq(line, "grep")) { shell_grep(arg); return; }
+    if (str_eq(line, "head")) { shell_head_tail(arg, 0); return; }
+    if (str_eq(line, "tail")) { shell_head_tail(arg, 1); return; }
+    if (str_eq(line, "wc")) { shell_wc(arg); return; }
+    if (str_eq(line, "sort")) { shell_sort(arg); return; }
     if (str_eq(line, "echo")) { shell_echo(arg); return; }
     if (str_eq(line, "mkdir")) { shell_mkdir(arg); return; }
     if (str_eq(line, "rm")) { shell_rm(arg); return; }

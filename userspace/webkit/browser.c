@@ -16,6 +16,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -36,6 +37,7 @@
 #include "ic_font.h"
 
 #define MAX_TABS   12
+#define BADGE_W    (84 * S)           /* "GPU" or "Software", right of the address */
 #define HOME_URL   "https://duckduckgo.com/"
 #define SEARCH_URL "https://duckduckgo.com/?q="
 #define DL_DIR     "/home/Downloads"
@@ -71,6 +73,8 @@ static int W, H, S;                /* window size (physical pixels), scale */
 static int TABS_H, BAR_H, TOP;     /* chrome heights; content starts at TOP */
 static char addr[2048];
 static int addr_focus, addr_all;   /* editing the address; everything selected */
+static int gpu_mode;                /* pages drawn on the GPU (below) */
+static char gpu_reason[200];        /* why not, when not */
 static char status[256];
 static uint32_t status_until;
 static int mouse_x, mouse_y;
@@ -141,7 +145,7 @@ static ic_rect_t button_rect(int i) {        /* 0 back, 1 forward, 2 reload */
 
 static ic_rect_t addr_rect(void) {
     ic_rect_t r = { 8 * S + 3 * 36 * S + 6 * S, TABS_H + 6 * S, 0, 32 * S };
-    r.w = W - r.x - 10 * S;
+    r.w = W - r.x - 10 * S - BADGE_W;
     return r;
 }
 
@@ -230,6 +234,13 @@ static void compose(void) {
                 }
             }
         }
+    }
+    {   /* how pages are drawn: on the GPU, or in software (the reason in
+         * /tmp/surfer.log and Settings > About) */
+        ic_rect_t a = addr_rect();
+        ic_rect_t r = { a.x + a.w + 8 * S, a.y + 4 * S, BADGE_W - 10 * S, a.h - 8 * S };
+        ic_gfx_rrect(&c, r.x, r.y, r.w, r.h, 7.0f * S, gpu_mode ? 0xFF1E5E3Au : C_FIELD);
+        ic_text_draw_in(&c, small, r, gpu_mode ? "GPU" : "Software", gpu_mode ? 0xFF7CE0A0u : C_TEXT2, IC_ALIGN_CENTER);
     }
     if (t && t->loading && t->progress > 0 && t->progress < 1) {
         ic_gfx_fill(&c, 0, TOP - 2 * S, (int)(W * t->progress), 2 * S, C_ACCENT);
@@ -370,7 +381,7 @@ static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer 
 #define GPU_OFF_FLAG "/tmp/icda-webkit-software"
 #define GPU_RUN_FLAG "/tmp/icda-webkit-gpu"
 
-static int gpu_mode, gpu_bgra;
+static int gpu_bgra;
 static EGLDisplay egl_dpy = EGL_NO_DISPLAY;
 static GLuint rb_fbo, rb_tex;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target;
@@ -378,6 +389,36 @@ static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target;
 static void touch(const char *path) {
     FILE *f = fopen(path, "w");
     if (f) fclose(f);
+}
+
+/* /tmp/surfer.log: how Surfer chose to draw and why, kept for the session
+ * (Terminal: cat /tmp/surfer.log) */
+static void slog(const char *fmt, ...) {
+    char line[400];
+    va_list ap;
+    FILE *f;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "icda-webkit: %s\n", line);
+    if ((f = fopen("/tmp/surfer.log", "a"))) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+    }
+}
+
+/* why pages are drawn in software: the first reason counts */
+static void reason(const char *why) {
+    if (!gpu_reason[0]) snprintf(gpu_reason, sizeof gpu_reason, "%s", why);
+}
+
+/* /tmp/surfer-mode, for Settings > About: "GPU", or "Software: why" */
+static void write_mode(void) {
+    FILE *f = fopen("/tmp/surfer-mode", "w");
+    if (!f) return;
+    if (gpu_mode) fprintf(f, "GPU\n");
+    else fprintf(f, "Software: %s\n", gpu_reason[0] ? gpu_reason : "no GPU driver");
+    fclose(f);
 }
 
 static int gpu_start(void) {
@@ -392,7 +433,7 @@ static int gpu_start(void) {
     ctx = eglCreateContext(egl_dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, attrs);
     if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return 0;
     renderer = (const char *)glGetString(GL_RENDERER);
-    fprintf(stderr, "icda-webkit: GL renderer %s\n", renderer ? renderer : "(none)");
+    slog("GL renderer: %s", renderer ? renderer : "(none)");
     if (!renderer || strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe") || strstr(renderer, "Software")) return 0;
     exts = (const char *)glGetString(GL_EXTENSIONS);
     gpu_bgra = exts && strstr(exts, "GL_EXT_read_format_bgra") != NULL;
@@ -423,21 +464,30 @@ static int gpu_probe(void) {
         glClearColor(1.0f, 0.5f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        fprintf(stderr, "icda-webkit: GPU test pixel %d %d %d %d\n", px[0], px[1], px[2], px[3]);
+        slog("GPU test pixel: %d %d %d %d (want 255 127 0 255)", px[0], px[1], px[2], px[3]);
         _exit(px[0] == 255 && px[1] >= 126 && px[1] <= 129 && px[2] == 0 && px[3] == 255 ? 0 : 3);
     }
     if (pid < 0) return 0;
     for (int i = 0; i < 200; i++) {                  /* 20 s: the first start compiles shaders */
         int st;
         if (waitpid(pid, &st, WNOHANG) == pid) {
-            fprintf(stderr, "icda-webkit: GPU test %s\n", WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "passed" : "failed");
+            if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+                slog("GPU test passed");
+            } else {
+                static const char *const why[] = { "", "Mesa could not start on the GPU (see the GL renderer line)",
+                                                   "the GPU could not draw into a picture", "the GPU drew the test picture wrong" };
+                int code = WIFEXITED(st) ? WEXITSTATUS(st) : 0;
+                slog("GPU test failed (%s %d)", WIFEXITED(st) ? "exit" : "signal", WIFEXITED(st) ? code : WTERMSIG(st));
+                reason(code >= 1 && code <= 3 ? why[code] : "the GPU test crashed");
+            }
             return WIFEXITED(st) && WEXITSTATUS(st) == 0;
         }
         usleep(100000);
     }
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
-    fprintf(stderr, "icda-webkit: GPU test did not finish\n");
+    slog("GPU test did not finish in 20 s");
+    reason("the GPU test hung");
     return 0;
 }
 
@@ -446,14 +496,14 @@ static void gpu_clean_exit(void) {
 }
 
 /* Surfer again, drawing in software, at url */
-static void restart_in_software(const char *url) {
+static void restart_in_software(const char *url, const char *why) {
     char self[512];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
     char *args[3];
-    fprintf(stderr, "icda-webkit: restarting with software drawing\n");
-    touch(GPU_OFF_FLAG);
+    FILE *off = fopen(GPU_OFF_FLAG, "w");          /* the rest of the session: software, and why */
+    if (off) { fprintf(off, "%s\n", why); fclose(off); }
+    slog("restarting with software drawing: %s", why);
     unlink(GPU_RUN_FLAG);
-    setenv("ICDA_WEBKIT_SOFTWARE", "1", 1);
     if (n <= 0) exit(1);
     self[n] = 0;
     args[0] = self;
@@ -559,7 +609,7 @@ static void on_terminated(WebKitWebView *v, WebKitWebProcessTerminationReason re
     fprintf(stderr, "icda-webkit: web process %s (reason %d)\n", why, (int)reason);
     if (gpu_mode && reason == WEBKIT_WEB_PROCESS_CRASHED) {
         const char *uri = webkit_web_view_get_uri(v);
-        restart_in_software(uri);
+        restart_in_software(uri, "a page crashed while drawing on the GPU");
     }
     snprintf(msg, sizeof msg, "The page %s. Press F5 to load it again.", why);
     set_status(msg, 0);
@@ -1081,11 +1131,25 @@ int main(int argc, char **argv) {
     /* the GPU when ICDA's driver offers it and it draws correctly here;
      * Mesa's software renderer otherwise */
     {
-        int want = access("/dev/dri/renderD128", F_OK) == 0 && access(GPU_OFF_FLAG, F_OK) != 0 &&
-                   !getenv("ICDA_WEBKIT_SOFTWARE");
-        if (want && access(GPU_RUN_FLAG, F_OK) == 0) {
-            fprintf(stderr, "icda-webkit: the last GPU session did not end cleanly\n");
-            touch(GPU_OFF_FLAG);
+        int want = 1;
+        FILE *off;
+        slog("---- Surfer starting");
+        if (access("/dev/dri/renderD128", F_OK) != 0) {
+            want = 0;
+            reason("no GPU driver (Terminal: cat /dev/gpu)");
+        } else if ((off = fopen(GPU_OFF_FLAG, "r"))) {
+            /* the GPU failed earlier this session: the reason is in the flag */
+            char why[200] = "";
+            if (fgets(why, sizeof why, off)) why[strcspn(why, "\n")] = 0;
+            fclose(off);
+            want = 0;
+            reason(why[0] ? why : "the GPU failed earlier this session");
+        } else if (getenv("ICDA_WEBKIT_SOFTWARE")) {
+            want = 0;
+            reason("asked for (ICDA_WEBKIT_SOFTWARE)");
+        } else if (access(GPU_RUN_FLAG, F_OK) == 0) {
+            slog("the last GPU session did not end cleanly");
+            reason("Surfer stopped unexpectedly while drawing on the GPU");
             unlink(GPU_RUN_FLAG);
             want = 0;
         }
@@ -1094,9 +1158,15 @@ int main(int argc, char **argv) {
             touch(GPU_RUN_FLAG);
             atexit(gpu_clean_exit);
         } else if (want) {
-            touch(GPU_OFF_FLAG);
+            reason("the GPU test failed");
         }
-        fprintf(stderr, "icda-webkit: drawing on the %s\n", gpu_mode ? "GPU" : "CPU (software)");
+        if (!gpu_mode && want != 0) want = 0;
+        if (!gpu_mode && gpu_reason[0] && access(GPU_OFF_FLAG, F_OK) != 0 && access("/dev/dri/renderD128", F_OK) == 0) {
+            FILE *f = fopen(GPU_OFF_FLAG, "w");          /* the rest of the session stays in software */
+            if (f) { fprintf(f, "%s\n", gpu_reason); fclose(f); }
+        }
+        slog("drawing on the %s%s%s", gpu_mode ? "GPU" : "CPU (software)", gpu_mode ? "" : ": ", gpu_mode ? "" : gpu_reason);
+        write_mode();
     }
     if (!gpu_mode) {
         env_default("LIBGL_ALWAYS_SOFTWARE", "1");
@@ -1121,7 +1191,7 @@ int main(int argc, char **argv) {
     compose();
 
     wpe_loader_init("libWPEBackend-fdo-1.0.so.1");
-    if (gpu_mode && !wpe_fdo_initialize_for_egl_display(egl_dpy)) restart_in_software(url);
+    if (gpu_mode && !wpe_fdo_initialize_for_egl_display(egl_dpy)) restart_in_software(url, "WebKit could not take the GPU display");
     if (!gpu_mode && !wpe_fdo_initialize_shm()) {
         fprintf(stderr, "icda-webkit: WPEBackend-fdo shared memory mode failed\n");
         return 1;
