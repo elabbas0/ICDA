@@ -17,6 +17,7 @@
 #include "../drivers/net/iwm/wifi.h"
 #include "../fs/sysupdate.h"
 #include "../power/battery.h"
+#include "../drivers/display/intel_gpu.h"
 #include "notify.h"
 
 
@@ -318,6 +319,14 @@ static const dev_calls_t dev_wifi_calls = {
 
 
 
+/* /dev/gpu: the Intel graphics driver's findings (drivers/display/intel_gpu.c) */
+static const dev_calls_t dev_gpu_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    intel_gpu_node_read,
+    0,
+};
+
 /* /dev/battery, /dev/power: battery state, power modes (power/battery.c) */
 static const dev_calls_t dev_battery_calls = {
     0, 0, 0, 0, 0, 0, 0, 0,
@@ -402,9 +411,9 @@ int dev_populate(void) {
         rc = -1;
     }
     {
-        static const char *const extra[] = { "/dev/battery", "/dev/power", "/dev/notify" };
-        static const dev_calls_t *const extra_calls[] = { &dev_battery_calls, &dev_power_calls, &dev_notify_calls };
-        for (int i = 0; i < 3; i++) {
+        static const char *const extra[] = { "/dev/battery", "/dev/power", "/dev/notify", "/dev/gpu" };
+        static const dev_calls_t *const extra_calls[] = { &dev_battery_calls, &dev_power_calls, &dev_notify_calls, &dev_gpu_calls };
+        for (int i = 0; i < 4; i++) {
             if (!vfs_resolve(vfs_root(), extra[i])) (void)vfs_create(vfs_root(), extra[i]);
             if (devops_register(extra[i], extra_calls[i]) != 0) rc = -1;
         }

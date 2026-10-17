@@ -15,6 +15,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/net/net_drv.h"
 #include "drivers/display/virtio_gpu.h"
+#include "drivers/display/intel_gpu.h"
 #include "drivers/serial/serial.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
@@ -342,6 +343,12 @@ void kernel_main(void *multiboot_info) {
             boot_prefix("display");
             console_write("virtio-gpu unavailable\n", CONSOLE_STYLE_WARN);
         }
+    }
+
+    /* Intel graphics: found, woken, its render engine tested (/dev/gpu) */
+    bootstage_set(1202, "intel-gpu");
+    if (intel_gpu_init(boot_cmdline_has_flag(multiboot_info, "icda.nogpu=1")) == 0) {
+        boot_line("display", "intel gpu: render engine runs commands");
     }
 
     bootstage_set(121, "hda");
