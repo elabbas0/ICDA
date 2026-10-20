@@ -35,6 +35,6 @@ mkdir -p "$here/qemu/pc-bios"
 docker cp icda-qemu-wasm:/build/qemu-system-x86_64 "$here/qemu/qemu-system-x86_64.js"
 docker cp icda-qemu-wasm:/build/qemu-system-x86_64.wasm "$here/qemu/"
 docker cp icda-qemu-wasm:/build/qemu-system-x86_64.worker.js "$here/qemu/"
-for f in bios-256k.bin vgabios-stdvga.bin kvmvapic.bin efi-e1000.rom; do
+for f in bios-256k.bin vgabios-stdvga.bin kvmvapic.bin efi-e1000.rom multiboot_dma.bin; do
     cp "pc-bios/$f" "$here/qemu/pc-bios/"
 done

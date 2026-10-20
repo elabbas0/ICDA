@@ -39,12 +39,22 @@ let ring = null;       // Int32Array view of the event ring
 let shared = null;     // Int32Array view of [pending, head, tail]
 let ringSize = 0;
 let image = null;
+let booted = false;
 
 function setStatus(text) {
   statusEl.textContent = text;
 }
 
 function log(line) {
+  // Boot progress from the serial console, until the desktop is up
+  if (!booted) {
+    const stage = /^\[stage\] \[S\d+ ([^\]]+)\]/.exec(line);
+    if (stage) setStatus(`Booting ICDA: ${stage[1]}…`);
+    if (line.startsWith('wm:')) {
+      booted = true;
+      setStatus('Running. Click the screen to type.');
+    }
+  }
   logEl.textContent += line + '\n';
   if (logEl.textContent.length > 200000) {
     logEl.textContent = logEl.textContent.slice(-100000);
@@ -134,10 +144,17 @@ async function boot() {
     setStatus('This page needs cross-origin isolation (SharedArrayBuffer). Reloading…');
     return;
   }
-  const iso = await fetchWithProgress('kernel.iso', 'ICDA image');
+  // The kernel is served gzip-compressed and unpacked here at native speed.
+  // QEMU loads it through the Multiboot 1 shim (shim/shim.c) instead of
+  // GRUB, which takes over a minute to read it from an emulated CD.
+  const gz = await fetchWithProgress('kernel.bin.gz', 'ICDA kernel');
+  setStatus('Unpacking the kernel…');
+  const kernel = new Uint8Array(await new Response(
+    new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  const shim = new Uint8Array(await (await fetch('shim.elf')).arrayBuffer());
   const bios = {};
   for (const f of ['bios-256k.bin', 'vgabios-stdvga.bin', 'kvmvapic.bin',
-                   'efi-e1000.rom']) {
+                   'efi-e1000.rom', 'multiboot_dma.bin']) {
     bios[f] = new Uint8Array(await (await fetch('qemu/pc-bios/' + f)).arrayBuffer());
   }
   setStatus('Starting the emulator…');
@@ -153,8 +170,9 @@ async function boot() {
       '-monitor', 'none',
       '-device', 'qemu-xhci',
       '-device', 'usb-tablet',
-      '-cdrom', '/icda/kernel.iso',
-      '-boot', 'd',
+      '-nic', 'none',
+      '-kernel', '/icda/shim.elf',
+      '-initrd', '/icda/kernel.bin',
       '-no-reboot',
     ],
     mainScriptUrlOrBlob: new URL('./qemu/qemu-system-x86_64.js', import.meta.url).href,
@@ -167,13 +185,14 @@ async function boot() {
         mod.FS.writeFile('/pc-bios/' + name, data);
       }
       mod.FS.mkdir('/icda');
-      mod.FS.writeFile('/icda/kernel.iso', iso);
+      mod.FS.writeFile('/icda/shim.elf', shim);
+      mod.FS.writeFile('/icda/kernel.bin', kernel);
     }],
     canvasInit(ringPtr, sharedPtr, size) {
       ring = new Int32Array(Module.HEAP32.buffer, ringPtr, size * 4);
       shared = new Int32Array(Module.HEAP32.buffer, sharedPtr, 4);
       ringSize = size;
-      setStatus('Running. Click the screen to type.');
+      setStatus('Booting ICDA…');
     },
     canvasResize(w, h) {
       canvas.width = w;
