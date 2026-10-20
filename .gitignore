@@ -140,3 +140,9 @@ ap_trampoline.bin
 tests/linux/out/
 userspace/webkit/out/
 userspace/llm/out/
+
+# In-browser demo build outputs (web/README.md)
+web/kernel.bin.gz
+web/shim/shim.elf
+web/qemu/
+web/.qemu-wasm/

@@ -1,0 +1,301 @@
+diff --git a/include/glib-compat.h b/include/glib-compat.h
+index 43a5629..affddcd 100644
+--- a/include/glib-compat.h
++++ b/include/glib-compat.h
+@@ -151,4 +151,31 @@ qemu_g_test_slow(void)
+ #define G_NORETURN G_GNUC_NORETURN
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++/*
++ * glib calls a GCompareFunc through a GCompareDataFunc pointer with an extra
++ * argument.  Native ABIs tolerate that; WebAssembly traps on the signature
++ * mismatch.  Route every two-argument comparator through a trampoline.
++ */
++static inline gint qemu_wasm_cmp_tramp(gconstpointer a, gconstpointer b,
++                                       gpointer f)
++{
++    return ((GCompareFunc)f)(a, b);
++}
++#define g_slist_sort(l, f) \
++    g_slist_sort_with_data((l), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_list_sort(l, f) \
++    g_list_sort_with_data((l), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_slist_insert_sorted(l, d, f) \
++    g_slist_insert_sorted_with_data((l), (d), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_list_insert_sorted(l, d, f) \
++    g_list_insert_sorted_with_data((l), (d), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_array_sort(a, f) \
++    g_array_sort_with_data((a), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_ptr_array_sort(a, f) \
++    g_ptr_array_sort_with_data((a), qemu_wasm_cmp_tramp, (gpointer)(f))
++#define g_tree_new(f) \
++    g_tree_new_with_data(qemu_wasm_cmp_tramp, (gpointer)(f))
++#endif
++
+ #endif
+diff --git a/qapi/ui.json b/qapi/ui.json
+index a0158ba..f3a3ba2 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1482,6 +1482,9 @@
+ #
+ # @dbus: Start a D-Bus service for the display.  (Since 7.0)
+ #
++# @canvas: Draw into an HTML canvas when built with Emscripten.
++#     (Since 8.2)
++#
+ # Since: 2.12
+ ##
+ { 'enum'    : 'DisplayType',
+@@ -1494,7 +1497,8 @@
+     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
+     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
+     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
+-    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' }
++    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
++    { 'name': 'canvas' }
+   ]
+ }
+ 
+diff --git a/ui/canvas.c b/ui/canvas.c
+new file mode 100644
+index 0000000..78bf01b
+--- /dev/null
++++ b/ui/canvas.c
+@@ -0,0 +1,223 @@
++/*
++ * Browser canvas display for QEMU built with Emscripten.
++ *
++ * The guest's graphic console is converted to RGBA and handed to the page
++ * through a shared buffer; the page draws it with putImageData.  Keyboard and
++ * pointer events come back through a ring in shared memory that the page
++ * fills with Atomics and this listener drains on every refresh tick, on the
++ * QEMU main loop thread.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/atomic.h"
++#include "qemu/module.h"
++#include "ui/console.h"
++#include "ui/input.h"
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
++#define CANVAS_RING_EVENTS 1024
++
++enum {
++    CANVAS_EV_KEY = 1,     /* a = linux keycode, b = down */
++    CANVAS_EV_ABS = 2,     /* a = x, b = y, in canvas pixels */
++    CANVAS_EV_BTN = 3,     /* a = 0 left / 1 middle / 2 right, b = down */
++    CANVAS_EV_WHEEL = 4,   /* a = 1 up / -1 down */
++};
++
++/* [0] frame pending, [1] ring head (page writes), [2] ring tail (we write) */
++static int32_t canvas_shared[4];
++static int32_t canvas_ring[CANVAS_RING_EVENTS * 4];
++
++typedef struct CanvasDisplay {
++    DisplayChangeListener dcl;
++    DisplaySurface *surface;
++    pixman_image_t *rgba;
++    uint32_t *buf;
++    int width, height;
++    bool dirty;
++} CanvasDisplay;
++
++static void canvas_resize(CanvasDisplay *cd, int w, int h)
++{
++    if (cd->rgba && cd->width == w && cd->height == h) {
++        return;
++    }
++    while (qatomic_read(&canvas_shared[0])) {
++        /* the page is still copying the old buffer */
++        g_usleep(1000);
++    }
++    if (cd->rgba) {
++        pixman_image_unref(cd->rgba);
++        g_free(cd->buf);
++    }
++    cd->width = w;
++    cd->height = h;
++    cd->buf = g_malloc0((size_t)w * h * 4);
++    /* a8b8g8r8 is R,G,B,A in memory on little endian: what ImageData wants */
++    cd->rgba = pixman_image_create_bits(PIXMAN_a8b8g8r8, w, h, cd->buf, w * 4);
++}
++
++static void canvas_push_frame(CanvasDisplay *cd)
++{
++    if (!cd->surface || !cd->rgba || qatomic_read(&canvas_shared[0])) {
++        return;
++    }
++    pixman_image_composite(PIXMAN_OP_SRC, cd->surface->image, NULL, cd->rgba,
++                           0, 0, 0, 0, 0, 0, cd->width, cd->height);
++    cd->dirty = false;
++    qatomic_set(&canvas_shared[0], 1);
++#ifdef __EMSCRIPTEN__
++    MAIN_THREAD_ASYNC_EM_ASM({
++        if (Module.canvasFrame) {
++            Module.canvasFrame($0, $1, $2, $3);
++        } else {
++            Atomics.store(HEAP32, $3 >> 2, 0);
++        }
++    }, cd->buf, cd->width, cd->height, &canvas_shared[0]);
++#else
++    qatomic_set(&canvas_shared[0], 0);
++#endif
++}
++
++static void canvas_drain_input(CanvasDisplay *cd)
++{
++    QemuConsole *con = cd->dcl.con;
++    int32_t head = qatomic_load_acquire(&canvas_shared[1]);
++    int32_t tail = qatomic_read(&canvas_shared[2]);
++    bool sync = false;
++
++    while (tail != head) {
++        int32_t *ev = &canvas_ring[(tail % CANVAS_RING_EVENTS) * 4];
++        static const InputButton btns[3] = {
++            INPUT_BUTTON_LEFT, INPUT_BUTTON_MIDDLE, INPUT_BUTTON_RIGHT,
++        };
++
++        switch (ev[0]) {
++        case CANVAS_EV_KEY:
++            if (ev[1] > 0 && ev[1] < qemu_input_map_linux_to_qcode_len) {
++                QKeyCode q = qemu_input_map_linux_to_qcode[ev[1]];
++                if (q) {
++                    qemu_input_event_send_key_qcode(con, q, ev[2] != 0);
++                }
++            }
++            break;
++        case CANVAS_EV_ABS:
++            if (cd->width && cd->height) {
++                qemu_input_queue_abs(con, INPUT_AXIS_X, ev[1], 0, cd->width);
++                qemu_input_queue_abs(con, INPUT_AXIS_Y, ev[2], 0, cd->height);
++                sync = true;
++            }
++            break;
++        case CANVAS_EV_BTN:
++            if (ev[1] >= 0 && ev[1] < 3) {
++                /*
++                 * Sync each button change on its own: a press and release
++                 * drained in the same tick would otherwise cancel out.
++                 */
++                if (sync) {
++                    qemu_input_event_sync();
++                    sync = false;
++                }
++                qemu_input_queue_btn(con, btns[ev[1]], ev[2] != 0);
++                qemu_input_event_sync();
++            }
++            break;
++        case CANVAS_EV_WHEEL: {
++            InputButton b = ev[1] > 0 ? INPUT_BUTTON_WHEEL_UP
++                                      : INPUT_BUTTON_WHEEL_DOWN;
++            qemu_input_queue_btn(con, b, true);
++            qemu_input_event_sync();
++            qemu_input_queue_btn(con, b, false);
++            sync = true;
++            break;
++        }
++        }
++        tail++;
++    }
++    qatomic_store_release(&canvas_shared[2], tail);
++    if (sync) {
++        qemu_input_event_sync();
++    }
++}
++
++static void canvas_refresh(DisplayChangeListener *dcl)
++{
++    CanvasDisplay *cd = container_of(dcl, CanvasDisplay, dcl);
++
++    graphic_hw_update(dcl->con);
++    canvas_drain_input(cd);
++    if (cd->dirty) {
++        canvas_push_frame(cd);
++    }
++}
++
++static void canvas_gfx_update(DisplayChangeListener *dcl,
++                              int x, int y, int w, int h)
++{
++    CanvasDisplay *cd = container_of(dcl, CanvasDisplay, dcl);
++    cd->dirty = true;
++}
++
++static void canvas_gfx_switch(DisplayChangeListener *dcl,
++                              DisplaySurface *surface)
++{
++    CanvasDisplay *cd = container_of(dcl, CanvasDisplay, dcl);
++
++    cd->surface = surface;
++    if (surface) {
++        canvas_resize(cd, surface_width(surface), surface_height(surface));
++#ifdef __EMSCRIPTEN__
++        MAIN_THREAD_ASYNC_EM_ASM({
++            if (Module.canvasResize) {
++                Module.canvasResize($0, $1);
++            }
++        }, cd->width, cd->height);
++#endif
++    }
++    cd->dirty = true;
++}
++
++static const DisplayChangeListenerOps canvas_ops = {
++    .dpy_name       = "canvas",
++    .dpy_refresh    = canvas_refresh,
++    .dpy_gfx_update = canvas_gfx_update,
++    .dpy_gfx_switch = canvas_gfx_switch,
++};
++
++static void canvas_init(DisplayState *ds, DisplayOptions *opts)
++{
++    QemuConsole *con = qemu_console_lookup_by_index(0);
++    CanvasDisplay *cd;
++
++    if (!con || !qemu_console_is_graphic(con)) {
++        return;
++    }
++    cd = g_new0(CanvasDisplay, 1);
++    cd->dcl.con = con;
++    cd->dcl.ops = &canvas_ops;
++    register_displaychangelistener(&cd->dcl);
++#ifdef __EMSCRIPTEN__
++    MAIN_THREAD_ASYNC_EM_ASM({
++        if (Module.canvasInit) {
++            Module.canvasInit($0, $1, $2);
++        }
++    }, canvas_ring, canvas_shared, CANVAS_RING_EVENTS);
++#endif
++}
++
++static QemuDisplay qemu_display_canvas = {
++    .type = DISPLAY_TYPE_CANVAS,
++    .init = canvas_init,
++};
++
++static void register_canvas(void)
++{
++    qemu_display_register(&qemu_display_canvas);
++}
++
++type_init(register_canvas);
+diff --git a/ui/meson.build b/ui/meson.build
+index 0ccb338..b49bd73 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -18,6 +18,7 @@ system_ss.add(files(
+   'ui-qmp-cmds.c',
+   'util.c',
+ ))
++system_ss.add(when: pixman, if_true: files('canvas.c'))
+ system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
+ if dbus_display
+   system_ss.add(files('dbus-module.c'))
