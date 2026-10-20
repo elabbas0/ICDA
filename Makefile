@@ -1387,6 +1387,12 @@ qemu-uefi: kernel.iso
 qemu-smoke: kernel.iso
 	sh scripts/qemu-smoke.sh kernel.iso
 
+# Boot image for the in-browser demo in web/ (see web/README.md)
+web-iso: kernel.bin
+	sh scripts/web-iso.sh kernel.bin web/kernel.iso
+
+.PHONY: web-iso
+
 
 
 
