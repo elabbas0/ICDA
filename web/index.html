@@ -42,14 +42,25 @@
       background: var(--accent); color: #fff; cursor: pointer;
     }
     button:disabled { opacity: .5; cursor: default; }
+    button.secondary {
+      background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    }
+    button.secondary[aria-pressed="true"] { background: var(--accent); color: #fff; }
+    button[hidden] { display: none; }
     #status { color: var(--muted); }
     .screen {
       background: #000; border: 1px solid var(--border); border-radius: 8px;
-      overflow: hidden; aspect-ratio: 4 / 3;
+      overflow: hidden; aspect-ratio: 4 / 3; position: relative;
+    }
+    /* Receives the phone keyboard's input; kept on screen (iOS scrolls to a
+       focused field) but invisible, and at 16px so iOS does not zoom. */
+    #softkbd {
+      position: absolute; left: 0; bottom: 0; width: 1px; height: 1px;
+      opacity: 0; border: 0; padding: 0; resize: none; font-size: 16px;
     }
     canvas {
       display: block; width: 100%; height: 100%; outline: none;
-      image-rendering: pixelated; cursor: none;
+      image-rendering: pixelated; cursor: none; touch-action: none;
     }
     details { margin-top: 16px; }
     summary { cursor: pointer; color: var(--muted); }
@@ -68,10 +79,13 @@
        reaches its desktop within a minute of the download finishing.</p>
     <div class="bar">
       <button id="start">Boot ICDA</button>
+      <button id="kbd" class="secondary" aria-pressed="false" hidden>Keyboard</button>
       <span id="status">Downloads about 32 MB.</span>
     </div>
     <div class="screen">
       <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
+      <textarea id="softkbd" aria-label="Type into ICDA" autocomplete="off"
+                autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
     </div>
     <details>
       <summary>Serial console</summary>
