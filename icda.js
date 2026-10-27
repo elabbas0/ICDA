@@ -52,7 +52,9 @@ function log(line) {
     if (stage) setStatus(`Booting ICDA: ${stage[1]}…`);
     if (line.startsWith('wm:')) {
       booted = true;
-      setStatus('Running. Click the screen to type.');
+      setStatus(matchMedia('(pointer: coarse)').matches
+        ? 'Running. Tap Keyboard to type.'
+        : 'Running. Click the screen to type.');
     }
   }
   logEl.textContent += line + '\n';
@@ -82,7 +84,132 @@ function pointerPos(e) {
           Math.max(0, Math.min(canvas.height - 1, y))];
 }
 
+// Characters typed on a phone's on-screen keyboard -> [Linux keycode, shift]
+const CHAR_KEYS = (() => {
+  const map = { ' ': [57, 0], '\n': [28, 0], '\t': [15, 0] };
+  const rows = [
+    ['1234567890-=', '!@#$%^&*()_+', 2],
+    ['qwertyuiop[]', 'QWERTYUIOP{}', 16],
+    ["asdfghjkl;'`", 'ASDFGHJKL:"~', 30],
+    ['\\zxcvbnm,./', '|ZXCVBNM<>?', 43],
+  ];
+  for (const [plain, shifted, first] of rows) {
+    [...plain].forEach((c, i) => { map[c] = [first + i, 0]; });
+    [...shifted].forEach((c, i) => { map[c] = [first + i, 1]; });
+  }
+  return map;
+})();
+
+// Key presses replayed from the text field arrive in bursts (a whole
+// autocorrected word at once), and ICDA drops keys when too many land in one
+// display tick.  Feed them to QEMU a couple at a time instead.
+const keyQueue = [];
+let keyTimer = 0;
+
+function queueKey(code, down) {
+  keyQueue.push([code, down]);
+  if (!keyTimer) {
+    keyTimer = setInterval(() => {
+      for (let i = 0; i < 2 && keyQueue.length; i++) push(EV_KEY, ...keyQueue.shift());
+      if (!keyQueue.length) { clearInterval(keyTimer); keyTimer = 0; }
+    }, 20);
+  }
+}
+
+function tapKey(code, shift) {
+  if (shift) queueKey(42, 1);
+  queueKey(code, 1);
+  queueKey(code, 0);
+  if (shift) queueKey(42, 0);
+}
+
+function typeText(text) {
+  for (const c of text.normalize('NFKD')) {
+    const k = CHAR_KEYS[c];
+    if (k) tapKey(k[0], k[1]);
+  }
+}
+
+function releaseModifiers() {
+  for (const k of ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
+                   'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight']) {
+    push(EV_KEY, LINUX_KEYS[k], 0);
+  }
+}
+
+// Phones only show their keyboard for a focused text field, and many send no
+// usable key codes (Android reports keyCode 229 for everything).  So on touch
+// devices a hidden textarea takes the focus, and whatever the keyboard does to
+// its text is replayed as key presses: added characters are typed, removed
+// ones become Backspace.  The field always holds a few placeholder characters
+// so that Backspace has something to delete.
+function wireSoftKeyboard() {
+  const field = document.getElementById('softkbd');
+  const button = document.getElementById('kbd');
+  const FILL = '    ';
+  let last = FILL;
+  let wanted = false;
+
+  const reset = () => {
+    field.value = FILL;
+    last = FILL;
+    field.setSelectionRange(FILL.length, FILL.length);
+  };
+  const open = () => {
+    wanted = true;
+    reset();
+    field.focus({ preventScroll: true });
+    button.setAttribute('aria-pressed', 'true');
+  };
+  const close = () => {
+    wanted = false;
+    field.blur();
+    button.setAttribute('aria-pressed', 'false');
+  };
+
+  if (matchMedia('(pointer: coarse)').matches) button.hidden = false;
+  // pointerdown would move the focus to the button and close the keyboard
+  // before the click toggles it.
+  button.addEventListener('pointerdown', (e) => e.preventDefault());
+  button.addEventListener('click', () => (wanted ? close() : open()));
+
+  field.addEventListener('keydown', (e) => {
+    // A hardware keyboard reports real codes: send those directly and keep
+    // them out of the text field.
+    const code = LINUX_KEYS[e.code];
+    if (code && !e.isComposing && e.keyCode !== 229) {
+      push(EV_KEY, code, 1);
+      e.preventDefault();
+    }
+  });
+  field.addEventListener('keyup', (e) => {
+    const code = LINUX_KEYS[e.code];
+    if (code && !e.isComposing && e.keyCode !== 229) push(EV_KEY, code, 0);
+  });
+  field.addEventListener('input', (e) => {
+    const now = field.value;
+    let same = 0;
+    while (same < last.length && same < now.length && last[same] === now[same]) same++;
+    for (let i = same; i < last.length; i++) tapKey(14, 0); // Backspace
+    typeText(now.slice(same));
+    last = now;
+    if (now.length < 2 || /\n/.test(now) || (now.length > 64 && !e.isComposing)) reset();
+  });
+  field.addEventListener('compositionend', () => {
+    if (last.length > 64) reset();
+  });
+  // Fires when the phone's own "done" button hides the keyboard, too.
+  field.addEventListener('blur', () => {
+    releaseModifiers();
+    wanted = false;
+    button.setAttribute('aria-pressed', 'false');
+  });
+
+  return { active: () => wanted };
+}
+
 function wireInput() {
+  const softKeyboard = wireSoftKeyboard();
   canvas.addEventListener('keydown', (e) => {
     const code = LINUX_KEYS[e.code];
     if (code) { push(EV_KEY, code, 1); e.preventDefault(); }
@@ -93,7 +220,8 @@ function wireInput() {
   });
   canvas.addEventListener('pointermove', (e) => push(EV_ABS, ...pointerPos(e)));
   canvas.addEventListener('pointerdown', (e) => {
-    canvas.focus();
+    // Focusing the canvas would close the on-screen keyboard.
+    if (!softKeyboard.active()) canvas.focus();
     push(EV_ABS, ...pointerPos(e));
     if (e.button <= 2) push(EV_BTN, e.button, 1);
     e.preventDefault();
@@ -108,12 +236,7 @@ function wireInput() {
   }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   // Release every modifier when focus leaves, so none stay stuck down.
-  canvas.addEventListener('blur', () => {
-    for (const k of ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
-                     'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight']) {
-      push(EV_KEY, LINUX_KEYS[k], 0);
-    }
-  });
+  canvas.addEventListener('blur', releaseModifiers);
 }
 
 async function fetchWithProgress(url, label) {
