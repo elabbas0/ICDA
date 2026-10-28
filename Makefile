@@ -1387,6 +1387,13 @@ qemu-uefi: kernel.iso
 qemu-smoke: kernel.iso
 	sh scripts/qemu-smoke.sh kernel.iso
 
+# Kernel and boot shim for the in-browser demo in web/ (see web/README.md)
+web-kernel: kernel.bin
+	gzip -9c kernel.bin > web/kernel.bin.gz
+	$(MAKE) -C web/shim
+
+.PHONY: web-kernel
+
 
 
 

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ICDA in the browser</title>
+  <!-- GitHub Pages cannot send COOP/COEP headers; this worker adds them so
+       SharedArrayBuffer (needed by the threaded emulator) is available. -->
+  <script src="coi-serviceworker.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f4f2;
+      --fg: #1d1d1f;
+      --muted: #6b6b70;
+      --panel: #ffffff;
+      --border: #d9d9dc;
+      --accent: #2f6fde;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141416;
+        --fg: #ececee;
+        --muted: #9a9aa2;
+        --panel: #1d1d20;
+        --border: #34343a;
+        --accent: #6c9cff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    p { margin: 0 0 16px; color: var(--muted); }
+    .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    button {
+      font: inherit; padding: 8px 16px; border-radius: 8px; border: 0;
+      background: var(--accent); color: #fff; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+    button.secondary {
+      background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    }
+    button.secondary[aria-pressed="true"] { background: var(--accent); color: #fff; }
+    button[hidden] { display: none; }
+    #status { color: var(--muted); }
+    .screen {
+      background: #000; border: 1px solid var(--border); border-radius: 8px;
+      overflow: hidden; aspect-ratio: 4 / 3; position: relative;
+    }
+    /* Receives the phone keyboard's input; kept on screen (iOS scrolls to a
+       focused field) but invisible, and at 16px so iOS does not zoom. */
+    #softkbd {
+      position: absolute; left: 0; bottom: 0; width: 1px; height: 1px;
+      opacity: 0; border: 0; padding: 0; resize: none; font-size: 16px;
+    }
+    canvas {
+      display: block; width: 100%; height: 100%; outline: none;
+      image-rendering: pixelated; cursor: none; touch-action: none;
+    }
+    details { margin-top: 16px; }
+    summary { cursor: pointer; color: var(--muted); }
+    #log {
+      margin: 8px 0 0; height: 240px; overflow: auto; padding: 8px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ICDA in the browser</h1>
+    <p>The ICDA operating system running in an x86-64 PC emulated by QEMU,
+       compiled to WebAssembly. Everything runs on your machine; ICDA usually
+       reaches its desktop within a minute of the download finishing.</p>
+    <div class="bar">
+      <button id="start">Boot ICDA</button>
+      <button id="kbd" class="secondary" aria-pressed="false" hidden>Keyboard</button>
+      <span id="status">Downloads about 32 MB.</span>
+    </div>
+    <div class="screen">
+      <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
+      <textarea id="softkbd" aria-label="Type into ICDA" autocomplete="off"
+                autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    </div>
+    <details>
+      <summary>Serial console</summary>
+      <pre id="log"></pre>
+    </details>
+  </main>
+  <script type="module" src="icda.js"></script>
+</body>
+</html>
