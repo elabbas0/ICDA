@@ -48,6 +48,14 @@ typedef struct lx_file {
     char       *mem;
     uint64_t    mem_len;
     uint64_t    proc_pid;
+    /* a /proc file (LXF_MEM): what it shows, the scheduler tick it was
+     * rendered at, and whether it was read since.  Read from the start again
+     * (after a rewind, or a pread at 0) it is rendered anew - unless it was
+     * just opened and not read yet - so programs that keep it open and read
+     * it again, as WebKit's memory monitors do, see it change. */
+    const char *proc_leaf;
+    uint64_t    proc_rendered;
+    int         proc_read;
     uint64_t    poll_in_reset, poll_out_reset; /* readiness clears or explicit poll notifications */
     const lx_fops_t *ops;                   /* LXF_OBJ */
     void       *obj;

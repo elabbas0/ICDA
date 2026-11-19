@@ -18,6 +18,8 @@
 #define LX_OPEN      2
 #define LX_CLOSE     3
 #define LX_FSTAT     5
+#define LX_LSEEK     8
+#define LX_PREAD64   17
 #define LX_MMAP      9
 #define LX_MPROTECT  10
 #define LX_MUNMAP    11
@@ -67,6 +69,53 @@ static int lx_streq(const char *a, const char *b) {
     uint64_t i = 0;
     while (a[i] && a[i] == b[i]) i++;
     return a[i] == b[i];
+}
+
+/* the n-th (from 0) number in s[0 .. len), 0 if there are fewer */
+static uint64_t nth_number(const char *s, long len, int n) {
+    long i = 0;
+    for (;;) {
+        uint64_t v = 0;
+        int digits = 0;
+        while (i < len && (s[i] < '0' || s[i] > '9')) i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9') {
+            v = v * 10 + (uint64_t)(s[i] - '0');
+            i++;
+            digits = 1;
+        }
+        if (!digits) return 0;
+        if (n-- == 0) return v;
+    }
+}
+
+/* the number after key in s[0 .. len) ("MemFree:" in /proc/meminfo), 0 if absent */
+static uint64_t number_after(const char *s, long len, const char *key) {
+    long kl = (long)lx_strlen(key);
+    for (long i = 0; i + kl <= len; i++) {
+        long k = 0;
+        while (k < kl && s[i + k] == key[k]) k++;
+        if (k == kl) return nth_number(s + i + kl, len - i - kl, 0);
+    }
+    return 0;
+}
+
+/* 1 if key occurs in s[0 .. len) */
+static int contains(const char *s, long len, const char *key) {
+    long kl = (long)lx_strlen(key);
+    for (long i = 0; i + kl <= len; i++) {
+        long k = 0;
+        while (k < kl && s[i + k] == key[k]) k++;
+        if (k == kl) return 1;
+    }
+    return 0;
+}
+
+/* an anonymous mapping of len bytes with every page written (the memory in use), or 0 */
+static uint64_t touch_new(uint64_t len) {
+    uint64_t addr = sys_call6(LX_MMAP, 0, len, 3, LX_MAP_PRIVATE | LX_MAP_ANON, (uint64_t)(int64_t)-1, 0);
+    if ((long)addr < 0) return 0;
+    for (uint64_t i = 0; i < len; i += 4096) ((volatile char *)(uintptr_t)addr)[i] = 1;
+    return addr;
 }
 
 static void check(const char *name, long rc, long want) {
@@ -219,6 +268,63 @@ int nptestlx_main(int argc, char **argv) {
 
     check("arch_prctl stub ok",
           (long)sys_call2(LX_ARCH_PRCTL, LX_ARCH_SET_FS, 0x70000000), 0);
+
+    /* /proc as WebKit reads it.  Its allocator opens /proc/self/statm once
+     * and preads it again at offset 0 for its footprint; its memory monitor
+     * keeps /proc/meminfo open and rewinds it.  Both must see memory change. */
+    {
+        long pfd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)"/proc/self/statm", LX_O_RDONLY, 0);
+        check("open /proc/self/statm", pfd >= 3 ? 1 : pfd, 1);
+        if (pfd >= 3) {
+            uint64_t r0, r1, addr;
+            n = (long)sys_call4(LX_PREAD64, (uint64_t)pfd, (uint64_t)(uintptr_t)buf, sizeof(buf), 0);
+            check("pread /proc/self/statm", n > 0 ? 1 : n, 1);
+            r0 = n > 0 ? nth_number(buf, n, 1) : 0;
+            check("statm resident > 0", r0 > 0 ? 1 : 0, 1);
+            addr = touch_new(4ULL << 20);
+            check("statm: 4 MB touched", addr ? 1 : 0, 1);
+            n = (long)sys_call4(LX_PREAD64, (uint64_t)pfd, (uint64_t)(uintptr_t)buf, sizeof(buf), 0);
+            r1 = n > 0 ? nth_number(buf, n, 1) : 0;
+            check("statm resident follows memory use (pread at 0)", r1 >= r0 + 1024 ? 1 : 0, 1);
+            if (addr) sys_call2(LX_MUNMAP, addr, 4ULL << 20);
+            check("close statm", (long)sys_call1(LX_CLOSE, (uint64_t)pfd), 0);
+        }
+    }
+    {
+        long mfd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)"/proc/meminfo", LX_O_RDONLY, 0);
+        check("open /proc/meminfo", mfd >= 3 ? 1 : mfd, 1);
+        if (mfd >= 3) {
+            uint64_t f0, f1, a0, addr;
+            n = (long)sys_call3(LX_READ, (uint64_t)mfd, (uint64_t)(uintptr_t)buf, sizeof(buf));
+            f0 = n > 0 ? number_after(buf, n, "MemFree:") : 0;
+            a0 = n > 0 ? number_after(buf, n, "MemAvailable:") : 0;
+            check("meminfo MemFree > 0", f0 > 0 ? 1 : 0, 1);
+            check("meminfo MemAvailable >= MemFree", a0 >= f0 ? 1 : 0, 1);
+            addr = touch_new(16ULL << 20);
+            check("meminfo: 16 MB touched", addr ? 1 : 0, 1);
+            check("lseek /proc/meminfo to 0", (long)sys_call3(LX_LSEEK, (uint64_t)mfd, 0, 0), 0);
+            n = (long)sys_call3(LX_READ, (uint64_t)mfd, (uint64_t)(uintptr_t)buf, sizeof(buf));
+            f1 = n > 0 ? number_after(buf, n, "MemFree:") : 0;
+            check("meminfo follows memory use after a rewind", f1 && f1 + 8192 <= f0 ? 1 : 0, 1);
+            if (addr) sys_call2(LX_MUNMAP, addr, 16ULL << 20);
+            check("close meminfo", (long)sys_call1(LX_CLOSE, (uint64_t)mfd), 0);
+        }
+    }
+    {
+        long sfd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)"/proc/self/status", LX_O_RDONLY, 0);
+        check("open /proc/self/status", sfd >= 3 ? 1 : sfd, 1);
+        if (sfd >= 3) {
+            n = (long)sys_call3(LX_READ, (uint64_t)sfd, (uint64_t)(uintptr_t)buf, sizeof(buf));
+            check("status has Threads and RssAnon", n > 0 && contains(buf, n, "Threads:") && contains(buf, n, "RssAnon:") ? 1 : 0, 1);
+            sys_call1(LX_CLOSE, (uint64_t)sfd);
+        }
+        sfd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)"/proc/self", LX_O_RDONLY, 0);
+        if (sfd >= 3) {
+            n = (long)sys_call3(LX_GETDENTS, (uint64_t)sfd, (uint64_t)(uintptr_t)buf, sizeof(buf));
+            check("/proc/self lists statm", n > 0 && contains(buf, n, "statm") ? 1 : 0, 1);
+            sys_call1(LX_CLOSE, (uint64_t)sfd);
+        }
+    }
 
     if (failures == 0) {
         lx_puts("nptestlx: ALL PASS\n");

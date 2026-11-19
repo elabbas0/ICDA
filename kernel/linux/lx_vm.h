@@ -35,6 +35,10 @@ int      lxvm_fault_current(uint64_t addr, int write);
 
 /* lets the page allocator take back unmapped cached file pages when short */
 void     lxvm_init_reclaim(void);
+/* /proc: p's regions in pages (size, resident file and shared pages, private writable size) */
+void     lxvm_usage(process_t *p, uint64_t *size, uint64_t *file_resident, uint64_t *data);
+/* /proc/meminfo: frames in the file page cache, and those no process maps (reclaimable) */
+void     lxvm_cache_usage(uint64_t *cached, uint64_t *reclaimable);
 int      lxvm_fork(process_t *parent, process_t *child);
 void     lxvm_free(process_t *p);
 int      lxvm_reserve(process_t *p, uint64_t start, uint64_t end, uint32_t prot);

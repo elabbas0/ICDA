@@ -111,6 +111,8 @@ addr_space_t *vmm_clone_user(addr_space_t *src);
 int vmm_cow_break(addr_space_t *as, uint64_t virt);
 void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
                    void (*fn)(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx), void *ctx);
+/* pages present in [start, end), read-only (no TLB invalidation) */
+uint64_t vmm_count_present(addr_space_t *as, uint64_t start, uint64_t end);
 void vmm_note_unmapped(addr_space_t *as);
 
 

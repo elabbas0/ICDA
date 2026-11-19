@@ -742,6 +742,42 @@ void lxvm_free_list(void *list) {
     }
 }
 
+/* /proc/<pid>/statm and status: p's regions in pages - their size, how much
+ * of the files and shared memory in them is resident, and the size of its
+ * private writable regions.  Reads only the page tables of file and shared
+ * regions (libraries, a few hundred megabytes), not the gigabytes
+ * JavaScriptCore reserves. */
+void lxvm_usage(process_t *p, uint64_t *size, uint64_t *file_resident, uint64_t *data) {
+    uint64_t sz = 0, fr = 0, dt = 0;
+    for (lx_vma_t *v = (lx_vma_t *)p->lx_vmas; v; v = v->next) {
+        uint64_t pages = (v->end - v->start) / PAGE;
+        sz += pages;
+        if (v->node || v->file || (v->flags & LXVM_SHARED)) fr += vmm_count_present(p->addr_space, v->start, v->end);
+        else if (v->prot & PROT_WRITE) dt += pages;
+    }
+    *size = sz;
+    *file_resident = fr;
+    *data = dt;
+}
+
+/* /proc/meminfo: frames the file page cache holds, and how many of them no
+ * process maps - pc_reclaim gives those back as soon as memory is short, so
+ * they count as available.  Counted at most once a second (16384 buckets). */
+void lxvm_cache_usage(uint64_t *cached, uint64_t *reclaimable) {
+    static uint64_t counted_at = ~0ULL, unmapped;
+    uint64_t now = sched_ticks();
+    if (counted_at == ~0ULL || now - counted_at >= 100) {
+        uint64_t n = 0;
+        for (uint32_t b = 0; b < PC_BUCKETS; b++)
+            for (pcent_t *e = pc_tab[b]; e; e = e->next)
+                if (pmm_refcount(e->phys) == 1) n++;
+        unmapped = n;
+        counted_at = now;
+    }
+    *cached = pc_pages;
+    *reclaimable = unmapped < pc_pages ? unmapped : pc_pages;
+}
+
 /* "name+0xoffset" for an address in a mapped file (crash reports) */
 void lxvm_describe(process_t *p, uint64_t addr, char *out, uint64_t cap) {
     static const char hex[] = "0123456789abcdef";

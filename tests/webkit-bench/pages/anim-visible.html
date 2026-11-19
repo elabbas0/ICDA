@@ -1,0 +1,14 @@
+<!doctype html>
+<!-- A small animation in view: the same pulsing dot with nothing over it. -->
+<html><head><meta charset="utf-8"><title>Visible animation</title>
+<style>
+  body { margin: 0; font: 16px/1.5 sans-serif; padding: 40px; }
+  .dot { position: absolute; left: 200px; top: 160px; width: 18px; height: 18px; border-radius: 50%;
+         background: #36c; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(51,102,204,.7); } 100% { box-shadow: 0 0 0 14px rgba(51,102,204,0); } }
+</style></head>
+<body>
+  <h1>A visible animation</h1>
+  <div class="dot"></div>
+  <p style="margin-top: 200px">Plain text that does not change.</p>
+</body></html>

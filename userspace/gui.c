@@ -145,43 +145,49 @@ int gui_window_height(void) { return win_h; }
 int gui_window_scale(void) { return win_scale; }
 uint64_t gui_font_shm(void) { return win_font_shm; }
 
-void gui_flush(void) {
-    gui_msg_t msg;
-    int dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0, damaged = 1;
-    if (!win_reply_queue) return;
-    if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
-        /* Publish only what changed since the last flush and tell the WM
-         * where, so a hover tweak or caret blink doesn't recomposite the
-         * whole window.  Nothing changed: nothing to send. */
-        int pw = win_w * win_scale, ph = win_h * win_scale;
-        dx0 = pw; dy0 = ph; dx1 = -1; dy1 = -1;
-        for (int y = 0; y < ph; y++) {
-            uint32_t *dst = win_shm_pixels + (uint64_t)y * (uint64_t)pw;
-            const uint32_t *src = win_pixels + (uint64_t)y * (uint64_t)pw;
-            int first = -1, last = -1;
-            for (int x = 0; x < pw; x++) {
-                if (dst[x] != src[x]) {
-                    if (first < 0) first = x;
-                    last = x;
-                    dst[x] = src[x];
-                }
-            }
-            if (first >= 0) {
-                if (first < dx0) dx0 = first;
-                if (last > dx1) dx1 = last;
-                if (y < dy0) dy0 = y;
-                dy1 = y;
-            }
-        }
-        if (dx1 < 0) return;
-        /* device pixels -> window coordinates, rounded outward */
-        dx0 /= win_scale;
-        dy0 /= win_scale;
-        dx1 = dx1 / win_scale + 1;
-        dy1 = dy1 / win_scale + 1;
-    } else {
-        damaged = 0;
+/* The first of n pixels where a and b differ (n if none).  Two pixels per
+ * comparison: a window is mostly unchanged between flushes, and this scan is
+ * most of what a flush costs. */
+static int gui_first_diff(const uint32_t *a, const uint32_t *b, int n) {
+    int i = 0;
+    for (; i + 2 <= n; i += 2) {
+        uint64_t x, y;
+        __builtin_memcpy(&x, a + i, 8);
+        __builtin_memcpy(&y, b + i, 8);
+        if (x != y) return a[i] != b[i] ? i : i + 1;
     }
+    return (i < n && a[i] != b[i]) ? i : n;
+}
+
+/* Copies what changed in the device-pixel rectangle [px0, px1) x [py0, py1)
+ * from the drawing buffer to the WM's and returns its bounds in window
+ * coordinates (rounded outward); 0 if nothing changed. */
+static int gui_publish(int px0, int py0, int px1, int py1, int *dx0, int *dy0, int *dx1, int *dy1) {
+    int pw = win_w * win_scale;
+    int x0 = px1, y0 = py1, x1 = -1, y1 = -1;
+    for (int y = py0; y < py1; y++) {
+        uint32_t *dst = win_shm_pixels + (uint64_t)y * (uint64_t)pw;
+        const uint32_t *src = win_pixels + (uint64_t)y * (uint64_t)pw;
+        int first = px0 + gui_first_diff(src + px0, dst + px0, px1 - px0), last;
+        if (first >= px1) continue;
+        last = px1 - 1;
+        while (last > first && src[last] == dst[last]) last--;
+        for (int x = first; x <= last; x++) dst[x] = src[x];
+        if (first < x0) x0 = first;
+        if (last > x1) x1 = last;
+        if (y < y0) y0 = y;
+        y1 = y;
+    }
+    if (x1 < 0) return 0;
+    *dx0 = x0 / win_scale;
+    *dy0 = y0 / win_scale;
+    *dx1 = x1 / win_scale + 1;
+    *dy1 = y1 / win_scale + 1;
+    return 1;
+}
+
+static void gui_send_flush(int damaged, int dx0, int dy0, int dx1, int dy1) {
+    gui_msg_t msg;
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_FLUSH;
     msg.window_id = win_id;
@@ -192,6 +198,38 @@ void gui_flush(void) {
         msg.damage.h = dy1 - dy0;
     }
     icda_msg_send(win_reply_queue, &msg);
+}
+
+void gui_flush(void) {
+    int dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
+    if (!win_reply_queue) return;
+    if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
+        /* Publish only what changed since the last flush and tell the WM
+         * where, so a hover tweak or caret blink doesn't recomposite the
+         * whole window.  Nothing changed: nothing to send. */
+        if (!gui_publish(0, 0, win_w * win_scale, win_h * win_scale, &dx0, &dy0, &dx1, &dy1)) return;
+        gui_send_flush(1, dx0, dy0, dx1, dy1);
+    } else {
+        gui_send_flush(0, 0, 0, 0, 0);
+    }
+}
+
+void gui_flush_rect(int x, int y, int w, int h) {
+    int dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
+    if (!win_reply_queue) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > win_w) w = win_w - x;
+    if (y + h > win_h) h = win_h - y;
+    if (w <= 0 || h <= 0) return;
+    if (win_pixels != win_shm_pixels && win_shm_pixels && win_pixels) {
+        if (!gui_publish(x * win_scale, y * win_scale, (x + w) * win_scale, (y + h) * win_scale, &dx0, &dy0, &dx1, &dy1))
+            return;
+        gui_send_flush(1, dx0, dy0, dx1, dy1);
+    } else {
+        /* drawn straight into the WM's buffer: the caller's rectangle is the damage */
+        gui_send_flush(1, x, y, x + w, y + h);
+    }
 }
 
 void gui_set_cursor(int shape) {

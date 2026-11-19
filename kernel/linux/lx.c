@@ -1120,18 +1120,24 @@ static int proc_parse(const char *path, uint64_t *pid, const char **leaf) {
     return 1;
 }
 
+/* the files in /proc/<pid> */
+static const char *const proc_pid_files[] = { "stat", "cmdline", "status", "comm", "statm" };
+
+/* leaf as the tables spell it (a string that stays), 0 if /proc has no such file */
+static const char *proc_leaf_of(uint64_t pid, const char *leaf) {
+    const char *const *names = pid ? proc_pid_files : proc_files;
+    uint64_t n = pid ? sizeof(proc_pid_files) / sizeof(proc_pid_files[0]) : sizeof(proc_files) / sizeof(proc_files[0]);
+    for (uint64_t i = 0; i < n; i++)
+        if (kstreq(leaf, names[i])) return names[i];
+    return 0;
+}
+
 static int proc_valid(uint64_t pid, const char *leaf) {
     if (pid) {
         process_t *q = sched_find_process(pid);
         if (!q || q->state == PROCESS_REAPED) return 0;
-        return !*leaf || kstreq(leaf, "stat") || kstreq(leaf, "cmdline") || kstreq(leaf, "status") ||
-               kstreq(leaf, "comm");
     }
-    if (!*leaf) return 1;
-    for (uint64_t i = 0; i < sizeof(proc_files) / sizeof(proc_files[0]); i++) {
-        if (kstreq(leaf, proc_files[i])) return 1;
-    }
-    return 0;
+    return !*leaf || proc_leaf_of(pid, leaf) != 0;
 }
 
 static char proc_state_char(process_t *q) {
@@ -1160,7 +1166,25 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
             sb_put(b, "\n");
             return;
         }
-        if (kstreq(leaf, "status")) {
+        if (kstreq(leaf, "statm") || kstreq(leaf, "status")) {
+            /* pages: the regions' size, resident, of which files and shared memory, private writable size.
+             * WebKit's allocator (bmalloc) measures a web process by its statm: without it, or
+             * with figures that never change, WebKit never sees a page grow and never trims it. */
+            uint64_t size = 0, file = 0, data = 0, resident = proc_mem_kb(q) / 4;
+            lxvm_usage(q, &size, &file, &data);
+            if (size < resident) size = resident;            /* the loader's pages are not all regions */
+            if (file > resident) file = resident;
+            if (kstreq(leaf, "statm")) {
+                sb_num(b, size);
+                sb_put(b, " ");
+                sb_num(b, resident);
+                sb_put(b, " ");
+                sb_num(b, file);
+                sb_put(b, " 0 0 ");
+                sb_num(b, data);
+                sb_put(b, " 0\n");
+                return;
+            }
             sb_put(b, "Name:\t");
             sb_put(b, q->name);
             sb_put(b, "\nState:\t");
@@ -1177,7 +1201,14 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
                 }
                 sb_put(b, "\n");
             }
-            sb_kv(b, "VmRSS:\t", proc_mem_kb(q));
+            sb_kv(b, "VmSize:\t", size * 4);
+            sb_kv(b, "VmRSS:\t", resident * 4);
+            sb_kv(b, "RssAnon:\t", (resident - file) * 4);
+            sb_kv(b, "RssFile:\t", file * 4);
+            sb_kv(b, "VmData:\t", data * 4);
+            sb_put(b, "Threads:\t");
+            sb_num(b, q->nthreads > 0 ? (uint64_t)q->nthreads : 1);
+            sb_put(b, "\n");
             return;
         }
         sb_num(b, q->pid);
@@ -1201,12 +1232,20 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
         return;
     }
     if (kstreq(leaf, "meminfo")) {
+        /* available: free, and the cached file pages no process maps (the
+         * allocator takes them back before it runs out: lx_vm.c pc_reclaim) */
+        uint64_t cached = 0, unmapped = 0, avail;
+        lxvm_cache_usage(&cached, &unmapped);
+        avail = free + unmapped * 4;
+        if (avail > total) avail = total;
         sb_kv(b, "MemTotal:       ", total);
         sb_kv(b, "MemFree:        ", free);
-        sb_kv(b, "MemAvailable:   ", free);
+        sb_kv(b, "MemAvailable:   ", avail);
         sb_kv(b, "Buffers:        ", 0);
-        sb_kv(b, "Cached:         ", 0);
+        sb_kv(b, "Cached:         ", cached * 4);
         sb_kv(b, "SwapCached:     ", 0);
+        sb_kv(b, "Active(file):   ", (cached - unmapped) * 4);
+        sb_kv(b, "Inactive(file): ", unmapped * 4);
         sb_kv(b, "SwapTotal:      ", 0);
         sb_kv(b, "SwapFree:       ", 0);
         sb_kv(b, "Shmem:          ", 0);
@@ -1264,7 +1303,29 @@ static lx_file_t *proc_open(uint64_t pid, const char *leaf) {
     proc_render(&b, pid, leaf);
     f->mem = b.buf;
     f->mem_len = b.len;
+    f->proc_pid = pid;
+    f->proc_leaf = proc_leaf_of(pid, leaf);
+    f->proc_rendered = sched_ticks();
     return f;
+}
+
+/* A /proc file read from the start again: rendered anew, unless it was
+ * rendered this very tick and not read since (opened and read at once), or
+ * its process is gone (then it keeps what it last showed).  Linux renders it
+ * again too, which is what a program that keeps it open and rewinds - or
+ * opens it once and reads it much later - counts on. */
+static void proc_refresh(lx_file_t *f) {
+    sbuf_t b;
+    uint64_t now = sched_ticks();
+    if (!f->mem || (!f->proc_read && now == f->proc_rendered) || !proc_valid(f->proc_pid, f->proc_leaf)) return;
+    b.buf = f->mem;
+    b.cap = 4096;                      /* proc_open's buffer */
+    b.len = 0;
+    b.buf[0] = 0;
+    proc_render(&b, f->proc_pid, f->proc_leaf);
+    f->mem_len = b.len;
+    f->proc_rendered = now;
+    f->proc_read = 0;
 }
 
 /* Directory entry idx of a /proc directory; returns 0 past the end. */
@@ -1272,9 +1333,8 @@ static int proc_dirent(lx_file_t *f, uint64_t idx, const char **name, char *numb
     uint64_t nfiles = sizeof(proc_files) / sizeof(proc_files[0]);
     *is_dir = 0;
     if (f->proc_pid) {
-        static const char *const leaves[] = { "stat", "cmdline", "status", "comm" };
-        if (idx >= 4) return 0;
-        *name = leaves[idx];
+        if (idx >= sizeof(proc_pid_files) / sizeof(proc_pid_files[0])) return 0;
+        *name = proc_pid_files[idx];
         return 1;
     }
     if (idx < nfiles) {
@@ -1473,11 +1533,13 @@ static uint64_t file_read_raw(lx_file_t *f, char *ubuf, uint64_t count, uint64_t
         case LXF_PROCDIR: return ERR(EISDIR);
         case LXF_MEM: {
             uint64_t n;
+            if (*offp == 0 && f->proc_leaf) proc_refresh(f);
             if (*offp >= f->mem_len) return 0;
             n = f->mem_len - *offp;
             if (n > count) n = count;
             if (copy_to_user(ubuf, f->mem + *offp, n) != 0) return ERR(EFAULT);
             *offp += n;
+            f->proc_read = 1;
             return n;
         }
         case LXF_NULL: return 0;
@@ -1598,7 +1660,9 @@ static uint64_t sys_prw(int64_t fd, char *ubuf, uint64_t count, uint64_t off, in
     lx_file_t *f = fd_get(lx_get(sched_current_process()), fd);
     uint64_t pos = off, saved, rc;
     if (!f) return ERR(EBADF);
-    if (f->kind != LXF_VFS) return ERR(ESPIPE);
+    /* files, and reading the text files the kernel makes (/proc): WebKit's
+     * allocator reads its own /proc/self/statm with pread(fd, buf, n, 0) */
+    if (f->kind != LXF_VFS && !(f->kind == LXF_MEM && !write)) return ERR(ESPIPE);
     saved = f->flags;
     f->flags &= ~(uint64_t)O_APPEND;
     rc = write ? file_write(f, ubuf, count, &pos) : file_read(f, ubuf, count, &pos);

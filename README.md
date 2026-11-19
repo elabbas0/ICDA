@@ -152,6 +152,24 @@ sockets remain open during reconnection. `make dhcp-test` checks a strict
 hotspot, delayed replies, and malformed packets. Wi-Fi errors distinguish
 a missing DHCP offer from a missing acknowledgement.
 
+## Surfer on WebKit
+
+Surfer shows a page's frames at the display's pace: 60 a second, 15 once
+nothing on screen has changed for half a second (a page animating something
+hidden), and one a second for tabs that are not shown. A key press, the
+pointer or a visible change brings the full rate back at once. Only the parts
+of a frame that changed are copied to the window.
+
+Memory is watched, because ICDA has no swap. A page gives memory back as it
+grows, from a sixth of the RAM (at most 1 GB), and a page that keeps growing
+past two fifths (at most 2.4 GB) is stopped with *The page used too much
+memory*. Sites you leave do not stay in memory, and below 6 GB of RAM going
+Back loads the page again from the disk cache. When the computer runs short
+of memory, the tab shown longest ago is discarded: its name stays in the tab
+strip, and it loads again when you select it. Tabs playing sound are kept.
+`/tmp/surfer.log` shows the limits in use. `tests/webkit-bench/run.sh`
+measures Surfer before and after a change.
+
 ## Users
 
 ICDA has user accounts. On the first start the desktop asks for the first

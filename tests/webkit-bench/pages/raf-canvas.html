@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- Motion that is meant to be seen: a canvas redrawn on every animation
+     frame. Surfer should show each frame, up to the display's rate. -->
+<html><head><meta charset="utf-8"><title>Canvas animation</title>
+<style> body { margin: 0; font: 16px/1.5 sans-serif; padding: 24px; } canvas { display: block; } </style></head>
+<body>
+  <h1>A canvas animated with requestAnimationFrame</h1>
+  <canvas id="c" width="640" height="360"></canvas>
+  <script>
+    const c = document.getElementById("c"), g = c.getContext("2d");
+    function frame(t) {
+      const x = (t / 4) % 640;
+      g.fillStyle = "#eef2f8"; g.fillRect(0, 0, 640, 360);
+      g.fillStyle = "#2a78d6"; g.fillRect(x, 140, 80, 80);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body></html>

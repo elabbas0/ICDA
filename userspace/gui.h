@@ -26,6 +26,10 @@ uint64_t  gui_font_shm(void);
 
 
 void gui_flush(void);
+/* gui_flush for part of the window (window coordinates): only that
+ * rectangle is compared and published.  For what a program knows it changed
+ * (a frame of a video or a web page under unchanged surroundings). */
+void gui_flush_rect(int x, int y, int w, int h);
 void gui_set_cursor(int shape);
 
 

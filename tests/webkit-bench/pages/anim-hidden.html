@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- An animation nobody can see: a pulsing dot under an opaque banner, as
+     Wikipedia's fundraising banner covered its pulsing onboarding dot.
+     WebKit draws every frame; not a pixel on screen changes. -->
+<html><head><meta charset="utf-8"><title>Hidden animation</title>
+<style>
+  body { margin: 0; font: 16px/1.5 sans-serif; }
+  .dot { position: absolute; left: 200px; top: 160px; width: 18px; height: 18px; border-radius: 50%;
+         background: #36c; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(51,102,204,.7); } 100% { box-shadow: 0 0 0 14px rgba(51,102,204,0); } }
+  .banner { position: absolute; left: 0; top: 0; right: 0; height: 420px; background: #5a2a48; color: #fff; padding: 40px; }
+  article { position: absolute; top: 440px; padding: 0 40px; }
+</style></head>
+<body>
+  <div class="dot"></div>
+  <div class="banner"><h1>An opaque banner</h1><p>It covers the animated dot below it.</p></div>
+  <article><h2>Article</h2><p>Plain text that does not change.</p></article>
+</body></html>

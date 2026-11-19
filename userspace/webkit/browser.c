@@ -10,6 +10,11 @@
  * GPU driver, on the GPU (EGL mode, Mesa's Intel driver); the active
  * tab's frame is copied under the chrome.
  *
+ * Frames are paced to the display (frame pacing, below) and only the rows of
+ * a frame that changed are copied on; memory is watched (memory, below): web
+ * processes give memory back as they grow and tabs not shown give theirs
+ * back when the machine runs short.
+ *
  * Surfer (browser.app) starts this when a Linux root with WebKit is present.
  *
  * usage: icda-webkit [url] */
@@ -50,6 +55,7 @@
 #define C_FIELD_ON  0xFF161618u
 #define C_TEXT      0xFFF2F2F7u
 #define C_TEXT2     0xFF98989Fu
+#define C_TEXT3     0xFF6A6A70u       /* a discarded tab's title */
 #define C_ACCENT    0xFF0A84FFu
 #define C_LINE      0xFF404044u
 
@@ -65,6 +71,14 @@ typedef struct {
     char uri[2048];
     double progress;
     int loading;
+    /* frame pacing (below) */
+    guint ack_source;              /* the frame complete waiting to be sent, or 0 */
+    uint32_t last_ack;             /* when the last one was sent (ms) */
+    unsigned still;                /* frames in a row that changed nothing on screen */
+    /* memory (below) */
+    uint32_t last_shown;           /* when it was last the active tab (ms) */
+    int discarded;                 /* its web process was ended to free memory: loads again when selected */
+    int related;                   /* shares its web process with another tab (a popup and its opener) */
 } tab_t;
 
 static tab_t *tabs[MAX_TABS];      /* each its own allocation: the backend keeps pointers into it */
@@ -77,9 +91,11 @@ static int gpu_mode;                /* pages drawn on the GPU (below) */
 static char gpu_reason[200];        /* why not, when not */
 static char status[256];
 static uint32_t status_until;
+static ic_rect_t status_drawn;     /* where the status line is on screen (w 0: nowhere) */
 static int mouse_x, mouse_y;
 static uint32_t buttons_down;
-static int redraw_pending;
+static int chrome_dirty;           /* tabs, toolbar or address to draw again */
+static int status_dirty;           /* the status line changed */
 
 static uint32_t now_ms(void) {
     struct timespec t;
@@ -92,7 +108,7 @@ static int content_h(void) { return H - TOP > 1 ? H - TOP : 1; }
 static void set_status(const char *s, int ms) {
     snprintf(status, sizeof status, "%s", s);
     status_until = ms ? now_ms() + (uint32_t)ms : 0;
-    redraw_pending = 1;
+    status_dirty = 1;
 }
 
 /* ---- drawing -------------------------------------------------------------------- */
@@ -153,22 +169,18 @@ static int in_rect(ic_rect_t r, int x, int y) {
     return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
 }
 
-static void compose(void) {
-    uint32_t *px = gui_pixel_buffer();
-    ic_canvas_t c;
+/* the tab strip, the toolbar and the loading line: rows 0 .. TOP - 1 */
+static void draw_chrome(ic_canvas_t *c) {
     const ic_face_t *body = ic_font(IC_FONT_BODY), *small = ic_font(IC_FONT_FOOTNOTE);
     tab_t *t = ntabs ? tabs[active] : 0;
-    if (!px) return;
-    c = ic_canvas_make(px, W, H);
-    redraw_pending = 0;
 
     /* tab strip */
-    ic_gfx_fill(&c, 0, 0, W, TOP, C_BG);
+    ic_gfx_fill(c, 0, 0, W, TOP, C_BG);
     for (int i = 0; i < ntabs; i++) {
         ic_rect_t r = tab_rect(i), tr;
         int hover = in_rect(r, mouse_x, mouse_y);
-        if (i == active) ic_gfx_rrect4(&c, r.x, r.y, r.w, r.h + 4 * S, 8.0f * S, 8.0f * S, 0, 0, C_TAB);
-        else if (hover) ic_gfx_rrect(&c, r.x, r.y + 2 * S, r.w, r.h - 4 * S, 7.0f * S, C_TAB_HOVER);
+        if (i == active) ic_gfx_rrect4(c, r.x, r.y, r.w, r.h + 4 * S, 8.0f * S, 8.0f * S, 0, 0, C_TAB);
+        else if (hover) ic_gfx_rrect(c, r.x, r.y + 2 * S, r.w, r.h - 4 * S, 7.0f * S, C_TAB_HOVER);
         tr = r;
         tr.x += 12 * S;
         tr.w -= 12 * S + (i == active ? 26 * S : 8 * S);
@@ -177,48 +189,48 @@ static void compose(void) {
             char cut[160];
             int n = ic_text_fit(small, title, tr.w);
             snprintf(cut, sizeof cut, "%.*s", n, title);
-            ic_text_draw_in(&c, small, tr, cut, i == active ? C_TEXT : C_TEXT2, IC_ALIGN_LEFT);
+            ic_text_draw_in(c, small, tr, cut, i == active ? C_TEXT : tabs[i]->discarded ? C_TEXT3 : C_TEXT2, IC_ALIGN_LEFT);
         }
-        if (tabs[i]->loading) ic_gfx_circle(&c, r.x + 6 * S, r.y + r.h / 2, 2.0f * S, C_ACCENT);
+        if (tabs[i]->loading) ic_gfx_circle(c, r.x + 6 * S, r.y + r.h / 2, 2.0f * S, C_ACCENT);
         if (i == active) {                                   /* close */
             int cx = r.x + r.w - 14 * S, cy = r.y + r.h / 2;
-            ic_gfx_line(&c, cx - 4 * S, cy - 4 * S, cx + 4 * S, cy + 4 * S, 1.4f * S, C_TEXT2);
-            ic_gfx_line(&c, cx + 4 * S, cy - 4 * S, cx - 4 * S, cy + 4 * S, 1.4f * S, C_TEXT2);
+            ic_gfx_line(c, cx - 4 * S, cy - 4 * S, cx + 4 * S, cy + 4 * S, 1.4f * S, C_TEXT2);
+            ic_gfx_line(c, cx + 4 * S, cy - 4 * S, cx - 4 * S, cy + 4 * S, 1.4f * S, C_TEXT2);
         }
     }
     {
         ic_rect_t r = newtab_rect();
         int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-        if (in_rect(r, mouse_x, mouse_y)) ic_gfx_rrect(&c, r.x, r.y, r.w, r.h, 6.0f * S, C_TAB_HOVER);
-        ic_gfx_line(&c, cx - 6 * S, cy, cx + 6 * S, cy, 1.6f * S, C_TEXT2);
-        ic_gfx_line(&c, cx, cy - 6 * S, cx, cy + 6 * S, 1.6f * S, C_TEXT2);
+        if (in_rect(r, mouse_x, mouse_y)) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 6.0f * S, C_TAB_HOVER);
+        ic_gfx_line(c, cx - 6 * S, cy, cx + 6 * S, cy, 1.6f * S, C_TEXT2);
+        ic_gfx_line(c, cx, cy - 6 * S, cx, cy + 6 * S, 1.6f * S, C_TEXT2);
     }
 
     /* toolbar */
-    ic_gfx_fill(&c, 0, TABS_H, W, BAR_H, C_TAB);
+    ic_gfx_fill(c, 0, TABS_H, W, BAR_H, C_TAB);
     for (int i = 0; i < 3; i++) {
         ic_rect_t r = button_rect(i);
         int able = !t ? 0 : i == 0 ? webkit_web_view_can_go_back(t->view) : i == 1 ? webkit_web_view_can_go_forward(t->view) : 1;
         ic_color_t col = able ? C_TEXT : C_LINE;
-        if (able && in_rect(r, mouse_x, mouse_y)) ic_gfx_circle(&c, r.x + r.w / 2, r.y + r.h / 2, r.w / 2, C_TAB_HOVER);
-        if (i < 2) draw_chevron(&c, r.x + r.w / 2, r.y + r.h / 2, i == 0 ? -1 : 1, col);
-        else draw_reload(&c, r.x + r.w / 2, r.y + r.h / 2, t && t->loading, col);
+        if (able && in_rect(r, mouse_x, mouse_y)) ic_gfx_circle(c, r.x + r.w / 2, r.y + r.h / 2, r.w / 2, C_TAB_HOVER);
+        if (i < 2) draw_chevron(c, r.x + r.w / 2, r.y + r.h / 2, i == 0 ? -1 : 1, col);
+        else draw_reload(c, r.x + r.w / 2, r.y + r.h / 2, t && t->loading, col);
     }
     {
         ic_rect_t r = addr_rect(), tr;
         const char *text = addr_focus ? addr : (t && t->uri[0] ? t->uri : "");
-        ic_gfx_rrect(&c, r.x, r.y, r.w, r.h, 9.0f * S, addr_focus ? C_FIELD_ON : C_FIELD);
-        if (addr_focus) ic_gfx_rrect_stroke(&c, r.x, r.y, r.w, r.h, 9.0f * S, 1.5f * S, C_ACCENT);
+        ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 9.0f * S, addr_focus ? C_FIELD_ON : C_FIELD);
+        if (addr_focus) ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, 9.0f * S, 1.5f * S, C_ACCENT);
         tr = r;
         tr.x += 14 * S;
         tr.w -= 28 * S;
         if (addr_focus && addr_all && addr[0]) {
             int tw = ic_text_measure(body, addr);
             if (tw > tr.w) tw = tr.w;
-            ic_gfx_rrect(&c, tr.x - 2 * S, r.y + 7 * S, tw + 4 * S, r.h - 14 * S, 3.0f * S, 0xFF1F4E8Cu);
+            ic_gfx_rrect(c, tr.x - 2 * S, r.y + 7 * S, tw + 4 * S, r.h - 14 * S, 3.0f * S, 0xFF1F4E8Cu);
         }
         if (!text[0] && !addr_focus) {
-            ic_text_draw_in(&c, body, tr, "Search or enter address", C_TEXT2, IC_ALIGN_LEFT);
+            ic_text_draw_in(c, body, tr, "Search or enter address", C_TEXT2, IC_ALIGN_LEFT);
         } else {
             /* the end of a long address stays in view while typing */
             int len = (int)strlen(text), start = 0;
@@ -227,10 +239,10 @@ static void compose(void) {
                 char cut[2048];
                 int n = ic_text_fit(body, text + start, tr.w);
                 snprintf(cut, sizeof cut, "%.*s", n, text + start);
-                ic_text_draw_in(&c, body, tr, cut, C_TEXT, IC_ALIGN_LEFT);
+                ic_text_draw_in(c, body, tr, cut, C_TEXT, IC_ALIGN_LEFT);
                 if (addr_focus && !addr_all) {                       /* caret */
                     int cx = tr.x + ic_text_measure(body, cut) + 1;
-                    ic_gfx_vline(&c, cx, r.y + 8 * S, r.h - 16 * S, C_ACCENT);
+                    ic_gfx_vline(c, cx, r.y + 8 * S, r.h - 16 * S, C_ACCENT);
                 }
             }
         }
@@ -239,40 +251,116 @@ static void compose(void) {
          * /tmp/surfer.log and Settings > About) */
         ic_rect_t a = addr_rect();
         ic_rect_t r = { a.x + a.w + 8 * S, a.y + 4 * S, BADGE_W - 10 * S, a.h - 8 * S };
-        ic_gfx_rrect(&c, r.x, r.y, r.w, r.h, 7.0f * S, gpu_mode ? 0xFF1E5E3Au : C_FIELD);
-        ic_text_draw_in(&c, small, r, gpu_mode ? "GPU" : "Software", gpu_mode ? 0xFF7CE0A0u : C_TEXT2, IC_ALIGN_CENTER);
+        ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 7.0f * S, gpu_mode ? 0xFF1E5E3Au : C_FIELD);
+        ic_text_draw_in(c, small, r, gpu_mode ? "GPU" : "Software", gpu_mode ? 0xFF7CE0A0u : C_TEXT2, IC_ALIGN_CENTER);
     }
     if (t && t->loading && t->progress > 0 && t->progress < 1) {
-        ic_gfx_fill(&c, 0, TOP - 2 * S, (int)(W * t->progress), 2 * S, C_ACCENT);
+        ic_gfx_fill(c, 0, TOP - 2 * S, (int)(W * t->progress), 2 * S, C_ACCENT);
     } else {
-        ic_gfx_hline(&c, 0, TOP - 1, W, C_LINE);
+        ic_gfx_hline(c, 0, TOP - 1, W, C_LINE);
     }
+}
 
-    /* the page */
+/* rows y0 .. y1 of the page area (0 is its top) from the active tab's picture */
+static void draw_page(ic_canvas_t *c, int y0, int y1) {
+    uint32_t *px = c->px;
+    tab_t *t = ntabs ? tabs[active] : 0;
+    int ch = content_h();
+    if (y0 < 0) y0 = 0;
+    if (y1 > ch - 1) y1 = ch - 1;
+    if (y1 < y0) return;
     if (t && t->frame) {
-        int ch = content_h(), cw = t->fw < W ? t->fw : W, rows = t->fh < ch ? t->fh : ch;
-        for (int y = 0; y < rows; y++)
-            memcpy(px + (size_t)(TOP + y) * (size_t)W, t->frame + (size_t)y * (size_t)t->fw, (size_t)cw * 4);
-        if (rows < ch) ic_gfx_fill(&c, 0, TOP + rows, W, ch - rows, 0xFFFFFFFFu);
-        if (cw < W) ic_gfx_fill(&c, cw, TOP, W - cw, rows, 0xFFFFFFFFu);
-    } else {
-        ic_rect_t r = { 0, TOP, W, content_h() };
-        ic_gfx_fill(&c, 0, TOP, W, content_h(), 0xFFFFFFFFu);
-        ic_text_draw_in(&c, body, r, t && t->loading ? "Loading..." : "", 0xFF8E8E93u, IC_ALIGN_CENTER);
-    }
-
-    /* status line: downloads, links */
-    if (status[0] && (!status_until || now_ms() < status_until)) {
-        int tw = ic_text_measure(small, status) + 20 * S, sh = 24 * S;
-        ic_gfx_rrect4(&c, 0, H - sh, tw, sh, 0, 8.0f * S, 0, 0, 0xEE2B2B2Eu);
-        {
-            ic_rect_t r = { 10 * S, H - sh, tw - 20 * S, sh };
-            ic_text_draw_in(&c, small, r, status, C_TEXT, IC_ALIGN_LEFT);
+        int cw = t->fw < W ? t->fw : W;
+        for (int y = y0; y <= y1; y++) {
+            uint32_t *row = px + (size_t)(TOP + y) * (size_t)W;
+            int x = 0;
+            if (y < t->fh) {
+                memcpy(row, t->frame + (size_t)y * (size_t)t->fw, (size_t)cw * 4);
+                x = cw;
+            }
+            for (; x < W; x++) row[x] = 0xFFFFFFFFu;
         }
-    } else if (status[0]) {
-        status[0] = 0;
+    } else {
+        ic_rect_t r = { 0, TOP, W, ch };
+        ic_gfx_fill(c, 0, TOP + y0, W, y1 - y0 + 1, 0xFFFFFFFFu);
+        if (y0 == 0 && y1 == ch - 1)
+            ic_text_draw_in(c, ic_font(IC_FONT_BODY), r, t && t->loading ? "Loading..." : "", 0xFF8E8E93u, IC_ALIGN_CENTER);
     }
+}
+
+/* the status line (downloads, links) over the bottom left of the page */
+static void draw_status(ic_canvas_t *c) {
+    const ic_face_t *small = ic_font(IC_FONT_FOOTNOTE);
+    status_drawn.w = 0;
+    if (status[0] && status_until && now_ms() >= status_until) status[0] = 0;
+    if (!status[0]) return;
+    {
+        int tw = ic_text_measure(small, status) + 20 * S, sh = 24 * S;
+        ic_rect_t r = { 10 * S, H - sh, tw - 20 * S, sh };
+        if (tw > W) tw = W;
+        ic_gfx_rrect4(c, 0, H - sh, tw, sh, 0, 8.0f * S, 0, 0, 0xEE2B2B2Eu);
+        ic_text_draw_in(c, small, r, status, C_TEXT, IC_ALIGN_LEFT);
+        status_drawn.x = 0;
+        status_drawn.y = H - sh;
+        status_drawn.w = tw;
+        status_drawn.h = sh;
+    }
+}
+
+static int canvas(ic_canvas_t *c) {
+    uint32_t *px = gui_pixel_buffer();
+    if (!px) return 0;
+    *c = ic_canvas_make(px, W, H);
+    return 1;
+}
+
+/* the whole window */
+static void compose(void) {
+    ic_canvas_t c;
+    if (!canvas(&c)) return;
+    chrome_dirty = status_dirty = 0;
+    draw_chrome(&c);
+    draw_page(&c, 0, content_h() - 1);
+    draw_status(&c);
     gui_flush();
+}
+
+/* the chrome alone: a hover, a title, the loading line */
+static void update_chrome(void) {
+    ic_canvas_t c;
+    chrome_dirty = 0;
+    if (!canvas(&c)) return;
+    draw_chrome(&c);
+    gui_flush_rect(0, 0, W, TOP);
+}
+
+/* rows y0 .. y1 of the page changed (with the status line over them) */
+static void update_rows(int y0, int y1) {
+    ic_canvas_t c;
+    int top = TOP + y0, bottom = TOP + y1 + 1;
+    if (!canvas(&c)) return;
+    draw_page(&c, y0, y1);
+    if (status_drawn.w && bottom > status_drawn.y && top < status_drawn.y + status_drawn.h) {
+        draw_status(&c);
+        if (status_drawn.y + status_drawn.h > bottom) bottom = status_drawn.y + status_drawn.h;
+    }
+    gui_flush_rect(0, top, W, bottom - top);
+}
+
+/* the status line changed: the page where it was, and the new one */
+static void update_status(void) {
+    ic_canvas_t c;
+    int top = status_drawn.w ? status_drawn.y : H, bottom = H;
+    status_dirty = 0;
+    if (!canvas(&c)) return;
+    if (status_drawn.w) draw_page(&c, status_drawn.y - TOP, H - TOP - 1);
+    draw_status(&c);
+    if (status_drawn.w && status_drawn.y < top) {
+        draw_page(&c, status_drawn.y - TOP, top - TOP - 1);      /* the new line is taller: under it too */
+        draw_status(&c);
+        top = status_drawn.y;
+    }
+    if (top < bottom) gui_flush_rect(0, top, W, bottom - top);
 }
 
 /* ---- tabs ------------------------------------------------------------------------- */
@@ -326,38 +414,163 @@ static void frame_stats(unsigned t0) {
     }
 }
 
+/* ---- frame pacing ------------------------------------------------------------------------
+ *
+ * WebKit draws a page's next frame only after it is told the last one was
+ * shown (frame complete), and requestAnimationFrame and CSS animations run at
+ * that pace.  Sent at once, as it used to be, a page with any animation at
+ * all was drawn as fast as the processors allowed: Wikipedia, sitting still,
+ * 200 times a second - two processor cores, ~13,000 system calls and ~20,000
+ * page faults a second, each one through ICDA's kernel lock - though not a
+ * pixel changed.
+ *
+ * So frame complete goes at the display's rate, 60 a second; at 15 a second
+ * once half a second of frames has changed nothing on screen and no key or
+ * pointer has moved (a page animating something invisible); once a second
+ * for a tab that is not shown.  The first visible change, key or pointer
+ * movement brings the full rate back. */
+#define FRAME_MS        16
+#define STILL_FRAME_MS  66
+#define STILL_AFTER     30
+#define HIDDEN_FRAME_MS 1000
+#define INPUT_HOLD_MS   500
+static uint32_t last_input;        /* ms of the last key or pointer event */
+
+static gboolean frame_complete(gpointer data) {
+    tab_t *t = (tab_t *)data;
+    t->ack_source = 0;
+    t->last_ack = now_ms();
+    wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
+    return G_SOURCE_REMOVE;
+}
+
+static uint32_t frame_interval(tab_t *t) {
+    if (!ntabs || t != tabs[active]) return HIDDEN_FRAME_MS;
+    if (t->still >= STILL_AFTER && now_ms() - last_input > INPUT_HOLD_MS) return STILL_FRAME_MS;
+    return FRAME_MS;
+}
+
+/* frame complete for t's last frame, as soon as its pace allows */
+static void pace_frame(tab_t *t) {
+    int32_t left;
+    if (t->ack_source) g_source_remove(t->ack_source);
+    t->ack_source = 0;
+    left = (int32_t)(t->last_ack + frame_interval(t) - now_ms());
+    if (left <= 0) frame_complete(t);
+    else t->ack_source = g_timeout_add_full(G_PRIORITY_HIGH, (guint)left, frame_complete, t, NULL);
+}
+
+/* a key, the pointer, or the tab being shown: a frame complete held back
+ * for a still or hidden page goes at the full rate */
+static void hurry_frame(tab_t *t) {
+    if (t && t->ack_source) pace_frame(t);
+}
+
+static void note_input(void) {
+    last_input = now_ms();
+    if (ntabs) {
+        tabs[active]->still = 0;
+        hurry_frame(tabs[active]);
+    }
+}
+
+/* ---- frames in --------------------------------------------------------------------------- */
+
+typedef uint32_t px4_t __attribute__((vector_size(16)));
+
+/* copies n pixels, opaque, and says whether any differed from what was there:
+ * one pass for the copy, the alpha and the change */
+static int copy_row(uint32_t *restrict d, const uint32_t *restrict s, int n) {
+    const px4_t opaque = { 0xFF000000u, 0xFF000000u, 0xFF000000u, 0xFF000000u };
+    px4_t diff = { 0, 0, 0, 0 };
+    uint32_t any;
+    int x = 0;
+    for (; x + 4 <= n; x += 4) {
+        px4_t a, b;
+        memcpy(&a, s + x, sizeof a);
+        memcpy(&b, d + x, sizeof b);
+        a |= opaque;
+        diff |= a ^ b;
+        memcpy(d + x, &a, sizeof a);
+    }
+    any = diff[0] | diff[1] | diff[2] | diff[3];
+    for (; x < n; x++) {
+        uint32_t v = s[x] | 0xFF000000u;
+        any |= v ^ d[x];
+        d[x] = v;
+    }
+    return any != 0;
+}
+
+/* the same from bytes R G B A (the GPU's read-back without BGRA) */
+static int copy_row_rgba(uint32_t *restrict d, const uint32_t *restrict s, int n) {
+    uint32_t any = 0;
+    for (int x = 0; x < n; x++) {
+        uint32_t v = s[x];
+        v = 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
+        any |= v ^ d[x];
+        d[x] = v;
+    }
+    return any != 0;
+}
+
+/* A frame from the web process into t->frame.  *y0 .. *y1 are the rows that
+ * changed; returns 0 if none did (the page drew the same picture again). */
+static int take_frame(tab_t *t, const uint8_t *src, int w, int h, size_t stride, int rgba, int *y0, int *y1) {
+    int all = 0;
+    *y0 = h;
+    *y1 = -1;
+    if (t->fw != w || t->fh != h || !t->frame) {
+        free(t->frame);
+        t->frame = (uint32_t *)calloc((size_t)w * (size_t)h, 4);
+        t->fw = t->frame ? w : 0;
+        t->fh = t->frame ? h : 0;
+        if (!t->frame) return 0;
+        all = 1;
+    }
+    for (int y = 0; y < h; y++) {
+        const uint32_t *s = (const uint32_t *)(src + (size_t)y * stride);
+        uint32_t *d = t->frame + (size_t)y * (size_t)w;
+        if ((rgba ? copy_row_rgba(d, s, w) : copy_row(d, s, w)) || all) {
+            if (*y0 > y) *y0 = y;
+            *y1 = y;
+        }
+    }
+    return *y1 >= 0;
+}
+
+/* after a frame: shown if it changed something, then paced.  WPE_DAMAGE
+ * prints each frame's changed rows and the pace it got. */
+static void frame_done(tab_t *t, int changed, int y0, int y1, unsigned t0) {
+    static int damage_log = -1;
+    if (damage_log < 0) damage_log = getenv("WPE_DAMAGE") != NULL;
+    if (damage_log)
+        fprintf(stderr, "icda-webkit damage: ms %u tab %s rows %d-%d still %u\n", now_ms(),
+                ntabs && t == tabs[active] ? "shown" : "hidden", changed ? y0 : -1, changed ? y1 : -1, t->still);
+    if (changed && ntabs && t == tabs[active]) update_rows(y0, y1);
+    if (!timing_painted) {
+        timing_painted = 1;
+        timing("first picture", "");
+    }
+    frame_stats(t0);
+    t->still = changed ? 0 : t->still < 1000000 ? t->still + 1 : t->still;
+    pace_frame(t);
+}
+
 static void on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *buffer) {
     tab_t *t = tab_of_exp(data);
     unsigned t0 = now_ms();
     struct wl_shm_buffer *shm = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
-    if (shm) {
+    int changed = 0, y0 = 0, y1 = -1;
+    /* a tab not shown keeps the picture it had (WebKit draws it again when it is shown) */
+    if (shm && ntabs && (t == tabs[active] || !t->frame)) {
         int w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm), stride = wl_shm_buffer_get_stride(shm);
-        if (t->fw != w || t->fh != h || !t->frame) {
-            free(t->frame);
-            t->frame = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
-            t->fw = w;
-            t->fh = h;
-        }
-        if (t->frame) {
-            const uint8_t *src;
-            wl_shm_buffer_begin_access(shm);
-            src = wl_shm_buffer_get_data(shm);
-            for (int y = 0; y < h; y++) {
-                const uint32_t *s = (const uint32_t *)(src + (size_t)y * (size_t)stride);
-                uint32_t *d = t->frame + (size_t)y * (size_t)w;
-                for (int x = 0; x < w; x++) d[x] = s[x] | 0xFF000000u;
-            }
-            wl_shm_buffer_end_access(shm);
-        }
-        if (t == tabs[active]) compose();
-        if (!timing_painted) {
-            timing_painted = 1;
-            timing("first picture", "");
-        }
-        frame_stats(t0);
+        wl_shm_buffer_begin_access(shm);
+        changed = take_frame(t, (const uint8_t *)wl_shm_buffer_get_data(shm), w, h, (size_t)stride, 0, &y0, &y1);
+        wl_shm_buffer_end_access(shm);
     }
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
     wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(t->exp, buffer);
+    frame_done(t, changed, y0, y1, t0);
 }
 
 /* ---- pages drawn on the GPU ------------------------------------------------------------
@@ -385,6 +598,8 @@ static int gpu_bgra;
 static EGLDisplay egl_dpy = EGL_NO_DISPLAY;
 static GLuint rb_fbo, rb_tex;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target;
+static uint32_t *rb_buf;            /* a frame read back from the GPU */
+static size_t rb_cap;
 
 static void touch(const char *path) {
     FILE *f = fopen(path, "w");
@@ -526,40 +741,25 @@ static void on_export_egl_image(void *data, struct wpe_fdo_egl_exported_image *i
     unsigned t0 = now_ms();
     int w = (int)wpe_fdo_egl_exported_image_get_width(image), h = (int)wpe_fdo_egl_exported_image_get_height(image);
     EGLImageKHR img = wpe_fdo_egl_exported_image_get_egl_image(image);
-    if (w > 0 && h > 0 && img) {
-        if (t->fw != w || t->fh != h || !t->frame) {
-            free(t->frame);
-            t->frame = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
-            t->fw = w;
-            t->fh = h;
+    int changed = 0, y0 = 0, y1 = -1;
+    if (w > 0 && h > 0 && img && ntabs && (t == tabs[active] || !t->frame)) {
+        size_t n = (size_t)w * (size_t)h;
+        if (n > rb_cap) {
+            free(rb_buf);
+            rb_buf = (uint32_t *)malloc(n * 4);
+            rb_cap = rb_buf ? n : 0;
         }
         glBindTexture(GL_TEXTURE_2D, rb_tex);
         image_target(GL_TEXTURE_2D, (GLeglImageOES)img);
         glBindFramebuffer(GL_FRAMEBUFFER, rb_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rb_tex, 0);
-        if (t->frame && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-            uint32_t *p = t->frame;
-            size_t n = (size_t)w * (size_t)h;
-            if (gpu_bgra) {
-                glReadPixels(0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, p);
-                for (size_t i = 0; i < n; i++) p[i] |= 0xFF000000u;
-            } else {
-                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, p);
-                for (size_t i = 0; i < n; i++) {
-                    uint32_t v = p[i];          /* bytes R G B A -> 0xAARRGGBB */
-                    p[i] = 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
-                }
-            }
+        if (rb_buf && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            glReadPixels(0, 0, w, h, gpu_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE, rb_buf);
+            changed = take_frame(t, (const uint8_t *)rb_buf, w, h, (size_t)w * 4, !gpu_bgra, &y0, &y1);
         }
-        if (t == tabs[active]) compose();
-        if (!timing_painted) {
-            timing_painted = 1;
-            timing("first picture", "");
-        }
-        frame_stats(t0);
     }
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete(t->exp);
     wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(t->exp, image);
+    frame_done(t, changed, y0, y1, t0);
 }
 
 static void sync_addr(void) {
@@ -575,9 +775,10 @@ static void on_title(WebKitWebView *v, GParamSpec *ps, gpointer d) {
         fprintf(stderr, "icda-webkit probe: %s\n", s + 6);
         return;
     }
+    if (t->discarded && !(s && *s)) return;           /* ending its process clears it: the tab keeps its name */
     snprintf(t->title, sizeof t->title, "%s", s ? s : "");
     if (getenv("WPE_CONSOLE")) fprintf(stderr, "icda-webkit title: %s\n", t->title);
-    redraw_pending = 1;
+    chrome_dirty = 1;
 }
 
 static void on_uri(WebKitWebView *v, GParamSpec *ps, gpointer d) {
@@ -585,10 +786,11 @@ static void on_uri(WebKitWebView *v, GParamSpec *ps, gpointer d) {
     const char *s = webkit_web_view_get_uri(v);
     (void)ps; (void)d;
     if (!t) return;
+    if (t->discarded && !(s && *s)) return;
     snprintf(t->uri, sizeof t->uri, "%s", s ? s : "");
     sync_addr();
     if (getenv("WPE_CONSOLE")) fprintf(stderr, "icda-webkit uri: %s\n", t->uri);
-    redraw_pending = 1;
+    chrome_dirty = 1;
 }
 
 static void on_progress(WebKitWebView *v, GParamSpec *ps, gpointer d) {
@@ -597,7 +799,7 @@ static void on_progress(WebKitWebView *v, GParamSpec *ps, gpointer d) {
     if (!t) return;
     t->progress = webkit_web_view_get_estimated_load_progress(v);
     t->loading = webkit_web_view_is_loading(v);
-    redraw_pending = 1;
+    chrome_dirty = 1;
 }
 
 static gboolean on_fail(WebKitWebView *v, WebKitLoadEvent ev, char *uri, GError *err, gpointer d) {
@@ -610,10 +812,12 @@ static gboolean on_fail(WebKitWebView *v, WebKitLoadEvent ev, char *uri, GError 
 
 /* the page's web process ended: say so instead of leaving a blank page */
 static void on_terminated(WebKitWebView *v, WebKitWebProcessTerminationReason reason, gpointer d) {
+    tab_t *t = tab_of_view(v);
     const char *why = reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "used too much memory"
                     : reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" : "was stopped";
     char msg[160];
-    (void)v; (void)d;
+    (void)d;
+    if (t && t->discarded && reason == WEBKIT_WEB_PROCESS_TERMINATED_BY_API) return;   /* memory, below: it reloads when shown */
     fprintf(stderr, "icda-webkit: web process %s (reason %d)\n", why, (int)reason);
     if (gpu_mode && reason == WEBKIT_WEB_PROCESS_CRASHED) {
         const char *uri = webkit_web_view_get_uri(v);
@@ -634,13 +838,125 @@ static void set_sizes(tab_t *t) {
     wpe_view_backend_dispatch_set_device_scale_factor(t->wb, (float)S);
 }
 
+/* ---- memory ------------------------------------------------------------------------------
+ *
+ * ICDA has no swap.  When memory runs out its kernel ends whichever program
+ * asks for a page next: the page being read, or the desktop itself.  So:
+ *   - each web process gives memory back as it grows (WebKit's memory
+ *     pressure settings, scaled to the machine below: caches dropped from a
+ *     sixth of the RAM, harder from a quarter) and a page that keeps
+ *     growing past two fifths of the RAM is ended with a message instead
+ *     (at most 1, 1.5 and 2.4 GB: WebKit's limit stops at 3 GB);
+ *   - when the machine is short of memory, the tab shown longest ago gives
+ *     its memory back: its web process is ended (the tab is discarded) and
+ *     the page loads again when the tab is selected.  One tab every two
+ *     seconds while memory stays short; tabs playing sound, and popups and
+ *     their openers (they share a process), are kept. */
+#define MEM_CHECK_MS 2000
+static WebKitWebContext *web_context;
+static unsigned ram_mb;            /* the machine's RAM */
+
+/* MemTotal and MemAvailable (MemFree if it has none), in kB.  Opened anew
+ * each time: older ICDA kernels render the file only when it is opened. */
+static int meminfo(unsigned long long *total_kb, unsigned long long *avail_kb) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    char line[128];
+    unsigned long long total = 0, avail = 0, freekb = 0, v;
+    int have_avail = 0;
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "MemTotal: %llu", &v) == 1) total = v;
+        else if (sscanf(line, "MemAvailable: %llu", &v) == 1) { avail = v; have_avail = 1; }
+        else if (sscanf(line, "MemFree: %llu", &v) == 1) freekb = v;
+    }
+    fclose(f);
+    if (!total) return 0;
+    *total_kb = total;
+    *avail_kb = have_avail ? avail : freekb;
+    return 1;
+}
+
+/* below this much available memory (kB), tabs are discarded */
+static unsigned long long mem_low_kb(unsigned long long total_kb) {
+    unsigned long long low = total_kb / 12;
+    return low < 192 * 1024 ? 192 * 1024 : low;
+}
+
+static void memory_setup(void) {
+    unsigned long long total_kb = 0, avail_kb = 0;
+    unsigned limit_mb;
+    WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
+    ram_mb = meminfo(&total_kb, &avail_kb) ? (unsigned)(total_kb / 1024) : 4096;
+    limit_mb = ram_mb / 2;
+    if (limit_mb < 512) limit_mb = 512;
+    if (limit_mb > 3072) limit_mb = 3072;
+    webkit_memory_pressure_settings_set_memory_limit(mp, limit_mb);
+    webkit_memory_pressure_settings_set_conservative_threshold(mp, 0.33);
+    webkit_memory_pressure_settings_set_strict_threshold(mp, 0.5);
+    webkit_memory_pressure_settings_set_kill_threshold(mp, 0.8);
+    webkit_memory_pressure_settings_set_poll_interval(mp, 10);
+    /* The web browser cache model keeps the web process of every site left
+     * behind (4 per GB of RAM, up to 30) for a quicker return, and WebKit
+     * 2.40 never lets them go when memory runs short on Linux: six sites in
+     * one tab left eight web processes and 2.1 GB.  The document browser
+     * model keeps none, only the two pages back/forward goes to at once.
+     * The cache model is one setting for the whole program and a context's
+     * process cache is sized when the context is made, so it is set before
+     * (through the default context, otherwise unused). */
+    webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
+    web_context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, NULL));
+    webkit_memory_pressure_settings_free(mp);
+    slog("memory: %u MB of RAM; a page gives memory back from %u MB, harder from %u MB, ended at %u MB; "
+         "tabs are discarded below %llu MB available; back/forward keeps pages %s",
+         ram_mb, limit_mb / 3, limit_mb / 2, limit_mb * 4 / 5, mem_low_kb((unsigned long long)ram_mb * 1024) / 1024,
+         ram_mb < 6144 ? "on disk only (under 6 GB)" : "in memory");
+}
+
+static void discard_tab(tab_t *t, unsigned long long avail_kb) {
+    fprintf(stderr, "icda-webkit: discarded %s (%llu MB available)\n", t->uri[0] ? t->uri : "a tab", avail_kb / 1024);
+    t->discarded = 1;
+    t->loading = 0;
+    if (t->ack_source) g_source_remove(t->ack_source);
+    t->ack_source = 0;
+    free(t->frame);
+    t->frame = 0;
+    t->fw = t->fh = 0;
+    webkit_web_view_terminate_web_process(t->view);
+    chrome_dirty = 1;
+}
+
+static gboolean memory_watch(gpointer d) {
+    unsigned long long total, avail;
+    tab_t *pick = 0;
+    (void)d;
+    if (!meminfo(&total, &avail) || avail >= mem_low_kb(total)) return G_SOURCE_CONTINUE;
+    for (int i = 0; i < ntabs; i++) {
+        tab_t *t = tabs[i];
+        if (i == active || t->discarded || t->related || webkit_web_view_is_playing_audio(t->view)) continue;
+        if (!pick || (int32_t)(t->last_shown - pick->last_shown) < 0) pick = t;
+    }
+    if (pick) discard_tab(pick, avail);
+    return G_SOURCE_CONTINUE;
+}
+
 static void select_tab(int i) {
+    tab_t *t;
     if (i < 0 || i >= ntabs) return;
-    if (ntabs && active < ntabs && active != i)
+    if (ntabs && active < ntabs && active != i) {
+        tabs[active]->last_shown = now_ms();
         wpe_view_backend_remove_activity_state(tabs[active]->wb, wpe_view_activity_state_visible | wpe_view_activity_state_focused);
+    }
     active = i;
-    wpe_view_backend_add_activity_state(tabs[i]->wb, wpe_view_activity_state_visible | wpe_view_activity_state_focused |
-                                                    wpe_view_activity_state_in_window);
+    t = tabs[i];
+    t->last_shown = now_ms();
+    t->still = 0;
+    wpe_view_backend_add_activity_state(t->wb, wpe_view_activity_state_visible | wpe_view_activity_state_focused |
+                                                wpe_view_activity_state_in_window);
+    if (t->discarded) {                     /* back from memory, below: load the page again */
+        t->discarded = 0;
+        webkit_web_view_reload(t->view);
+    }
+    hurry_frame(t);
     addr_focus = 0;
     sync_addr();
     compose();
@@ -665,10 +981,15 @@ static int add_tab(const char *url, WebKitWebView *related) {
     }
     t->wb = wpe_view_backend_exportable_fdo_get_view_backend(t->exp);
     backend = webkit_web_view_backend_new(t->wb, NULL, NULL);
-    if (related)
+    if (related) {
+        tab_t *opener = tab_of_view(related);
+        t->related = 1;
+        if (opener) opener->related = 1;
         t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related, NULL));
-    else
-        t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "settings", settings, NULL));
+    } else {
+        t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "settings", settings,
+                                               "web-context", web_context, NULL));
+    }
     set_sizes(t);
     g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), NULL);
     g_signal_connect(t->view, "notify::uri", G_CALLBACK(on_uri), NULL);
@@ -702,6 +1023,8 @@ static void close_tab(int i) {
     t = tabs[i];
     memmove(&tabs[i], &tabs[i + 1], sizeof(tab_t *) * (size_t)(ntabs - i - 1));
     ntabs--;
+    if (t->ack_source) g_source_remove(t->ack_source);
+    t->ack_source = 0;
     webkit_web_view_try_close(t->view);
     g_object_unref(t->view);
     free(t->frame);
@@ -987,7 +1310,7 @@ static void mouse(int x, int y, uint32_t buttons, int wheel) {
         }
         if (in_rect(addr_rect(), x, y)) { focus_addr(); return; }
     } else if (moved) {
-        redraw_pending = 1;                                  /* hover highlights */
+        chrome_dirty = 1;                                    /* hover highlights */
     }
 }
 
@@ -1006,9 +1329,11 @@ static gboolean poll_window(gpointer data) {
     while (gui_poll_event(&m)) {
         switch (m.type) {
         case GUI_MSG_KEY_EVENT:
+            note_input();
             if (m.key.pressed) feed_key(m.key.keycode);
             break;
         case GUI_MSG_MOUSE_EVENT:
+            note_input();
             mouse(m.mouse.x, m.mouse.y, m.mouse.buttons, m.mouse.wheel);
             break;
         case GUI_MSG_RESIZE:
@@ -1029,9 +1354,10 @@ static gboolean poll_window(gpointer data) {
     if (status_until && now_ms() >= status_until) {
         status_until = 0;
         status[0] = 0;
-        redraw_pending = 1;
+        status_dirty = 1;
     }
-    if (redraw_pending) compose();
+    if (chrome_dirty) update_chrome();
+    if (status_dirty) update_status();
     return G_SOURCE_CONTINUE;
 }
 
@@ -1208,11 +1534,18 @@ int main(int argc, char **argv) {
         fprintf(stderr, "icda-webkit: WPEBackend-fdo shared memory mode failed\n");
         return 1;
     }
+    memory_setup();
     settings = webkit_settings_new();
     webkit_settings_set_user_agent(settings,
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15");
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, getenv("WPE_CONSOLE") != NULL);
     webkit_settings_set_enable_smooth_scrolling(settings, FALSE);
+    /* Back to a page from another site is instant because its web process is
+     * kept (two pages for the whole browser, WebKit lets them go only when
+     * their tab closes): up to a gigabyte for two heavy pages, a quarter of a
+     * 4 GB machine.  Below 6 GB, going back loads the page again from the
+     * disk cache instead. */
+    if (ram_mb < 6144) webkit_settings_set_enable_page_cache(settings, FALSE);
     g_signal_connect(webkit_network_session_get_default(), "download-started", G_CALLBACK(on_download), NULL);
 
     add_tab(url, NULL);
@@ -1220,6 +1553,7 @@ int main(int argc, char **argv) {
     set_status("", 1);
 
     g_timeout_add(10, poll_window, NULL);
+    g_timeout_add(MEM_CHECK_MS, memory_watch, NULL);
     if (getenv("WPE_THEN")) {
         char *spec = g_strdup(getenv("WPE_THEN")), *sp = strchr(spec, 0x20);
         if (sp) {
