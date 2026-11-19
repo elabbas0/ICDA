@@ -63,6 +63,19 @@ static long long bwm_ns(void) {
     return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+/* BENCH_TRACE=file: a line per wheel notch sent ("w us") and per flush
+ * ("f us x y w h", the damage), to measure how long input takes to show */
+static FILE *bwm_trace(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        const char *p = getenv("BENCH_TRACE");
+        tried = 1;
+        if (p && (f = fopen(p, "w"))) setvbuf(f, NULL, _IOLBF, 0);
+    }
+    return f;
+}
+
 static void bwm_push(const gui_msg_t *m) {
     if (bwm.tail - bwm.head >= sizeof bwm.q / sizeof bwm.q[0]) return;
     bwm.q[bwm.tail++ % (sizeof bwm.q / sizeof bwm.q[0])] = *m;
@@ -144,6 +157,7 @@ static void bwm_input(void) {
             /* down for the first 60 %, then back up: long pages stay scrollable */
             int up = now - bwm.scroll_start > (bwm.scroll_until - bwm.scroll_start) * 6 / 10;
             bwm_mouse(bwm.mouse_x, bwm.mouse_y, 0, up ? 1 : -1);
+            if (bwm_trace()) fprintf(bwm_trace(), "w %lld\n", bwm_ns() / 1000);
             bwm.scroll_next += bwm.scroll_period;
         }
     }
@@ -190,6 +204,7 @@ static void bwm_flush(const gui_msg_t *m) {
     }
     for (int r = 0; r < h; r++)
         memcpy(bwm.frame + (size_t)(y + r) * (size_t)bwm.w + x, bwm.win + (size_t)(y + r) * (size_t)bwm.w + x, (size_t)w * 4);
+    if (bwm_trace()) fprintf(bwm_trace(), "f %lld %d %d %d %d\n", t0 / 1000, x, y, w, h);
     bwm.flushes++;
     bwm.pixels += (unsigned long long)(w > 0 && h > 0 ? w * h : 0);
     bwm.comp_ns += (unsigned long long)(bwm_ns() - t0);

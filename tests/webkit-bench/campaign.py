@@ -57,10 +57,13 @@ def main():
     src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
     for f in os.listdir(src):
         shutil.copy(os.path.join(src, f), pages)
-    subprocess.run(["gst-launch-1.0", "-q", "videotestsrc", "num-buffers=300", "pattern=ball", "!",
-                    "video/x-raw,width=640,height=360,framerate=30/1", "!", "vp8enc", "deadline=1", "!", "webmmux", "!",
-                    "filesink", f"location={os.path.join(pages, 'test.webm')}"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["gst-launch-1.0", "-q", "videotestsrc", "num-buffers=300", "pattern=ball", "!",
+                        "video/x-raw,width=640,height=360,framerate=30/1", "!", "vp8enc", "deadline=1", "!", "webmmux", "!",
+                        "filesink", f"location={os.path.join(pages, 'test.webm')}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        print("campaign: no gst-launch-1.0 (gstreamer-tools): local-video plays nothing", file=sys.stderr)
     server = subprocess.Popen([sys.executable, "-m", "http.server", "18080", "--bind", "127.0.0.1"], cwd=pages,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
