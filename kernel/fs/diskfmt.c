@@ -9,6 +9,7 @@
 #include "fatfs.h"
 #include "exfat_upcase.h"
 #include "../memory/heap.h"
+#include "../memory/swap.h"
 
 #define DISK_SECTOR_SIZE 512U
 #define DISK_ALIGN_LBA 2048U
@@ -684,6 +685,7 @@ int diskfmt_format_device(uint32_t device_index, diskfmt_fs_t fs_type) {
     int rc;
     if (!dev || !dev->write) return -10;
     if (runtime_device >= 0 && device_index == (uint32_t)runtime_device) return -11;
+    if (swap_uses_device(dev)) return -11;          /* programs' memory is on it */
 
     if (fs_type == DISKFMT_FS_FAT32) {
         rc = diskfmt_format_fat32(dev);
@@ -719,6 +721,7 @@ int diskfmt_format_partition(uint32_t partition_index, diskfmt_fs_t fs_type) {
 
     if (!part || !part->device || !part->device->write) return -10;
     if (runtime_device >= 0 && part->device == block_get((uint32_t)runtime_device)) return -11;
+    if (swap_uses_device(part->device)) return -11;
 
     if (fs_type == DISKFMT_FS_FAT32) {
         rc = diskfmt_format_fat32_partition(part->device, (uint32_t)part->start_lba, (uint32_t)part->sector_count);
@@ -809,6 +812,7 @@ static int device_index_of(block_device_t *dev) {
 static int editable_device(block_device_t *dev) {
     int runtime = persistfs_active_device();
     if (!dev || !dev->write || dev->sector_size != DISK_SECTOR_SIZE) return 0;
+    if (swap_uses_device(dev)) return 0;            /* the swap area is on it */
     return runtime < 0 || device_index_of(dev) != runtime;
 }
 

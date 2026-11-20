@@ -743,7 +743,7 @@ static uint64_t sys_vm_free(uint64_t addr, uint64_t length) {
     if (!proc || !proc->addr_space || length == 0 || (addr & 0xFFFULL)) return (uint64_t)-U_EINVAL;
     if (addr < UVM_ANON_BASE || end < addr || end > proc->linux_mmap_next) return (uint64_t)-U_EINVAL;
     for (uint64_t page = addr; page < end; page += PAGE_SIZE_4K) {
-        if (vmm_virt_to_phys(proc->addr_space, page)) vmm_unmap_page(proc->addr_space, page, 1);
+        if (vmm_has_page(proc->addr_space, page)) vmm_unmap_page(proc->addr_space, page, 1);
     }
     return 0;
 }
@@ -1003,7 +1003,7 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
 
     /* kernel threads share the kernel's address space: no memory of their
      * own to show; a user count is never more than the machine has */
-    out->mem_bytes = proc->kind == PROCESS_USER && proc->addr_space ? proc->addr_space->mapped_pages : 0;
+    out->mem_bytes = proc->kind == PROCESS_USER ? vmm_resident_pages(proc->addr_space) : 0;
     if (out->mem_bytes > pmm_usable_frames()) out->mem_bytes = pmm_usable_frames();
     out->mem_bytes *= PAGE_SIZE_4K;
     {

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "fs/swaparea.h"
 
 #include "drivers/console/console.h"
 #include "drivers/audio/speaker.h"
@@ -501,6 +502,9 @@ void kernel_main(void *multiboot_info) {
     /* The installed kernel gets BusyBox from SYSTEM, not initramfs. Seed
      * /bin/sh and the applet entry points only after that binary is present. */
     lx_init();
+    /* swap: a swap partition, or /swapfile on an installed system (fs/swaparea.c) */
+    swap_area_boot(live_installer, boot_cmdline_has_flag(multiboot_info, "icda.swap=on"),
+                   boot_cmdline_has_flag(multiboot_info, "icda.swap=off"));
 
     
 

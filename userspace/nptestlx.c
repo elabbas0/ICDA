@@ -25,6 +25,10 @@
 #define LX_MUNMAP    11
 #define LX_BRK       12
 #define LX_EXIT      60
+#define LX_MREMAP    25
+#define LX_FORK      57
+#define LX_WAIT4     61
+#define LX_MREMAP_MAYMOVE 1
 #define LX_GETDENTS  217
 #define LX_ARCH_PRCTL 158
 
@@ -127,6 +131,170 @@ static void check(const char *name, long rc, long want) {
     }
     lx_puts(name);
     lx_puts("\n");
+}
+
+/* the number after key in /proc/<file> (kB in meminfo and status), 0 if absent */
+static uint64_t proc_number(const char *path, const char *key) {
+    char b[2048];
+    long fd = (long)sys_call3(LX_OPEN, (uint64_t)(uintptr_t)path, LX_O_RDONLY, 0), n;
+    if (fd < 0) return 0;
+    n = (long)sys_call3(LX_READ, (uint64_t)fd, (uint64_t)(uintptr_t)b, sizeof(b));
+    sys_call1(LX_CLOSE, (uint64_t)fd);
+    return n > 0 ? number_after(b, n, key) : 0;
+}
+
+/* what word w of the swap test's page i holds (gen: which writing) */
+static uint64_t swap_word(uint64_t i, uint64_t w, uint64_t gen) {
+    return (i * 0x9E3779B97F4A7C15ULL) ^ (w * 0xD1B54A32D192ED03ULL) ^ (gen * 0x5157A9ULL) ^ 0xA5A5A5A5ULL;
+}
+
+static void swap_fill(uint64_t addr, uint64_t first, uint64_t pages, uint64_t step, uint64_t gen) {
+    for (uint64_t i = first; i < pages; i += step) {
+        volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)(addr + i * 4096);
+        for (uint64_t w = 0; w < 512; w++) p[w] = swap_word(i, w, gen);
+    }
+}
+
+/* pages from first, every step, whose words are not gen's (the page index
+ * in the pattern is base + i: a range moved by mremap keeps its words) */
+static uint64_t swap_bad(uint64_t addr, uint64_t first, uint64_t pages, uint64_t step, uint64_t base, uint64_t gen) {
+    uint64_t bad = 0;
+    for (uint64_t i = first; i < pages; i += step) {
+        const volatile uint64_t *p = (const volatile uint64_t *)(uintptr_t)(addr + i * 4096);
+        for (uint64_t w = 0; w < 512; w++)
+            if (p[w] != swap_word(base + i, w, gen)) {
+                bad++;
+                break;
+            }
+    }
+    return bad;
+}
+
+static void lx_putnum(uint64_t n) {
+    char b[24];
+    int i = 23;
+    b[i] = 0;
+    do {
+        b[--i] = (char)('0' + n % 10);
+        n /= 10;
+    } while (n && i > 0);
+    lx_puts(b + i);
+}
+
+/* the generation page j holds after the fill (1), the fork (2 on every 7th)
+ * and the mprotect step (3 on pages 1, 8, 15 ... of the first quarter) */
+static uint64_t swap_gen(uint64_t j, uint64_t quarter) {
+    if (j % 7 == 0) return 2;
+    if (j < quarter && j % 7 == 1) return 3;
+    return 1;
+}
+
+/* every page of a range moved by mremap (page i was page base + i); the
+ * first wrong one is described */
+static uint64_t swap_bad_moved(uint64_t addr, uint64_t pages, uint64_t base, uint64_t quarter) {
+    uint64_t bad = 0;
+    for (uint64_t i = 0; i < pages; i++) {
+        const volatile uint64_t *p = (const volatile uint64_t *)(uintptr_t)(addr + i * 4096);
+        uint64_t gen = swap_gen(base + i, quarter);
+        for (uint64_t w = 0; w < 512; w++)
+            if (p[w] != swap_word(base + i, w, gen)) {
+                if (!bad) {
+                    uint64_t zero = 1, other = 0;
+                    for (uint64_t k = 0; k < 512; k++) zero &= p[k] == 0;
+                    for (uint64_t j = 0; j < pages + 2 * quarter && !other; j++)
+                        if (p[0] == swap_word(j, 0, swap_gen(j, quarter))) other = j + 1;
+                    lx_puts("  first wrong page ");
+                    lx_putnum(i);
+                    lx_puts(" of ");
+                    lx_putnum(pages);
+                    lx_puts(", word ");
+                    lx_putnum(w);
+                    lx_puts(zero ? ", all zero" : "");
+                    lx_puts(", page ");
+                    lx_putnum(base + i);
+                    lx_puts(" gen ");
+                    lx_putnum(gen);
+                    if (other) {
+                        lx_puts(", holds page ");
+                        lx_putnum(other - 1);
+                    }
+                    lx_puts("\n");
+                }
+                bad++;
+                break;
+            }
+    }
+    if (bad) {
+        lx_puts("  wrong pages: ");
+        lx_putnum(bad);
+        lx_puts("\n");
+    }
+    return bad;
+}
+
+/* Swap (kernel/memory/swap.c): more memory than the machine has, written
+ * and read back word for word; then a fork, mprotect, mremap and munmap
+ * over pages that are in swap.  Only with a swap area. */
+static void swap_tests(void) {
+    uint64_t total = proc_number("/proc/meminfo", "MemTotal:"), swap = proc_number("/proc/meminfo", "SwapTotal:");
+    uint64_t len, pages, addr, free0, free1, cut;
+    long pid;
+    if (!swap) {
+        lx_puts("SKIP swap: no swap area\n");
+        return;
+    }
+    len = (total + total / 4) * 1024;
+    if (len > (total + swap / 2) * 1024) len = (total + swap / 2) * 1024;
+    len &= ~4095ULL;
+    pages = len / 4096;
+    free0 = proc_number("/proc/meminfo", "SwapFree:");
+    addr = sys_call6(LX_MMAP, 0, len, 3, LX_MAP_PRIVATE | LX_MAP_ANON, (uint64_t)(int64_t)-1, 0);
+    check("swap: map more than the memory", (long)addr > 0 ? 1 : (long)addr, 1);
+    if ((long)addr <= 0) return;
+    swap_fill(addr, 0, pages, 1, 1);
+    free1 = proc_number("/proc/meminfo", "SwapFree:");
+    check("swap: pages went to swap", free1 < free0 ? 1 : 0, 1);
+    check("swap: status shows VmSwap", proc_number("/proc/self/status", "VmSwap:") > 0 ? 1 : 0, 1);
+    check("swap: every word read back", (long)swap_bad(addr, 0, pages, 1, 0, 1), 0);
+
+    /* a fork: the child reads the copy it had at the fork while the parent
+     * writes over every 7th page */
+    pid = (long)sys_call0(LX_FORK);
+    if (pid == 0) {
+        uint64_t bad = swap_bad(addr, 0, pages, 7, 0, 1);
+        sys_call1(LX_EXIT, bad ? 1 : 0);
+    }
+    check("swap: fork", pid > 0 ? 1 : pid, 1);
+    if (pid > 0) {
+        int status = -1;
+        swap_fill(addr, 0, pages, 7, 2);
+        sys_call4(LX_WAIT4, (uint64_t)pid, (uint64_t)(uintptr_t)&status, 0, 0);
+        check("swap: the child read its own copy back", status, 0);
+        check("swap: the parent read its writes back", (long)swap_bad(addr, 0, pages, 7, 0, 2), 0);
+        check("swap: and the pages it did not write", (long)swap_bad(addr, 3, pages, 7, 0, 1), 0);
+    }
+
+    /* read-only while in swap, then writable again */
+    cut = (pages / 4) * 4096;
+    check("swap: mprotect read-only", (long)sys_call3(LX_MPROTECT, addr, cut, LX_PROT_READ), 0);
+    check("swap: read back read-only", (long)swap_bad(addr, 1, cut / 4096, 7, 0, 1), 0);
+    check("swap: mprotect read-write", (long)sys_call3(LX_MPROTECT, addr, cut, LX_PROT_READ | LX_PROT_WRITE), 0);
+    swap_fill(addr, 1, cut / 4096, 7, 3);
+    check("swap: written after", (long)swap_bad(addr, 1, cut / 4096, 7, 0, 3), 0);
+
+    /* mremap moves pages that are in swap with the rest */
+    {
+        uint64_t from = addr + cut, size = (pages / 4) * 4096, to;
+        to = sys_call5(LX_MREMAP, from, size, size + 4096, LX_MREMAP_MAYMOVE, 0);
+        check("swap: mremap", (long)to > 0 ? 1 : (long)to, 1);
+        if ((long)to > 0) {
+            check("swap: moved pages read back", (long)swap_bad_moved(to, size / 4096, cut / 4096, cut / 4096), 0);
+            sys_call2(LX_MUNMAP, to, size + 4096);
+        }
+    }
+
+    sys_call2(LX_MUNMAP, addr, len);
+    check("swap: munmap gives the slots back", proc_number("/proc/meminfo", "SwapFree:") + 256 >= free0 ? 1 : 0, 1);
 }
 
 int nptestlx_main(int argc, char **argv) {
@@ -325,6 +493,8 @@ int nptestlx_main(int argc, char **argv) {
             sys_call1(LX_CLOSE, (uint64_t)sfd);
         }
     }
+
+    swap_tests();
 
     if (failures == 0) {
         lx_puts("nptestlx: ALL PASS\n");

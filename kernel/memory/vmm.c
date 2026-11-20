@@ -1,5 +1,6 @@
 #include "vmm.h"
 #include "pmm.h"
+#include "swap.h"
 #include "../cpu/multiboot2.h"
 #include "../cpu/pat.h"
 #include "../cpu/smp.h"
@@ -146,7 +147,9 @@ int vmm_map_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags)
     phys &= ~0xFFFULL;
     pte_t *pte = get_pte(as, virt, 1);
     if (!pte) return -1;
-    if (!(*pte & PTE_PRESENT) && as && !(flags & VMM_GLOBAL)) {
+    if (pte_is_swap(*pte)) {
+        swap_entry_free(as, *pte);              /* the new page replaces the swapped one */
+    } else if (!(*pte & PTE_PRESENT) && as && !(flags & VMM_GLOBAL)) {
         as->mapped_pages++;
     }
     {
@@ -160,6 +163,12 @@ int vmm_map_page(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t flags)
 void vmm_unmap_page(addr_space_t *as, uint64_t virt, int free_phys) {
     virt &= ~0xFFFULL;
     pte_t *pte = get_pte(as, virt, 0);
+    if (pte && pte_is_swap(*pte)) {
+        swap_entry_free(as, *pte);
+        *pte = 0;
+        if (as && as->mapped_pages > 0) as->mapped_pages--;
+        return;
+    }
     if (!pte || !(*pte & PTE_PRESENT)) return;
     if (free_phys) pmm_free(PTE_FRAME(*pte));
     if (as && !(*pte & PTE_GLOBAL) && as->mapped_pages > 0) {
@@ -184,10 +193,47 @@ void vmm_unmap_range(addr_space_t *as, uint64_t virt, uint64_t size, int free_ph
         vmm_unmap_page(as, virt + i * PAGE_SIZE_4K, free_phys);
 }
 
+/* A user page written to swap is read back: whoever asks for the page's
+ * frame is about to use it. */
 uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt) {
     pte_t *pte = get_pte(as, virt, 0);
+    if (pte && pte_is_swap(*pte) && virt < 0x0000800000000000ULL && swap_in(as, virt, pte) < 0) return 0;
     if (!pte || !(*pte & PTE_PRESENT)) return 0;
     return PTE_FRAME(*pte) | VA_OFFSET(virt);
+}
+
+/* there is a page at virt, in memory or written to swap (reads nothing back) */
+int vmm_has_page(addr_space_t *as, uint64_t virt) {
+    pte_t *pte = get_pte(as, virt & ~0xFFFULL, 0);
+    return pte && ((*pte & PTE_PRESENT) || pte_is_swap(*pte));
+}
+
+/* the page at virt is in memory (mincore) */
+int vmm_resident(addr_space_t *as, uint64_t virt) {
+    pte_t *pte = get_pte(as, virt & ~0xFFFULL, 0);
+    return pte && (*pte & PTE_PRESENT);
+}
+
+/* a fault at virt on a page written to swap: 1 it is back, 0 it was not
+ * swapped, -1 no memory to read it into, -2 the disk failed */
+int vmm_swap_fault(addr_space_t *as, uint64_t virt) {
+    pte_t *pte;
+    if (!as || virt >= 0x0000800000000000ULL) return 0;
+    pte = get_pte(as, virt & ~0xFFFULL, 0);
+    if (!pte || !pte_is_swap(*pte)) return 0;
+    return swap_in(as, virt & ~0xFFFULL, pte);
+}
+
+/* puts a swap entry at virt (a Linux program's mremap moving its pages) */
+int vmm_set_swap_entry(addr_space_t *as, uint64_t virt, pte_t e) {
+    pte_t *pte = get_pte(as, virt & ~0xFFFULL, 1);
+    if (!pte || !pte_is_swap(e)) return -1;
+    if (pte_is_swap(*pte)) swap_entry_free(as, *pte);
+    else if (*pte & PTE_PRESENT) return -1;
+    else as->mapped_pages++;
+    *pte = e;
+    as->swapped_pages++;
+    return 0;
 }
 
 
@@ -202,6 +248,7 @@ int vmm_page_writable(addr_space_t *as, uint64_t virt) {
         return 0;
     }
     pte = get_pte(as, virt & ~0xFFFULL, 0);
+    if (pte && pte_is_swap(*pte) && swap_in(as, virt & ~0xFFFULL, pte) < 0) return 0;
     if (!pte || !(*pte & PTE_PRESENT)) {
         return 0;
     }
@@ -293,6 +340,8 @@ static void free_user_pd(pte_t *pd) {
         for (int i1 = 0; i1 < PT_ENTRIES; i1++) {
             if ((pt[i1] & PTE_PRESENT) && (pt[i1] & PTE_USER) && !(pt[i1] & VMM_NOFREE)) {
                 pmm_free(PTE_FRAME(pt[i1]));
+            } else if (pte_is_swap(pt[i1])) {
+                swap_entry_free(0, pt[i1]);         /* the space is going */
             }
         }
         pmm_free(PTE_FRAME(pd[i2]));
@@ -349,6 +398,15 @@ addr_space_t *vmm_clone_user(addr_space_t *src) {
                     uint64_t va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
                     uint64_t flags = e & ~PTE_ADDR_MASK & ~(PTE_ACCESSED | PTE_DIRTY);
                     uint64_t phys;
+                    if (pte_is_swap(e)) {
+                        /* both hold the slot; each reads its own copy back */
+                        pte_t *cp = get_pte(dst, va, 1);
+                        if (!cp) goto fail;
+                        swap_entry_dup(dst, e);
+                        *cp = e;
+                        dst->mapped_pages++;
+                        continue;
+                    }
                     if (!(e & PTE_PRESENT) || !(e & PTE_USER)) continue;
                     phys = PTE_FRAME(e);
                     if (!(e & VMM_NOFREE)) {
@@ -513,7 +571,7 @@ void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
         if (!(pd[i2] & PTE_PRESENT) || (pd[i2] & PTE_HUGE)) { va = (va | ((1ULL << 21) - 1)) + 1; continue; }
         pt = pt_ptr(PTE_FRAME(pd[i2]));
         for (i1 = VA_PT_IDX(va); i1 < 512 && va < end; i1++, va += PAGE_SIZE_4K) {
-            if (!(pt[i1] & PTE_PRESENT)) continue;
+            if (!(pt[i1] & PTE_PRESENT) && !pte_is_swap(pt[i1])) continue;
             visited = 1;
             fn(as, va, &pt[i1], ctx);
             vmm_invlpg(va);
@@ -546,6 +604,12 @@ uint64_t vmm_count_present(addr_space_t *as, uint64_t start, uint64_t end) {
             if (pt[i1] & PTE_PRESENT) n++;
     }
     return n;
+}
+
+/* user pages in memory: mapped less those in swap */
+uint64_t vmm_resident_pages(const addr_space_t *as) {
+    if (!as) return 0;
+    return as->mapped_pages > as->swapped_pages ? as->mapped_pages - as->swapped_pages : 0;
 }
 
 /* Bookkeeping for a page entry the walker cleared */

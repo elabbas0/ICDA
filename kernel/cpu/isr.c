@@ -169,7 +169,14 @@ void irq_handler(struct registers* regs) {
         lx_prof_tick(regs);
         power_tick();
     }
-    irq_dispatch(regs, irq);
+    {
+        /* the interrupted thread is marked, not the processor: if the
+         * interrupt switches threads, the next one is not in an interrupt */
+        struct thread *it = this_cpu()->current;
+        if (it) it->in_irq++;
+        irq_dispatch(regs, irq);
+        if (it) it->in_irq--;
+    }
     if (took) {
         lx_after_interrupt(regs);   /* the thread now returning to user mode */
         bkl_exit();

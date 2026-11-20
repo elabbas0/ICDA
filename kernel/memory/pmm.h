@@ -20,6 +20,9 @@ uint64_t pmm_total_frames();
 uint64_t pmm_usable_frames();
 /* called when no frame is free: frees up to want frames, returns how many */
 void pmm_set_reclaim(uint64_t (*fn)(uint64_t want));
+/* with swap on: called when the caches had nothing (urgent: frees up to
+ * want frames by writing pages out), and to keep low_frames free */
+void pmm_set_swap(uint64_t (*fn)(uint64_t want, int urgent), uint64_t low_frames);
 uint64_t pmm_next_free_frame();
 void     pmm_refs_init(void);
 void     pmm_use_hhdm(void);

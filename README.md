@@ -160,7 +160,8 @@ hidden), and one a second for tabs that are not shown. A key press, the
 pointer or a visible change brings the full rate back at once. Only the parts
 of a frame that changed are copied to the window.
 
-Memory is watched, because ICDA has no swap. A page gives memory back as it
+Memory is watched, because swap is far slower than memory (and a live start
+has none). A page gives memory back as it
 grows, from a sixth of the RAM (at most 1 GB), and a page that keeps growing
 past two fifths (at most 2.4 GB) is stopped with *The page used too much
 memory*. Sites you leave do not stay in memory, and below 6 GB of RAM going
@@ -247,3 +248,42 @@ deleted later). If an update is still on trial, the move waits until the next
 boot. An installation that has been moved can no longer be booted by a kernel
 older than 1.9. The live USB still runs from memory. `make vfs-rootfs-test`
 checks the loading and freeing on the host.
+
+## Swap
+
+When memory runs short, the pages programs have not used for a while are
+written to a swap area and their memory goes to whoever needs it; a program
+that touches such a page waits while it is read back. A program that needs
+more than the computer's memory slows down instead of being stopped. Cached
+file contents are dropped before anything is swapped. The window manager's
+memory is never swapped, and it does not wait for the disk unless memory has
+run out, so the desktop keeps answering while the disk works. When memory
+and swap have both run out, the program that needs more is stopped, as
+before.
+
+The swap area is the first of:
+
+- ICDA's own swap partition: the 512 MB **ICDA Swap** partition its disk
+  layout makes (or one the installer was given for swap), on ICDA's disk;
+- a swap partition Linux's `mkswap` prepared. Its first page, with
+  Linux's signature, is left as it is, and one holding a hibernated system
+  is not touched;
+- `/swapfile` on ICDA's partition, made at the first start: as large as the
+  memory (rounded up to 256 MB), from 1 GB to just under 4 GB, but never so
+  large that less than 2 GB, or less than half of the free space, would be
+  left. Not on a USB disk.
+
+`/etc/icda/swap` holds `auto` (the default), `off`, or a size in MB, which
+makes a swap file of that size the swap area. The swap file is made again
+only when a different size is wanted, and removed when swap is off or a
+partition is used. No program can read `/swapfile`, administrators
+included, since other programs' memory is in it, and while swap is on, the
+disk it is on cannot be formatted or repartitioned. The live USB uses no swap
+unless `icda.swap=on` is on the kernel's command line (then a swap
+partition); `icda.swap=off` turns swap off for one start. `/proc/meminfo`
+shows `SwapTotal` and `SwapFree`, and a Linux program's `/proc/<pid>/status`
+its `VmSwap`; a program's memory in Activity and `/proc` counts only what is
+in memory. If the disk fails while a page is read back, only the program
+that owned it is stopped. `make swapfile-test` checks the making, reuse
+and removal of `/swapfile` on the host; nptestlx (`icda.test=nptestlx`, with
+a swap partition) checks swapping with fork, mprotect, mremap and munmap.

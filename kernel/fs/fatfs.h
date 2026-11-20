@@ -70,4 +70,15 @@ int fatfs_write_at(fatfs_t *vol, const char *path, uint64_t off, const void *dat
 int fatfs_truncate(fatfs_t *vol, const char *path, uint64_t len);
 int fatfs_rename(fatfs_t *vol, const char *from, const char *to);
 
+/* A file of about *size bytes (set to what it got) on the fewest runs of
+ * free clusters (at most max_runs), leaving keep_free bytes, and at least
+ * half of what is free, free.  Its contents are not written: what was on
+ * the disk stays there, so it is for files only the kernel reads
+ * (/swapfile).  attr: the entry's attribute bits.  0, or -1 (it exists, or
+ * no room). */
+int fatfs_create_reserved(fatfs_t *v, const char *path, uint64_t *size, uint8_t attr, int max_runs, uint64_t keep_free);
+/* fn(device lba, sectors) for each run of consecutive clusters of the file
+ * starting at first, for its first bytes; 0, or -1 (the chain is shorter) */
+int fatfs_extents(fatfs_t *v, uint32_t first, uint64_t bytes, int (*fn)(uint64_t lba, uint64_t sectors, void *ctx), void *ctx);
+
 #endif

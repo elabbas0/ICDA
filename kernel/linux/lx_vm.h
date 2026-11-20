@@ -57,4 +57,7 @@ extern lxvm_stat_t lxvm_stat;
 /* 1 once if the last page fault failed for want of memory */
 int lxvm_take_oom(void);
 
+/* the first shared mapping of p ending after va (swap leaves those alone) */
+int lxvm_next_shared(struct process *p, uint64_t va, uint64_t *start, uint64_t *end);
+
 #endif

@@ -74,7 +74,6 @@ typedef struct process {
     struct vfs_node *ex_cfg;    /* their settings folder, shown as /cfg */
     uint64_t ex_token;
     int      ex_session_leader;
-    uint8_t  ex_wm;             /* the session's window manager: /apps/wm.app started by the system */
     
 
 
@@ -98,6 +97,8 @@ typedef struct process {
     void            *lx_vmas;      /* Linux personality: mmap regions (linux/lx_vm.c) */
     uint64_t         lx_interp_base; /* where the dynamic loader was put (AT_BASE), 0 if none */
     char             name[64];
+    /* at the end: the fields before keep their places for objects built earlier */
+    uint8_t          ex_wm;     /* the session's window manager: /apps/wm.app started by the system */
 } process_t;
 
 typedef struct thread {
@@ -144,6 +145,9 @@ typedef struct thread {
     uint64_t         lx_pending;    /* signals sent to this thread alone (tgkill, tkill) */
     uint64_t         lx_suspend_mask;   /* rt_sigsuspend: the mask its handler's return restores */
     int              lx_in_suspend;
+    /* handling a device interrupt: the thread it interrupted keeps the mark
+     * when the interrupt switches threads (swap waits for a thread) */
+    int              in_irq;
 } thread_t;
 
 #endif

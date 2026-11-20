@@ -192,6 +192,8 @@ static int may_access(vfs_node_t *n, const vfs_cred_t *c, int op) {
     if (str_eq(top->name, "etc") && second && str_eq(second->name, "icda")) return 0;   /* accounts */
     /* the image an installation from before 1.9 kept everyone's files in */
     if (str_eq(top->name, "ICDAROOT.OLD") || str_eq(top->name, "ICDAROOT.BIN")) return 0;
+    /* swap: other programs' memory */
+    if (str_eq(top->name, "swapfile")) return 0;
     return op == VFS_OP_READ;                           /* the system: read only */
 }
 

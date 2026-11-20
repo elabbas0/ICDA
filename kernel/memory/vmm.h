@@ -56,7 +56,8 @@ typedef struct {
     uint64_t pml4_phys;
     
 
-    uint64_t mapped_pages;
+    uint64_t mapped_pages;      /* user pages, in memory or in swap */
+    uint64_t swapped_pages;     /* of which in swap (memory/swap.c) */
 } addr_space_t;
 
 
@@ -97,7 +98,18 @@ int  vmm_map_range(addr_space_t *as, uint64_t virt, uint64_t phys, uint64_t size
 void vmm_unmap_range(addr_space_t *as, uint64_t virt, uint64_t size, int free_phys);
 
 
+/* a user page written to swap is read back first (memory/swap.c) */
 uint64_t vmm_virt_to_phys(addr_space_t *as, uint64_t virt);
+/* a page at virt, in memory or in swap; reads nothing back */
+int vmm_has_page(addr_space_t *as, uint64_t virt);
+/* the page at virt is in memory */
+int vmm_resident(addr_space_t *as, uint64_t virt);
+/* a fault on a swapped page: 1 read back, 0 not swapped, -1 no memory, -2 disk error */
+int vmm_swap_fault(addr_space_t *as, uint64_t virt);
+/* puts a swap entry at virt (mremap) */
+int vmm_set_swap_entry(addr_space_t *as, uint64_t virt, pte_t e);
+/* user pages in memory (mapped_pages less those in swap) */
+uint64_t vmm_resident_pages(const addr_space_t *as);
 
 
 int vmm_page_writable(addr_space_t *as, uint64_t virt);
@@ -109,6 +121,7 @@ addr_space_t *vmm_create_address_space(void);
 void vmm_destroy_address_space(addr_space_t *as);
 addr_space_t *vmm_clone_user(addr_space_t *src);
 int vmm_cow_break(addr_space_t *as, uint64_t virt);
+/* fn also sees entries of pages written to swap (memory/swap.h) */
 void vmm_walk_user(addr_space_t *as, uint64_t start, uint64_t end,
                    void (*fn)(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx), void *ctx);
 /* pages present in [start, end), read-only (no TLB invalidation) */

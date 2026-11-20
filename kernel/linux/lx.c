@@ -11,6 +11,7 @@
 #include "../memory/pf.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
+#include "../memory/swap.h"
 #include "../proc/sched.h"
 #include "../proc/user.h"
 #include "../proc/accounts.h"
@@ -1147,8 +1148,9 @@ static char proc_state_char(process_t *q) {
     return q == sched_current_process() ? 'R' : 'S';
 }
 
+/* in memory: pages in swap are not resident */
 static uint64_t proc_mem_kb(process_t *q) {
-    return q->addr_space ? q->addr_space->mapped_pages * 4 : 0;
+    return vmm_resident_pages(q->addr_space) * 4;
 }
 
 static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
@@ -1206,6 +1208,7 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
             sb_kv(b, "RssAnon:\t", (resident - file) * 4);
             sb_kv(b, "RssFile:\t", file * 4);
             sb_kv(b, "VmData:\t", data * 4);
+            sb_kv(b, "VmSwap:\t", q->addr_space ? q->addr_space->swapped_pages * 4 : 0);
             sb_put(b, "Threads:\t");
             sb_num(b, q->nthreads > 0 ? (uint64_t)q->nthreads : 1);
             sb_put(b, "\n");
@@ -1246,8 +1249,8 @@ static void proc_render(sbuf_t *b, uint64_t pid, const char *leaf) {
         sb_kv(b, "SwapCached:     ", 0);
         sb_kv(b, "Active(file):   ", (cached - unmapped) * 4);
         sb_kv(b, "Inactive(file): ", unmapped * 4);
-        sb_kv(b, "SwapTotal:      ", 0);
-        sb_kv(b, "SwapFree:       ", 0);
+        sb_kv(b, "SwapTotal:      ", swap_total_pages() * 4);
+        sb_kv(b, "SwapFree:       ", swap_free_pages() * 4);
         sb_kv(b, "Shmem:          ", 0);
         sb_kv(b, "SReclaimable:   ", 0);
     } else if (kstreq(leaf, "uptime")) {
@@ -1994,14 +1997,14 @@ static uint64_t sys_readlinkat(int64_t dirfd, const char *upath, char *ubuf, uin
 
 static void unmap_range(process_t *p, uint64_t addr, uint64_t len) {
     for (uint64_t page = addr; page < addr + len; page += PAGE_SIZE_4K) {
-        if (vmm_virt_to_phys(p->addr_space, page)) vmm_unmap_page(p->addr_space, page, 1);
+        if (vmm_has_page(p->addr_space, page)) vmm_unmap_page(p->addr_space, page, 1);
     }
 }
 
 static int map_zero(process_t *p, uint64_t addr, uint64_t len, uint64_t flags) {
     for (uint64_t page = addr; page < addr + len; page += PAGE_SIZE_4K) {
         uint64_t phys;
-        if (vmm_virt_to_phys(p->addr_space, page)) vmm_unmap_page(p->addr_space, page, 1);
+        if (vmm_has_page(p->addr_space, page)) vmm_unmap_page(p->addr_space, page, 1);
         phys = pmm_alloc();
         if (!phys) return -1;
         kzero(PHYS_TO_VIRT(phys), PAGE_SIZE_4K);
@@ -3291,7 +3294,7 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
                 uint64_t n = pages - done < sizeof(vec) ? pages - done : sizeof(vec);
                 for (uint64_t i = 0; i < n; i++) {
                     uint64_t va = a0 + (done + i) * 4096;
-                    int present = vmm_virt_to_phys(p->addr_space, va) != 0;
+                    int present = vmm_resident(p->addr_space, va);
                     if (!present && !lxvm_mapped(p, va)) return ERR(ENOMEM);
                     vec[i] = (uint8_t)present;
                 }

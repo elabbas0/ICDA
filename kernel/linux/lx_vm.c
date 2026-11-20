@@ -15,6 +15,7 @@
  * are not regions here; munmap / mprotect / mremap fall back to acting on
  * their pages directly. */
 #include "lx_vm.h"
+#include "../memory/swap.h"
 #include "lx_internal.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
@@ -149,7 +150,8 @@ static uint64_t pte_flags(uint32_t prot) {
 
 static void drop_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
     (void)va; (void)ctx;
-    if (!(*pte & VMM_NOFREE)) pmm_free(PTE_FRAME(*pte));
+    if (pte_is_swap(*pte)) swap_entry_free(as, *pte);    /* its slot goes */
+    else if (!(*pte & VMM_NOFREE)) pmm_free(PTE_FRAME(*pte));
     *pte = 0;
     vmm_note_unmapped(as);
 }
@@ -163,6 +165,11 @@ static void reprotect_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx)
     uint32_t prot = c->prot;
     uint64_t phys = PTE_FRAME(*pte), fl = pte_flags(prot);
     (void)as; (void)va;
+    if (pte_is_swap(*pte)) {
+        /* in swap: the bits it gets back with change; it comes back as its own copy */
+        *pte = (*pte & ~PTE_SWAP_KEEP) | (fl & (PTE_WRITE | PTE_USER));
+        return;
+    }
     if ((prot & PROT_WRITE) && !c->shared && ((*pte & VMM_COW) || pmm_refcount(phys) > 1)) fl = VMM_FLAGS_USER_RO | VMM_COW;
     *pte = phys | fl | (*pte & VMM_NOFREE) | VMM_PRESENT;
 }
@@ -175,6 +182,12 @@ static void move_page(addr_space_t *as, uint64_t va, pte_t *pte, void *ctx) {
     (void)as;
     *pte = 0;
     vmm_note_unmapped(m->as);
+    if (pte_is_swap(e)) {
+        /* in swap: the entry moves and the slot stays (counted again where it lands) */
+        if (m->as->swapped_pages) m->as->swapped_pages--;
+        if (vmm_set_swap_entry(m->as, va - m->from + m->to, e) != 0) swap_entry_free(0, e);
+        return;
+    }
     vmm_map_page(m->as, va - m->from + m->to, PTE_FRAME(e), e & ~PTE_ADDR_MASK & ~PTE_PRESENT);
 }
 
@@ -401,16 +414,16 @@ static void populate_run(process_t *p, lx_vma_t *v, uint64_t from, uint64_t to, 
         /* Shared mappings must use the page cache's frames, including when
          * another mapping already has one of the same file pages. */
         for (; a < to; a += PAGE)
-            if (a != skip && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
+            if (a != skip && !vmm_has_page(p->addr_space, a) && populate(p, v, a) != 0) break;
         return;
     }
     while (a < to) {
         uint64_t begin, n = 0, off, phys;
-        if (a == skip || vmm_virt_to_phys(p->addr_space, a)) { a += PAGE; continue; }
+        if (a == skip || vmm_has_page(p->addr_space, a)) { a += PAGE; continue; }
         begin = a;
         /* A skipped or already mapped page ends the run. Packing sparse
          * virtual addresses into one read shifts every subsequent file page. */
-        while (a < to && n < FAULT_AROUND && a != skip && !vmm_virt_to_phys(p->addr_space, a)) {
+        while (a < to && n < FAULT_AROUND && a != skip && !vmm_has_page(p->addr_space, a)) {
             a += PAGE;
             n++;
         }
@@ -447,6 +460,8 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
     t0 = t1;
     if (!v || !v->prot || (write && !(v->prot & PROT_WRITE)) || !(v->prot & (PROT_READ | PROT_WRITE | PROT_EXEC))) return 0;
     phys = vmm_virt_to_phys(p->addr_space, va);
+    /* in swap, and it could not be read back: not replaced by a new page */
+    if (!phys && vmm_has_page(p->addr_space, va)) return 0;
     if (!phys) {
         r = populate(p, v, va) == 0;
         if (r && pmm_free_frames() > pmm_usable_frames() / 4) {   /* not when memory is short */
@@ -463,7 +478,7 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
                  * process using the library, and read from disk once a boot
                  * instead of again for each process and each run */
                 for (uint64_t a = from; a < to; a += PAGE)
-                    if (a != va && !vmm_virt_to_phys(p->addr_space, a) && populate(p, v, a) != 0) break;
+                    if (a != va && !vmm_has_page(p->addr_space, a) && populate(p, v, a) != 0) break;
             }
         }
         lxvm_stat.populate_cycles += tsc_read() - t0;
@@ -551,7 +566,7 @@ int64_t lxvm_mmap(process_t *p, uint64_t addr, uint64_t len, uint32_t prot, uint
      * its pages come in on first use instead, a short step at a time. */
     if ((flags & LXVM_POPULATE) && prot && !(node && size > (64ULL << 20)))
         for (uint64_t va = start; va < start + size; va += PAGE)
-            if (!vmm_virt_to_phys(p->addr_space, va)) (void)populate(p, v, va);
+            if (!vmm_has_page(p->addr_space, va)) (void)populate(p, v, va);
     return (int64_t)start;
 }
 
@@ -658,6 +673,18 @@ int lxvm_madvise(process_t *p, uint64_t addr, uint64_t len, int advice) {
             uint64_t a = v->start > addr ? v->start : addr, b = v->end < end ? v->end : end;
             if (a < b) vmm_walk_user(p->addr_space, a, b, drop_page, 0);
         }
+    }
+    return 0;
+}
+
+/* The first shared mapping (or memory object) of p ending after va, which
+ * swap leaves alone: 1 and its bounds, or 0 when there is none. */
+int lxvm_next_shared(process_t *p, uint64_t va, uint64_t *start, uint64_t *end) {
+    for (lx_vma_t *v = p ? (lx_vma_t *)p->lx_vmas : 0; v; v = v->next) {
+        if (v->end <= va || !((v->flags & LXVM_SHARED) || v->file)) continue;
+        *start = v->start;
+        *end = v->end;
+        return 1;
     }
     return 0;
 }

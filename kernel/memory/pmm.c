@@ -250,12 +250,33 @@ void pmm_set_reclaim(uint64_t (*fn)(uint64_t want)) {
 
 static uint64_t pmm_alloc_scan(void);
 
-/* a frame; when none is free, caches give some back (reclaim_hook) first */
+static uint64_t (*swap_hook)(uint64_t want, int urgent);
+static uint64_t swap_low;               /* free frames below which the reserve is refilled */
+static int refilling;
+
+void pmm_set_swap(uint64_t (*fn)(uint64_t want, int urgent), uint64_t low_frames) {
+    swap_low = low_frames;
+    swap_hook = fn;
+}
+
+/* a frame; when none is free, caches give some back (reclaim_hook) first,
+ * then pages programs have not used lately go to swap (swap_hook).  With
+ * swap on, a reserve is kept: below swap_low each allocation refills it a
+ * little, from the caches while they have something to give. */
 uint64_t pmm_alloc() {
     uint64_t f = pmm_alloc_scan();
     if (!f && reclaim_hook && reclaim_hook(4096)) {
         next_free = 0;
         f = pmm_alloc_scan();
+    }
+    if (!f && swap_hook && swap_hook(64, 1)) {
+        next_free = 0;
+        f = pmm_alloc_scan();
+    }
+    if (f && swap_hook && !refilling && total_frames - used_frames < swap_low) {
+        refilling = 1;
+        if (!reclaim_hook || !reclaim_hook(32)) swap_hook(32, 0);
+        refilling = 0;
     }
     return f;
 }

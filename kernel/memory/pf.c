@@ -210,8 +210,24 @@ static int is_stack_growth(struct registers *regs, uint64_t cr2) {
 
 
 
+static int stop_swap_io;               /* the stop being reported: swap could not be read */
+
 static void page_fault_handler(struct registers *regs) {
     uint64_t cr2 = read_cr2();
+
+    /* a page written to swap: read it back */
+    if (!(regs->err_code & PF_PRESENT) && cr2 < 0x0000800000000000ULL) {
+        int r = vmm_swap_fault(active_as(), cr2);
+        if (r > 0) return;
+        if (r < 0) {
+            process_t *sp = sched_current_process();
+            if (sp && sp->kind == PROCESS_USER && sched_current_thread()) {
+                if (r == -1) user_oom_kill();
+                stop_swap_io = 1;
+                user_fault_kill(7);
+            }
+        }
+    }
 
     if ((regs->err_code & PF_PRESENT) && (regs->err_code & PF_WRITE) && cr2 < 0x0000800000000000ULL &&
         vmm_cow_break(active_as(), cr2) == 0) {
@@ -293,7 +309,12 @@ static void report_stop(process_t *proc, int sig) {
     dialog_app_label(proc->name, app, sizeof(app));
     title[0] = 0;
     cat(title, sizeof(title), app);
-    if (sig == 9) {
+    if (stop_swap_io) {
+        stop_swap_io = 0;
+        cat(title, sizeof(title), " was closed");
+        why = "Part of its memory could not be read back from the disk it had been moved to. "
+              "Anything it had not saved is lost.";
+    } else if (sig == 9) {
         cat(title, sizeof(title), " was closed");
         why = "The computer ran out of memory, so ICDA closed it to keep everything else running. "
               "Anything it had not saved is lost.";

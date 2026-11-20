@@ -1149,6 +1149,176 @@ static int fatfs_rename_op(fatfs_t *v, const char *from, const char *to) {
  * every operation runs without preemption, and any FAT write makes the other
  * instances read their FAT sector again (fat_epoch). */
 
+/* ---- files only the kernel reads (/swapfile) --------------------------------------- */
+
+typedef struct { uint32_t first, count; } fat_run_t;
+
+/* keeps the cap largest runs, largest first */
+static void keep_run(fat_run_t *runs, int *n, int cap, uint32_t first, uint32_t count) {
+    int i;
+    if (cap <= 0) return;
+    if (*n == cap) {
+        if (runs[cap - 1].count >= count) return;      /* no larger than any kept */
+        i = cap - 1;                                    /* takes the smallest one's place */
+    } else {
+        i = (*n)++;
+    }
+    while (i > 0 && runs[i - 1].count < count) {
+        runs[i] = runs[i - 1];
+        i--;
+    }
+    runs[i].first = first;
+    runs[i].count = count;
+}
+
+/* the largest runs of free clusters (the FAT read in 32 KB pieces, not
+ * a sector at a time), and how many clusters are free in all */
+static int largest_free_runs(fatfs_t *v, fat_run_t *runs, int cap, uint64_t *free_total) {
+    const uint32_t chunk = 64;
+    uint8_t *buf = (uint8_t *)kmalloc((uint64_t)chunk * SECTOR);
+    uint32_t total = v->cluster_count + 2, c = 0, start = 0, len = 0;
+    int n = 0;
+    *free_total = 0;
+    if (!buf) return -1;
+    if (fat_cache_flush(v) != 0) {
+        kfree(buf);
+        return -1;
+    }
+    for (uint32_t s = 0; s < v->fat_sectors && c < total; s += chunk) {
+        uint32_t k = v->fat_sectors - s < chunk ? v->fat_sectors - s : chunk;
+        if (dev_read(v, v->fat_lba + s, k, buf) != 0) {
+            kfree(buf);
+            return -1;
+        }
+        for (uint32_t i = 0; i < k * (SECTOR / 4) && c < total; i++, c++) {
+            if (c >= 2 && (rd32(buf + i * 4) & 0x0FFFFFFFU) == 0) {
+                if (!len) start = c;
+                len++;
+                (*free_total)++;
+            } else if (len) {
+                keep_run(runs, &n, cap, start, len);
+                len = 0;
+            }
+        }
+    }
+    if (len) keep_run(runs, &n, cap, start, len);
+    kfree(buf);
+    return n;
+}
+
+static int fatfs_create_reserved_op(fatfs_t *v, const char *path, uint64_t *size, uint8_t attr, int max_runs,
+                                    uint64_t keep_free) {
+    fat_run_t runs[64], pick[64];
+    fatfs_entry_t parent, e;
+    const char *leaf;
+    uint64_t want, got = 0, free_total;
+    uint32_t prev = 0, first = 0;
+    int n, np = 0;
+    if (max_runs > 64) max_runs = 64;
+    if (fatfs_lookup_op(v, path, &e) == 0 || split_parent(v, path, &parent, &leaf) != 0) return -1;
+    want = (*size + v->cluster_bytes - 1) / v->cluster_bytes;
+    if (want > 0xFFFFFFFFULL / v->cluster_bytes) want = 0xFFFFFFFFULL / v->cluster_bytes;   /* FAT32's largest file */
+    n = largest_free_runs(v, runs, max_runs, &free_total);
+    if (n <= 0) return -1;
+    {
+        /* keep_free, and half of what is free, stay free */
+        uint64_t keep = keep_free / v->cluster_bytes;
+        if (keep < free_total / 2) keep = free_total / 2;
+        if (free_total <= keep) return -1;
+        if (want > free_total - keep) want = free_total - keep;
+    }
+    for (int i = 0; i < n && got < want; i++) {
+        uint32_t take = runs[i].count;
+        if (got + take > want) take = (uint32_t)(want - got);
+        pick[np].first = runs[i].first;
+        pick[np].count = take;
+        np++;
+        got += take;
+    }
+    /* in disk order, so the file runs forward */
+    for (int i = 1; i < np; i++) {
+        fat_run_t t = pick[i];
+        int j = i;
+        while (j > 0 && pick[j - 1].first > t.first) { pick[j] = pick[j - 1]; j--; }
+        pick[j] = t;
+    }
+    for (int i = 0; i < np; i++) {
+        for (uint32_t c = pick[i].first; c < pick[i].first + pick[i].count; c++) {
+            if (prev && fat_set(v, prev, c) != 0) return -1;
+            if (!prev) first = c;
+            prev = c;
+        }
+    }
+    if (!prev || fat_set(v, prev, EOC) != 0) return -1;
+    v->touched = 1;
+    if (create_entry(v, parent.cluster, leaf, attr, first, (uint32_t)(got * v->cluster_bytes)) != 0) {
+        free_chain(v, first);
+        (void)fatfs_flush_op(v);
+        return -1;
+    }
+    if (fatfs_flush_op(v) != 0) return -1;
+    *size = got * v->cluster_bytes;
+    return 0;
+}
+
+/* the chain is read from the FAT 32 KB at a time, not a sector at a time:
+ * a 4 GB file's chain is 4 MB of FAT with 4 KB clusters */
+static int fatfs_extents_op(fatfs_t *v, uint32_t first, uint64_t bytes, int (*fn)(uint64_t lba, uint64_t sectors, void *ctx),
+                            void *ctx) {
+    const uint32_t chunk = 64;
+    uint8_t *buf = (uint8_t *)kmalloc((uint64_t)chunk * SECTOR);
+    uint32_t c = first, run_start = first, run_len = 0, guard = v->cluster_count, base = 0, have = 0;
+    uint64_t clusters = (bytes + v->cluster_bytes - 1) / v->cluster_bytes;
+    int rc = 0;
+    if (!buf) return -1;
+    if (fat_cache_flush(v) != 0) {
+        kfree(buf);
+        return -1;
+    }
+    while (valid_cluster(v, c) && clusters && guard--) {
+        uint32_t next, sec = (c * 4U) / SECTOR;
+        if (!have || sec < base || sec >= base + have) {
+            base = sec;
+            have = v->fat_sectors - sec < chunk ? v->fat_sectors - sec : chunk;
+            if (!have || dev_read(v, v->fat_lba + base, have, buf) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+        if (!run_len) run_start = c;
+        run_len++;
+        clusters--;
+        next = rd32(buf + (sec - base) * SECTOR + (c * 4U) % SECTOR) & 0x0FFFFFFFU;
+        if (next != c + 1 || !clusters) {
+            if (fn(v->base_lba + cluster_lba(v, run_start), (uint64_t)run_len * v->sectors_per_cluster, ctx) != 0) {
+                rc = -1;
+                break;
+            }
+            run_len = 0;
+        }
+        if (next >= EOC_MIN) break;
+        c = next;
+    }
+    kfree(buf);
+    return rc == 0 && !clusters ? 0 : -1;
+}
+
+int fatfs_create_reserved(fatfs_t *v, const char *path, uint64_t *size, uint8_t attr, int max_runs, uint64_t keep_free) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_create_reserved_op(v, path, size, attr, max_runs, keep_free);
+    sched_preempt_enable();
+    return r;
+}
+
+int fatfs_extents(fatfs_t *v, uint32_t first, uint64_t bytes, int (*fn)(uint64_t lba, uint64_t sectors, void *ctx), void *ctx) {
+    int r;
+    sched_preempt_disable();
+    r = fatfs_extents_op(v, first, bytes, fn, ctx);
+    sched_preempt_enable();
+    return r;
+}
+
 int fatfs_flush(fatfs_t *v) {
     int r;
     sched_preempt_disable();
