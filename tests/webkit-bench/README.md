@@ -46,7 +46,8 @@ load times, crashes, out-of-memory kills, discarded tabs.
 | `local-static` | nothing moves (control) |
 | `local-raf-canvas` | a canvas redrawn every animation frame (motion meant to be seen) |
 | `local-video` | a 30 frames-a-second video playing |
-| `local-background-tab` | the hidden animation in a tab not shown |
+| `local-background-tab` | the box-shadow animation (repainted on the main thread) in a tab not shown |
+| `local-background-tab-compositor` | a transform/opacity animation (run by the compositor thread) in a tab not shown |
 | `site-*` | load, 15 s idle, 10 s of scrolling on a real site |
 | `navigate-6-sites` | six sites one after another in one tab: web processes left behind |
 | `tabs-8-on-4GB` | eight heavy sites in tabs on a 4 GB machine |

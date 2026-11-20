@@ -35,6 +35,8 @@ def scenarios():
                                      "--load-timeout", "20", "--ram-mb", "8192"], 3))
     s.append(("local-background-tab", ["tabs", "--urls", f"{PAGES}/anim-hidden.html,{PAGES}/static.html", "--idle", "15",
                                        "--load-timeout", "20", "--ram-mb", "8192"], 3))
+    s.append(("local-background-tab-compositor", ["tabs", "--urls", f"{PAGES}/anim-accel.html,{PAGES}/static.html", "--idle", "15",
+                                                  "--load-timeout", "20", "--ram-mb", "8192"], 3))
     for name, u in SITES.items():
         s.append((f"site-{name}", ["single", "--url", u, "--idle", "15", "--scroll", "10", "--load-timeout", "45",
                                    "--ram-mb", "8192"], 3))

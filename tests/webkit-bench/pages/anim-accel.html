@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- An animation of transform and opacity, which WebKit runs on its
+     compositor thread (as Wikipedia's pulsing dot does), unlike the
+     box-shadow of anim-hidden.html, which it repaints on the page's main
+     thread. Put in a tab behind another, it shows whether hidden tabs keep
+     drawing. -->
+<html><head><meta charset="utf-8"><title>Compositor animation</title>
+<style>
+  body { margin: 0; font: 16px/1.5 sans-serif; padding: 40px; }
+  .dot { position: absolute; left: 200px; top: 160px; width: 18px; height: 18px; border-radius: 50%;
+         background: #36c; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(2.4); opacity: 0; } }
+</style></head>
+<body>
+  <h1>An animation on the compositor thread</h1>
+  <div class="dot"></div>
+</body></html>
