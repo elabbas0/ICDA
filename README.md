@@ -168,7 +168,8 @@ Back loads the page again from the disk cache. When the computer runs short
 of memory, the tab shown longest ago is discarded: its name stays in the tab
 strip, and it loads again when you select it. Tabs playing sound are kept.
 `/tmp/surfer.log` shows the limits in use. `tests/webkit-bench/run.sh`
-measures Surfer before and after a change.
+measures Surfer before and after a change; the measurements of these changes
+are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md).
 
 ## Users
 
