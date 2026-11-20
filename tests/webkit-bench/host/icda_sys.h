@@ -154,9 +154,11 @@ static void bwm_input(void) {
         if (now >= bwm.scroll_until) {
             bwm.scroll_until = 0;
         } else {
-            /* down for the first 60 %, then back up: long pages stay scrollable */
+            /* down for the first 60 %, then back up: long pages stay scrollable.  ICDA's wheel
+             * is positive towards the user, scrolling down (wm.c send_wheel; every app scrolls
+             * by +wheel) */
             int up = now - bwm.scroll_start > (bwm.scroll_until - bwm.scroll_start) * 6 / 10;
-            bwm_mouse(bwm.mouse_x, bwm.mouse_y, 0, up ? 1 : -1);
+            bwm_mouse(bwm.mouse_x, bwm.mouse_y, 0, up ? -1 : 1);
             if (bwm_trace()) fprintf(bwm_trace(), "w %lld\n", bwm_ns() / 1000);
             bwm.scroll_next += bwm.scroll_period;
         }

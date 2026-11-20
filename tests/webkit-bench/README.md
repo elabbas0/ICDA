@@ -48,7 +48,7 @@ load times, crashes, out-of-memory kills, discarded tabs.
 | `local-video` | a 30 frames-a-second video playing |
 | `local-background-tab` | the box-shadow animation (repainted on the main thread) in a tab not shown |
 | `local-background-tab-compositor` | a transform/opacity animation (run by the compositor thread) in a tab not shown |
-| `site-*` | load, 15 s idle, 10 s of scrolling on a real site |
+| `site-*` | load, 15 s idle, 10 s of scrolling on a real site (down for 6 s, back up for 4) |
 | `navigate-6-sites` | six sites one after another in one tab: web processes left behind |
 | `tabs-8-on-4GB` | eight heavy sites in tabs on a 4 GB machine |
 
@@ -65,3 +65,5 @@ builds alternate, and `analyze.py` reports medians.
 - `host/procemu.c` - ICDA's `/proc`, emulated (LD_PRELOAD)
 - `pages/` - the local pages
 - `ppm2png.py` - screenshots to PNG
+- `latency.py` - how soon wheel notches reach the screen, from the traces
+  `bench.py --env BENCH_TRACE=file` writes (`pages/long.html` is made for it)
