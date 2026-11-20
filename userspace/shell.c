@@ -239,6 +239,121 @@ static void shell_stop_audio(void) {
     (void)icda_stop_audio();
 }
 
+/* one word of arg, or a "quoted phrase"; *p moves past it */
+static uint64_t shell_word(const char **p, char *out, uint64_t cap) {
+    const char *s = *p;
+    uint64_t n = 0;
+    while (*s == ' ') s++;
+    if (*s == '"') {
+        s++;
+        while (*s && *s != '"') { if (n + 1 < cap) out[n++] = *s; s++; }
+        if (*s == '"') s++;
+    } else {
+        while (*s && *s != ' ') { if (n + 1 < cap) out[n++] = *s; s++; }
+    }
+    out[n] = 0;
+    *p = s;
+    return n;
+}
+
+/* dialog [-e|-w|-q] [-b "Yes|No"] <title> [message]: the window manager asks,
+ * and the button chosen is printed (nothing when it is closed without one).
+ * "\n" in the message starts a new line.  The request format is
+ * kernel/dev/dialog.c's. */
+static void shell_dialog(const char *arg) {
+    static char req[1600];
+    char word[256], buttons[200], labels[4][64];
+    const char *kind = "info", *p = arg ? arg : "";
+    uint64_t n = 0;
+    int nlabels = 0;
+    buttons[0] = 0;
+    for (;;) {
+        while (*p == ' ') p++;
+        if (p[0] == '-' && p[1] && (p[2] == ' ' || !p[2])) {
+            char f = p[1];
+            p += 2;
+            if (f == 'e') kind = "error";
+            else if (f == 'w') kind = "warning";
+            else if (f == 'q') kind = "question";
+            else if (f == 'i') kind = "info";
+            else if (f == 'b') shell_word(&p, buttons, sizeof(buttons));
+            continue;
+        }
+        break;
+    }
+    if (!shell_word(&p, word, sizeof(word))) {
+        icda_write("usage: dialog [-e|-w|-q] [-b \"Yes|No\"] <title> [message]\n");
+        return;
+    }
+    req[0] = 0;
+    append_text(req, "kind=", sizeof(req));
+    append_text(req, kind, sizeof(req));
+    append_text(req, "\ntitle=", sizeof(req));
+    append_text(req, word, sizeof(req));
+    append_text(req, "\n", sizeof(req));
+    while (*p == ' ') p++;
+    if (*p) {
+        /* the rest is the message: quotes around it go, "\n" is a new line */
+        uint64_t len = str_len(p);
+        const char *m = p;
+        if (len >= 2 && m[0] == '"' && m[len - 1] == '"') { m++; len -= 2; }
+        append_text(req, "message=", sizeof(req));
+        n = str_len(req);
+        for (uint64_t i = 0; i < len && n + 12 < sizeof(req); i++) {
+            if (m[i] == '\\' && i + 1 < len && m[i + 1] == 'n') {
+                req[n] = 0;
+                append_text(req, "\nmessage=", sizeof(req));
+                n = str_len(req);
+                i++;
+            } else {
+                req[n++] = m[i];
+            }
+        }
+        req[n] = 0;
+        append_text(req, "\n", sizeof(req));
+    }
+    if (buttons[0]) {
+        uint64_t i = 0;
+        append_text(req, "buttons=", sizeof(req));
+        append_text(req, buttons, sizeof(req));
+        append_text(req, "\n", sizeof(req));
+        while (buttons[i] && nlabels < 4) {
+            uint64_t k = 0;
+            while (buttons[i] && buttons[i] != '|') { if (k + 1 < sizeof(labels[0])) labels[nlabels][k++] = buttons[i]; i++; }
+            labels[nlabels++][k] = 0;
+            if (buttons[i] == '|') i++;
+        }
+    } else {
+        copy_text(labels[0], "OK", sizeof(labels[0]));
+        nlabels = 1;
+    }
+    if ((long)icda_write_file("/dev/dialog", req, str_len(req)) != (long)str_len(req)) {
+        icda_write("dialog: could not ask (another dialog of this shell is open)\n");
+        return;
+    }
+    for (;;) {
+        char r[64];
+        long got = (long)icda_read_file("/dev/dialog", r, sizeof(r) - 1);
+        if (got <= 0) return;
+        r[got] = 0;
+        if (str_prefix(r, "nohost")) {
+            (void)icda_write_file("/dev/dialog", "cancel", 6);
+            icda_write("dialog: no window manager to show it\n");
+            return;
+        }
+        if (str_prefix(r, "answer=")) {
+            int b = r[7] == '-' ? -1 : r[7] - '0';
+            if (b >= 0 && b < nlabels) {
+                icda_write(labels[b]);
+                icda_write("\n");
+            }
+            return;
+        }
+        if (!str_prefix(r, "pending")) return;
+        icda_sleep(2);
+    }
+}
+
 static void shell_curl(const char *arg) {
     char url[256];
     char out_path[160];
@@ -373,7 +488,7 @@ static int shell_autocomplete(char *line, uint64_t cap) {
     if (token_start == 0 && !str_has_slash(token)) {
         static const char *builtins[] = {
             "help","clear","pwd","cd","ls","cat","grep","head","tail","wc","sort","mkdir","rm","touch","write","stat","install","sync","storage","mount","play","stop",
-            "edit","diskman","curl","notify","run","exit"
+            "edit","diskman","curl","notify","dialog","run","exit"
         };
         for (uint64_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]) && match_count < 32; i++) {
             if (str_prefix(builtins[i], token)) {
@@ -607,7 +722,7 @@ static void print_prompt(void) {
 
 static void shell_help(void) {
     icda_write("commands: help clear pwd cd ls cat echo grep head tail wc sort mkdir touch write stat install sync\n"
-               "          storage mount play stop edit diskman curl wifi webkit codex run exit\n"
+               "          storage mount play stop edit diskman curl notify dialog wifi webkit codex run exit\n"
                "  cmd > file, cmd >> file   output into a file (replace, add to)\n"
                "  a | b                     a's output is b's input (cat, grep, head, tail, wc, sort)\n"
                "  a ; b, a && b             one after the other; with &&, b only if a worked\n");
@@ -1695,6 +1810,7 @@ static void shell_dispatch_one(char *line) {
         (void)icda_write_file("/dev/notify", msg, n);
         return;
     }
+    if (str_eq(line, "dialog")) { shell_dialog(arg); return; }
     if (str_eq(line, "wifi")) { shell_wifi(arg); return; }
     if (str_eq(line, "webkit")) { shell_webkit(arg); return; }
     if (str_eq(line, "codex")) {

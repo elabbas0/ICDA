@@ -97,6 +97,7 @@ int gui_open_window(const char *title, int w, int h) {
     for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
     msg.type = GUI_MSG_OPEN_WINDOW;
     msg.window_id = (uint32_t)app_queue;
+    msg.sender_pid = (uint32_t)icda_get_pid();
     msg.open_req.w = w;
     msg.open_req.h = h;
     int len = 0;
@@ -239,6 +240,19 @@ void gui_set_cursor(int shape) {
     msg.type = GUI_MSG_SET_CURSOR;
     msg.window_id = win_id;
     msg.cursor.shape = (uint8_t)shape;
+    icda_msg_send(win_reply_queue, &msg);
+}
+
+uint32_t gui_window_id(void) {
+    return win_reply_queue ? win_id : 0;
+}
+
+void gui_dialog_kick(void) {
+    gui_msg_t msg;
+    if (!win_reply_queue) return;
+    for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
+    msg.type = GUI_MSG_DIALOG;
+    msg.window_id = win_id;
     icda_msg_send(win_reply_queue, &msg);
 }
 

@@ -41,11 +41,11 @@ USR_CFLAGS = -ffreestanding -O2 -Wall -Wextra -Wpedantic -Wno-unused-command-lin
 
 
 
-IC_MODULES = ic_time ic_anim ic_gfx ic_font ic_theme ic_ui ic_symbols ic_app ic_mem
+IC_MODULES = ic_time ic_anim ic_gfx ic_font ic_theme ic_ui ic_symbols ic_app ic_dialog ic_mem
 IC_MODULE_OBJS = $(addsuffix .o,$(IC_MODULES))
 IC_HEADERS = userspace/libicda.h userspace/ic_mem.h userspace/ic_time.h userspace/ic_anim.h userspace/ic_gfx.h \
              userspace/ic_font.h userspace/ic_fonts_gen.h userspace/ic_theme.h userspace/ic_ui.h \
-             userspace/ic_app.h userspace/gui.h userspace/gui_proto.h \
+             userspace/ic_app.h userspace/ic_dialog.h userspace/gui.h userspace/gui_proto.h \
              userspace/settings_store.h userspace/icda_sys.h
 
 all: kernel.iso kernel-usb.img usb-sync
@@ -248,6 +248,9 @@ accounts.o: kernel/proc/accounts.c kernel/proc/accounts.h kernel/proc/process.h 
 notify.o: kernel/dev/notify.c kernel/dev/notify.h
 	$(CC) $(CFLAGS) -c kernel/dev/notify.c -o notify.o
 
+dialog.o: kernel/dev/dialog.c kernel/dev/dialog.h kernel/proc/process.h
+	$(CC) $(CFLAGS) -c kernel/dev/dialog.c -o dialog.o
+
 power.o: kernel/power/power.c kernel/power/power.h kernel/firmware/acpi.h
 	$(CC) $(CFLAGS) -c kernel/power/power.c -o power.o
 
@@ -270,7 +273,7 @@ msgq.o: kernel/ipc/msgq.c kernel/ipc/msgq.h kernel/proc/sched.h
 devops.o: kernel/dev/devops.c kernel/dev/devops.h
 	$(CC) $(CFLAGS) -c kernel/dev/devops.c -o devops.o
 
-devnodes.o: kernel/dev/devnodes.c kernel/dev/devops.h kernel/drivers/rtc/rtc.h kernel/drivers/console/console.h kernel/drivers/display/framebuffer.h kernel/drivers/display/gpu.h kernel/drivers/display/vga.h kernel/drivers/input/input.h kernel/drivers/input/mouse.h kernel/fs/vfs.h kernel/memory/vmm.h kernel/cpu/pat.h kernel/proc/sched.h kernel/syscall/syscall.h
+devnodes.o: kernel/dev/devnodes.c kernel/dev/devops.h kernel/dev/dialog.h kernel/drivers/rtc/rtc.h kernel/drivers/console/console.h kernel/drivers/display/framebuffer.h kernel/drivers/display/gpu.h kernel/drivers/display/vga.h kernel/drivers/input/input.h kernel/drivers/input/mouse.h kernel/fs/vfs.h kernel/memory/vmm.h kernel/cpu/pat.h kernel/proc/sched.h kernel/syscall/syscall.h
 	$(CC) $(CFLAGS) -c kernel/dev/devnodes.c -o devnodes.o
 
 nvme.o: kernel/drivers/storage/nvme.c kernel/drivers/storage/nvme.h kernel/drivers/pci/pci.h \
@@ -457,11 +460,11 @@ vmm.o: kernel/memory/vmm.c kernel/memory/vmm.h kernel/memory/pmm.h \
        kernel/cpu/multiboot2.h kernel/cpu/pat.h kernel/drivers/display/framebuffer.h
 	$(CC) $(CFLAGS) -c kernel/memory/vmm.c -o vmm.o
 
-pf.o: kernel/memory/pf.c kernel/memory/pf.h kernel/memory/vmm.h \
+pf.o: kernel/memory/pf.c kernel/memory/pf.h kernel/dev/dialog.h kernel/memory/vmm.h \
       kernel/memory/pmm.h kernel/cpu/isr.h kernel/drivers/display/framebuffer.h
 	$(CC) $(CFLAGS) -c kernel/memory/pf.c -o pf.o
 
-sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
+sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/dev/dialog.h kernel/proc/process.h \
          kernel/memory/pmm.h kernel/memory/vmm.h kernel/memory/pf.h \
          kernel/cpu/gdt.h kernel/cpu/fpu.h kernel/drivers/display/framebuffer.h
 	$(CC) $(CFLAGS) -c kernel/proc/sched.c -o sched.o
@@ -469,7 +472,7 @@ sched.o: kernel/proc/sched.c kernel/proc/sched.h kernel/proc/process.h \
 sched_asm.o: kernel/proc/sched.asm
 	$(ASM) -f elf64 kernel/proc/sched.asm -o sched_asm.o
 
-user.o: kernel/proc/user.c kernel/proc/user.h kernel/proc/process.h kernel/proc/elf.h kernel/memory/vmm.h kernel/memory/pf.h
+user.o: kernel/proc/user.c kernel/proc/user.h kernel/dev/dialog.h kernel/proc/process.h kernel/proc/elf.h kernel/memory/vmm.h kernel/memory/pf.h
 	$(CC) $(CFLAGS) -c kernel/proc/user.c -o user.o
 
 user_enter.o: kernel/proc/user_enter.asm
@@ -1247,7 +1250,7 @@ userspace/gui_demo.app: gui_demo.o crt0.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-gui_demo.app gui_demo.o crt0.o gui.o libicda.o
 	cp -f /tmp/icda-gui_demo.app userspace/gui_demo.app
 
-wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/wm_panels.h userspace/wm_assistant.h userspace/wm_login.h userspace/shortcuts.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
+wm.o: userspace/wm.c userspace/wm_frame.h userspace/wm_shell.h userspace/wm_wifi.h userspace/wm_panels.h userspace/wm_dialog.h userspace/wm_assistant.h userspace/wm_login.h userspace/shortcuts.h userspace/gui_proto.h $(IC_HEADERS) userspace/icon_data.h userspace/font.h userspace/icda_sys.h \
       userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm.c -o /tmp/icda-wm.o
 	cp -f /tmp/icda-wm.o wm.o
@@ -1276,8 +1279,12 @@ wm_panels.o: userspace/wm_panels.c userspace/wm_panels.h userspace/wm_shell.h us
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_panels.c -o /tmp/icda-wm_panels.o
 	cp -f /tmp/icda-wm_panels.o wm_panels.o
 
-userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_assistant.o wm_login.o gui.o libicda.o userspace/user.ld
-	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_assistant.o wm_login.o gui.o libicda.o
+wm_dialog.o: userspace/wm_dialog.c userspace/wm_dialog.h $(IC_HEADERS)
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/wm_dialog.c -o /tmp/icda-wm_dialog.o
+	cp -f /tmp/icda-wm_dialog.o wm_dialog.o
+
+userspace/wm.app: crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_dialog.o wm_assistant.o wm_login.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-wm.app crt0.o wm.o wm_frame.o wm_shell.o wm_wifi.o wm_panels.o wm_dialog.o wm_assistant.o wm_login.o gui.o libicda.o
 	cp -f /tmp/icda-wm.app userspace/wm.app
 
 desktop.o: userspace/desktop.c userspace/gui.h userspace/gui_proto.h $(IC_HEADERS) userspace/font.h userspace/icda_sys.h \
@@ -1315,20 +1322,20 @@ user_programs_slim.o: kernel/proc/user_programs.asm userspace/init.app
 user_programs.o: kernel/proc/user_programs.asm $(USER_PROGS_ALL) resources/linux/busybox resources/ssl/cacert.pem resources/codex/terminal.sh resources/codex/AGENTS.md resources/codex/CURRENT_TASK.md resources/ai/guide.txt
 	$(ASM) -f elf64 -DCI_IMAGE=$(CI_IMAGE) kernel/proc/user_programs.asm -o user_programs.o
 
-kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
+kernel/install-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o dialog.o accounts.o rootfs.o xhci.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel/install-kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs_install.o font_assets.o install.o diskfmt.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o dialog.o accounts.o rootfs.o xhci.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs_slim.o shell_blob.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc
 
-kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
+kernel.bin: kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o bootstage.o splash.o power.o battery.o notify.o dialog.o accounts.o rootfs.o xhci.o vt.o \
             sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o boot.o gdt_flush.o isr_asm.o \
             sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o
 	$(CC) -T kernel/linker.ld -o kernel.bin -ffreestanding -O0 -nostdlib \
-	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o accounts.o rootfs.o xhci.o vt.o \
+	      -fno-pie -no-pie boot.o kernel.o device.o speaker.o playback.o hda.o e1000.o virtio_net.o net_drv.o net.o sock.o vga.o framebuffer.o gpu.o virtio_gpu.o intel_gpu.o i915.o flip.o keyboard.o input.o mouse.o shm.o msgq.o devops.o devnodes.o nvme.o ahci.o ata.o block.o partition.o pci.o initramfs.o install.o diskfmt.o audio_assets_gen.o icon_assets_gen.o icon_assets.o font_assets.o vfs.o fd.o lx.o lx_vm.o lx_ipc.o lx_drm.o persistfs.o bootlog.o sysupdate.o fat32.o fatfs.o exfatfs.o ntfsfs.o volumes.o exfat.o ntfs.o tty.o pty.o syscall.o console.o serial.o power.o battery.o notify.o dialog.o accounts.o rootfs.o xhci.o vt.o \
 	      gdt.o idt.o isr.o pic.o lapic.o smp.o tsc.o ap_blob.o pat.o fpu.o rtc.o ioapic.o irq_controller.o acpi.o efi.o pmm.o heap.o vmm.o pf.o \
 	      bootstage.o splash.o sched.o sched_asm.o user.o user_enter.o user_programs.o audio_assets.o shell_blob.o boot_assets.o gdt_flush.o isr_asm.o \
 	      sha256.o sha1.o aes.o bn.o rsa.o x25519.o gcm.o tls.o $(IWM_OBJS) vdso_blob.o -lgcc

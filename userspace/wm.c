@@ -20,6 +20,7 @@
 #include "wm_shell.h"
 #include "wm_wifi.h"
 #include "wm_panels.h"
+#include "wm_dialog.h"
 #include "wm_assistant.h"
 #include "wm_login.h"
 #include "shortcuts.h"
@@ -77,6 +78,7 @@ typedef struct {
     wm_hit_t  pressed;
     int       pointer_in;     
     char      title[32];
+    uint32_t  pid;            /* the program's (0: it did not say) */
 } wm_window_t;
 
 static wm_window_t windows[MAX_WINDOWS];
@@ -332,7 +334,7 @@ static ic_rect_t reach_of(ic_rect_t outer) {
 
 
 
-static int win_bounds(const wm_window_t *win, ic_rect_t out[3]) {
+static int win_bounds(const wm_window_t *win, ic_rect_t out[4]) {
     int n = 0;
     out[n++] = wm_frame_damage_rect(win->x, win->y, win->w, win->h);
     if (win->anim_kind == WM_ANIM_GEOMETRY) {
@@ -344,11 +346,14 @@ static int win_bounds(const wm_window_t *win, ic_rect_t out[3]) {
         out[n++] = reach_of(win->anim_from);
         out[n++] = reach_of(win->anim_to);
     }
+    if (wm_dialog_has(win->id))
+        out[n++] = wm_dialog_reach(wm_dialog_rect(win->id, ic_rect_make(win->x, win->y, win->w, win->h),
+                                                  scr_w, scr_h - WM_BAR_H));
     return n;
 }
 
 static void mark_dirty_win(const wm_window_t *win) {
-    ic_rect_t b[3];
+    ic_rect_t b[4];
     int n;
     if (!win || !win->valid) return;
     n = win_bounds(win, b);
@@ -1666,6 +1671,7 @@ static void send_close_to_app(wm_window_t *win) {
 
 static void send_mouse(wm_window_t *win, int x, int y, uint8_t buttons) {
     gui_msg_t m;
+    if (wm_dialog_has(win->id)) return;          /* it waits for its dialog */
     clear_msg(&m);
     m.type = GUI_MSG_MOUSE_EVENT;
     m.window_id = win->id;
@@ -1687,7 +1693,7 @@ static void send_wheel(int dz) {
     if (idx < 0) return;
     if (capture_win < 0 && hit != WM_HIT_CLIENT) return;
     win = &windows[idx];
-    if (!win->valid || win->closing || win->minimized) return;
+    if (!win->valid || win->closing || win->minimized || wm_dialog_has(win->id)) return;
     clear_msg(&m);
     m.type = GUI_MSG_MOUSE_EVENT;
     m.window_id = win->id;
@@ -1855,6 +1861,7 @@ static void finish_close(int slot) {
     win = &windows[slot];
     if (!win->valid) return;
     mark_dirty_win(win);
+    wm_dialog_window_gone(win->id);
     icda_shm_unmap(win->shm_handle);
     icda_shm_close(win->shm_handle);
     win->valid = 0;
@@ -2067,6 +2074,7 @@ static void open_window_from_msg(gui_msg_t *msg, uint64_t wm_queue, uint32_t *ne
     for (int i = 0; i < (int)sizeof(*win); i++) ((uint8_t *)win)[i] = 0;
     win->valid = 1;
     win->id = (*next_win_id)++;
+    win->pid = msg->sender_pid;
     win->app_queue_handle = msg->window_id;
     win->shm_handle = shm_hnd;
     win->pixels = (uint32_t*)map_addr;
@@ -2307,6 +2315,7 @@ static void draw_overlays(void) {
         overview_draw();
         return;
     }
+    if (wm_dialog_has(0)) wm_dialog_draw(&scene, 0, ic_rect_make(0, 0, 0, 0), 0.0f, scr_w, scr_h - WM_BAR_H);
     if (rubber_active) wm_rubber_band_draw(&scene, rubber_x0, rubber_y0, rubber_x1, rubber_y1);
     if (snap_zone && drag_win >= 0) {
         ic_rect_t s = ic_rect_inset(snap_rect(snap_zone), 6, 6);
@@ -2560,12 +2569,18 @@ static void composite_region(int x, int y, int rw, int rh) {
         if (!win->valid) continue;
         if (win->minimized && win->anim_kind != WM_ANIM_MINIMIZE) continue;
         {
-            ic_rect_t b[3];
+            ic_rect_t b[4];
             int n = win_bounds(win, b), touches = 0;
             for (int k = 0; k < n && !touches; k++) touches = rect_hit(x, y, rw, rh, b[k]);
             if (!touches) continue;
         }
         composite_window(win, idx);
+        if (wm_dialog_has(win->id) && win->anim_kind == WM_ANIM_NONE && !win->minimized) {
+            wm_frame_t f;
+            win_frame(win, idx, &f);
+            wm_dialog_draw(&scene, win->id, ic_rect_make(win->x, win->y, win->w, win->h),
+                           win->maximized ? 0.0f : wm_frame_radius(&f), scr_w, scr_h - WM_BAR_H);
+        }
     }
     if (rect_hit(x, y, rw, rh, wm_bar_rect(scr_w, scr_h))) draw_bar();
     draw_overlays();
@@ -3127,6 +3142,115 @@ static void set_caption_hover(int idx, wm_hit_t hit) {
     }
 }
 
+/* ---- dialogs (wm_dialog.c) ---- */
+
+static uint32_t dlg_press_window;     /* the dialog a button press began in */
+static int dlg_pressing;
+static uint32_t dlg_hover_window = 0xFFFFFFFFu;
+
+static int window_id_exists(uint32_t id) {
+    return find_window_by_id(id) != -1;
+}
+
+/* the program learns its dialog was answered without having to look */
+static void dialog_answered(uint32_t window_id, uint32_t dialog_id, int button) {
+    int slot = find_window_by_id(window_id);
+    gui_msg_t m;
+    if (slot < 0) return;
+    clear_msg(&m);
+    m.type = GUI_MSG_DIALOG;
+    m.window_id = window_id;
+    m.dialog.id = dialog_id;
+    m.dialog.button = button;
+    send_maybe(windows[slot].app_queue_handle, &m);
+}
+
+/* The kernel says a program stopped: its windows go (nothing is left to draw
+ * them) and the dialog names it as its window does.  1 if it had any. */
+static int program_stopped(uint32_t pid, char *label, int cap) {
+    int found = 0;
+    if (!pid) return 0;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        wm_window_t *win = &windows[i];
+        if (!win->valid || win->pid != pid) continue;
+        if (!found && label && cap > 0) {
+            int n = 0;
+            while (win->title[n] && n + 1 < cap) { label[n] = win->title[n]; n++; }
+            label[n] = 0;
+        }
+        found = 1;
+        if (!win->closing) start_close(win);
+    }
+    return found;
+}
+
+static ic_rect_t dialog_rect_of(uint32_t window_id) {
+    int slot = window_id ? find_window_by_id(window_id) : -1;
+    ic_rect_t content = slot >= 0 ? ic_rect_make(windows[slot].x, windows[slot].y, windows[slot].w, windows[slot].h)
+                                  : ic_rect_make(0, 0, 0, 0);
+    return wm_dialog_rect(window_id, content, scr_w, scr_h - WM_BAR_H);
+}
+
+/* the dialog under the pointer, if no window above covers it */
+static int dialog_at(int mx, int my, uint32_t *window_id, ic_rect_t *rect) {
+    if (wm_dialog_has(0)) {
+        ic_rect_t r = dialog_rect_of(0);
+        if (ic_ui_hit(r, mx, my)) {
+            *window_id = 0;
+            *rect = r;
+            return 1;
+        }
+    }
+    for (int i = num_windows - 1; i >= 0; i--) {
+        int idx = z_order[i];
+        wm_window_t *win;
+        wm_frame_t f;
+        if (idx < 0 || idx >= MAX_WINDOWS) continue;
+        win = &windows[idx];
+        if (!win->valid || win->minimized || win->closing) continue;
+        if (wm_dialog_has(win->id)) {
+            ic_rect_t r = dialog_rect_of(win->id);
+            if (ic_ui_hit(r, mx, my)) {
+                *window_id = win->id;
+                *rect = r;
+                return 1;
+            }
+        }
+        win_frame(win, idx, &f);
+        if (wm_frame_hit(&f, mx, my) != WM_HIT_NONE) return 0;
+    }
+    return 0;
+}
+
+static void dialog_redraw(uint32_t window_id, int result) {
+    if (result == 2) {
+        mark_dirty_full();
+        /* the screen's last dialog answered: the keyboard goes back to the windows */
+        if (!window_id && !wm_dialog_has(0) && focused_window_idx == -1) focus_top_visible();
+    } else if (result) {
+        mark_dirty_rect(wm_dialog_reach(dialog_rect_of(window_id)));
+    }
+}
+
+static void dialog_key(uint32_t window_id, long key) {
+    dialog_redraw(window_id, wm_dialog_key(window_id, key));
+}
+
+/* a new dialog: its window comes forward with the focus; a screen dialog
+ * takes the keyboard from the windows */
+static void dialog_focus(uint32_t window_id) {
+    if (window_id) {
+        int idx = find_window_by_id(window_id);
+        if (idx >= 0) bring_to_front(idx);
+    } else if (focused_window_idx != -1) {
+        int old = focused_window_idx;
+        focused_window_idx = -1;
+        mark_dirty_win(&windows[old]);
+        mark_dirty_bar();
+        notify_focus_change(old, -1);
+    }
+}
+
 static void left_press(void) {
     int idx;
     wm_hit_t hit;
@@ -3208,6 +3332,23 @@ static void left_press(void) {
         return;
     }
 
+    {
+        uint32_t dw;
+        ic_rect_t dr;
+        if (dialog_at(mouse_x, mouse_y, &dw, &dr)) {
+            if (dw) {
+                int di = find_window_by_id(dw);
+                if (di >= 0) bring_to_front(di);
+            } else {
+                dialog_focus(0);
+            }
+            dlg_press_window = dw;
+            dlg_pressing = 1;
+            dialog_redraw(dw, wm_dialog_press(dw, dr, mouse_x, mouse_y));
+            return;
+        }
+    }
+
     idx = window_at(mouse_x, mouse_y, &hit);
     if (idx >= 0) {
         wm_window_t *win = &windows[idx];
@@ -3250,6 +3391,12 @@ static void left_press(void) {
 }
 
 static void left_release(void) {
+    if (dlg_pressing) {
+        dlg_pressing = 0;
+        dialog_redraw(dlg_press_window, wm_dialog_release(dlg_press_window, dialog_rect_of(dlg_press_window),
+                                                          mouse_x, mouse_y));
+        return;
+    }
     if (panel_open && wm_panels_release() == WM_PANEL_REDRAW) {
         mark_dirty_panel();
         mark_dirty_bar();
@@ -3370,6 +3517,22 @@ static void pointer_moved(void) {
         return;
     }
     desk_track_motion(mouse_x, mouse_y, mouse_buttons);
+
+    {
+        /* buttons under the pointer light up */
+        uint32_t dw;
+        ic_rect_t dr;
+        if (dialog_at(mouse_x, mouse_y, &dw, &dr)) {
+            if (dlg_hover_window != 0xFFFFFFFFu && dlg_hover_window != dw && wm_dialog_has(dlg_hover_window))
+                dialog_redraw(dlg_hover_window, wm_dialog_hover(dlg_hover_window, dialog_rect_of(dlg_hover_window), -1, -1));
+            dialog_redraw(dw, wm_dialog_hover(dw, dr, mouse_x, mouse_y));
+            dlg_hover_window = dw;
+        } else if (dlg_hover_window != 0xFFFFFFFFu) {
+            if (wm_dialog_has(dlg_hover_window))
+                dialog_redraw(dlg_hover_window, wm_dialog_hover(dlg_hover_window, dialog_rect_of(dlg_hover_window), -1, -1));
+            dlg_hover_window = 0xFFFFFFFFu;
+        }
+    }
 
     if (drag_win >= 0) {
         wm_window_t *win = &windows[drag_win];
@@ -3708,6 +3871,10 @@ static void handle_key(long key) {
         wm_window_t *win = &windows[focused_window_idx];
         if (win->valid && !win->minimized && !win->closing) {
             gui_msg_t kmsg;
+            if (wm_dialog_has(win->id)) {
+                dialog_key(win->id, key);
+                return;
+            }
             clear_msg(&kmsg);
             kmsg.type = GUI_MSG_KEY_EVENT;
             kmsg.window_id = win->id;
@@ -3715,6 +3882,8 @@ static void handle_key(long key) {
             kmsg.key.pressed = 1;
             send_maybe(win->app_queue_handle, &kmsg);
         }
+    } else if (wm_dialog_has(0)) {
+        dialog_key(0, key);
     }
 }
 
@@ -3811,6 +3980,9 @@ int main(int argc, char **argv) {
 
     wm_panels_init();
     wm_ai_init();
+    wm_dialog_init(window_id_exists);
+    wm_dialog_on_answer(dialog_answered);
+    wm_dialog_on_stopped(program_stopped);
     ic_tween_set(&ctx_fade, 0.0f);
     ic_tween_set(&props_fade, 0.0f);
 
@@ -3822,6 +3994,7 @@ int main(int argc, char **argv) {
     mark_dirty_full();
 
     for (;;) {
+        static int dialog_kick;
         int need_frame = 0;
         int mouse_moved = 0;
         uint64_t now = icda_ticks();
@@ -3857,6 +4030,8 @@ int main(int argc, char **argv) {
                     send_close_to_app(&windows[slot]);
                     start_close(&windows[slot]);
                 }
+            } else if (msg.type == GUI_MSG_DIALOG) {
+                dialog_kick = 1;
             } else if (msg.type == GUI_MSG_SET_CURSOR) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
@@ -3931,6 +4106,18 @@ int main(int argc, char **argv) {
                 if (!in_seq && !chord_left) break;
                 key = icda_read_char_timeout(1);
             }
+        }
+
+        {
+            uint32_t fw = 0;
+            int had_screen = wm_dialog_has(0);
+            if (wm_dialog_poll(dialog_kick, &fw)) {
+                mark_dirty_full();
+                if (fw) dialog_focus(fw);
+                else if (!had_screen && wm_dialog_has(0)) dialog_focus(0);
+            }
+            dialog_kick = 0;
+            dialog_redraw(wm_dialog_last_window(), wm_dialog_tick());
         }
 
         if (animations_tick()) need_frame = 1;

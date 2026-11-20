@@ -68,8 +68,7 @@ static struct {
     int hover_col;
     int list_focused;
 
-    int alert_action;
-    int alert_hover;
+    int confirming;              /* a confirmation dialog is open */
 
     char     storage[TM_STORAGE_CAP];
     char     status[TM_STATUS_CAP];
@@ -252,15 +251,6 @@ static ic_rect_t kill_rect(ic_app_t *app) {
     return ic_rect_make(r.x + r.w + IC_SP_2, r.y, w, IC_H_CONTROL_SM);
 }
 
-static ic_rect_t alert_rect(ic_app_t *app) {
-    int w = 380, h = ic_ui_alert_height(IC_SYM_INFO, "");
-    return ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
-}
-
-static ic_rect_t alert_button_rect(ic_app_t *app, int index) {
-    return ic_ui_alert_button_rect(alert_rect(app), index, 2);
-}
-
 /* ---- sampling ------------------------------------------------------------------ */
 
 static uint64_t prev_ticks_of(uint64_t pid, int *found) {
@@ -438,7 +428,14 @@ static void sample(void) {
         return;
     }
     buf[rc] = 0;
-    parse_procs(buf, (uint64_t)rc, wall);
+    {
+        /* the selected process stays selected: the new list's order is not the old one's */
+        uint64_t keep = has_selection() ? tm.procs[tm.selected].pid : 0;
+        parse_procs(buf, (uint64_t)rc, wall);
+        tm.selected = -1;
+        for (int i = 0; keep && i < tm.count; i++)
+            if (tm.procs[i].pid == keep) tm.selected = i;
+    }
     sort_procs();
     tm.last_sample = icda_ticks();
     sn = (long)icda_storage_info(tm.storage, sizeof(tm.storage) - 1);
@@ -485,9 +482,44 @@ static void toggle_suspend(void) {
     reselect(pid);
 }
 
-static void confirm(int action) {
-    tm.alert_action = action;
-    tm.alert_hover = -1;
+/* asked about this process: the list may have moved under the dialog */
+static uint64_t confirm_pid;
+
+static void confirmed(ic_app_t *app, int button, void *ctx) {
+    int action = (int)(uintptr_t)ctx;
+    (void)app;
+    tm.confirming = 0;
+    if (button != 1) return;
+    reselect(confirm_pid);
+    if (!has_selection() || tm.procs[tm.selected].pid != confirm_pid) {
+        tm_status("That process has already ended");
+        return;
+    }
+    if (action == TM_KILL) kill_selected();
+    else toggle_suspend();
+}
+
+static void confirm(ic_app_t *app, int action) {
+    static const char *const kill_buttons[2] = { "Cancel", "Quit Process" };
+    static const char *const suspend_buttons[2] = { "Cancel", "Suspend" };
+    static char msg[160];
+    ic_dialog_t d;
+    if (!has_selection() || tm.confirming) return;
+    confirm_pid = tm.procs[tm.selected].pid;
+    msg[0] = 0;
+    ic_strlcat(msg, tm.procs[tm.selected].name, sizeof(msg));
+    ic_strlcat(msg, action == TM_KILL ? " will be stopped and cannot be restarted."
+                                      : " will be paused until it is resumed.", sizeof(msg));
+    ic_memzero(&d, sizeof(d));
+    d.kind = action == TM_KILL ? IC_DIALOG_WARNING : IC_DIALOG_QUESTION;
+    d.title = action == TM_KILL ? "Quit this process?" : "Suspend this process?";
+    d.message = msg;
+    d.buttons = action == TM_KILL ? kill_buttons : suspend_buttons;
+    d.count = 2;
+    d.default_button = 1;
+    d.cancel_button = 0;
+    d.destructive_button = action == TM_KILL ? 1 : -1;
+    if (ic_app_dialog(app, &d, confirmed, (void *)(uintptr_t)action) == 0) tm.confirming = 1;
 }
 
 /* ---- drawing -------------------------------------------------------------------- */
@@ -663,31 +695,12 @@ static void draw_footer(ic_app_t *app, ic_canvas_t *c) {
     }
 }
 
-static void draw_alert(ic_app_t *app, ic_canvas_t *c) {
-    const char *labels[2] = { "Cancel", tm.alert_action == TM_KILL ? "Quit Process" : "Suspend" };
-    ic_rect_t rects[2];
-    char msg[160];
-    const char *title = tm.alert_action == TM_KILL ? "Quit this process?" : "Suspend this process?";
-
-    msg[0] = 0;
-    if (has_selection()) {
-        ic_strlcat(msg, tm.procs[tm.selected].name, sizeof(msg));
-        ic_strlcat(msg, tm.alert_action == TM_KILL ? " will be stopped and cannot be restarted."
-                                                   : " will be paused until it is resumed.", sizeof(msg));
-    } else {
-        ic_strcpy(msg, "No process is selected.", sizeof(msg));
-    }
-    ic_ui_alert(c, alert_rect(app), tm.alert_action == TM_KILL ? IC_SYM_WARNING : IC_SYM_INFO, title, msg, labels, 2,
-                tm.alert_hover, rects);
-}
-
 static void draw(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
     draw_toolbar(app, c);
     draw_cards(app, c);
     draw_table(app, c);
     draw_footer(app, c);
-    if (tm.alert_action != TM_NONE) draw_alert(app, c);
 }
 
 /* ---- input -------------------------------------------------------------------- */
@@ -700,22 +713,9 @@ static int row_at(ic_app_t *app, int x, int y) {
     return (i >= 0 && i < tm.count) ? i : -1;
 }
 
-static void resolve_alert(void) {
-    int action = tm.alert_action;
-    tm.alert_action = TM_NONE;
-    tm.alert_hover = -1;
-    if (action == TM_KILL) kill_selected();
-    else if (action == TM_SUSPEND) toggle_suspend();
-}
-
 static void event(ic_app_t *app, const ic_event_t *ev) {
     switch (ev->type) {
     case IC_EV_MOUSE_MOVE:
-        if (tm.alert_action != TM_NONE) {
-            tm.alert_hover = ic_ui_hit(alert_button_rect(app, 0), ev->x, ev->y) ? 0
-                           : (ic_ui_hit(alert_button_rect(app, 1), ev->x, ev->y) ? 1 : -1);
-            break;
-        }
         tm.hover_refresh = ic_ui_hit(refresh_rect(app), ev->x, ev->y);
         tm.hover_suspend = ic_ui_hit(suspend_rect(app), ev->x, ev->y);
         tm.hover_kill = ic_ui_hit(kill_rect(app), ev->x, ev->y);
@@ -724,21 +724,13 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         break;
     case IC_EV_MOUSE_DOWN:
         if (ev->button != GUI_BTN_LEFT) break;
-        if (tm.alert_action != TM_NONE) {
-            if (ic_ui_hit(alert_button_rect(app, 1), ev->x, ev->y)) resolve_alert();
-            else if (ic_ui_hit(alert_button_rect(app, 0), ev->x, ev->y)) {
-                tm.alert_action = TM_NONE;
-                tm.alert_hover = -1;
-            }
-            break;
-        }
         if (tm.hover_refresh) { sample(); break; }
         if (tm.hover_suspend && has_selection()) {
             if (suspend_label_is_resume()) toggle_suspend();
-            else confirm(TM_SUSPEND);
+            else confirm(app, TM_SUSPEND);
             break;
         }
-        if (tm.hover_kill && has_selection()) { confirm(TM_KILL); break; }
+        if (tm.hover_kill && has_selection()) { confirm(app, TM_KILL); break; }
         {
             int col = column_at(app, ev->x, ev->y), i;
             if (col >= 0) {
@@ -764,17 +756,6 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         tm.scroll += ev->wheel * 3;
         break;
     case IC_EV_KEY:
-        if (tm.alert_action != TM_NONE) {
-            if (ev->key == IC_KEY_ESCAPE) {
-                tm.alert_action = TM_NONE;
-                tm.alert_hover = -1;
-            } else if (ev->key == IC_KEY_ENTER || ev->key == IC_KEY_RIGHT) {
-                resolve_alert();
-            } else if (ev->key == IC_KEY_LEFT || ev->key == IC_KEY_TAB) {
-                tm.alert_hover = tm.alert_hover == 0 ? 1 : 0;
-            }
-            break;
-        }
         switch (ev->key) {
         case IC_KEY_UP:   if (tm.selected > 0) tm.selected--; break;
         case IC_KEY_DOWN: if (tm.selected + 1 < tm.count) tm.selected++; break;
@@ -782,11 +763,11 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
         case IC_KEY_PAGE_DOWN: tm.scroll += tm.rows; break;
         case IC_KEY_HOME:  tm.scroll = 0; break;
         case IC_KEY_END:   tm.scroll = tm.count; break;
-        case IC_KEY_DELETE: if (has_selection()) confirm(TM_KILL); break;
+        case IC_KEY_DELETE: if (has_selection()) confirm(app, TM_KILL); break;
         case IC_KEY_ESCAPE: tm.selected = -1; break;
         case 's': case 'S': if (!has_selection()) break;
             if (suspend_label_is_resume()) toggle_suspend();
-            else confirm(TM_SUSPEND);
+            else confirm(app, TM_SUSPEND);
             break;
         case 'r': case 'R': sample(); break;
         default: break;
@@ -827,8 +808,7 @@ static void init(ic_app_t *app) {
     tm.hover_col = -1;
     tm.hover_refresh = tm.hover_suspend = tm.hover_kill = 0;
     tm.list_focused = 1;
-    tm.alert_action = TM_NONE;
-    tm.alert_hover = -1;
+    tm.confirming = 0;
     tm.last_sample = 0;
     tm.status[0] = 0;
     tm.storage[0] = 0;

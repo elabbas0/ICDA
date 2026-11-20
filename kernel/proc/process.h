@@ -74,6 +74,7 @@ typedef struct process {
     struct vfs_node *ex_cfg;    /* their settings folder, shown as /cfg */
     uint64_t ex_token;
     int      ex_session_leader;
+    uint8_t  ex_wm;             /* the session's window manager: /apps/wm.app started by the system */
     
 
 

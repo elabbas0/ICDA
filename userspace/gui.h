@@ -31,6 +31,10 @@ void gui_flush(void);
  * (a frame of a video or a web page under unchanged surroundings). */
 void gui_flush_rect(int x, int y, int w, int h);
 void gui_set_cursor(int shape);
+/* the window's id (0: none), for /dev/dialog's window= */
+uint32_t gui_window_id(void);
+/* tells the window manager a dialog request was just made (it looks at once) */
+void gui_dialog_kick(void);
 
 
 int gui_poll_event(gui_msg_t *out);

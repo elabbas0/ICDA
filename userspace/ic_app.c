@@ -215,6 +215,47 @@ static void ic_app_paint(ic_app_t *app) {
     app->dirty = 0;
 }
 
+/* the app's open dialog: answered when the window manager says so
+ * (GUI_MSG_DIALOG), or found answered by a look every half second */
+static struct {
+    int               open;
+    ic_dialog_done_fn done;
+    void             *ctx;
+    uint32_t          looked_ms;
+} dlg;
+
+int ic_app_dialog(ic_app_t *app, const ic_dialog_t *d, ic_dialog_done_fn done, void *ctx) {
+    (void)app;
+    if (dlg.open || ic_dialog_open(d) != 0) return -1;
+    dlg.open = 1;
+    dlg.done = done;
+    dlg.ctx = ctx;
+    dlg.looked_ms = ic_time_ms();
+    return 0;
+}
+
+int ic_app_alert(ic_app_t *app, ic_dialog_kind_t kind, const char *title, const char *message) {
+    ic_dialog_t d;
+    for (uint64_t i = 0; i < sizeof(d); i++) ((uint8_t *)&d)[i] = 0;
+    d.kind = kind;
+    d.title = title;
+    d.message = message;
+    d.cancel_button = -1;
+    d.destructive_button = -1;
+    return ic_app_dialog(app, &d, 0, 0);
+}
+
+static void ic_app_dialog_look(ic_app_t *app) {
+    int r;
+    if (!dlg.open) return;
+    dlg.looked_ms = ic_time_ms();
+    r = ic_dialog_result();
+    if (r == IC_DIALOG_OPEN || r == IC_DIALOG_NO_HOST) return;
+    dlg.open = 0;
+    if (dlg.done) dlg.done(app, r, dlg.ctx);
+    app->dirty = 1;
+}
+
 int ic_app_run(const ic_app_desc_t *desc, void *user) {
     ic_app_t app;
     ic_keydec_t keys;
@@ -269,6 +310,9 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
                 ic_app_emit(&app, app.focused ? IC_EV_FOCUS : IC_EV_BLUR, 0, 0, 0);
                 ic_app_caret_reset(&app);
                 break;
+            case GUI_MSG_DIALOG:
+                ic_app_dialog_look(&app);
+                break;
             case GUI_MSG_RESIZE:
                 
                 app.width = gui_window_width();
@@ -288,6 +332,7 @@ int ic_app_run(const ic_app_desc_t *desc, void *user) {
         }
         if (desc->tick) desc->tick(&app);
         ic_app_wheel_coast(&app);
+        if (dlg.open && ic_time_ms() - dlg.looked_ms >= 500) ic_app_dialog_look(&app);
 
         {
             uint32_t now = ic_time_ms();

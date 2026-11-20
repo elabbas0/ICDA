@@ -17,6 +17,9 @@
 #define GUI_MSG_RESIZE         8   
 #define GUI_MSG_FOCUS          9   
 #define GUI_MSG_SET_CURSOR    10   
+/* app -> WM: a request was just written to /dev/dialog (look now);
+ * WM -> app: its dialog was answered (dialog.button, -1 none) */
+#define GUI_MSG_DIALOG        11
 
 
 #define GUI_BTN_LEFT    0x01
@@ -73,6 +76,13 @@ typedef struct {
             uint8_t  _pad[39];
         } cursor;
 
+        /* GUI_MSG_DIALOG: the request's id in /dev/dialog, and the answer */
+        struct {
+            uint32_t id;
+            int32_t  button;
+            uint8_t  _pad[32];
+        } dialog;
+
         /* GUI_MSG_FLUSH: changed area in window coordinates; w == 0 means everything */
         struct {
             int32_t  x, y, w, h;
@@ -92,7 +102,10 @@ typedef struct {
 
         uint8_t raw[40];
     };
-    uint8_t _tail[16]; 
+    /* GUI_MSG_OPEN_WINDOW: the asking program's pid, so the window manager
+     * knows whose window it is (a program that stopped takes its windows) */
+    uint32_t sender_pid;
+    uint8_t _tail[12];
 } __attribute__((packed)) gui_msg_t;
 
 

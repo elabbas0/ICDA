@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include "ic_gfx.h"
+#include "ic_dialog.h"
 
 
 
@@ -120,6 +121,15 @@ void ic_app_caret_reset(ic_app_t *app);
 void ic_app_quit(ic_app_t *app);
 
 void ic_app_set_cursor(ic_app_t *app, int shape);
+
+/* A dialog over the app's window (ic_dialog.h): done, if given, is called
+ * with the button chosen (-1: none) once it is answered; the app keeps
+ * running and drawing meanwhile, and its window takes no input.  0, or -1
+ * when the app already has one open. */
+typedef void (*ic_dialog_done_fn)(ic_app_t *app, int button, void *ctx);
+int  ic_app_dialog(ic_app_t *app, const ic_dialog_t *d, ic_dialog_done_fn done, void *ctx);
+/* the usual one: a message and OK */
+int  ic_app_alert(ic_app_t *app, ic_dialog_kind_t kind, const char *title, const char *message);
 
 #define IC_CLIPBOARD_PATH "/home/.clipboard"
 

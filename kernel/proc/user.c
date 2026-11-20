@@ -1,4 +1,5 @@
 #include "user.h"
+#include "../dev/dialog.h"
 #include "../linux/lx_vm.h"
 #include "../linux/lx.h"
 
@@ -426,6 +427,7 @@ void user_request_exit_to_kernel(uint64_t code) {
         fd_proc_exit(proc);
         shm_proc_exit(proc);
         pty_proc_exit(proc);
+        dialog_proc_exit(proc);
         proc->state = PROCESS_EXITED;
         proc->exit_code = code;
     }
@@ -802,6 +804,11 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
         user_proc->ex_uid = 0;
         user_proc->ex_session_leader = 1;
         user_proc->ex_token = sched_ticks() ? (uint64_t)sched_ticks() : 1;
+    }
+    /* The window manager the system starts (init, or the kernel switching
+     * consoles) shows /dev/dialog's dialogs; a copy a user starts does not. */
+    if (cstr_eq(path, "/apps/wm.app") && (!current_proc || current_proc->kind != PROCESS_USER || current_proc->ex_uid == 0)) {
+        user_proc->ex_wm = 1;
     }
 
     user_proc->state = PROCESS_READY;

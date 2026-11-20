@@ -54,4 +54,7 @@ typedef struct { uint64_t faults, file_faults, present_faults, vmas, find_cycles
                  pages[3], kind_cycles[3], step_cycles[3], madv_dontneed, madv_free, madv_free_kept; } lxvm_stat_t;   /* by kind: 0 anonymous, 1 file, 2 memory object */
 extern lxvm_stat_t lxvm_stat;
 
+/* 1 once if the last page fault failed for want of memory */
+int lxvm_take_oom(void);
+
 #endif

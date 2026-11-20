@@ -19,6 +19,7 @@
 #include "../power/battery.h"
 #include "../drivers/display/intel_gpu.h"
 #include "notify.h"
+#include "dialog.h"
 
 
 
@@ -350,6 +351,14 @@ static const dev_calls_t dev_notify_calls = {
     notify_node_write,
 };
 
+/* /dev/dialog: dialogs for the window manager to show, and their answers (dev/dialog.c) */
+static const dev_calls_t dev_dialog_calls = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    dialog_node_read,
+    dialog_node_write,
+};
+
 int dev_populate(void) {
     vfs_node_t *dev;
     int rc = 0;
@@ -411,9 +420,10 @@ int dev_populate(void) {
         rc = -1;
     }
     {
-        static const char *const extra[] = { "/dev/battery", "/dev/power", "/dev/notify", "/dev/gpu" };
-        static const dev_calls_t *const extra_calls[] = { &dev_battery_calls, &dev_power_calls, &dev_notify_calls, &dev_gpu_calls };
-        for (int i = 0; i < 4; i++) {
+        static const char *const extra[] = { "/dev/battery", "/dev/power", "/dev/notify", "/dev/gpu", "/dev/dialog" };
+        static const dev_calls_t *const extra_calls[] = { &dev_battery_calls, &dev_power_calls, &dev_notify_calls, &dev_gpu_calls,
+                                                          &dev_dialog_calls };
+        for (int i = 0; i < 5; i++) {
             if (!vfs_resolve(vfs_root(), extra[i])) (void)vfs_create(vfs_root(), extra[i]);
             if (devops_register(extra[i], extra_calls[i]) != 0) rc = -1;
         }

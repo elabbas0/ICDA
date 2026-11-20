@@ -1,4 +1,5 @@
 #include "pf.h"
+#include "../dev/dialog.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "../cpu/isr.h"
@@ -227,6 +228,9 @@ static void page_fault_handler(struct registers *regs) {
         
         uint64_t phys = pmm_alloc();
         if (!phys) {
+            /* no memory for the program's stack: the program ends, not the machine */
+            process_t *sp = sched_current_process();
+            if (sp && sp->kind == PROCESS_USER && sched_current_thread()) user_oom_kill();
             fb_print("\n*** PAGE FAULT: OOM during stack growth ***\n", FB_WHITE, FB_RED);
             __asm__ volatile("cli; hlt");
             return;
@@ -260,6 +264,9 @@ static void page_fault_handler(struct registers *regs) {
         thread_t *thread = sched_current_thread();
         if (proc && proc->kind == PROCESS_USER && thread) {
             pf_serial_dump(regs, cr2);
+            /* the page could not be given memory: out of memory, not a bad
+             * address, so no SIGSEGV for the program to catch */
+            if (lxvm_take_oom()) user_oom_kill();
             if (lx_fault_signal(regs, 11, cr2)) return;      /* the program handles SIGSEGV */
             user_fault_kill(11);
         }
@@ -268,15 +275,50 @@ static void page_fault_handler(struct registers *regs) {
     pf_panic(regs, cr2);
 }
 
+static void cat(char *dst, int cap, const char *src) {
+    int n = 0;
+    while (n < cap - 1 && dst[n]) n++;
+    for (int i = 0; src[i] && n < cap - 1; i++) dst[n++] = src[i];
+    dst[n] = 0;
+}
+
+/* A program the desktop started that stops gets a dialog saying so.  One in
+ * a terminal is reported by its shell, and a program's helpers (a browser's
+ * page processes) by the program, which knows what they were doing. */
+static void report_stop(process_t *proc, int sig) {
+    char app[40], title[96];
+    const char *why;
+    if (!proc || proc->kind != PROCESS_USER || proc->pty || proc->ex_wm ||
+        !proc->parent || !proc->parent->ex_wm) return;
+    dialog_app_label(proc->name, app, sizeof(app));
+    title[0] = 0;
+    cat(title, sizeof(title), app);
+    if (sig == 9) {
+        cat(title, sizeof(title), " was closed");
+        why = "The computer ran out of memory, so ICDA closed it to keep everything else running. "
+              "Anything it had not saved is lost.";
+    } else {
+        cat(title, sizeof(title), " stopped unexpectedly");
+        why = sig == 4 ? "It used an instruction this processor does not have. Anything it had not saved is lost."
+            : sig == 8 ? "It made an arithmetic error, such as dividing by zero. Anything it had not saved is lost."
+            : sig == 7 ? "It read or wrote memory in a way the processor does not allow. Anything it had not saved is lost."
+            : sig == 5 ? "It stopped at a breakpoint with no debugger to take over. Anything it had not saved is lost."
+            : "It used memory that was not its own. Anything it had not saved is lost.";
+    }
+    dialog_post_stopped(proc->pid, proc->name, app, title, why, proc->ex_uid);
+}
+
 /* Ends the current user process after a fault it does not handle; sig is
  * the signal Linux would report (its parent sees the process killed by it). */
 __attribute__((noreturn)) void user_fault_kill(int sig) {
     process_t *proc = sched_current_process();
     thread_t *thread = sched_current_thread();
+    report_stop(proc, sig);
     sched_stop_threads(proc, thread);
     fd_proc_exit(proc);
     shm_proc_exit(proc);
     pty_proc_exit(proc);
+    dialog_proc_exit(proc);
     serial_write("  user process killed\n");
     lx_mark_signaled(proc, sig);
     proc->state = PROCESS_EXITED;
@@ -300,6 +342,14 @@ __attribute__((noreturn)) void user_fault_kill(int sig) {
 }
 
 
+
+__attribute__((noreturn)) void user_oom_kill(void) {
+    process_t *proc = sched_current_process();
+    serial_write("  out of memory: ");
+    serial_write(proc ? proc->name : "?");
+    serial_write("\n");
+    user_fault_kill(9);
+}
 
 void pf_init(void) {
     isr_register(14, page_fault_handler);

@@ -279,6 +279,16 @@ static uint64_t pc_frame(vfs_node_t *n, uint64_t idx) {
 /* gives the page at va its memory (zeroes or the file's bytes) */
 static int populate_page(process_t *p, lx_vma_t *v, uint64_t va);
 
+/* the last fault failed for want of memory (pf.c ends the program as out of
+ * memory, not with SIGSEGV) */
+static int fault_oom;
+
+int lxvm_take_oom(void) {
+    int r = fault_oom;
+    fault_oom = 0;
+    return r;
+}
+
 /* profiler: time per kind of page */
 static int populate(process_t *p, lx_vma_t *v, uint64_t va) {
     uint64_t t0 = tsc_read();
@@ -324,7 +334,10 @@ static int populate_page(process_t *p, lx_vma_t *v, uint64_t va) {
         uint64_t t0 = tsc_read(), t1, t2;
         phys = pmm_alloc();
         t1 = tsc_read();
-        if (!phys) return -1;
+        if (!phys) {
+            fault_oom = 1;
+            return -1;
+        }
         mem = (char *)PHYS_TO_VIRT(phys);
         for (int i = 0; i < (int)(PAGE / 8); i++) ((uint64_t *)mem)[i] = src ? ((uint64_t *)PHYS_TO_VIRT(src))[i] : 0;
         t2 = tsc_read();
@@ -426,6 +439,7 @@ int lxvm_fault(process_t *p, uint64_t addr, int write) {
     uint64_t va = addr & PAGE_MASK, phys, t0 = tsc_read(), t1;
     int r;
     if (!p || !p->linux_personality || !p->addr_space) return 0;
+    fault_oom = 0;
     v = find(p, addr);
     t1 = tsc_read();
     lxvm_stat.faults++;

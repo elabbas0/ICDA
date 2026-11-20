@@ -171,6 +171,30 @@ strip, and it loads again when you select it. Tabs playing sound are kept.
 measures Surfer before and after a change; the measurements of these changes
 are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md).
 
+## Dialogs
+
+A program asks the window manager for a dialog (an error, a warning, or a
+question with up to four answers) and the window manager draws it, so every
+dialog looks and works the same: Enter presses the default button, Escape the
+cancel one, Tab and the arrow keys move between them. A program's dialog sits
+on its window, which dims and takes no input until the dialog is answered;
+the program keeps running meanwhile. Programs without a window and ICDA
+itself put theirs in the middle of the screen: when a program started from
+the desktop stops on a fault, or is ended because memory ran out, a dialog
+names it and its window goes. (Before, such a program vanished silently, and
+running out of memory while a program's stack grew stopped the computer.)
+
+Dialogs are not notifications. A notification (`/dev/notify`, the bell in the
+taskbar) reports something and waits in the notification centre; a dialog
+needs an answer, and is not kept.
+
+Programs ask with `ic_app_dialog` or `ic_app_alert` (`userspace/ic_app.h`),
+which call back with the answer, or without ic_app with `ic_dialog_open`,
+`ic_dialog_result` and `ic_dialog_run` (`userspace/ic_dialog.h`). Underneath
+is `/dev/dialog`, whose format `kernel/dev/dialog.c` describes. In Terminal,
+`dialog [-e|-w|-q] [-b "Yes|No"] <title> [message]` asks and prints the
+button chosen.
+
 ## Users
 
 ICDA has user accounts. On the first start the desktop asks for the first

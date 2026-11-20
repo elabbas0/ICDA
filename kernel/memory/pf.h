@@ -41,4 +41,9 @@ void pf_init(void);
  * signal Linux would report) */
 __attribute__((noreturn)) void user_fault_kill(int sig);
 
+/* ends the current user process because no memory is left for it (SIGKILL,
+ * as Linux's out-of-memory killer); a program the desktop started gets a
+ * dialog saying so */
+__attribute__((noreturn)) void user_oom_kill(void);
+
 #endif
