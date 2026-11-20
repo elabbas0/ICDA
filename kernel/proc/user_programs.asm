@@ -63,6 +63,8 @@ global userprog_gui_demo_end
 %endif
 global userprog_taskman_start
 global userprog_taskman_end
+global userprog_installer_start
+global userprog_installer_end
 global userprog_browser_start
 global userprog_browser_end
 global userprog_settings_start
@@ -229,6 +231,12 @@ userprog_taskman_start:
     incbin "userspace/taskman.app"
 %endif
 userprog_taskman_end:
+
+userprog_installer_start:
+%if SLIM == 0
+    incbin "userspace/installer.app"
+%endif
+userprog_installer_end:
 
 userprog_browser_start:
 %if SLIM == 0

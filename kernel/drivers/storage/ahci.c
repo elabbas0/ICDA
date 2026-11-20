@@ -319,7 +319,10 @@ static int ahci_setup_device(const pci_device_t *pci_dev, hba_mem_t *abar, uint8
 
     if (ahci_count >= AHCI_MAX_DEVICES) return -1;
     if (!ahci_port_ready(port)) return -1;
-    if (port->sig != SATA_SIG_ATA) return -1;
+    /* UEFI firmware can leave a port with its FIS receive off and the
+     * signature at its reset value (all ones), a disk on it all the same:
+     * IDENTIFY DEVICE below tells, and fails for anything but an ATA disk */
+    if (port->sig != SATA_SIG_ATA && port->sig != 0xFFFFFFFFU) return -1;
 
     dev = &ahci_devices[ahci_count];
     {

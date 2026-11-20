@@ -1481,6 +1481,13 @@ static uint64_t sys_storage_info(char *buf, uint64_t cap) {
     out = append_text(buf, out, cap, "firmware=");
     out = append_text(buf, out, cap, efi_available() ? "uefi" : "bios");
     out = append_text(buf, out, cap, "\n");
+    /* a live start, and the disk it came from (the installer leaves that one be) */
+    out = append_text(buf, out, cap, persistfs_live_mode() ? "boot=live\n" : "boot=installed\n");
+    if (persistfs_live_mode() && system_install_live_medium() >= 0) {
+        out = append_text(buf, out, cap, "medium=");
+        out = append_uint(buf, out, cap, (uint64_t)system_install_live_medium());
+        out = append_text(buf, out, cap, "\n");
+    }
 
     out = append_text(buf, out, cap, "mounts:\n");
     if (fat32_mount_count() == 0 && exfat_mount_count() == 0 && ntfs_mount_count() == 0) {

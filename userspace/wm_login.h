@@ -13,6 +13,7 @@
 #define WM_LOGIN_SETUP   1   /* no accounts yet: the owner makes the first */
 #define WM_LOGIN_SIGNIN  2
 #define WM_LOGIN_LOCK    3
+#define WM_LOGIN_LIVE    4   /* a live start: install ICDA, or try it (no account) */
 
 #define WM_LOGIN_KEEP     0
 #define WM_LOGIN_REDRAW   1
@@ -26,5 +27,6 @@ int  wm_login_click(int sw, int sh, int x, int y);
 int  wm_login_hover(int sw, int sh, int x, int y);   /* REDRAW when what is under the pointer changed */
 int  wm_login_tick(void);        /* the caret and the clock */
 void wm_login_end(void);         /* wipes what was typed */
+int  wm_login_live_install(void); /* after WM_LOGIN_LIVE: 1 when Install was chosen */
 
 #endif

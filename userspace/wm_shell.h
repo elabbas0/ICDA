@@ -22,8 +22,10 @@ typedef struct {
     const char *path;
 } wm_app_t;
 
-extern const wm_app_t wm_apps[];
-extern const int      wm_app_count;
+extern wm_app_t wm_apps[];
+extern int      wm_app_count;
+/* a live start: Install ICDA comes first in the start menu and on the desktop */
+void wm_apps_live(void);
 
 
 const ic_icon_t *wm_app_icon_for_title(const char *title);

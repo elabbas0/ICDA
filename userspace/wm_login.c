@@ -13,7 +13,7 @@ typedef struct {
 } user_t;
 
 /* what the card shows */
-enum { V_SETUP, V_SIGNIN, V_LOCK, V_RECOVER, V_KEY };
+enum { V_SETUP, V_SIGNIN, V_LOCK, V_RECOVER, V_KEY, V_LIVE };
 
 static int mode, view;
 static user_t users[MAX_USERS];
@@ -30,8 +30,14 @@ static int esc_state;           /* ESC [ A: the arrow keys */
 /* the recovery key on show, and who signs in once it has been read */
 static char key_shown[ICDA_ACCT_KEY_CAP];
 static char pend_name[32], pend_pw[FIELD_CAP];
+/* a live start: the tile with the focus (0 install, 1 try), and the choice */
+static int live_focus, live_install;
 
-enum { HIT_NONE = -1, HIT_FIELD0 = 0, HIT_FIELD1, HIT_FIELD2, HIT_PRIMARY = 10, HIT_SECONDARY, HIT_USER0 = 20 };
+enum { HIT_NONE = -1, HIT_FIELD0 = 0, HIT_FIELD1, HIT_FIELD2, HIT_PRIMARY = 10, HIT_SECONDARY, HIT_USER0 = 20,
+       HIT_LIVE0 = 30, HIT_LIVE1 };
+
+#define LIVE_CARD_W 540
+#define LIVE_TILE_H 168
 
 static void zero(char *s, int n) {
     for (int i = 0; i < n; i++) ((volatile char *)s)[i] = 0;
@@ -105,8 +111,19 @@ int wm_login_begin(int want) {
     caret_ms = ic_time_ms();
     if (want == WM_LOGIN_LOCK) {
         load_me();
+        if (!nusers) {                                      /* no one signed in (a live start): nothing to lock with */
+            mode = WM_LOGIN_NONE;
+            return mode;
+        }
         mode = WM_LOGIN_LOCK;
         go(V_LOCK);
+        return mode;
+    }
+    if (want == WM_LOGIN_LIVE) {
+        mode = WM_LOGIN_LIVE;
+        live_focus = 0;
+        live_install = 0;
+        go(V_LIVE);
         return mode;
     }
     load_users();
@@ -130,6 +147,10 @@ void wm_login_end(void) {
     wipe_all();
 }
 
+int wm_login_live_install(void) {
+    return live_install;
+}
+
 /* ---- layout ------------------------------------------------------------------- */
 
 static int user_has_password(void) {
@@ -138,7 +159,7 @@ static int user_has_password(void) {
 
 static int nfields(void) {
     if (view == V_SETUP || view == V_RECOVER) return 3;
-    if (view == V_KEY) return 0;
+    if (view == V_KEY || view == V_LIVE) return 0;
     return user_has_password() ? 1 : 0;
 }
 
@@ -159,20 +180,28 @@ static int heading_h(void) {
 }
 
 static int card_h(void) {
+    if (view == V_LIVE) return 24 + 92 + LIVE_TILE_H + 18 + 16 + 22;
     return 24 + heading_h() + nfields() * 46 + (nfields() == 3 ? 8 : 0) + 40 + (has_secondary() ? 40 : 0) + 30;
 }
 
 static ic_rect_t card_rect(int sw, int sh) {
-    int h = card_h(), y = sh * 36 / 100;
+    int h = card_h(), y = sh * 36 / 100, w = view == V_LIVE ? LIVE_CARD_W : CARD_W;
+    if (w > sw - 32) w = sw - 32;
     if (y + h > sh - 24) y = sh - 24 - h;
     if (y < 120) y = 120;
-    return ic_rect_make((sw - CARD_W) / 2, y, CARD_W, h);
+    return ic_rect_make((sw - w) / 2, y, w, h);
 }
 
 /* where each part is; -1 width when absent */
 static ic_rect_t part_rect(int sw, int sh, int id) {
     ic_rect_t c = card_rect(sw, sh);
     int x = c.x + 24, w = c.w - 48, y = c.y + 24;
+    if (view == V_LIVE) {
+        int tw = (w - 16) / 2;
+        if (id == HIT_LIVE0) return ic_rect_make(x, y + 92, tw, LIVE_TILE_H);
+        if (id == HIT_LIVE1) return ic_rect_make(x + w - tw, y + 92, tw, LIVE_TILE_H);
+        return ic_rect_make(0, 0, -1, 0);
+    }
     if (view == V_SIGNIN && nusers > 1) {
         int shown = nusers < 5 ? nusers : 5, gap = 12, aw = 52;
         int total = shown * aw + (shown - 1) * gap, ax = c.x + (c.w - total) / 2;
@@ -191,7 +220,8 @@ static ic_rect_t part_rect(int sw, int sh, int id) {
 
 static int hit(int sw, int sh, int mx, int my) {
     static const int ids[] = { HIT_FIELD0, HIT_FIELD1, HIT_FIELD2, HIT_PRIMARY, HIT_SECONDARY,
-                               HIT_USER0, HIT_USER0 + 1, HIT_USER0 + 2, HIT_USER0 + 3, HIT_USER0 + 4 };
+                               HIT_USER0, HIT_USER0 + 1, HIT_USER0 + 2, HIT_USER0 + 3, HIT_USER0 + 4,
+                               HIT_LIVE0, HIT_LIVE1 };
     for (unsigned i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
         ic_rect_t r = part_rect(sw, sh, ids[i]);
         if (r.w > 0 && ic_ui_hit(r, mx, my)) return ids[i];
@@ -232,6 +262,28 @@ static ic_state_t state_of(int id) {
     return ic_ui_state(1, hover == id, 0);
 }
 
+/* one of the live start's two choices: an icon in a disc, a name, what it does */
+static void live_tile(ic_canvas_t *c, ic_rect_t r, int i) {
+    static const char *const names[2] = { "Install ICDA", "Try ICDA" };
+    static const char *const texts[2] = {
+        "Put ICDA on a disk in this computer. A guide takes you through it, step by step.",
+        "Use ICDA from the USB drive. Nothing on this computer changes; you can install later."
+    };
+    const ic_palette_t *p = ic_palette();
+    int focused = live_focus == i, hovered = hover == HIT_LIVE0 + i;
+    float cx = (float)r.x + r.w / 2.0f, cy = (float)r.y + 42.0f;
+    ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 12.0f, focused ? p->accent_soft : p->group);
+    if (hovered) ic_gfx_rrect(c, r.x, r.y, r.w, r.h, 12.0f, p->fill_hover);
+    ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, 12.0f, focused ? 2.0f : 1.0f, focused ? p->accent : p->group_stroke);
+    ic_gfx_circle(c, cx, cy, 24.0f, i == 0 ? p->accent : p->control);
+    ic_symbol_draw(c, i == 0 ? IC_SYM_DISK : IC_SYM_PLAY, cx, cy, i == 0 ? 24.0f : 20.0f,
+                   i == 0 ? p->label_on_accent : p->label);
+    ic_text_draw_in(c, ic_font(IC_FONT_HEADLINE), ic_rect_make(r.x + 8, r.y + 76, r.w - 16, 22), names[i], p->label,
+                    IC_ALIGN_CENTER);
+    ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + 16, r.y + 102, r.w - 32, 56), texts[i],
+                         p->label_secondary, 3);
+}
+
 static void heading(ic_canvas_t *c, ic_rect_t card, int y, const char *title, const char *text) {
     const ic_palette_t *p = ic_palette();
     ic_text_draw_in(c, ic_font(IC_FONT_TITLE2), ic_rect_make(card.x, y, card.w, 30), title, p->label, IC_ALIGN_CENTER);
@@ -258,6 +310,16 @@ void wm_login_draw(ic_canvas_t *c, int sw, int sh, uint32_t *scratch, int scratc
     }
 
     ic_ui_panel(c, card, 16.0f, IC_ELEV_WINDOW, scratch, scratch_len);
+    if (view == V_LIVE) {
+        heading(c, card, y, "Welcome to ICDA",
+                "ICDA started from a USB drive. Install it on this computer now, or try it first: "
+                "Install ICDA on the desktop is there whenever you are ready.");
+        live_tile(c, part_rect(sw, sh, HIT_LIVE0), 0);
+        live_tile(c, part_rect(sw, sh, HIT_LIVE1), 1);
+        ic_text_draw_in(c, ic_font(IC_FONT_CAPTION), ic_rect_make(card.x, card.y + card.h - 34, card.w, 16),
+                        "Choose with the arrow keys and Enter, or click.", p->label_tertiary, IC_ALIGN_CENTER);
+        return;
+    }
     switch (view) {
     case V_SETUP:
         heading(c, card, y, "Welcome to ICDA",
@@ -407,10 +469,35 @@ static void select_user(int i) {
     flen[1] = 0;
 }
 
+/* a live start's choice is made */
+static int live_choose(int i) {
+    live_install = i == 0;
+    return WM_LOGIN_DONE;
+}
+
+static int live_key(long key) {
+    if (esc_state == 1) { esc_state = key == '[' ? 2 : 0; return WM_LOGIN_KEEP; }
+    if (esc_state == 2) {
+        esc_state = 0;
+        if (key == 'C' || key == 'D' || key == 'A' || key == 'B') {
+            live_focus = key == 'C' || key == 'B' ? 1 : 0;
+            return WM_LOGIN_REDRAW;
+        }
+        return WM_LOGIN_KEEP;
+    }
+    if (key == 27) { esc_state = 1; return WM_LOGIN_KEEP; }
+    if (key == '\t') { live_focus ^= 1; return WM_LOGIN_REDRAW; }
+    if (key == '\n' || key == '\r' || key == ' ') return live_choose(live_focus);
+    if (key == 'i' || key == 'I') return live_choose(0);
+    if (key == 't' || key == 'T') return live_choose(1);
+    return WM_LOGIN_KEEP;
+}
+
 int wm_login_key(long key) {
     int f = focus;
     caret_on = 1;
     caret_ms = ic_time_ms();
+    if (view == V_LIVE) return live_key(key);
     if (esc_state == 1) { esc_state = key == '[' ? 2 : 0; if (esc_state) return WM_LOGIN_KEEP; }
     else if (esc_state == 2) {
         esc_state = 0;
@@ -454,6 +541,7 @@ int wm_login_key(long key) {
 
 int wm_login_click(int sw, int sh, int x, int y) {
     int h = hit(sw, sh, x, y);
+    if (view == V_LIVE) return h == HIT_LIVE0 || h == HIT_LIVE1 ? live_choose(h - HIT_LIVE0) : WM_LOGIN_KEEP;
     if (h >= HIT_FIELD0 && h <= HIT_FIELD2) { focus = h; return WM_LOGIN_REDRAW; }
     if (h == HIT_PRIMARY) return submit();
     if (h == HIT_SECONDARY) return secondary();
@@ -465,6 +553,7 @@ int wm_login_hover(int sw, int sh, int x, int y) {
     int h = hit(sw, sh, x, y);
     if (h == hover) return WM_LOGIN_KEEP;
     hover = h;
+    if (view == V_LIVE && (h == HIT_LIVE0 || h == HIT_LIVE1)) live_focus = h - HIT_LIVE0;   /* the pointer moves the focus too */
     return WM_LOGIN_REDRAW;
 }
 

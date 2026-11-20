@@ -226,6 +226,21 @@ def draw_disk():
     return glyph_shadow(img, g)
 
 
+def draw_install():
+    """Install ICDA: a drive with an arrow coming down into it."""
+    img = tile((96, 156, 255), (52, 96, 232))
+
+    def g(d):
+        d.rounded_rectangle(box(13, 35, 51, 51), radius=sc(5), fill=(236, 238, 242, 255))
+        d.ellipse(box(42.5, 41, 46.5, 45), fill=(52, 199, 89, 255))
+        for x in (17, 21, 25):
+            d.rounded_rectangle(box(x, 42, x + 2, 44), radius=sc(1), fill=(150, 154, 164, 255))
+        d.line([sc(32), sc(11), sc(32), sc(27)], fill=WHITE, width=sc(5))
+        d.ellipse(box(29.5, 8.5, 34.5, 13.5), fill=WHITE)
+        d.polygon([(sc(22.5), sc(23)), (sc(41.5), sc(23)), (sc(32), sc(32.5))], fill=WHITE)
+    return glyph_shadow(img, g)
+
+
 def draw_taskman():
     img = tile((58, 58, 62), (22, 22, 26))
     grid = new_layer()
@@ -329,6 +344,7 @@ DRAWERS = {
     "editor": draw_editor,
     "music": draw_music,
     "disk": draw_disk,
+    "install": draw_install,
     "taskman": draw_taskman,
     "settings": draw_settings,
     "app": draw_app,

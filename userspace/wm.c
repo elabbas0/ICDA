@@ -654,7 +654,7 @@ static int desk_last_click_icon = -1;
 static void desk_init_registry(void) {
     
 
-    static const char *const pinned[] = { "Explorer", "Terminal", "Surfer", "Media" };
+    static const char *const pinned[] = { "Install ICDA", "Explorer", "Terminal", "Surfer", "Media" };
     int row = 0;
     desk_icon_count = 0;
     for (int i = 0; i < wm_app_count && desk_icon_count < DESK_MAX_ICONS; i++) {
@@ -2787,6 +2787,22 @@ done:
     return result;
 }
 
+/* A live start (the kernel's storage report says boot=live): ICDA runs
+ * from the USB drive, and the first thing offered is to install it. */
+static int wm_live_start(void) {
+    static char info[8192];
+    const char *s = info;
+    ic_memzero(info, sizeof(info));
+    if ((long)icda_storage_info(info, sizeof(info) - 1) < 0) return 0;
+    while (*s) {
+        if (s[0] == 'b' && s[1] == 'o' && s[2] == 'o' && s[3] == 't' && s[4] == '=')
+            return s[5] == 'l' && s[6] == 'i' && s[7] == 'v' && s[8] == 'e';
+        while (*s && *s != '\n') s++;
+        if (*s) s++;
+    }
+    return 0;
+}
+
 /* who is signed in, for the start menu's footer */
 static void session_name(void) {
     char buf[64];
@@ -3893,6 +3909,7 @@ int main(int argc, char **argv) {
     uint32_t next_win_id = 1;
     uint64_t last_composite_tick = 0;
     int do_present;
+    int live = 0, install_first = 0;
 
     (void)argc;
     (void)argv;
@@ -3971,10 +3988,20 @@ int main(int argc, char **argv) {
     ic_tween_set(&panel_fade, 0.0f);
 
     /* Sign in first: the settings, the desktop and every program started
-     * after this are the user's (their /home and /cfg). */
+     * after this are the user's (their /home and /cfg).  A live start asks
+     * instead whether to install ICDA or try it: nothing it does is kept, so
+     * it needs no account. */
     build_desktop_layer();
-    (void)login_screen(WM_LOGIN_SIGNIN);
+    live = wm_live_start();
+    if (live) {
+        wm_apps_live();
+        (void)login_screen(WM_LOGIN_LIVE);
+        install_first = wm_login_live_install();
+    } else {
+        (void)login_screen(WM_LOGIN_SIGNIN);
+    }
     session_name();
+    if (live) ic_strcpy(wm_launch_user, "Live session", sizeof(wm_launch_user));
     icda_settings_load(&wm_settings);
     ic_palette_reload();
 
@@ -3992,6 +4019,7 @@ int main(int argc, char **argv) {
     clock_refresh();
     wm_intro_sequence();
     mark_dirty_full();
+    if (install_first) (void)icda_spawn("/apps/installer.app");
 
     for (;;) {
         static int dialog_kick;

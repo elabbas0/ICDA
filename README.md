@@ -196,6 +196,35 @@ is `/dev/dialog`, whose format `kernel/dev/dialog.c` describes. In Terminal,
 `dialog [-e|-w|-q] [-b "Yes|No"] <title> [message]` asks and prints the
 button chosen.
 
+## Installing ICDA
+
+Started from a USB drive (`kernel-usb.img`, or `kernel.iso` written to a
+stick), ICDA first asks whether to **Install ICDA** or **Try ICDA**. Nothing
+on the computer changes either way until the installer's last step. Trying
+needs no account: the live session runs from memory and keeps nothing, and
+Install ICDA stays first on its desktop and in the start menu.
+
+The installer (`/apps/installer.app`) takes four steps: the disk, how to
+install, a last look, and the copying. The USB drive ICDA runs from is shown
+but cannot be chosen.
+
+- **Alongside** what is on the disk, in its largest free space (a GPT disk,
+  started in UEFI mode, with 1 GB free at least). A slider sets ICDA's size,
+  and a bar shows the disk as it will be. An existing EFI partition is
+  reused, else a 260 MB one is made.
+- **Erase the disk**: ICDA's own layout (EFI, a 512 MB swap partition, and
+  ICDA). The install button stays off until "Yes, erase everything on ..."
+  is ticked.
+- **Choose partitions myself** opens Disk Utility's manual install for that
+  disk.
+
+The last look lists what will happen, with the disk as it is and as it will
+be. While copying, the installer shows the stage, the share done and the
+time taken; at the end, **Restart now**. On its first start the installed
+ICDA asks for the first account (below). The arrow keys, Tab, Enter and
+Escape work throughout, and Disk Utility's Install ICDA opens the same guide
+for the disk it shows.
+
 ## Users
 
 ICDA has user accounts. On the first start the desktop asks for the first

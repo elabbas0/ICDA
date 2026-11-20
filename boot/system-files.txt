@@ -13,6 +13,7 @@ apps/desktop.app      userspace/desktop.app
 apps/terminal.app     userspace/terminal.app
 apps/shell.app        userspace/shell.app
 apps/taskman.app      userspace/taskman.app
+apps/installer.app    userspace/installer.app
 apps/browser.app      userspace/browser.app
 apps/settings.app     userspace/settings.app
 bin/hello.elf         userspace/hello.elf

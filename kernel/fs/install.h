@@ -10,6 +10,9 @@ int system_install_partitions(uint32_t efi_partition_index, uint32_t root_partit
                               uint64_t *files_installed, uint64_t *bytes_installed);
 int system_install_present(void);
 int system_install_export_scratch(void);
+/* The disk a live start came from (the installer leaves it alone): -1 when
+ * this is no live start, or it was not found */
+int system_install_live_medium(void);
 
 typedef struct {
     int      active;

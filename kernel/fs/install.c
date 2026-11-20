@@ -934,3 +934,61 @@ int system_install_webkit(uint64_t *bytes_out) {
     install_progress_done();
     return rc;
 }
+
+/* ---- the live start's own disk --------------------------------------------------
+ * A live start runs from memory, but the USB drive it came from is still one
+ * of the disks; the installer must not offer to erase it.  It is the disk
+ * with a FAT partition whose GRUB menu starts ICDA live (the USB image, or
+ * the ISO's files copied to a stick), or one with an ISO 9660 image written
+ * over the whole disk (the volume descriptor at 32 KB).  Looked for again
+ * only when the disks change: USB drives can come up after the desktop. */
+static int text_has(const char *text, uint64_t n, const char *needle) {
+    uint64_t k = str_len(needle);
+    for (uint64_t i = 0; k && i + k <= n; i++) {
+        uint64_t j = 0;
+        while (j < k && text[i + j] == needle[j]) j++;
+        if (j == k) return 1;
+    }
+    return 0;
+}
+
+static int device_index(const block_device_t *d) {
+    for (uint32_t i = 0; i < block_count(); i++)
+        if (block_get(i) == d) return (int)i;
+    return -1;
+}
+
+int system_install_live_medium(void) {
+    static int found = -1;
+    /* the disks and partitions there were when it was looked for (a USB
+     * drive's partitions are found a moment after the drive) */
+    static uint32_t looked_disks = ~0U, looked_parts = ~0U;
+    static uint8_t sector[512];
+    static fatfs_t vol;
+    if (found >= 0 || !persistfs_live_mode() || (looked_disks == block_count() && looked_parts == partition_count()))
+        return found;
+    looked_disks = block_count();
+    looked_parts = partition_count();
+    for (uint32_t i = 0; i < block_count() && found < 0; i++) {
+        block_device_t *d = block_get(i);
+        if (!d || !d->read || d->sector_size != 512 || d->sector_count <= 64) continue;
+        if (d->read(d->context, 64, 1, sector) == 0 && sector[0] == 1 && text_has((const char *)sector + 1, 5, "CD001"))
+            found = (int)i;
+    }
+    for (uint32_t i = 0; i < partition_count() && found < 0; i++) {
+        const partition_info_t *p = partition_get(i);
+        char *cfg = 0;
+        uint64_t n = 0;
+        if (!p || !p->device || p->fs_hint != PARTITION_FS_FAT32 || fatfs_mount_part(&vol, p) != 0) continue;
+        if (fatfs_read(&vol, "/boot/grub/grub.cfg", &cfg, &n) == 0 && cfg) {
+            if (text_has(cfg, n, "icda.live=1")) found = device_index(p->device);
+            kfree(cfg);
+        }
+    }
+    if (found >= 0) {
+        serial_write("[install] live start from disk ");
+        serial_write_char((char)('0' + found % 10));
+        serial_write("\n");
+    }
+    return found;
+}

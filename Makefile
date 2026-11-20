@@ -659,6 +659,16 @@ userspace/taskman.app: crt0.o taskman.o gui.o libicda.o userspace/user.ld
 	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-taskman.app crt0.o taskman.o gui.o libicda.o
 	cp -f /tmp/icda-taskman.app userspace/taskman.app
 
+# Install ICDA: the guide a live start offers first (and its disk-work helper)
+userspace/installer.app: crt0.o installer.o gui.o libicda.o userspace/user.ld
+	ld -nostdlib -static -T userspace/user.ld -o /tmp/icda-installer.app crt0.o installer.o gui.o libicda.o
+	cp -f /tmp/icda-installer.app userspace/installer.app
+
+installer.o: userspace/installer.c userspace/gui.h userspace/gui_proto.h $(IC_HEADERS) userspace/icda_sys.h \
+             userspace/ic_version.h version.h
+	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/installer.c -o /tmp/icda-installer.o
+	cp -f /tmp/icda-installer.o installer.o
+
 taskman.o: userspace/taskman.c userspace/gui.h userspace/gui_proto.h $(IC_HEADERS) userspace/font.h userspace/icda_sys.h \
            userspace/ic_version.h version.h
 	$(CC) $(USR_CFLAGS) -Iuserspace -c userspace/taskman.c -o /tmp/icda-taskman.o
@@ -1323,7 +1333,7 @@ userspace/terminal.app: crt0.o terminal.o gui.o libicda.o userspace/user.ld
 
 
 
-USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/assistantd.elf userspace/model-install.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/browser.app userspace/settings.app userspace/init.app
+USER_PROGS_PROD = userspace/hello.icx userspace/pid.icx userspace/ticker.icx userspace/hello.elf userspace/pid.elf userspace/argc.elf userspace/libctest.elf userspace/fetch.elf userspace/updated.elf userspace/assistantd.elf userspace/model-install.elf userspace/media.app userspace/editor.app userspace/diskman.app userspace/curl.app userspace/wm.app userspace/desktop.app userspace/terminal.app userspace/taskman.app userspace/installer.app userspace/browser.app userspace/settings.app userspace/init.app
 USER_PROGS_TEST = userspace/gui_demo.app userspace/nptest.app userspace/nptestlx.elf
 ifeq ($(CI_IMAGE),1)
 USER_PROGS_ALL = $(USER_PROGS_PROD) $(USER_PROGS_TEST)
@@ -1376,7 +1386,8 @@ kernel-usb.img: kernel.bin
 	dd if=/dev/zero of=kernel-usb.img bs=1M count=256
 	$(SGDISK) -og kernel-usb.img
 	$(SGDISK) -n 1:2048:0 -t 1:ef00 -c 1:"ICDA EFI" kernel-usb.img
-	mformat -i kernel-usb.img@@1048576 -F ::
+	# the file system fills the partition, not the image: the backup GPT is in the last 33 sectors
+	mformat -i kernel-usb.img@@1048576 -T $$($(SGDISK) -i 1 kernel-usb.img | awk '/Partition size/ {print $$3}') -F ::
 	mmd -i kernel-usb.img@@1048576 ::/EFI
 	mmd -i kernel-usb.img@@1048576 ::/EFI/BOOT
 	mmd -i kernel-usb.img@@1048576 ::/boot

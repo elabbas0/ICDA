@@ -20,21 +20,18 @@
 #define FS_EXFAT 2
 #define LAYOUT_MBR 5
 #define LAYOUT_GPT 6
-#define LAYOUT_ICDA 4
 
-#define ICDA_MIN_MB   1024ULL
-#define ESP_MB        260ULL
 
 enum { DRIVE_HDD = 0, DRIVE_NVME, DRIVE_USB };
 
 enum {
     M_NONE = 0, M_CREATE, M_RESIZE, M_RESIZE_NTFS, M_FORMAT, M_DELETE, M_ERASE_GPT, M_ERASE_MBR,
-    M_INSTALL, M_PROGRESS, M_RESULT, M_INSTALL_MODE, M_INSTALL_MANUAL
+    M_PROGRESS, M_RESULT, M_INSTALL_MANUAL
 };
 
 enum {
     H_NONE = 0, H_INSTALL, H_DISKMENU, H_ADD, H_REMOVE, H_GEAR, H_REFRESH,
-    H_M_CANCEL, H_M_OK, H_M_SLIDER, H_M_SEG, H_M_CARD_A, H_M_CARD_B, H_M_TOGGLE,
+    H_M_CANCEL, H_M_OK, H_M_SLIDER, H_M_SEG, H_M_TOGGLE,
     H_M_EFI_ROW = 100, H_M_ROOT_ROW = 200
 };
 
@@ -93,8 +90,6 @@ static struct {
     float   slider;
     int     dragging;
     int     seg_choice;
-    int     card;
-    int     mode_card;
     int     efi_list[MAX_PART], root_list[MAX_PART];
     int     efi_n, root_n;
     int     man_efi, man_root, man_format;
@@ -760,16 +755,10 @@ static void draw_content(ic_app_t *app, ic_canvas_t *c) {
 }
 
 static ic_rect_t modal_rect(ic_app_t *app) {
-    int h = dm.modal == M_INSTALL ? 330 : dm.modal == M_PROGRESS ? 170 : dm.modal == M_RESULT ? 190 :
-            dm.modal == M_INSTALL_MODE ? 280 : dm.modal == M_INSTALL_MANUAL ? 420 : 230;
-    int w = dm.modal == M_INSTALL || dm.modal == M_INSTALL_MODE ? 520 : dm.modal == M_INSTALL_MANUAL ? 540 : 460;
+    int h = dm.modal == M_PROGRESS ? 170 : dm.modal == M_RESULT ? 190 : dm.modal == M_INSTALL_MANUAL ? 420 : 230;
+    int w = dm.modal == M_INSTALL_MANUAL ? 540 : 460;
     if (h > app->height - 16) h = app->height - 16;
     return ic_rect_make((app->width - w) / 2, (app->height - h) / 2, w, h);
-}
-
-static ic_rect_t mode_card_rect(ic_app_t *app, int i) {
-    ic_rect_t m = ic_rect_make((app->width - 520) / 2, (app->height - 280) / 2, 520, 280);
-    return ic_rect_make(m.x + IC_SP_5, m.y + 60 + i * 82, m.w - 2 * IC_SP_5, 72);
 }
 
 #define MAN_ROWS 4
@@ -841,7 +830,6 @@ static ic_rect_t modal_button(ic_app_t *app, int primary) {
 
 static ic_rect_t modal_slider(ic_app_t *app) {
     ic_rect_t m = modal_rect(app);
-    if (dm.modal == M_INSTALL) return ic_rect_make(m.x + IC_SP_5 + 28, m.y + 168, m.w - 2 * IC_SP_5 - 28, 22);
     return ic_rect_make(m.x + IC_SP_5, m.y + 92, m.w - 2 * IC_SP_5, 22);
 }
 
@@ -850,43 +838,8 @@ static ic_rect_t modal_segmented(ic_app_t *app) {
     return ic_rect_make(m.x + IC_SP_5, m.y + (dm.modal == M_FORMAT ? 92 : 136), m.w - 2 * IC_SP_5, IC_H_CONTROL);
 }
 
-static ic_rect_t install_card(ic_app_t *app, int i) {
-    ic_rect_t m = modal_rect(app);
-    return i == 0 ? ic_rect_make(m.x + IC_SP_5, m.y + 60, m.w - 2 * IC_SP_5, 140)
-                  : ic_rect_make(m.x + IC_SP_5, m.y + 210, m.w - 2 * IC_SP_5, 58);
-}
-
 static const char *const create_kinds[4] = { "FAT32", "exFAT", "Swap", "Empty" };
 static const char *const format_kinds[2] = { "FAT32", "exFAT" };
-
-static gap_t *largest_gap(void) {
-    disk_t *d = cur_disk();
-    gap_t *best = 0;
-    for (int i = 0; d && i < dm.gap_count; i++) {
-        if (dm.gaps[i].dev == d->index && (!best || dm.gaps[i].sectors > best->sectors)) best = &dm.gaps[i];
-    }
-    return best;
-}
-
-static int disk_has_esp(void) {
-    disk_t *d = cur_disk();
-    for (int i = 0; d && i < dm.part_count; i++) {
-        if (s_eq(dm.parts[i].dev, d->name) && s_eq(dm.parts[i].role, "efi") && s_eq(dm.parts[i].fs, "fat32")) return 1;
-    }
-    return 0;
-}
-
-static uint64_t alongside_max_mb(void) {
-    gap_t *g = largest_gap();
-    uint64_t mb = g ? g->sectors / SECTORS_MB : 0;
-    if (!disk_has_esp()) mb = mb > ESP_MB ? mb - ESP_MB : 0;
-    return mb;
-}
-
-static int alongside_possible(void) {
-    disk_t *d = cur_disk();
-    return d && dm.uefi && s_eq(d->table, "gpt") && alongside_max_mb() >= ICDA_MIN_MB;
-}
 
 static uint64_t slider_mb(uint64_t lo, uint64_t hi) {
     if (hi <= lo) return lo;
@@ -982,77 +935,6 @@ static void draw_modal(ic_app_t *app, ic_canvas_t *c) {
         ok_style = IC_BUTTON_DESTRUCTIVE;
         msg = "Every partition and file on this disk will be deleted.";
         break;
-    case M_INSTALL: {
-        int can_a = alongside_possible();
-        ic_rect_t a = install_card(app, 0), b = install_card(app, 1);
-        title = "Install ICDA";
-        ok = "Install";
-        if (dm.card == 1) ok_style = IC_BUTTON_DESTRUCTIVE;
-        ic_gfx_rrect(c, a.x, a.y, a.w, a.h, IC_R_GROUP, dm.card == 0 ? p->accent_soft : p->group);
-        ic_gfx_rrect_stroke(c, a.x, a.y, a.w, a.h, IC_R_GROUP, dm.card == 0 ? 2.0f : 1.0f,
-                            dm.card == 0 ? p->accent : p->group_stroke);
-        ic_gfx_ring(c, (float)a.x + 16, (float)a.y + 20, 7, 1.5f, p->label_secondary);
-        if (dm.card == 0) ic_gfx_circle(c, (float)a.x + 16, (float)a.y + 20, 4, p->accent);
-        ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), ic_rect_make(a.x + 32, a.y + 10, a.w - 40, 20),
-                        "Install alongside the other systems", can_a ? p->label : p->label_disabled, IC_ALIGN_LEFT);
-        if (can_a) {
-            uint64_t mb = slider_mb(ICDA_MIN_MB, alongside_max_mb());
-            t[0] = 0;
-            ic_strlcat(t, "Uses ", sizeof(t));
-            size_text(mb * MB, u, sizeof(u));
-            ic_strlcat(t, u, sizeof(t));
-            ic_strlcat(t, " of free space. Nothing is deleted.", sizeof(t));
-            ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(a.x + 32, a.y + 32, a.w - 40, 18), t,
-                            p->label_secondary, IC_ALIGN_LEFT);
-            ic_ui_slider(c, modal_slider(app), dm.slider, dm.hover == H_M_SLIDER ? IC_STATE_HOVER : IC_STATE_NORMAL);
-            ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(a.x + 32, a.y + 58, a.w - 44, 46),
-                                 disk_has_esp() ? "Reuses the existing EFI partition and adds ICDA to the UEFI "
-                                                  "boot menu. Windows stays in the boot menu."
-                                                : "Creates a 260 MB EFI partition and adds ICDA to the UEFI boot "
-                                                  "menu.", p->label_secondary, 2);
-        } else {
-            ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(a.x + 32, a.y + 34, a.w - 44, 90),
-                                 !dm.uefi ? "This computer started in legacy BIOS mode. Installing alongside "
-                                            "another system needs UEFI."
-                                          : "Needs a GPT disk with at least 1 GB of free space. To make room "
-                                            "next to Windows, shrink its volume in Windows Disk Management first.",
-                                 p->label_secondary, 2);
-        }
-        ic_gfx_rrect(c, b.x, b.y, b.w, b.h, IC_R_GROUP, dm.card == 1 ? ic_color_with_alpha(p->danger, 40) : p->group);
-        ic_gfx_rrect_stroke(c, b.x, b.y, b.w, b.h, IC_R_GROUP, dm.card == 1 ? 2.0f : 1.0f,
-                            dm.card == 1 ? p->danger : p->group_stroke);
-        ic_gfx_ring(c, (float)b.x + 16, (float)b.y + 20, 7, 1.5f, p->label_secondary);
-        if (dm.card == 1) ic_gfx_circle(c, (float)b.x + 16, (float)b.y + 20, 4, p->danger);
-        ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), ic_rect_make(b.x + 32, b.y + 10, b.w - 40, 20),
-                        "Erase disk and install ICDA", p->label, IC_ALIGN_LEFT);
-        ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(b.x + 32, b.y + 32, b.w - 40, 18),
-                        "Deletes every partition and file on this disk.", p->danger, IC_ALIGN_LEFT);
-        break;
-    }
-    case M_INSTALL_MODE: {
-        static const char *const heads[2] = { "Automatic (recommended)", "Manual" };
-        static const char *const subs[2] = {
-            "ICDA picks the space: next to your other systems in free space, or the whole disk.",
-            "Choose the EFI partition and the ICDA partition yourself. For advanced setups."
-        };
-        title = "How do you want to install ICDA?";
-        ok = "Continue";
-        for (int i = 0; i < 2; i++) {
-            ic_rect_t r = mode_card_rect(app, i);
-            int sel = dm.mode_card == i;
-            ic_gfx_rrect(c, r.x, r.y, r.w, r.h, IC_R_GROUP, sel ? p->accent_soft : p->group);
-            ic_gfx_rrect_stroke(c, r.x, r.y, r.w, r.h, IC_R_GROUP, sel ? 2.0f : 1.0f, sel ? p->accent : p->group_stroke);
-            ic_gfx_ring(c, (float)r.x + 16, (float)r.y + 20, 7, 1.5f, p->label_secondary);
-            if (sel) ic_gfx_circle(c, (float)r.x + 16, (float)r.y + 20, 4, p->accent);
-            ic_symbol_draw(c, i == 0 ? IC_SYM_CHECK : IC_SYM_GEAR, (float)r.x + r.w - 26, (float)r.y + 22, 16,
-                           p->label_secondary);
-            ic_text_draw_in(c, ic_font(IC_FONT_BODY_EMPH), ic_rect_make(r.x + 32, r.y + 10, r.w - 72, 20), heads[i],
-                            p->label, IC_ALIGN_LEFT);
-            ic_text_draw_wrapped(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(r.x + 32, r.y + 32, r.w - 60, 36),
-                                 subs[i], p->label_secondary, 2);
-        }
-        break;
-    }
     case M_INSTALL_MANUAL: {
         title = "Manual installation";
         ok = "Install";
@@ -1116,8 +998,7 @@ static void draw_modal(ic_app_t *app, ic_canvas_t *c) {
                                                                     m.w - 40, 90), msg, p->label_secondary, 3);
     }
     if (dm.modal != M_PROGRESS) {
-        int ok_enabled = !(dm.modal == M_INSTALL && dm.card == 0 && !alongside_possible()) &&
-                         !(dm.modal == M_INSTALL_MANUAL && !manual_ready());
+        int ok_enabled = !(dm.modal == M_INSTALL_MANUAL && !manual_ready());
         ic_ui_button(c, modal_button(app, 1), ok, IC_SYM_NONE, ok_style,
                      !ok_enabled ? IC_STATE_DISABLED : dm.hover == H_M_OK ? IC_STATE_HOVER : IC_STATE_NORMAL);
         if (show_cancel) {
@@ -1234,17 +1115,6 @@ static void do_erase(int layout) {
     refresh_keep(~0ULL);
 }
 
-static int find_part_at(uint64_t dev_index, uint64_t start) {
-    const char *name = 0;
-    for (int i = 0; i < dm.disk_count; i++) {
-        if (dm.disks[i].index == dev_index) name = dm.disks[i].name;
-    }
-    for (int i = 0; name && i < dm.part_count; i++) {
-        if (s_eq(dm.parts[i].dev, name) && dm.parts[i].start == start) return (int)dm.parts[i].index;
-    }
-    return -1;
-}
-
 static void start_progress(const char *args) {
     icda_disk_edit_t req;
     ic_memzero(&req, sizeof(req));
@@ -1272,78 +1142,6 @@ static void fail_result(const char *title, const char *text) {
     ic_strcpy(dm.result_text, text, sizeof(dm.result_text));
 }
 
-static void do_install(void) {
-    disk_t *d = cur_disk();
-    char args[64], n[24];
-    if (!d) return;
-    if (dm.card == 1) {
-        args[0] = 0;
-        ic_strlcat(args, "--install-device ", sizeof(args));
-        ic_uint_to_str(d->index, n, sizeof(n));
-        ic_strlcat(args, n, sizeof(args));
-        start_progress(args);
-        return;
-    }
-    {
-        gap_t *g = largest_gap();
-        icda_disk_edit_t req;
-        uint64_t start, mb = slider_mb(ICDA_MIN_MB, alongside_max_mb());
-        int esp = -1, root;
-        if (!g || !alongside_possible()) return;
-        start = g->start;
-        for (int i = 0; i < dm.part_count; i++) {
-            if (s_eq(dm.parts[i].dev, d->name) && s_eq(dm.parts[i].role, "efi") && s_eq(dm.parts[i].fs, "fat32")) {
-                esp = (int)dm.parts[i].index;
-                break;
-            }
-        }
-        if (esp < 0) {
-            ic_memzero(&req, sizeof(req));
-            req.op = ICDA_DISK_CREATE;
-            req.device = (uint32_t)d->index;
-            req.start_lba = start;
-            req.sectors = ESP_MB * SECTORS_MB;
-            req.role = ICDA_ROLE_EFI;
-            req.fs = FS_FAT32;
-            ic_strcpy(req.name, "EFI System", sizeof(req.name));
-            if (icda_disk_edit(&req) < 0) {
-                fail_result("Install failed", "Could not create the EFI system partition.");
-                return;
-            }
-            refresh_keep(~0ULL);
-            esp = find_part_at(d->index, start);
-            start += ESP_MB * SECTORS_MB;
-        }
-        ic_memzero(&req, sizeof(req));
-        req.op = ICDA_DISK_CREATE;
-        req.device = (uint32_t)d->index;
-        req.start_lba = start;
-        req.sectors = mb * SECTORS_MB;
-        req.role = ICDA_ROLE_SYSTEM;
-        req.fs = FS_FAT32;
-        ic_strcpy(req.name, "ICDA System", sizeof(req.name));
-        if (icda_disk_edit(&req) < 0) {
-            fail_result("Install failed", "Could not create the ICDA partition in the free space.");
-            refresh_keep(~0ULL);
-            return;
-        }
-        refresh_keep(start);
-        root = find_part_at(d->index, start);
-        if (esp < 0 || root < 0) {
-            fail_result("Install failed", "The new partitions could not be found after creating them.");
-            return;
-        }
-        args[0] = 0;
-        ic_strlcat(args, "--install ", sizeof(args));
-        ic_uint_to_str((uint64_t)esp, n, sizeof(n));
-        ic_strlcat(args, n, sizeof(args));
-        ic_strlcat(args, " ", sizeof(args));
-        ic_uint_to_str((uint64_t)root, n, sizeof(n));
-        ic_strlcat(args, n, sizeof(args));
-        start_progress(args);
-    }
-}
-
 static void do_install_manual(void) {
     char args[64], n[24];
     part_t *efi, *root;
@@ -1361,7 +1159,6 @@ static void do_install_manual(void) {
     ic_strlcat(args, " ", sizeof(args));
     ic_uint_to_str(root->index, n, sizeof(n));
     ic_strlcat(args, n, sizeof(args));
-    dm.card = 0;
     start_progress(args);
 }
 
@@ -1395,8 +1192,7 @@ static void tick(ic_app_t *app) {
             ic_strcpy(dm.result_text, "The installer stopped with error ", sizeof(dm.result_text));
             ic_uint_to_str((uint64_t)(-rc), n, sizeof(n));
             ic_strlcat(dm.result_text, n, sizeof(dm.result_text));
-            ic_strlcat(dm.result_text, dm.card == 0 ? ". Your existing partitions were not touched." : ".",
-                       sizeof(dm.result_text));
+            ic_strlcat(dm.result_text, ".", sizeof(dm.result_text));
         }
         refresh_keep(~0ULL);
     } else if (!req.role && now - dm.install_started > 15000 && !dm.progress_stage[0]) {
@@ -1450,17 +1246,23 @@ static void open_menu(int disk_menu, int x, int y) {
     dm.menu_open = 1;
 }
 
+/* Install ICDA is a guide of its own (installer.c), for the disk shown */
+static void open_installer(void) {
+    disk_t *d = cur_disk();
+    char args[32], n[24];
+    args[0] = 0;
+    ic_strlcat(args, "--disk ", sizeof(args));
+    ic_uint_to_str(d ? d->index : 0, n, sizeof(n));
+    ic_strlcat(args, n, sizeof(args));
+    if ((long)icda_spawn_args("/apps/installer.app", args) < 0) set_status("Install ICDA could not be opened", 0);
+}
+
 static void open_modal(int modal) {
     dm.modal = modal;
-    if (modal == M_INSTALL_MODE) dm.mode_card = 0;
     dm.slider = 1.0f;
     dm.seg_choice = 0;
     dm.dragging = 0;
     dm.hover = H_NONE;
-    if (modal == M_INSTALL) {
-        dm.card = alongside_possible() ? 0 : 1;
-        dm.slider = 1.0f;
-    }
 }
 
 static void menu_action(int action) {
@@ -1486,17 +1288,7 @@ static void menu_action(int action) {
 
 static void modal_ok(void) {
     int m = dm.modal;
-    if (m == M_INSTALL && dm.card == 0 && !alongside_possible()) return;
     if (m == M_INSTALL_MANUAL && !manual_ready()) return;
-    if (m == M_INSTALL_MODE) {
-        if (dm.mode_card == 0) {
-            open_modal(M_INSTALL);
-        } else {
-            open_modal(M_INSTALL_MANUAL);
-            build_manual_lists();
-        }
-        return;
-    }
     dm.modal = M_NONE;
     switch (m) {
     case M_CREATE: do_create(); break;
@@ -1505,7 +1297,6 @@ static void modal_ok(void) {
     case M_DELETE: do_delete(); break;
     case M_ERASE_GPT: do_erase(LAYOUT_GPT); break;
     case M_ERASE_MBR: do_erase(LAYOUT_MBR); break;
-    case M_INSTALL: do_install(); break;
     case M_INSTALL_MANUAL: do_install_manual(); break;
     default: break;
     }
@@ -1514,13 +1305,11 @@ static void modal_ok(void) {
 static int modal_hover(ic_app_t *app, int x, int y) {
     if (ic_ui_hit(modal_button(app, 1), x, y)) return H_M_OK;
     if (dm.modal != M_RESULT && dm.modal != M_RESIZE_NTFS && ic_ui_hit(modal_button(app, 0), x, y)) return H_M_CANCEL;
-    if ((dm.modal == M_CREATE || dm.modal == M_RESIZE || (dm.modal == M_INSTALL && dm.card == 0 && alongside_possible())) &&
+    if ((dm.modal == M_CREATE || dm.modal == M_RESIZE) &&
         ic_ui_hit(modal_slider(app), x, y)) {
         return H_M_SLIDER;
     }
     if ((dm.modal == M_CREATE || dm.modal == M_FORMAT) && ic_ui_hit(modal_segmented(app), x, y)) return H_M_SEG;
-    if (dm.modal == M_INSTALL_MODE && ic_ui_hit(mode_card_rect(app, 0), x, y)) return H_M_CARD_A;
-    if (dm.modal == M_INSTALL_MODE && ic_ui_hit(mode_card_rect(app, 1), x, y)) return H_M_CARD_B;
     if (dm.modal == M_INSTALL_MANUAL) {
         for (int i = 0; i < dm.efi_n; i++) {
             if (ic_ui_hit(manual_row_rect(app, 0, i), x, y)) return H_M_EFI_ROW + i;
@@ -1530,8 +1319,6 @@ static int modal_hover(ic_app_t *app, int x, int y) {
         }
         if (ic_ui_hit(manual_toggle_rect(app), x, y)) return H_M_TOGGLE;
     }
-    if (dm.modal == M_INSTALL && ic_ui_hit(install_card(app, 0), x, y)) return H_M_CARD_A;
-    if (dm.modal == M_INSTALL && ic_ui_hit(install_card(app, 1), x, y)) return H_M_CARD_B;
     return H_NONE;
 }
 
@@ -1587,8 +1374,6 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             } else if (h == H_M_SEG) {
                 int i = ic_ui_segmented_hit(modal_segmented(app), dm.modal == M_FORMAT ? 2 : 4, ev->x, ev->y);
                 if (i >= 0) dm.seg_choice = i;
-            } else if (dm.modal == M_INSTALL_MODE && (h == H_M_CARD_A || h == H_M_CARD_B)) {
-                dm.mode_card = h == H_M_CARD_A ? 0 : 1;
             } else if (dm.modal == M_INSTALL_MANUAL && h >= H_M_EFI_ROW && h < H_M_EFI_ROW + MAN_ROWS) {
                 dm.man_efi = dm.efi_list[h - H_M_EFI_ROW];
                 if (dm.man_root == dm.man_efi) dm.man_root = -1;
@@ -1596,10 +1381,6 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
                 if (dm.root_list[h - H_M_ROOT_ROW] != dm.man_efi) dm.man_root = dm.root_list[h - H_M_ROOT_ROW];
             } else if (dm.modal == M_INSTALL_MANUAL && h == H_M_TOGGLE) {
                 dm.man_format = !dm.man_format;
-            } else if (h == H_M_CARD_A && alongside_possible()) {
-                dm.card = 0;
-            } else if (h == H_M_CARD_B) {
-                dm.card = 1;
             }
             break;
         }
@@ -1615,7 +1396,7 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
             break;
         }
         if (dm.hover == H_INSTALL && can_edit_disk()) {
-            open_modal(M_INSTALL_MODE);
+            open_installer();
             break;
         }
         if (dm.hover == H_DISKMENU && can_edit_disk()) {
@@ -1674,6 +1455,9 @@ static void event(ic_app_t *app, const ic_event_t *ev) {
     ic_app_invalidate(app);
 }
 
+/* --manual N: opened by the installer's "Choose partitions myself", on disk N */
+static int manual_dev = -1;
+
 static void init(ic_app_t *app) {
     dm_app = app;
     dm.selected_disk = 0;
@@ -1686,6 +1470,14 @@ static void init(ic_app_t *app) {
     for (int i = 0; i < dm.disk_count; i++) {
         if (!disk_is_runtime(&dm.disks[i])) {
             select_disk(i);
+            break;
+        }
+    }
+    for (int i = 0; manual_dev >= 0 && i < dm.disk_count; i++) {
+        if (dm.disks[i].index == (uint64_t)manual_dev && !disk_is_runtime(&dm.disks[i])) {
+            select_disk(i);
+            open_modal(M_INSTALL_MANUAL);
+            build_manual_lists();
             break;
         }
     }
@@ -1713,11 +1505,9 @@ int main(int argc, char **argv) {
         plan.swap_partition = -1;
         return (long)icda_install_partitions(&plan, &files, &bytes) < 0 ? 1 : 0;
     }
-    if (argc >= 3 && s_eq(argv[1], "--install-device")) {
-        uint64_t files = 0, bytes = 0, dev = 0;
-        if (!parse_arg(argv[2], &dev)) return 2;
-        (void)icda_format_device(dev, LAYOUT_ICDA);
-        return (long)icda_install_device(dev, &files, &bytes) < 0 ? 1 : 0;
+    if (argc >= 3 && s_eq(argv[1], "--manual")) {
+        uint64_t dev = 0;
+        if (parse_arg(argv[2], &dev)) manual_dev = (int)dev;
     }
     if (ic_app_run(&desc, 0) != 0) {
         icda_write("disk utility requires the desktop\n");

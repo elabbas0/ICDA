@@ -82,6 +82,8 @@ extern const char userprog_gui_demo_end[];
 #endif
 extern const char userprog_taskman_start[];
 extern const char userprog_taskman_end[];
+extern const char userprog_installer_start[];
+extern const char userprog_installer_end[];
 extern const char userprog_browser_start[];
 extern const char userprog_browser_end[];
 extern const char userprog_settings_start[];
@@ -175,6 +177,7 @@ static initramfs_file_t initramfs_files[] = {
     { "/apps/gui_demo.app", 0, 0 },
 #endif
     { "/apps/taskman.app", 0, 0 },
+    { "/apps/installer.app", 0, 0 },
     { "/apps/browser.app", 0, 0 },
     { "/apps/settings.app", 0, 0 },
 #if CI_IMAGE
@@ -236,6 +239,7 @@ int initramfs_init(void) {
     initramfs_seed_at(&n, userprog_gui_demo_start, userprog_gui_demo_end);
 #endif
     initramfs_seed_at(&n, userprog_taskman_start, userprog_taskman_end);
+    initramfs_seed_at(&n, userprog_installer_start, userprog_installer_end);
     initramfs_seed_at(&n, userprog_browser_start, userprog_browser_end);
     initramfs_seed_at(&n, userprog_settings_start, userprog_settings_end);
 #if CI_IMAGE

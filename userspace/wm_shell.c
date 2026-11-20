@@ -9,17 +9,27 @@
 
 
 
-const wm_app_t wm_apps[] = {
-    { "Explorer",     "explorer", "/apps/desktop.app" },
-    { "Terminal",     "terminal", "/apps/terminal.app" },
-    { "Surfer",       "browser",  "/apps/browser.app" },
-    { "Editor",       "editor",   "/apps/editor.app" },
-    { "Media",        "music",    "/apps/media.app" },
-    { "Disk Utility", "disk",     "/apps/diskman.app" },
-    { "Activity",     "taskman",  "/apps/taskman.app" },
-    { "Settings",     "settings", "/apps/settings.app" },
-};
-const int wm_app_count = (int)(sizeof(wm_apps) / sizeof(wm_apps[0]));
+#define WM_BASE_APPS \
+    { "Explorer",     "explorer", "/apps/desktop.app" }, \
+    { "Terminal",     "terminal", "/apps/terminal.app" }, \
+    { "Surfer",       "browser",  "/apps/browser.app" }, \
+    { "Editor",       "editor",   "/apps/editor.app" }, \
+    { "Media",        "music",    "/apps/media.app" }, \
+    { "Disk Utility", "disk",     "/apps/diskman.app" }, \
+    { "Activity",     "taskman",  "/apps/taskman.app" }, \
+    { "Settings",     "settings", "/apps/settings.app" }
+
+wm_app_t wm_apps[WM_LAUNCH_MAX_APPS] = { WM_BASE_APPS };
+int wm_app_count = (int)(sizeof((wm_app_t[]){ WM_BASE_APPS }) / sizeof(wm_app_t));
+
+static const wm_app_t wm_install_app = { "Install ICDA", "install", "/apps/installer.app" };
+
+void wm_apps_live(void) {
+    if (wm_app_count >= WM_LAUNCH_MAX_APPS || ic_streq(wm_apps[0].label, wm_install_app.label)) return;
+    for (int i = wm_app_count; i > 0; i--) wm_apps[i] = wm_apps[i - 1];
+    wm_apps[0] = wm_install_app;
+    wm_app_count++;
+}
 
 static int wm_prefix_ci(const char *s, const char *prefix) {
     while (*prefix) {
@@ -32,6 +42,7 @@ static int wm_prefix_ci(const char *s, const char *prefix) {
 
 const ic_icon_t *wm_app_icon_for_title(const char *title) {
     const ic_icon_t *icon = 0;
+    if (title && wm_prefix_ci(title, wm_install_app.label)) return ic_icon_builtin(wm_install_app.icon);
     if (title) {
         for (int i = 0; i < wm_app_count; i++) {
             if (wm_prefix_ci(title, wm_apps[i].label)) {
