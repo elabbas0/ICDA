@@ -116,9 +116,20 @@ void *teb_new(wthread_t *t, void *stack_base, void *stack_limit) {
 
 typedef struct { uint16_t Length, MaximumLength; uint32_t pad; WCHAR *Buffer; } UNICODE_STRING64;
 
+HANDLE WINAPI GetProcessHeap(void);
+
+static void ustr(uint8_t *at, const WCHAR *s) {
+    UNICODE_STRING64 *u = (UNICODE_STRING64 *)at;
+    size_t n = s ? w_len(s) : 0;
+    u->Length = (uint16_t)(n * 2);
+    u->MaximumLength = (uint16_t)(n * 2 + 2);
+    u->Buffer = (WCHAR *)s;
+}
+
 static void peb_init(void) {
     static uint8_t ldr[0x58];
     static uint8_t params[0x400];
+    static uint8_t loader_lock[40];
     peb = mmap(0, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     /* PEB_LDR_DATA: Length, Initialized, and three empty circular lists */
     *(uint32_t *)(ldr + 0) = sizeof(ldr);
@@ -135,6 +146,41 @@ static void peb_init(void) {
     *(uint16_t *)(peb + 0x120) = 19045;
     *(uint32_t *)(peb + 0x124) = 2;       /* VER_PLATFORM_WIN32_NT */
     *(uint32_t *)(peb + 0xB8) = 4;        /* NumberOfProcessors, refreshed by GetSystemInfo */
+    *(uint32_t *)(peb + 0x2C0) = 1;       /* SessionId */
+    /* the loader lock: a critical section nobody holds (code looks at its owner) */
+    *(void **)loader_lock = (void *)(intptr_t)-1;
+    *(void **)(peb + 0x110) = loader_lock;
+    *(void **)(peb + 0x30) = GetProcessHeap();
+    /* RTL_USER_PROCESS_PARAMETERS: the command line, the image, the current
+     * folder and the environment, for code that reads them there */
+    {
+        static WCHAR cwd_w[1100];
+        char cwd[1024], wcwd[1100];
+        WCHAR *image = utf8_to_w_dup(g_exe_win);
+        extern char **environ;
+        size_t total = 1, o = 0;
+        WCHAR *env;
+        if (getcwd(cwd, sizeof(cwd))) {
+            path_to_win(cwd, wcwd, sizeof(wcwd));
+            if (wcwd[strlen(wcwd) - 1] != '\\') strcat(wcwd, "\\");
+            utf8_to_w(wcwd, -1, cwd_w, 1100);
+        }
+        for (char **e = environ; *e; e++) total += (size_t)utf8_to_w(*e, -1, 0, 0);
+        env = malloc(total * sizeof(WCHAR));
+        for (char **e = environ; *e; e++) o += (size_t)utf8_to_w(*e, -1, env + o, (int)(total - o));
+        env[o] = 0;
+        *(uint32_t *)(params + 0) = sizeof(params);
+        *(uint32_t *)(params + 4) = sizeof(params);
+        *(uint32_t *)(params + 8) = 1;    /* PROCESS_PARAMETERS_NORMALIZED */
+        *(HANDLE *)(params + 0x20) = h_std(0);
+        *(HANDLE *)(params + 0x28) = h_std(1);
+        *(HANDLE *)(params + 0x30) = h_std(2);
+        ustr(params + 0x38, cwd_w);       /* CurrentDirectory.DosPath */
+        ustr(params + 0x60, image);       /* ImagePathName */
+        ustr(params + 0x70, g_cmdline_w); /* CommandLine */
+        *(WCHAR **)(params + 0x80) = env; /* Environment */
+        *(uint64_t *)(params + 0x3F0) = (uint64_t)(o + 1) * 2;   /* EnvironmentSize */
+    }
 }
 
 void thread_main_init(void *stack_base, void *stack_limit) {
@@ -245,7 +291,7 @@ int wobj_signaled(whandle_t *h, int consume) {
     case H_THREAD:
         return ((wthread_t *)h->obj)->done;
     case H_PROCESS:
-        return 0;
+        return ((wproc_t *)h->obj)->done;
     default:
         return -1;
     }

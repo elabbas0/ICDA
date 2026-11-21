@@ -39,99 +39,6 @@ static void fill_random(void *p, size_t n) {
 
 /* ---- advapi32 ------------------------------------------------------------------------------- */
 
-#define HKEY_FAKE ((HKEY)(uintptr_t)0x7E570000)
-
-static LONG WINAPI RegOpenKeyExW(HKEY k, const WCHAR *sub, DWORD opt, DWORD sam, HKEY *out) {
-    (void)k, (void)sub, (void)opt, (void)sam;
-    if (out) *out = 0;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegOpenKeyExA(HKEY k, const char *sub, DWORD opt, DWORD sam, HKEY *out) {
-    (void)k, (void)sub, (void)opt, (void)sam;
-    if (out) *out = 0;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegOpenKeyW(HKEY k, const WCHAR *sub, HKEY *out) { return RegOpenKeyExW(k, sub, 0, 0, out); }
-static LONG WINAPI RegOpenKeyA(HKEY k, const char *sub, HKEY *out) { return RegOpenKeyExA(k, sub, 0, 0, out); }
-static LONG WINAPI RegCreateKeyExW(HKEY k, const WCHAR *sub, DWORD r, WCHAR *cls, DWORD opt, DWORD sam, void *sa, HKEY *out,
-                                   DWORD *disp) {
-    (void)k, (void)sub, (void)r, (void)cls, (void)opt, (void)sam, (void)sa;
-    if (out) *out = HKEY_FAKE;
-    if (disp) *disp = 1;
-    return 0;
-}
-static LONG WINAPI RegCreateKeyExA(HKEY k, const char *sub, DWORD r, char *cls, DWORD opt, DWORD sam, void *sa, HKEY *out,
-                                   DWORD *disp) {
-    (void)k, (void)sub, (void)r, (void)cls, (void)opt, (void)sam, (void)sa;
-    if (out) *out = HKEY_FAKE;
-    if (disp) *disp = 1;
-    return 0;
-}
-static LONG WINAPI RegCloseKey(HKEY k) {
-    (void)k;
-    return 0;
-}
-static LONG WINAPI RegQueryValueExW(HKEY k, const WCHAR *n, DWORD *r, DWORD *t, BYTE *d, DWORD *sz) {
-    (void)k, (void)n, (void)r, (void)t, (void)d, (void)sz;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegQueryValueExA(HKEY k, const char *n, DWORD *r, DWORD *t, BYTE *d, DWORD *sz) {
-    (void)k, (void)n, (void)r, (void)t, (void)d, (void)sz;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegGetValueW(HKEY k, const WCHAR *s, const WCHAR *v, DWORD f, DWORD *t, void *d, DWORD *sz) {
-    (void)k, (void)s, (void)v, (void)f, (void)t, (void)d, (void)sz;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegGetValueA(HKEY k, const char *s, const char *v, DWORD f, DWORD *t, void *d, DWORD *sz) {
-    (void)k, (void)s, (void)v, (void)f, (void)t, (void)d, (void)sz;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegSetValueExW(HKEY k, const WCHAR *n, DWORD r, DWORD t, const BYTE *d, DWORD sz) {
-    (void)k, (void)n, (void)r, (void)t, (void)d, (void)sz;
-    return 0;
-}
-static LONG WINAPI RegSetValueExA(HKEY k, const char *n, DWORD r, DWORD t, const BYTE *d, DWORD sz) {
-    (void)k, (void)n, (void)r, (void)t, (void)d, (void)sz;
-    return 0;
-}
-static LONG WINAPI RegDeleteValueW(HKEY k, const WCHAR *n) {
-    (void)k, (void)n;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegDeleteKeyW(HKEY k, const WCHAR *n) {
-    (void)k, (void)n;
-    return ERROR_FILE_NOT_FOUND;
-}
-static LONG WINAPI RegEnumKeyExW(HKEY k, DWORD i, WCHAR *n, DWORD *nn, DWORD *r, WCHAR *c, DWORD *cn, FILETIME *ft) {
-    (void)k, (void)i, (void)n, (void)nn, (void)r, (void)c, (void)cn, (void)ft;
-    return ERROR_NO_MORE_ITEMS;
-}
-static LONG WINAPI RegEnumValueW(HKEY k, DWORD i, WCHAR *n, DWORD *nn, DWORD *r, DWORD *t, BYTE *d, DWORD *dn) {
-    (void)k, (void)i, (void)n, (void)nn, (void)r, (void)t, (void)d, (void)dn;
-    return ERROR_NO_MORE_ITEMS;
-}
-static LONG WINAPI RegQueryInfoKeyW(HKEY k, WCHAR *c, DWORD *cn, DWORD *r, DWORD *nsub, DWORD *maxsub, DWORD *maxcls,
-                                    DWORD *nval, DWORD *maxvn, DWORD *maxvl, DWORD *sd, FILETIME *ft) {
-    (void)k, (void)c, (void)cn, (void)r, (void)sd, (void)ft;
-    if (nsub) *nsub = 0;
-    if (maxsub) *maxsub = 0;
-    if (maxcls) *maxcls = 0;
-    if (nval) *nval = 0;
-    if (maxvn) *maxvn = 0;
-    if (maxvl) *maxvl = 0;
-    return 0;
-}
-static LONG WINAPI RegNotifyChangeKeyValue(HKEY k, BOOL sub, DWORD f, HANDLE ev, BOOL async) {
-    (void)k, (void)sub, (void)f, (void)ev, (void)async;
-    return 0;
-}
-static LONG WINAPI RegOpenCurrentUser(DWORD sam, HKEY *out) {
-    (void)sam;
-    *out = (HKEY)(uintptr_t)0x80000001;
-    return 0;
-}
-
 static BOOL WINAPI GetUserNameW(WCHAR *buf, DWORD *n) {
     const char *u = getenv("USER");
     int len;
@@ -189,10 +96,19 @@ static BOOL WINAPI CryptFail(void) {
     return FALSE;
 }
 
+/* access tokens: real handles (programs close them), of one token: the user's */
+static int token_obj = 0x544F4B;
+
 static BOOL WINAPI OpenProcessToken(HANDLE p, DWORD a, HANDLE *t) {
     (void)p, (void)a;
-    *t = (HANDLE)(uintptr_t)0x70C0;
-    return TRUE;
+    *t = h_new(H_OTHER, &token_obj);
+    return *t != 0;
+}
+
+static BOOL WINAPI DuplicateTokenEx(HANDLE t, DWORD a, void *sa, int il, int type, HANDLE *out) {
+    (void)t, (void)a, (void)sa, (void)il, (void)type;
+    *out = h_new(H_OTHER, &token_obj);
+    return *out != 0;
 }
 static BOOL WINAPI OpenThreadToken(HANDLE th, DWORD a, BOOL self, HANDLE *t) {
     (void)th, (void)a, (void)self;
@@ -200,10 +116,30 @@ static BOOL WINAPI OpenThreadToken(HANDLE th, DWORD a, BOOL self, HANDLE *t) {
     wset_last_error(1008);   /* ERROR_NO_TOKEN */
     return FALSE;
 }
+/* the user's SID: S-1-5-21-1001-1002-1003-1000, a local account */
+static const uint8_t user_sid[] = { 1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 0xE9, 3, 0, 0, 0xEA, 3, 0, 0, 0xEB, 3, 0, 0, 0xE8, 3, 0, 0 };
+
 static BOOL WINAPI GetTokenInformation(HANDLE t, int cls, void *info, DWORD n, DWORD *ret) {
     (void)t;
     if (cls == 20 && n >= 4) {     /* TokenElevation */
         *(DWORD *)info = 0;
+        if (ret) *ret = 4;
+        return TRUE;
+    }
+    if (cls == 1) {                /* TokenUser: SID_AND_ATTRIBUTES, then the SID */
+        DWORD need = 16 + sizeof(user_sid);
+        if (ret) *ret = need;
+        if (n < need || !info) {
+            wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        *(void **)info = (uint8_t *)info + 16;
+        *(DWORD *)((uint8_t *)info + 8) = 0;
+        memcpy((uint8_t *)info + 16, user_sid, sizeof(user_sid));
+        return TRUE;
+    }
+    if (cls == 18 && n >= 4) {     /* TokenElevationType: default */
+        *(DWORD *)info = 1;
         if (ret) *ret = 4;
         return TRUE;
     }
@@ -227,6 +163,65 @@ static BOOL WINAPI CheckTokenMembership(HANDLE t, void *sid, BOOL *is) {
     return TRUE;
 }
 static BOOL WINAPI SecTrue(void) { return TRUE; }
+
+static BOOL WINAPI ConvertSidToStringSidW(const uint8_t *sid, WCHAR **out) {
+    char s[160];
+    int n, o;
+    uint64_t auth = 0;
+    if (!sid || !out) return FALSE;
+    for (int i = 2; i < 8; i++) auth = auth << 8 | sid[i];
+    o = snprintf(s, sizeof(s), "S-%u-%llu", sid[0], (unsigned long long)auth);
+    n = sid[1];
+    for (int i = 0; i < n && o < (int)sizeof(s) - 12; i++) o += snprintf(s + o, sizeof(s) - (size_t)o, "-%u", *(const uint32_t *)(sid + 8 + 4 * i));
+    *out = LocalAlloc(0, ((size_t)o + 1) * 2);
+    utf8_to_w(s, -1, *out, o + 1);
+    return TRUE;
+}
+
+static BOOL WINAPI ConvertSidToStringSidA(const uint8_t *sid, char **out) {
+    WCHAR *w;
+    if (!ConvertSidToStringSidW(sid, &w)) return FALSE;
+    *out = LocalAlloc(0, w_len(w) * 3 + 1);
+    w_to_utf8(w, -1, *out, (int)w_len(w) * 3 + 1);
+    free(w);
+    return TRUE;
+}
+
+/* a security descriptor that says nothing: everyone may */
+static BOOL WINAPI ConvertStringSecurityDescriptorToSecurityDescriptorW(const WCHAR *s, DWORD rev, void **sd, ULONG *n) {
+    (void)s, (void)rev;
+    *sd = LocalAlloc(0x40, 20);
+    ((uint8_t *)*sd)[0] = 1;                  /* revision */
+    *(uint16_t *)((uint8_t *)*sd + 2) = 0x8004; /* self-relative, DACL present (NULL: everyone) */
+    if (n) *n = 20;
+    return TRUE;
+}
+
+static DWORD WINAPI SetNamedSecurityInfoW(const WCHAR *o, int t, DWORD i, void *a, void *b, void *c, void *d) {
+    (void)o, (void)t, (void)i, (void)a, (void)b, (void)c, (void)d;
+    return 0;
+}
+
+static DWORD WINAPI GetNamedSecurityInfoW(const WCHAR *o, int t, DWORD i, void **a, void **b, void **c, void **d, void **sd) {
+    (void)o, (void)t, (void)i;
+    if (a) *a = 0;
+    if (b) *b = 0;
+    if (c) *c = 0;
+    if (d) *d = 0;
+    if (sd) *sd = LocalAlloc(0x40, 20);
+    return 0;
+}
+
+static BOOL WINAPI IsValidSid(const void *sid) { return sid != 0; }
+static DWORD WINAPI GetLengthSid(const uint8_t *sid) { return sid ? 8u + 4u * sid[1] : 0; }
+static BOOL WINAPI EqualSid(const uint8_t *a, const uint8_t *b) {
+    return a && b && GetLengthSid(a) == GetLengthSid(b) && !memcmp(a, b, GetLengthSid(a));
+}
+static BOOL WINAPI CopySid(DWORD n, void *dst, const uint8_t *src) {
+    if (n < GetLengthSid(src)) return FALSE;
+    memcpy(dst, src, GetLengthSid(src));
+    return TRUE;
+}
 static ULONG WINAPI EventRegister(const GUID *g, void *cb, void *ctx, uint64_t *h) {
     (void)g, (void)cb, (void)ctx;
     *h = 1;
@@ -235,21 +230,24 @@ static ULONG WINAPI EventRegister(const GUID *g, void *cb, void *ctx, uint64_t *
 static ULONG WINAPI EventZero(void) { return 0; }
 
 static const wexport_t advapi[] = {
-    WEXP(RegOpenKeyExW), WEXP(RegOpenKeyExA), WEXP(RegOpenKeyW), WEXP(RegOpenKeyA), WEXP(RegCreateKeyExW),
-    WEXP(RegCreateKeyExA), WEXP(RegCloseKey), WEXP(RegQueryValueExW), WEXP(RegQueryValueExA), WEXP(RegGetValueW),
-    WEXP(RegGetValueA), WEXP(RegSetValueExW), WEXP(RegSetValueExA), WEXP(RegDeleteValueW), WEXP(RegDeleteKeyW),
-    WEXP(RegEnumKeyExW), WEXP(RegEnumValueW), WEXP(RegQueryInfoKeyW), WEXP(RegNotifyChangeKeyValue),
-    WEXP(RegOpenCurrentUser), WEXP(GetUserNameW), WEXP(GetUserNameA), WEXP(CryptAcquireContextW),
+    WEXP(GetUserNameW), WEXP(GetUserNameA), WEXP(CryptAcquireContextW),
     WEXP(CryptAcquireContextA), WEXP(CryptReleaseContext), WEXP(CryptGenRandom), WEXP(SystemFunction036),
     WEXPN("CryptCreateHash", CryptFail), WEXPN("CryptHashData", CryptFail), WEXPN("CryptGetHashParam", CryptFail),
     WEXPN("CryptDestroyHash", SecTrue), WEXPN("CryptImportKey", CryptFail), WEXPN("CryptDestroyKey", SecTrue),
     WEXPN("CryptEncrypt", CryptFail), WEXPN("CryptDecrypt", CryptFail), WEXP(OpenProcessToken), WEXP(OpenThreadToken),
     WEXP(GetTokenInformation), WEXP(AllocateAndInitializeSid), WEXP(FreeSid), WEXP(CheckTokenMembership),
     WEXPN("InitializeSecurityDescriptor", SecTrue), WEXPN("SetSecurityDescriptorDacl", SecTrue), WEXP(EventRegister),
+    WEXP(ConvertSidToStringSidW), WEXP(ConvertSidToStringSidA), WEXP(ConvertStringSecurityDescriptorToSecurityDescriptorW),
+    WEXP(SetNamedSecurityInfoW), WEXP(GetNamedSecurityInfoW), WEXP(IsValidSid), WEXP(GetLengthSid), WEXP(EqualSid),
+    WEXP(CopySid), WEXPN("SetSecurityInfo", SetNamedSecurityInfoW), WEXPN("SetEntriesInAclW", EventZero),
+    WEXPN("AddAccessAllowedAce", SecTrue), WEXPN("InitializeAcl", SecTrue), WEXPN("SetKernelObjectSecurity", SecTrue),
+    WEXPN("ImpersonateSelf", SecTrue), WEXPN("RevertToSelf", SecTrue), WEXP(DuplicateTokenEx),
     WEXPN("EventUnregister", EventZero), WEXPN("EventWriteTransfer", EventZero), WEXPN("EventWrite", EventZero),
     WEXPN("EventSetInformation", EventZero), WEXPN("EventEnabled", EventZero),
 };
-const wdll_t dll_advapi32 = { "advapi32.dll", advapi, sizeof(advapi) / sizeof(advapi[0]) };
+extern const wexport_t reg_exports[];
+extern const int reg_nexports;
+const wdll_t dll_advapi32 = { "advapi32.dll", advapi, sizeof(advapi) / sizeof(advapi[0]), reg_exports, &reg_nexports };
 
 /* ---- bcrypt ---------------------------------------------------------------------------------- */
 
@@ -260,9 +258,15 @@ static LONG WINAPI BCryptGenRandom(void *alg, BYTE *b, ULONG n, ULONG f) {
 }
 static LONG WINAPI BCryptNotSupported(void) { return (LONG)0xC00000BB; }   /* STATUS_NOT_SUPPORTED */
 
+/* bcryptprimitives.dll's: Chromium's random numbers */
+static BOOL WINAPI ProcessPrng(BYTE *b, SIZE_T n) {
+    fill_random(b, n);
+    return TRUE;
+}
+
 static const wexport_t bcrypt[] = {
     WEXP(BCryptGenRandom), WEXPN("BCryptOpenAlgorithmProvider", BCryptNotSupported),
-    WEXPN("BCryptCloseAlgorithmProvider", EventZero),
+    WEXPN("BCryptCloseAlgorithmProvider", EventZero), WEXP(ProcessPrng),
 };
 const wdll_t dll_bcrypt = { "bcrypt.dll", bcrypt, sizeof(bcrypt) / sizeof(bcrypt[0]) };
 
@@ -473,6 +477,24 @@ static BOOL WINAPI ShellExecuteExW(void *info) {
     return FALSE;
 }
 
+/* COM-style calls that have no object here say so, and give no pointer */
+static HRESULT WINAPI SHCreateAssociationRegistration(const GUID *iid, void **out) {
+    (void)iid;
+    if (out) *out = 0;
+    return (HRESULT)0x80004001;    /* E_NOTIMPL */
+}
+static void WINAPI SHChangeNotify(LONG e, UINT f, const void *a, const void *b) { (void)e, (void)f, (void)a, (void)b; }
+static HRESULT WINAPI SHGetPropertyStoreForWindow(HWND h, const GUID *iid, void **out) {
+    (void)h, (void)iid;
+    if (out) *out = 0;
+    return (HRESULT)0x80004001;
+}
+static HRESULT WINAPI ShellOutNotImpl(void *a, void *b, void **out) {
+    (void)a, (void)b;
+    if (out) *out = 0;
+    return (HRESULT)0x80004001;
+}
+
 static void WINAPI DragAcceptFiles(HWND w, BOOL a) { (void)w, (void)a; }
 static UINT WINAPI DragQueryFileW(HANDLE d, UINT i, WCHAR *f, UINT n) {
     (void)d, (void)i, (void)f, (void)n;
@@ -493,7 +515,10 @@ static const wexport_t shell[] = {
     WEXPN("SHBrowseForFolderW", ShellNull), WEXPN("Shell_NotifyIconW", ShellTrue), WEXPN("IsUserAnAdmin", ShellFalse),
     WEXPN("SHGetFileInfoW", ShellNull), WEXPN("ExtractIconW", ShellNull), WEXPN("SHFileOperationW", ShellNotImpl),
     WEXPN("SHAppBarMessage", ShellNull), WEXPN("SHCreateItemFromParsingName", ShellNotImpl),
-    WEXPN("SetCurrentProcessExplicitAppUserModelID", ShellNotImpl),
+    WEXPN("SetCurrentProcessExplicitAppUserModelID", ShellNotImpl), WEXP(SHCreateAssociationRegistration),
+    WEXP(SHChangeNotify), WEXP(SHGetPropertyStoreForWindow), WEXPN("SHCreateItemFromIDList", ShellOutNotImpl),
+    WEXPN("SHGetDesktopFolder", ShellNotImpl), WEXPN("SHGetMalloc", ShellNotImpl),
+    WEXPN("SHCreateDataObject", ShellNotImpl), WEXPO("IsUserAnAdmin", ShellFalse, 680),
 };
 const wdll_t dll_shell32 = { "shell32.dll", shell, sizeof(shell) / sizeof(shell[0]) };
 
@@ -652,19 +677,150 @@ static const wexport_t setupapi[] = {
 };
 const wdll_t dll_setupapi = { "setupapi.dll", setupapi, sizeof(setupapi) / sizeof(setupapi[0]) };
 
-/* ---- version: no version resources ------------------------------------------------------------- */
+/* ---- version: a file's version resource (VS_VERSIONINFO) ------------------------------------
+ * GetFileVersionInfo copies the RT_VERSION resource; VerQueryValue walks its
+ * tree: each node is wLength, wValueLength, wType, a key, then its value and
+ * its children, each 32-bit aligned. */
 
-static DWORD WINAPI GetFileVersionInfoSize(const void *f, DWORD *h) {
-    (void)f;
+static void *version_block(const WCHAR *wpath, DWORD *size) {
+    char a[1100], up[1100];
+    w_to_utf8(wpath, -1, a, sizeof(a));
+    if (path_find(a, up, sizeof(up)) != 0) return 0;
+    return pe_file_resource(up, (const WCHAR *)(uintptr_t)16, (const WCHAR *)(uintptr_t)1, size);   /* RT_VERSION, 1 */
+}
+
+static DWORD WINAPI GetFileVersionInfoSizeW(const WCHAR *path, DWORD *h) {
+    DWORD size = 0;
+    void *b = version_block(path, &size);
     if (h) *h = 0;
-    wset_last_error(1813);
-    return 0;
+    if (!b) {
+        wset_last_error(1813);    /* ERROR_RESOURCE_TYPE_NOT_FOUND */
+        return 0;
+    }
+    free(b);
+    return size * 2 + 4;          /* room for the ANSI copy, as Windows gives */
+}
+
+static BOOL WINAPI GetFileVersionInfoW(const WCHAR *path, DWORD h, DWORD len, void *data) {
+    DWORD size = 0;
+    void *b = version_block(path, &size);
+    (void)h;
+    if (!b) {
+        wset_last_error(1813);
+        return FALSE;
+    }
+    memset(data, 0, len);
+    memcpy(data, b, size < len ? size : len);
+    free(b);
+    return TRUE;
+}
+
+static DWORD WINAPI GetFileVersionInfoSizeA(const char *path, DWORD *h) {
+    WCHAR *w = utf8_to_w_dup(path);
+    DWORD r = GetFileVersionInfoSizeW(w, h);
+    free(w);
+    return r;
+}
+
+static BOOL WINAPI GetFileVersionInfoA(const char *path, DWORD h, DWORD len, void *data) {
+    WCHAR *w = utf8_to_w_dup(path);
+    BOOL r = GetFileVersionInfoW(w, h, len, data);
+    free(w);
+    return r;
+}
+
+static DWORD WINAPI GetFileVersionInfoSizeExW(DWORD f, const WCHAR *path, DWORD *h) {
+    (void)f;
+    return GetFileVersionInfoSizeW(path, h);
+}
+
+static BOOL WINAPI GetFileVersionInfoExW(DWORD f, const WCHAR *path, DWORD h, DWORD len, void *data) {
+    (void)f;
+    return GetFileVersionInfoW(path, h, len, data);
+}
+
+/* a node's key, value and first child */
+static const uint8_t *vnode(const uint8_t *n, const WCHAR **key, const void **val, UINT *vlen, int *vtype, const uint8_t **kids, const uint8_t **end) {
+    uint16_t len = ((const uint16_t *)n)[0], value_len = ((const uint16_t *)n)[1], type = ((const uint16_t *)n)[2];
+    const WCHAR *k = (const WCHAR *)(n + 6);
+    const uint8_t *p = (const uint8_t *)(k + w_len(k) + 1);
+    p = (const uint8_t *)(((uintptr_t)p + 3) & ~(uintptr_t)3);
+    *key = k;
+    *val = p;
+    *vlen = value_len;
+    *vtype = type;
+    p += type == 1 ? value_len * 2 : value_len;
+    *kids = (const uint8_t *)(((uintptr_t)p + 3) & ~(uintptr_t)3);
+    *end = n + len;
+    return n;
+}
+
+static BOOL ver_query(const void *block, const WCHAR *sub, void **out, UINT *outlen) {
+    const uint8_t *n = block, *kids, *end;
+    const WCHAR *key, *p = sub;
+    const void *val;
+    UINT vlen;
+    int vtype;
+    vnode(n, &key, &val, &vlen, &vtype, &kids, &end);
+    while (*p == '\\') p++;
+    while (*p) {
+        const WCHAR *e = p;
+        const uint8_t *c;
+        int found = 0;
+        while (*e && *e != '\\') e++;
+        for (c = kids; c + 6 < end && ((const uint16_t *)c)[0];) {
+            const uint8_t *ck, *ce;
+            const WCHAR *k;
+            const void *v;
+            UINT vl;
+            int vt;
+            vnode(c, &k, &v, &vl, &vt, &ck, &ce);
+            if (w_len(k) == (size_t)(e - p)) {
+                size_t i = 0;
+                for (; i < (size_t)(e - p); i++) {
+                    WCHAR x = k[i], y = p[i];
+                    if (x >= 'A' && x <= 'Z') x += 32;
+                    if (y >= 'A' && y <= 'Z') y += 32;
+                    if (x != y) break;
+                }
+                if (i == (size_t)(e - p)) {
+                    n = c, key = k, val = v, vlen = vl, vtype = vt, kids = ck, end = ce;
+                    found = 1;
+                    break;
+                }
+            }
+            c = (const uint8_t *)(((uintptr_t)ce + 3) & ~(uintptr_t)3);
+        }
+        if (!found) return FALSE;
+        p = *e ? e + 1 : e;
+    }
+    *out = (void *)val;
+    if (outlen) *outlen = vlen;
+    return vlen > 0 || vtype == 1;
+}
+
+static BOOL WINAPI VerQueryValueW(const void *block, const WCHAR *sub, void **out, UINT *len) {
+    if (!block || !sub) return FALSE;
+    return ver_query(block, sub, out, len);
+}
+
+static BOOL WINAPI VerQueryValueA(const void *block, const char *sub, void **out, UINT *len) {
+    WCHAR *w = utf8_to_w_dup(sub ? sub : "\\");
+    BOOL r = ver_query(block, w, out, len);
+    int is_string = r && !strstr(sub ? sub : "", "VarFileInfo") && strcmp(sub ? sub : "\\", "\\");
+    free(w);
+    if (r && is_string) {
+        /* the string in UTF-8, after the block (GetFileVersionInfoSize left room) */
+        static __thread char tmp[1024];
+        w_to_utf8(*out, -1, tmp, sizeof(tmp));
+        *out = tmp;
+        if (len) *len = (UINT)strlen(tmp) + 1;
+    }
+    return r;
 }
 
 static const wexport_t version[] = {
-    WEXPN("GetFileVersionInfoSizeA", GetFileVersionInfoSize), WEXPN("GetFileVersionInfoSizeW", GetFileVersionInfoSize),
-    WEXPN("GetFileVersionInfoA", ImmFalse), WEXPN("GetFileVersionInfoW", ImmFalse), WEXPN("VerQueryValueA", ImmFalse),
-    WEXPN("VerQueryValueW", ImmFalse), WEXPN("GetFileVersionInfoSizeExW", GetFileVersionInfoSize),
-    WEXPN("GetFileVersionInfoExW", ImmFalse),
+    WEXP(GetFileVersionInfoSizeW), WEXP(GetFileVersionInfoSizeA), WEXP(GetFileVersionInfoW), WEXP(GetFileVersionInfoA),
+    WEXP(GetFileVersionInfoSizeExW), WEXP(GetFileVersionInfoExW), WEXP(VerQueryValueW), WEXP(VerQueryValueA),
 };
 const wdll_t dll_version = { "version.dll", version, sizeof(version) / sizeof(version[0]) };

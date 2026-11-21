@@ -99,7 +99,8 @@ static void crash(int sig, siginfo_t *si, void *ctx) {
     snprintf(msg, sizeof(msg), "%s stopped: %s in %s (address %p).",
              strrchr(g_exe_win, '\\') ? strrchr(g_exe_win, '\\') + 1 : g_exe_win,
              sig == SIGSEGV ? "a memory access fault" : sig == SIGILL ? "an unknown instruction" :
-             sig == SIGFPE ? "an arithmetic fault" : "a bus error",
+             sig == SIGFPE ? "an arithmetic fault" : sig == SIGTRAP ? "a breakpoint (a check in the program failed)" :
+             "a bus error",
              where, si->si_addr);
     /* what called it: return addresses on the stack */
     {
@@ -143,6 +144,7 @@ static void crash_handlers(void) {
     sigaction(SIGILL, &sa, 0);
     sigaction(SIGFPE, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
+    sigaction(SIGTRAP, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, stop_signal);
     signal(SIGINT, stop_signal);
@@ -206,20 +208,30 @@ int main(int argc, char **argv) {
             if (chdir(dir[0] ? dir : "/") != 0) wlog("cannot enter %s", dir);
         }
     }
-    /* the command line and its arguments, the Windows way */
-    g_argc = argc - 1;
-    g_argv_a = calloc((size_t)g_argc + 1, sizeof(char *));
-    g_argv_w = calloc((size_t)g_argc + 1, sizeof(WCHAR *));
-    g_argv_a[0] = g_exe_win;
-    for (int i = 2; i < argc; i++) g_argv_a[i - 1] = argv[i];
-    for (int i = 0; i < g_argc; i++) {
-        if (i) cmd[o++] = ' ';
-        quote_arg(g_argv_a[i], cmd, sizeof(cmd), &o);
-        g_argv_w[i] = utf8_to_w_dup(g_argv_a[i]);
+    /* the command line and its arguments, the Windows way.  A program a
+     * Windows program started gets the exact line it was given. */
+    {
+        const char *given = getenv("ICDA_WIN_CMDLINE");
+        if (given && *given) {
+            g_cmdline_a = strdup(given);
+            unsetenv("ICDA_WIN_CMDLINE");
+            g_argc = split_cmdline(g_cmdline_a, &g_argv_a);
+        } else {
+            g_argc = argc - 1;
+            g_argv_a = calloc((size_t)g_argc + 1, sizeof(char *));
+            g_argv_a[0] = g_exe_win;
+            for (int i = 2; i < argc; i++) g_argv_a[i - 1] = argv[i];
+            for (int i = 0; i < g_argc; i++) {
+                if (i) cmd[o++] = ' ';
+                quote_arg(g_argv_a[i], cmd, sizeof(cmd), &o);
+            }
+            cmd[o] = 0;
+            g_cmdline_a = strdup(cmd);
+        }
+        g_argv_w = calloc((size_t)g_argc + 1, sizeof(WCHAR *));
+        for (int i = 0; i < g_argc; i++) g_argv_w[i] = utf8_to_w_dup(g_argv_a[i]);
+        g_cmdline_w = utf8_to_w_dup(g_cmdline_a);
     }
-    cmd[o] = 0;
-    g_cmdline_a = strdup(cmd);
-    g_cmdline_w = utf8_to_w_dup(cmd);
     if (wtrace) wlog("running %s as %s: %s", g_exe_unix, g_exe_win, g_cmdline_a);
     crash_handlers();
     /* 16 MB of stack: more than any program asks of Windows */

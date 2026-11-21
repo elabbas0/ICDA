@@ -2232,14 +2232,18 @@ static void run_atexit(void) {
     c__execute_onexit_table(&atexit_table);
 }
 
+void WINAPI ExitProcess(UINT code);
+BOOL WINAPI TerminateProcess(HANDLE h, UINT code);
+
+/* as on Windows: the CRT's exit ends in ExitProcess (which tells a parent the whole code) */
 static void WINAPI c_exit(int code) {
     run_atexit();
     fflush(0);
-    exit(code);
+    ExitProcess((UINT)code);
 }
 static void WINAPI c__exit(int code) {
     fflush(0);
-    _exit(code);
+    TerminateProcess((HANDLE)(intptr_t)-1, (UINT)code);
 }
 static void WINAPI c_quick_exit(int code) { c__exit(code); }
 static void WINAPI c__cexit(void) {

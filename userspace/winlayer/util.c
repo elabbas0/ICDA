@@ -338,3 +338,55 @@ int path_to_win(const char *up, char *out, size_t cap) {
     out[o] = 0;
     return 0;
 }
+
+/* a command line split the way Windows programs' C runtimes split it */
+int split_cmdline(const char *cmd, char ***out) {
+    size_t n = strlen(cmd);
+    char *buf = malloc(n + 2), *o = buf;
+    char **argv = calloc(n / 2 + 3, sizeof(char *));
+    int argc = 0;
+    const char *p = cmd;
+    /* the program's name: quoted or up to a space, no escapes */
+    argv[argc++] = o;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"') *o++ = *p++;
+        if (*p) p++;
+    } else {
+        while (*p && *p != ' ' && *p != '\t') *o++ = *p++;
+    }
+    *o++ = 0;
+    for (;;) {
+        int inq = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        argv[argc++] = o;
+        for (; *p; p++) {
+            size_t bs = 0;
+            while (*p == '\\') bs++, p++;
+            if (*p == '"') {
+                for (size_t i = 0; i < bs / 2; i++) *o++ = '\\';
+                if (bs % 2) {
+                    *o++ = '"';
+                    continue;
+                }
+                if (inq && p[1] == '"') {
+                    *o++ = '"';
+                    p++;
+                    continue;
+                }
+                inq = !inq;
+                continue;
+            }
+            for (size_t i = 0; i < bs; i++) *o++ = '\\';
+            if (!*p) break;
+            if (!inq && (*p == ' ' || *p == '\t')) break;
+            *o++ = *p;
+        }
+        *o++ = 0;
+        if (!*p) break;
+    }
+    argv[argc] = 0;
+    *out = argv;
+    return argc;
+}

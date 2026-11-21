@@ -27,6 +27,12 @@
 #include <sys/utsname.h>
 #include <linux/futex.h>
 #include <cpuid.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define MAP_FIXED_NOREPLACE_COMPAT 0x100000
 
@@ -39,6 +45,10 @@ typedef struct {
     int  is_dir;
     int  append;
     char path[1024];
+    int  stream;           /* a pipe or socket: no file offsets */
+    int  delete_on_close;  /* FILE_FLAG_DELETE_ON_CLOSE, FileDispositionInfo */
+    int  listen_fd;        /* a named pipe's server end: the socket it accepts on, -1 */
+    char pipe_name[256];   /* a named pipe's Unix socket path */
 } wfileobj_t;
 
 #define GENERIC_READ    0x80000000U
@@ -125,6 +135,7 @@ static HANDLE file_handle(int fd, const char *path, int is_dir) {
     if (!f) return INVALID_HANDLE_VALUE;
     f->fd = fd;
     f->is_dir = is_dir;
+    f->listen_fd = -1;
     if (path) snprintf(f->path, sizeof(f->path), "%s", path);
     h = h_new(H_FILE, f);
     if (!h) {
@@ -145,6 +156,239 @@ int file_fd(HANDLE h) {
 
 HANDLE file_from_fd(int fd) { return file_handle(fd, 0, 0); }
 
+/* ---- named pipes ------------------------------------------------------------------------
+ * \\.\pipe\NAME is a Unix socket, /tmp/.icda-pipes/<hash of the name, case-blind>:
+ * the server end listens there and accepts a client for each ConnectNamedPipe;
+ * a client opens it with CreateFile.  Message pipes are SOCK_SEQPACKET, which
+ * keeps each write a message. */
+
+static int pipe_path(const char *wname, char *out, size_t cap) {
+    const char *n = wname;
+    uint64_t h = 1469598103934665603ull;
+    if (!strncasecmp(n, "\\\\.\\pipe\\", 9)) n += 9;
+    else if (!strncasecmp(n, "\\\\?\\pipe\\", 9)) n += 9;
+    else return -1;
+    for (; *n; n++) h = (h ^ (uint8_t)(*n >= 'A' && *n <= 'Z' ? *n + 32 : *n)) * 1099511628211ull;
+    mkdir("/tmp/.icda-pipes", 01777);
+    snprintf(out, cap, "/tmp/.icda-pipes/%016llx", (unsigned long long)h);
+    return 0;
+}
+
+static int pipe_connect(const char *upath) {
+    struct sockaddr_un a;
+    int types[2] = { SOCK_SEQPACKET, SOCK_STREAM };
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", upath);
+    for (int i = 0; i < 2; i++) {
+        int fd = socket(AF_UNIX, types[i] | SOCK_CLOEXEC, 0);
+        if (fd < 0) continue;
+        if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) return fd;
+        close(fd);
+        if (errno != EPROTOTYPE) break;      /* the other kind is the one that listens */
+    }
+    return -1;
+}
+
+HANDLE WINAPI CreateNamedPipeW(const WCHAR *name, DWORD om, DWORD pm, DWORD inst, DWORD ob, DWORD ib, DWORD to, void *sa) {
+    char wn[512], up[256];
+    struct sockaddr_un a;
+    int lfd, type = (pm & 4) ? SOCK_SEQPACKET : SOCK_STREAM;     /* PIPE_TYPE_MESSAGE */
+    HANDLE h;
+    whandle_t *w;
+    (void)inst, (void)ob, (void)ib, (void)to, (void)sa;
+    w_to_utf8(name, -1, wn, sizeof(wn));
+    if (pipe_path(wn, up, sizeof(up)) != 0) {
+        wset_last_error(ERROR_INVALID_NAME);
+        return INVALID_HANDLE_VALUE;
+    }
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", up);
+    /* another server of the same name, still there? */
+    {
+        int probe = pipe_connect(up);
+        if (probe >= 0) {
+            close(probe);
+            if (om & 0x80000) {                     /* FILE_FLAG_FIRST_PIPE_INSTANCE */
+                wset_last_error(ERROR_ACCESS_DENIED);
+                return INVALID_HANDLE_VALUE;
+            }
+            /* more instances of a live pipe: a listener of our own is not possible
+             * on the same path, so the new instance shares nothing (rare) */
+        }
+        unlink(up);
+    }
+    lfd = socket(AF_UNIX, type | SOCK_CLOEXEC, 0);
+    if (lfd < 0 || bind(lfd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(lfd, 16) != 0) {
+        if (lfd >= 0) close(lfd);
+        set_errno_error();
+        return INVALID_HANDLE_VALUE;
+    }
+    h = file_handle(-1, 0, 0);
+    w = h_get(h, H_FILE);
+    if (!w) {
+        close(lfd);
+        return INVALID_HANDLE_VALUE;
+    }
+    ((wfileobj_t *)w->obj)->listen_fd = lfd;
+    ((wfileobj_t *)w->obj)->stream = 1;
+    snprintf(((wfileobj_t *)w->obj)->pipe_name, sizeof(((wfileobj_t *)w->obj)->pipe_name), "%s", up);
+    if (wtrace) wlog("named pipe %s", wn);
+    return h;
+}
+
+HANDLE WINAPI CreateNamedPipeA(const char *name, DWORD om, DWORD pm, DWORD inst, DWORD ob, DWORD ib, DWORD to, void *sa) {
+    WCHAR *w = utf8_to_w_dup(name);
+    HANDLE h = CreateNamedPipeW(w, om, pm, inst, ob, ib, to, sa);
+    free(w);
+    return h;
+}
+
+typedef struct {
+    int       lfd;
+    wfileobj_t *f;
+    void     *ov;
+} accept_job_t;
+
+BOOL WINAPI SetEvent(HANDLE h);
+
+static void *accept_thread(void *arg) {
+    accept_job_t *j = arg;
+    int fd = accept4(j->lfd, 0, 0, SOCK_CLOEXEC);
+    ULONG_PTR *ov = j->ov;
+    if (fd >= 0) j->f->fd = fd;
+    if (ov) {
+        ov[0] = fd >= 0 ? 0 : (ULONG_PTR)0xC0000001;   /* Internal: the status */
+        ov[1] = 0;
+        if (ov[3]) SetEvent((HANDLE)ov[3]);
+    }
+    free(j);
+    return 0;
+}
+
+BOOL WINAPI ConnectNamedPipe(HANDLE h, void *ov) {
+    whandle_t *w = h_get(h, H_FILE);
+    wfileobj_t *f = w ? w->obj : 0;
+    if (!f || f->listen_fd < 0) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (f->fd >= 0) {
+        wset_last_error(535);                 /* ERROR_PIPE_CONNECTED */
+        return FALSE;
+    }
+    if (ov) {
+        /* overlapped: accepted by a thread of ours, the event says when */
+        accept_job_t *j = malloc(sizeof(*j));
+        pthread_t th;
+        j->lfd = f->listen_fd;
+        j->f = f;
+        j->ov = ov;
+        ((ULONG_PTR *)ov)[0] = 0x103;         /* STATUS_PENDING */
+        pthread_create(&th, 0, accept_thread, j);
+        pthread_detach(th);
+        wset_last_error(997);                 /* ERROR_IO_PENDING */
+        return FALSE;
+    }
+    f->fd = accept4(f->listen_fd, 0, 0, SOCK_CLOEXEC);
+    if (f->fd < 0) {
+        set_errno_error();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI DisconnectNamedPipe(HANDLE h) {
+    whandle_t *w = h_get(h, H_FILE);
+    wfileobj_t *f = w ? w->obj : 0;
+    if (!f) return FALSE;
+    if (f->fd >= 0) close(f->fd);
+    f->fd = -1;
+    return TRUE;
+}
+
+BOOL WINAPI WaitNamedPipeW(const WCHAR *name, DWORD to) {
+    char wn[512], up[256];
+    uint64_t end = mono_ns() + (uint64_t)(to == 0 ? 50 : to == INFINITE ? 1u << 30 : to) * 1000000ull;
+    w_to_utf8(name, -1, wn, sizeof(wn));
+    if (pipe_path(wn, up, sizeof(up)) != 0) return FALSE;
+    while (mono_ns() < end) {
+        struct stat st;
+        if (stat(up, &st) == 0) return TRUE;
+        usleep(2000);
+    }
+    wset_last_error(ERROR_TIMEOUT);
+    return FALSE;
+}
+
+BOOL WINAPI SetNamedPipeHandleState(HANDLE h, DWORD *mode, DWORD *max, DWORD *to) {
+    (void)h, (void)mode, (void)max, (void)to;
+    return TRUE;
+}
+
+BOOL WINAPI GetNamedPipeInfo(HANDLE h, DWORD *flags, DWORD *ob, DWORD *ib, DWORD *inst) {
+    whandle_t *w = h_get(h, H_FILE);
+    wfileobj_t *f = w ? w->obj : 0;
+    if (flags) *flags = (f && f->listen_fd >= 0) ? 1 : 0;      /* PIPE_SERVER_END */
+    if (ob) *ob = 65536;
+    if (ib) *ib = 65536;
+    if (inst) *inst = 255;
+    return f != 0;
+}
+
+BOOL WINAPI GetNamedPipeClientProcessId(HANDLE h, ULONG *pid) {
+    int fd = file_fd(h);
+    struct ucred c;
+    socklen_t n = sizeof(c);
+    if (fd < 0 || getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &c, &n) != 0) return FALSE;
+    *pid = (ULONG)c.pid;
+    return TRUE;
+}
+
+BOOL WINAPI ImpersonateNamedPipeClient(HANDLE h) {
+    (void)h;
+    return TRUE;
+}
+
+BOOL WINAPI TransactNamedPipe(HANDLE h, void *in, DWORD nin, void *out, DWORD nout, DWORD *got, void *ov) {
+    int fd = file_fd(h);
+    ssize_t r;
+    (void)ov;
+    if (fd < 0 || write(fd, in, nin) != (ssize_t)nin) {
+        set_errno_error();
+        return FALSE;
+    }
+    r = read(fd, out, nout);
+    if (r < 0) {
+        set_errno_error();
+        return FALSE;
+    }
+    if (got) *got = (DWORD)r;
+    return TRUE;
+}
+
+BOOL WINAPI CallNamedPipeW(const WCHAR *name, void *in, DWORD nin, void *out, DWORD nout, DWORD *got, DWORD to) {
+    char wn[512], up[256];
+    int fd;
+    ssize_t r;
+    (void)to;
+    w_to_utf8(name, -1, wn, sizeof(wn));
+    if (pipe_path(wn, up, sizeof(up)) != 0 || (fd = pipe_connect(up)) < 0) {
+        wset_last_error(ERROR_FILE_NOT_FOUND);
+        return FALSE;
+    }
+    if (write(fd, in, nin) != (ssize_t)nin) {
+        close(fd);
+        return FALSE;
+    }
+    r = read(fd, out, nout);
+    close(fd);
+    if (r < 0) return FALSE;
+    *got = (DWORD)r;
+    return TRUE;
+}
+
 HANDLE WINAPI CreateFileW(const WCHAR *name, DWORD access, DWORD share, void *sa, DWORD disp, DWORD flags, HANDLE tmpl) {
     char wp[1024], up[1024];
     int oflags = O_CLOEXEC, fd;
@@ -157,7 +401,22 @@ HANDLE WINAPI CreateFileW(const WCHAR *name, DWORD access, DWORD share, void *sa
     }
     w_to_utf8(name, -1, wp, sizeof(wp));
     if (!a_icmp(wp, "CONOUT$") || !a_icmp(wp, "CONIN$")) return h_std(wp[3] == 'O' || wp[3] == 'o' ? 1 : 0);
-    if (!strncmp(wp, "\\\\.\\", 4)) {          /* devices: none */
+    if (!strncasecmp(wp, "\\\\.\\pipe\\", 9) || !strncasecmp(wp, "\\\\?\\pipe\\", 9)) {
+        char pp[256];
+        int fd;
+        HANDLE h;
+        whandle_t *w;
+        if (pipe_path(wp, pp, sizeof(pp)) != 0 || (fd = pipe_connect(pp)) < 0) {
+            wset_last_error(231);                 /* ERROR_PIPE_BUSY or not there: FILE_NOT_FOUND below */
+            wset_last_error(ERROR_FILE_NOT_FOUND);
+            return INVALID_HANDLE_VALUE;
+        }
+        h = file_handle(fd, 0, 0);
+        w = h_get(h, H_FILE);
+        if (w) ((wfileobj_t *)w->obj)->stream = 1;
+        return h;
+    }
+    if (!strncmp(wp, "\\\\.\\", 4)) {          /* other devices: none */
         wset_last_error(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
@@ -205,6 +464,7 @@ HANDLE WINAPI CreateFileW(const WCHAR *name, DWORD access, DWORD share, void *sa
         HANDLE h = file_handle(fd, up, 0);
         whandle_t *w = h_get(h, H_FILE);
         if (w && (access & FILE_APPEND_DATA) && !(access & (GENERIC_WRITE | 0x2))) ((wfileobj_t *)w->obj)->append = 1;
+        if (w && (flags & 0x04000000)) ((wfileobj_t *)w->obj)->delete_on_close = 1;     /* FILE_FLAG_DELETE_ON_CLOSE */
         return h;
     }
 }
@@ -231,13 +491,14 @@ BOOL WINAPI SetEvent(HANDLE h);
 
 BOOL WINAPI ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
     int fd = file_fd(h);
+    whandle_t *w = h_get(h, H_FILE);
     ssize_t r;
     if (got) *got = 0;
     if (fd < 0) {
         wset_last_error(ERROR_INVALID_HANDLE);
         return FALSE;
     }
-    if (ov) r = pread(fd, buf, n, (off_t)((uint64_t)ov->OffsetHigh << 32 | ov->Offset));
+    if (ov && !(w && ((wfileobj_t *)w->obj)->stream)) r = pread(fd, buf, n, (off_t)((uint64_t)ov->OffsetHigh << 32 | ov->Offset));
     else r = read(fd, buf, n);
     if (r < 0) {
         set_errno_error();
@@ -262,7 +523,7 @@ BOOL WINAPI WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *put, OVERLAPPED
         return FALSE;
     }
     if (w && ((wfileobj_t *)w->obj)->append) lseek(fd, 0, SEEK_END);
-    if (ov && !(ov->Offset == 0xFFFFFFFF && ov->OffsetHigh == 0xFFFFFFFF))
+    if (ov && !(ov->Offset == 0xFFFFFFFF && ov->OffsetHigh == 0xFFFFFFFF) && !(w && ((wfileobj_t *)w->obj)->stream))
         r = pwrite(fd, buf, n, (off_t)((uint64_t)ov->OffsetHigh << 32 | ov->Offset));
     else r = write(fd, buf, n);
     if (r < 0) {
@@ -1062,6 +1323,195 @@ BOOL WINAPI FlushViewOfFile(const void *p, SIZE_T n) {
     return TRUE;
 }
 
+
+BOOL WINAPI GetVolumePathNameW(const WCHAR *path, WCHAR *out, DWORD n) {
+    char a[1100], full[2048];
+    WCHAR root[4] = { 'C', ':', '\\', 0 };
+    w_to_utf8(path, -1, a, sizeof(a));
+    full_path(a, full, sizeof(full));
+    root[0] = (WCHAR)full[0];
+    if (n < 4) {
+        wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(out, root, sizeof(root));
+    return TRUE;
+}
+
+BOOL WINAPI GetVolumeNameForVolumeMountPointW(const WCHAR *mp, WCHAR *out, DWORD n) {
+    (void)mp;
+    return put_w("\\\\?\\Volume{1cda0000-0000-0000-0000-000000000001}\\", out, n) > 0;
+}
+
+DWORD WINAPI GetFinalPathNameByHandleW(HANDLE h, WCHAR *out, DWORD n, DWORD flags) {
+    whandle_t *w = h_get(h, H_FILE);
+    char wp[1100], full[1200];
+    (void)flags;
+    if (!w || !((wfileobj_t *)w->obj)->path[0]) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    path_to_win(((wfileobj_t *)w->obj)->path, wp, sizeof(wp));
+    snprintf(full, sizeof(full), "\\\\?\\%s", wp);
+    return put_w(full, out, n);
+}
+
+BOOL WINAPI SetProcessWorkingSetSize(HANDLE h, SIZE_T lo, SIZE_T hi) {
+    (void)h, (void)lo, (void)hi;
+    return TRUE;
+}
+BOOL WINAPI SetProcessWorkingSetSizeEx(HANDLE h, SIZE_T lo, SIZE_T hi, DWORD f) {
+    (void)h, (void)lo, (void)hi, (void)f;
+    return TRUE;
+}
+
+/* SetFileInformationByHandle: renaming, deleting, sizing a file by its handle */
+BOOL WINAPI SetFileInformationByHandle(HANDLE h, int cls, void *info, DWORD size) {
+    whandle_t *w = h_get(h, H_FILE);
+    wfileobj_t *f;
+    (void)size;
+    if (!w) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    f = w->obj;
+    switch (cls) {
+    case 0:                          /* FileBasicInfo: times and attributes */
+        return TRUE;
+    case 3: {                        /* FileRenameInfo */
+        uint8_t *ri = info;
+        DWORD len = *(DWORD *)(ri + 16);
+        WCHAR *name = (WCHAR *)(ri + 20);
+        char a[1100], up[1100];
+        WCHAR *tmp = calloc(len / 2 + 1, sizeof(WCHAR));
+        struct stat st;
+        memcpy(tmp, name, len);
+        w_to_utf8(tmp, -1, a, sizeof(a));
+        free(tmp);
+        if (path_find(a, up, sizeof(up)) != 0) {
+            wset_last_error(ERROR_PATH_NOT_FOUND);
+            return FALSE;
+        }
+        if (!ri[0] && stat(up, &st) == 0) {      /* ReplaceIfExists */
+            wset_last_error(ERROR_ALREADY_EXISTS);
+            return FALSE;
+        }
+        if (rename(f->path, up) != 0) {
+            set_errno_error();
+            return FALSE;
+        }
+        snprintf(f->path, sizeof(f->path), "%s", up);
+        return TRUE;
+    }
+    case 4:                          /* FileDispositionInfo: deleted when the handle closes (and can be taken back) */
+        f->delete_on_close = *(BOOLEAN *)info != 0;
+        return TRUE;
+    case 21: {                       /* FileDispositionInfoEx */
+        DWORD fl = *(DWORD *)info;
+        if ((fl & 1) && (fl & 2) && f->path[0]) {      /* DELETE with POSIX_SEMANTICS: now */
+            if (f->is_dir ? rmdir(f->path) : unlink(f->path)) {
+                set_errno_error();
+                return FALSE;
+            }
+            return TRUE;
+        }
+        f->delete_on_close = (fl & 1) != 0;
+        return TRUE;
+    }
+    case 5:                          /* FileAllocationInfo */
+        return TRUE;
+    case 6:                          /* FileEndOfFileInfo */
+        return ftruncate(f->fd, (off_t)*(int64_t *)info) == 0;
+    default:
+        wset_last_error(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+}
+
+BOOL WINAPI CreateHardLinkW(const WCHAR *to, const WCHAR *from, void *sa) {
+    char a[1100], b[1100], ua[1100], ub[1100];
+    (void)sa;
+    w_to_utf8(to, -1, a, sizeof(a));
+    w_to_utf8(from, -1, b, sizeof(b));
+    if (path_find(a, ua, sizeof(ua)) != 0 || path_find(b, ub, sizeof(ub)) != 0 || link(ub, ua) != 0) {
+        set_errno_error();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI ReplaceFileW(const WCHAR *replaced, const WCHAR *replacement, const WCHAR *backup, DWORD f, void *e, void *r) {
+    (void)f, (void)e, (void)r;
+    if (backup) CopyFileW(replaced, backup, FALSE);
+    return MoveFileExW(replacement, replaced, 1);
+}
+
+BOOL WINAPI CopyFileExW(const WCHAR *from, const WCHAR *to, void *progress, void *data, BOOL *cancel, DWORD flags) {
+    (void)progress, (void)data, (void)cancel;
+    return CopyFileW(from, to, (flags & 1) != 0);       /* COPY_FILE_FAIL_IF_EXISTS */
+}
+
+BOOL WINAPI MoveFileWithProgressW(const WCHAR *from, const WCHAR *to, void *p, void *d, DWORD flags) {
+    (void)p, (void)d;
+    return MoveFileExW(from, to, flags);
+}
+
+
+HANDLE WINAPI CreateMailslotW(const WCHAR *name, DWORD max, DWORD to, void *sa) {
+    (void)name, (void)max, (void)to, (void)sa;
+    wset_last_error(ERROR_NOT_SUPPORTED);
+    return INVALID_HANDLE_VALUE;
+}
+HANDLE WINAPI FindFirstChangeNotificationW(const WCHAR *p, BOOL sub, DWORD f) {
+    (void)p, (void)sub, (void)f;
+    wset_last_error(ERROR_NOT_SUPPORTED);
+    return INVALID_HANDLE_VALUE;
+}
+
+BOOL WINAPI GetProcessMitigationPolicy(HANDLE h, int policy, void *buf, SIZE_T n) {
+    (void)h, (void)policy;
+    if (buf) memset(buf, 0, n);
+    return TRUE;
+}
+BOOL WINAPI SetProcessMitigationPolicy(int policy, void *buf, SIZE_T n) {
+    (void)policy, (void)buf, (void)n;
+    return TRUE;
+}
+BOOL WINAPI SetThreadInformation(HANDLE h, int cls, void *info, DWORD n) {
+    (void)h, (void)cls, (void)info, (void)n;
+    return TRUE;
+}
+BOOL WINAPI SetProcessInformation(HANDLE h, int cls, void *info, DWORD n) {
+    (void)h, (void)cls, (void)info, (void)n;
+    return TRUE;
+}
+/* "en-US\0\0": the languages the user wants */
+static BOOL ui_languages(DWORD flags, ULONG *num, WCHAR *buf, ULONG *n) {
+    static const WCHAR langs[] = u"en-US\0";
+    (void)flags;
+    if (num) *num = 1;
+    if (!buf || *n < 7) {
+        *n = 7;
+        if (buf) {
+            wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        return TRUE;
+    }
+    memcpy(buf, langs, sizeof(langs));
+    *n = 7;
+    return TRUE;
+}
+BOOL WINAPI GetThreadPreferredUILanguages(DWORD f, ULONG *num, WCHAR *buf, ULONG *n) { return ui_languages(f, num, buf, n); }
+BOOL WINAPI GetUserPreferredUILanguages(DWORD f, ULONG *num, WCHAR *buf, ULONG *n) { return ui_languages(f, num, buf, n); }
+BOOL WINAPI GetSystemPreferredUILanguages(DWORD f, ULONG *num, WCHAR *buf, ULONG *n) { return ui_languages(f, num, buf, n); }
+BOOL WINAPI GetProcessPreferredUILanguages(DWORD f, ULONG *num, WCHAR *buf, ULONG *n) { return ui_languages(f, num, buf, n); }
+BOOL WINAPI SetProcessPreferredUILanguages(DWORD f, const WCHAR *l, ULONG *num) {
+    (void)f, (void)l;
+    if (num) *num = 1;
+    return TRUE;
+}
+
 /* ---- closing and duplicating handles ------------------------------------------------------ */
 
 BOOL WINAPI CloseHandle(HANDLE h) {
@@ -1074,7 +1524,15 @@ BOOL WINAPI CloseHandle(HANDLE h) {
     switch (w->kind) {
     case H_FILE: {
         wfileobj_t *f = w->obj;
+        if (f->delete_on_close && f->path[0]) {
+            if (f->is_dir) rmdir(f->path);
+            else unlink(f->path);
+        }
         if (f->fd > 2) close(f->fd);
+        if (f->listen_fd >= 0) {
+            close(f->listen_fd);
+            if (f->pipe_name[0]) unlink(f->pipe_name);
+        }
         free(f);
         break;
     }
@@ -1771,6 +2229,26 @@ BOOL WINAPI SystemTimeToFileTime(const SYSTEMTIME *st, FILETIME *ft) {
     t.tm_sec = st->wSecond;
     s = timegm(&t);
     unix_to_filetime(s, (long)st->wMilliseconds * 1000000L, ft);
+    return TRUE;
+}
+
+BOOL WINAPI DosDateTimeToFileTime(WORD date, WORD time, FILETIME *ft) {
+    SYSTEMTIME st;
+    memset(&st, 0, sizeof(st));
+    st.wYear = (WORD)(1980 + (date >> 9));
+    st.wMonth = (WORD)((date >> 5) & 15);
+    st.wDay = (WORD)(date & 31);
+    st.wHour = (WORD)(time >> 11);
+    st.wMinute = (WORD)((time >> 5) & 63);
+    st.wSecond = (WORD)((time & 31) * 2);
+    return SystemTimeToFileTime(&st, ft);
+}
+
+BOOL WINAPI FileTimeToDosDateTime(const FILETIME *ft, WORD *date, WORD *time) {
+    SYSTEMTIME st;
+    FileTimeToSystemTime(ft, &st);
+    *date = (WORD)(((st.wYear - 1980) << 9) | (st.wMonth << 5) | st.wDay);
+    *time = (WORD)((st.wHour << 11) | (st.wMinute << 5) | (st.wSecond / 2));
     return TRUE;
 }
 
@@ -3533,37 +4011,108 @@ BOOL WINAPI FreeResource(HGLOBAL h) {
     (void)h;
     return FALSE;
 }
-BOOL WINAPI EnumResourceNamesW(HMODULE h, const WCHAR *type, void *fn, LONG_PTR p) {
-    (void)h, (void)type, (void)fn, (void)p;
-    wset_last_error(1813);
-    return FALSE;
+typedef BOOL (WCALLBACK *ENUMRESNAMEPROCW)(HMODULE, const WCHAR *, WCHAR *, LONG_PTR);
+typedef BOOL (WCALLBACK *ENUMRESNAMEPROCA)(HMODULE, const char *, char *, LONG_PTR);
+typedef BOOL (WCALLBACK *ENUMRESTYPEPROCW)(HMODULE, WCHAR *, LONG_PTR);
+
+typedef struct {
+    HMODULE     h;
+    const void *type;
+    void       *fn;
+    LONG_PTR    param;
+    int         ansi, types;
+} res_enum_t;
+
+static int res_enum_cb(void *ctx, const WCHAR *name) {
+    res_enum_t *e = ctx;
+    if (e->types) return ((ENUMRESTYPEPROCW)e->fn)(e->h, (WCHAR *)name, e->param);
+    if (e->ansi) {
+        char a[256];
+        const char *n = (uintptr_t)name < 0x10000 ? (const char *)name : (w_to_utf8(name, -1, a, sizeof(a)), a);
+        return ((ENUMRESNAMEPROCA)e->fn)(e->h, e->type, (char *)n, e->param);
+    }
+    return ((ENUMRESNAMEPROCW)e->fn)(e->h, e->type, (WCHAR *)name, e->param);
 }
+
+BOOL WINAPI EnumResourceNamesW(HMODULE h, const WCHAR *type, void *fn, LONG_PTR p) {
+    res_enum_t e = { h ? h : ld_main()->base, type, fn, p, 0, 0 };
+    if (ld_enum_resources(ld_by_handle(h), type, res_enum_cb, &e) <= 0) {
+        wset_last_error(1813);     /* ERROR_RESOURCE_TYPE_NOT_FOUND */
+        return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL WINAPI EnumResourceNamesA(HMODULE h, const char *type, void *fn, LONG_PTR p) {
-    (void)h, (void)type, (void)fn, (void)p;
-    wset_last_error(1813);
-    return FALSE;
+    WCHAR wt[256];
+    const WCHAR *t = res_name_a(type, wt);
+    res_enum_t e = { h ? h : ld_main()->base, type, fn, p, 1, 0 };
+    if (ld_enum_resources(ld_by_handle(h), t, res_enum_cb, &e) <= 0) {
+        wset_last_error(1813);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI EnumResourceNamesExW(HMODULE h, const WCHAR *type, void *fn, LONG_PTR p, DWORD f, WORD lang) {
+    (void)f, (void)lang;
+    return EnumResourceNamesW(h, type, fn, p);
+}
+
+BOOL WINAPI EnumResourceTypesW(HMODULE h, void *fn, LONG_PTR p) {
+    res_enum_t e = { h ? h : ld_main()->base, 0, fn, p, 0, 1 };
+    return ld_enum_resources(ld_by_handle(h), 0, res_enum_cb, &e) > 0;
 }
 
 /* ---- processes ------------------------------------------------------------------------------- */
 
+/* a child of another Windows program says its whole exit code */
+static void self_exit_report(UINT code) {
+    const char *fd = getenv("ICDA_WIN_EXITFD");
+    if (fd) {
+        int f = atoi(fd);
+        (void)!write(f, &code, sizeof(code));
+        close(f);
+        unsetenv("ICDA_WIN_EXITFD");
+    }
+}
+
 void WINAPI ExitProcess(UINT code) {
     if (wtrace) wlog("ExitProcess(%u)", code);
     fflush(0);
+    self_exit_report(code);
     exit((int)code);
 }
 
 BOOL WINAPI TerminateProcess(HANDLE h, UINT code) {
+    whandle_t *w;
     if (h == (HANDLE)(intptr_t)-1 || h == 0) {
         fflush(0);
+        self_exit_report(code);
         _exit((int)code);
+    }
+    w = h_get(h, H_PROCESS);
+    if (w) {
+        kill(((wproc_t *)w->obj)->pid, SIGKILL);
+        return TRUE;
     }
     wset_last_error(ERROR_ACCESS_DENIED);
     return FALSE;
 }
 
+static void self_exit_report(UINT code);
+
 BOOL WINAPI GetExitCodeProcess(HANDLE h, DWORD *code) {
-    (void)h;
-    *code = 259;
+    whandle_t *w = h_get(h, H_PROCESS);
+    if (h == (HANDLE)(intptr_t)-1) {
+        *code = 259;
+        return TRUE;
+    }
+    if (!w) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    *code = ((wproc_t *)w->obj)->done ? ((wproc_t *)w->obj)->code : 259;   /* STILL_ACTIVE */
     return TRUE;
 }
 
@@ -3575,8 +4124,8 @@ HANDLE WINAPI OpenProcess(DWORD a, BOOL i, DWORD pid) {
 }
 
 DWORD WINAPI GetProcessId(HANDLE h) {
-    (void)h;
-    return (DWORD)getpid();
+    whandle_t *w = h_get(h, H_PROCESS);
+    return w ? (DWORD)((wproc_t *)w->obj)->pid : (DWORD)getpid();
 }
 
 DWORD WINAPI GetProcessVersion(DWORD pid) {
@@ -3584,18 +4133,234 @@ DWORD WINAPI GetProcessVersion(DWORD pid) {
     return (10u << 16);
 }
 
+/* ---- starting programs ---------------------------------------------------------------------
+ * A Windows program starts another as ICDA does it: icda-win runs it in a
+ * process of its own.  The child gets the exact command line (Windows
+ * passes one string), keeps the current folder it is given (Explorer's
+ * "its own folder" is for programs the user starts), and writes its
+ * 32-bit exit code back through a pipe, since Unix exit codes are 8 bits. */
+
+static char self_path[1024];
+
+static const char *icda_win_path(void) {
+    if (!self_path[0]) {
+        ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+        if (n > 0) self_path[n] = 0;
+        else snprintf(self_path, sizeof(self_path), "/usr/bin/icda-win");
+    }
+    return self_path;
+}
+
+static void *reaper(void *arg) {
+    wproc_t *p = arg;
+    int st = 0;
+    DWORD code = 0;
+    ssize_t n;
+    while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
+    }
+    /* the code the child wrote, else what Unix says */
+    n = read(p->exit_fd, &code, sizeof(code));
+    if (n != (ssize_t)sizeof(code)) code = WIFEXITED(st) ? (DWORD)WEXITSTATUS(st) : 0xC0000005u;
+    close(p->exit_fd);
+    sync_lock();
+    p->code = code;
+    p->done = 1;
+    sync_broadcast();
+    sync_unlock();
+    if (wtrace) wlog("process %d ended: %u", p->pid, code);
+    return 0;
+}
+
+/* the program a command line starts: its first word (quoted or not) */
+static void first_word(const char *cmd, char *out, size_t cap) {
+    size_t o = 0;
+    const char *p = cmd;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && o + 1 < cap) out[o++] = *p++;
+    } else {
+        while (*p && *p != ' ' && *p != '\t' && o + 1 < cap) out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+
+/* finds the program: as given, with .exe, then in the program's folder,
+ * the current folder, System32 and PATH */
+static int find_program(const char *name, char *out, size_t cap) {
+    char tries[4][1100], with_exe[1100], dir[1024];
+    int nt = 0;
+    struct stat st;
+    snprintf(with_exe, sizeof(with_exe), "%s%s", name, strrchr(name, '.') > strrchr(name, '\\') ? "" : ".exe");
+    if (strchr(name, '\\') || strchr(name, '/') || strchr(name, ':')) {
+        if (path_find(name, out, cap) == 0 && stat(out, &st) == 0 && S_ISREG(st.st_mode)) return 0;
+        if (path_find(with_exe, out, cap) == 0 && stat(out, &st) == 0 && S_ISREG(st.st_mode)) return 0;
+        return -1;
+    }
+    snprintf(dir, sizeof(dir), "%s", g_exe_unix);
+    if (strrchr(dir, '/')) *strrchr(dir, '/') = 0;
+    snprintf(tries[nt++], sizeof(tries[0]), "%s/%s", dir, with_exe);
+    snprintf(tries[nt++], sizeof(tries[0]), "./%s", with_exe);
+    snprintf(tries[nt++], sizeof(tries[0]), "%s/Windows/System32/%s", path_prefix(), with_exe);
+    for (int i = 0; i < nt; i++) {
+        if (stat(tries[i], &st) == 0 && S_ISREG(st.st_mode)) {
+            snprintf(out, cap, "%s", tries[i]);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+typedef struct {
+    HANDLE hProcess, hThread;
+    DWORD  dwProcessId, dwThreadId;
+} PROCESS_INFORMATION;
+
+extern char **environ;
+
+static BOOL create_process(const char *app, const char *cmd, BOOL inherit, DWORD flags, void *env, const char *dir,
+                           STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
+    char exe[1100], word[1100], *argv[3], **envp;
+    char udir[1100];
+    int pipefd[2];
+    pid_t pid;
+    posix_spawn_file_actions_t fa;
+    wproc_t *p;
+    int nenv = 0, k = 0;
+    (void)inherit;
+    if (app && *app) snprintf(word, sizeof(word), "%s", app);
+    else first_word(cmd ? cmd : "", word, sizeof(word));
+    /* crash reporters that send reports to their maker are not started:
+     * ICDA keeps a program's crashes to itself */
+    if (cmd && strstr(cmd, "--type=crashpad-handler") && !getenv("ICDA_WIN_CRASHPAD")) {
+        if (wtrace) wlog("CreateProcess: a crash reporter, not started");
+        wset_last_error(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    if (!word[0] || find_program(word, exe, sizeof(exe)) != 0) {
+        if (wtrace) wlog("CreateProcess(%s): not found", word);
+        wset_last_error(ERROR_FILE_NOT_FOUND);
+        return FALSE;
+    }
+    {
+        /* only Windows programs: a PE file */
+        int fd = open(exe, O_RDONLY | O_CLOEXEC);
+        char mz[2] = { 0, 0 };
+        if (fd < 0 || read(fd, mz, 2) != 2 || mz[0] != 'M' || mz[1] != 'Z') {
+            if (fd >= 0) close(fd);
+            wlog("CreateProcess(%s): not a Windows program", word);
+            wset_last_error(193);     /* ERROR_BAD_EXE_FORMAT */
+            return FALSE;
+        }
+        close(fd);
+    }
+    if (pipe2(pipefd, O_CLOEXEC) != 0) {
+        set_errno_error();
+        return FALSE;
+    }
+    /* the environment: the given block (UTF-16 or ANSI), or ours */
+    {
+        char **src = environ;
+        int unicode = (flags & 0x400) != 0;      /* CREATE_UNICODE_ENVIRONMENT */
+        char **list = 0;
+        if (env) {
+            int count = 0;
+            if (unicode)
+                for (const WCHAR *e = env; *e; e += w_len(e) + 1) count++;
+            else
+                for (const char *e = env; *e; e += strlen(e) + 1) count++;
+            list = calloc((size_t)count + 1, sizeof(char *));
+            count = 0;
+            if (unicode)
+                for (const WCHAR *e = env; *e; e += w_len(e) + 1) list[count++] = w_to_utf8_dup(e);
+            else
+                for (const char *e = env; *e; e += strlen(e) + 1) list[count++] = strdup(e);
+            src = list;
+        }
+        while (src[nenv]) nenv++;
+        envp = calloc((size_t)nenv + 6, sizeof(char *));
+        for (int i = 0; i < nenv; i++)
+            if (strncmp(src[i], "ICDA_WIN_CMDLINE=", 17) && strncmp(src[i], "ICDA_WIN_EXITFD=", 16) &&
+                strncmp(src[i], "ICDA_WIN_KEEP_CWD=", 18))
+                envp[k++] = src[i];
+    }
+    {
+        static char fdvar[32];
+        char *cl = malloc(strlen(cmd ? cmd : word) + 32);
+        sprintf(cl, "ICDA_WIN_CMDLINE=%s", cmd && *cmd ? cmd : word);
+        envp[k++] = cl;
+        snprintf(fdvar, sizeof(fdvar), "ICDA_WIN_EXITFD=3");
+        envp[k++] = strdup(fdvar);
+        envp[k++] = "ICDA_WIN_KEEP_CWD=1";
+        envp[k] = 0;
+    }
+    posix_spawn_file_actions_init(&fa);
+    /* the exit code pipe is the child's descriptor 3 */
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 3);
+    if (si && (si->dwFlags & 0x100)) {           /* STARTF_USESTDHANDLES */
+        int fds[3] = { file_fd(si->hStdInput), file_fd(si->hStdOutput), file_fd(si->hStdError) };
+        for (int i = 0; i < 3; i++)
+            if (fds[i] >= 0 && fds[i] != i) posix_spawn_file_actions_adddup2(&fa, fds[i], i);
+    }
+    if (dir && *dir && path_find(dir, udir, sizeof(udir)) == 0) posix_spawn_file_actions_addchdir_np(&fa, udir);
+    argv[0] = (char *)icda_win_path();
+    argv[1] = exe;
+    argv[2] = 0;
+    if (posix_spawn(&pid, argv[0], &fa, 0, argv, envp) != 0) {
+        posix_spawn_file_actions_destroy(&fa);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        set_errno_error();
+        return FALSE;
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    close(pipefd[1]);
+    if (wtrace) wlog("CreateProcess: %s -> pid %d (%s)", exe, pid, cmd ? cmd : "");
+    p = calloc(1, sizeof(*p));
+    p->pid = pid;
+    p->exit_fd = pipefd[0];
+    {
+        pthread_t th;
+        pthread_create(&th, 0, reaper, p);
+        pthread_detach(th);
+    }
+    pi->hProcess = h_new(H_PROCESS, p);
+    pi->hThread = h_new(H_PROCESS, p);           /* its thread ends with it */
+    pi->dwProcessId = (DWORD)pid;
+    pi->dwThreadId = (DWORD)pid;
+    return TRUE;
+}
+
 BOOL WINAPI CreateProcessW(const WCHAR *app, WCHAR *cmd, void *psa, void *tsa, BOOL inherit, DWORD flags, void *env,
-                           const WCHAR *dir, void *si, void *pi) {
-    (void)app, (void)cmd, (void)psa, (void)tsa, (void)inherit, (void)flags, (void)env, (void)dir, (void)si, (void)pi;
-    wset_last_error(ERROR_NOT_SUPPORTED);
-    return FALSE;
+                           const WCHAR *dir, STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
+    char *a = app ? w_to_utf8_dup(app) : 0, *c = cmd ? w_to_utf8_dup(cmd) : 0, *d = dir ? w_to_utf8_dup(dir) : 0;
+    BOOL r;
+    (void)psa, (void)tsa;
+    r = create_process(a, c, inherit, flags, env, d, si, pi);
+    free(a), free(c), free(d);
+    return r;
 }
 
 BOOL WINAPI CreateProcessA(const char *app, char *cmd, void *psa, void *tsa, BOOL inherit, DWORD flags, void *env,
-                           const char *dir, void *si, void *pi) {
-    (void)app, (void)cmd, (void)psa, (void)tsa, (void)inherit, (void)flags, (void)env, (void)dir, (void)si, (void)pi;
-    wset_last_error(ERROR_NOT_SUPPORTED);
-    return FALSE;
+                           const char *dir, STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
+    (void)psa, (void)tsa;
+    return create_process(app, cmd, inherit, flags & ~(DWORD)0x400, env, dir, si, pi);
+}
+
+BOOL WINAPI CreateProcessAsUserW(HANDLE tok, const WCHAR *app, WCHAR *cmd, void *psa, void *tsa, BOOL inherit, DWORD flags,
+                                 void *env, const WCHAR *dir, STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
+    (void)tok;
+    return CreateProcessW(app, cmd, psa, tsa, inherit, flags, env, dir, si, pi);
+}
+
+/* Windows's WinExec: a program and its arguments in one string */
+UINT WINAPI WinExec(const char *cmd, UINT show) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    (void)show;
+    memset(&si, 0, sizeof(si));
+    if (!create_process(0, cmd, FALSE, 0, 0, 0, &si, &pi)) return 2;
+    return 33;
 }
 
 BOOL WINAPI CreatePipe(HANDLE *r, HANDLE *w, void *sa, DWORD size) {
@@ -3987,7 +4752,17 @@ static const wexport_t k32[] = {
     X(FreeLibraryAndExitThread), X(GetProcAddress), X(DisableThreadLibraryCalls), X(SetDllDirectoryW),
     X(SetDllDirectoryA), X(AddDllDirectory), X(RemoveDllDirectory), X(SetDefaultDllDirectories), X(FindResourceExW),
     X(FindResourceW), X(FindResourceA), X(FindResourceExA), X(LoadResource), X(LockResource), X(SizeofResource),
-    X(FreeResource), X(EnumResourceNamesW), X(EnumResourceNamesA), X(ExitProcess), X(TerminateProcess),
+    X(FreeResource), X(EnumResourceNamesW), X(EnumResourceNamesA), X(EnumResourceNamesExW), X(EnumResourceTypesW),
+    X(ExitProcess), X(TerminateProcess), X(CreateProcessAsUserW), X(WinExec), X(GetVolumePathNameW),
+    X(GetVolumeNameForVolumeMountPointW), X(GetFinalPathNameByHandleW), X(SetProcessWorkingSetSize),
+    X(SetProcessWorkingSetSizeEx), X(SetFileInformationByHandle), X(DosDateTimeToFileTime),
+    X(FileTimeToDosDateTime), X(CreateHardLinkW), X(ReplaceFileW), X(CopyFileExW), X(MoveFileWithProgressW),
+    X(CreateNamedPipeW), X(CreateNamedPipeA), X(CreateMailslotW), X(FindFirstChangeNotificationW), X(WaitNamedPipeW),
+    X(ConnectNamedPipe), X(DisconnectNamedPipe), X(SetNamedPipeHandleState), X(GetNamedPipeInfo),
+    X(GetNamedPipeClientProcessId), X(ImpersonateNamedPipeClient), X(TransactNamedPipe), X(CallNamedPipeW),
+    X(GetProcessMitigationPolicy), X(SetProcessMitigationPolicy), X(SetThreadInformation), X(SetProcessInformation),
+    X(GetThreadPreferredUILanguages), X(GetUserPreferredUILanguages), X(GetSystemPreferredUILanguages),
+    X(GetProcessPreferredUILanguages), X(SetProcessPreferredUILanguages),
     X(GetExitCodeProcess), X(OpenProcess), X(GetProcessId), X(GetProcessVersion), X(CreateProcessW),
     X(CreateProcessA), X(CreatePipe), X(CreateToolhelp32Snapshot), X(Process32FirstW), X(Process32NextW),
     X(Module32FirstW), X(Module32NextW), X(Thread32First), X(Thread32Next), X(K32EnumProcessModules),
@@ -4025,4 +4800,6 @@ static const wexport_t ntd[] = {
     WEXPN("RtlDeleteCriticalSection", DeleteCriticalSection),
 };
 
-const wdll_t dll_ntdll = { "ntdll.dll", ntd, sizeof(ntd) / sizeof(ntd[0]) };
+extern const wexport_t reg_nt_exports[];
+extern const int reg_nt_nexports;
+const wdll_t dll_ntdll = { "ntdll.dll", ntd, sizeof(ntd) / sizeof(ntd[0]), reg_nt_exports, &reg_nt_nexports };

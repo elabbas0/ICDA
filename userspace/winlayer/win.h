@@ -91,6 +91,8 @@ typedef struct wdll {
     const char      *name;     /* lower case, with .dll */
     const wexport_t *exports;
     int              count;
+    const wexport_t *more;     /* a second table (another file's), or 0 */
+    const int       *nmore;
 } wdll_t;
 
 #define WEXP(f)        { #f, (void *)f, 0 }
@@ -100,7 +102,7 @@ typedef struct wdll {
 /* each dll_*.c defines one or more of these */
 extern const wdll_t dll_kernel32, dll_ntdll, dll_msvcrt, dll_ucrt, dll_vcruntime, dll_user32, dll_gdi32,
     dll_opengl32, dll_winmm, dll_advapi32, dll_shell32, dll_ole32, dll_oleaut32, dll_imm32, dll_setupapi,
-    dll_version, dll_ws2_32, dll_bcrypt, dll_misc;
+    dll_version, dll_ws2_32, dll_bcrypt, dll_cabinet, dll_misc;
 
 /* the builtin for a DLL name (any case, with or without .dll), 0 if none */
 const wdll_t *builtin_find(const char *dll);
@@ -131,6 +133,16 @@ void       ld_thread_attach(int attach);             /* DLL_THREAD_ATTACH / DETA
 int        ld_run_exe(const char *unix_path, char *const *argv);   /* loads and starts the program */
 wmodule_t *ld_modules(void);
 void      *ld_resource(wmodule_t *m, const WCHAR *type, const WCHAR *name, DWORD *size);
+int        ld_enum_resources(wmodule_t *m, const WCHAR *type, int (*cb)(void *ctx, const WCHAR *name), void *ctx);
+void      *pe_file_resource(const char *upath, const WCHAR *type, const WCHAR *name, DWORD *size);
+
+/* a child process (CreateProcess) */
+typedef struct {
+    int          pid;
+    volatile int done;
+    DWORD        code;
+    int          exit_fd;       /* the child writes its 32-bit exit code here */
+} wproc_t;
 
 /* ---- threads and the TEB (thread.c) --------------------------------------------- */
 
@@ -248,6 +260,9 @@ typedef __builtin_ms_va_list ms_va_list;
 int  ms_vformat(char *out, size_t cap, const char *fmt, ms_va_list ap, int wide_args);
 int  ms_vformatw(WCHAR *out, size_t cap, const WCHAR *fmt, ms_va_list ap);
 int  ms_vscan(const char *in, const char *fmt, ms_va_list ap);
+
+/* a command line split as Windows C runtimes split it (argv and its strings malloc'ed) */
+int split_cmdline(const char *cmd, char ***argv);
 
 /* the program's command line and its arguments */
 extern char   *g_cmdline_a;

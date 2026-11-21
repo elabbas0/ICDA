@@ -13,7 +13,7 @@
 static const wdll_t *const all_dlls[] = {
     &dll_kernel32, &dll_ntdll, &dll_msvcrt, &dll_ucrt, &dll_vcruntime, &dll_user32, &dll_gdi32, &dll_opengl32,
     &dll_winmm, &dll_advapi32, &dll_shell32, &dll_ole32, &dll_oleaut32, &dll_imm32, &dll_setupapi, &dll_version,
-    &dll_ws2_32, &dll_bcrypt, 0
+    &dll_ws2_32, &dll_bcrypt, &dll_cabinet, 0
 };
 
 static const struct {
@@ -30,6 +30,7 @@ static const struct {
     { "msvcr120.dll", &dll_msvcrt },
     { "wsock32.dll", &dll_ws2_32 },
     { "combase.dll", &dll_ole32 },
+    { "bcryptprimitives.dll", &dll_bcrypt },
 };
 
 /* api-ms-win-* names, by prefix */
@@ -71,12 +72,12 @@ const wdll_t *builtin_find(const char *dll) {
 /* ---- lookup ---------------------------------------------------------------------------- */
 
 typedef struct {
-    const wdll_t *dll;
-    int           cap;          /* a power of two */
-    int          *slot;         /* export index + 1, 0: empty */
+    const wexport_t *ex;
+    int              cap;          /* a power of two */
+    int             *slot;         /* export index + 1, 0: empty */
 } xtable_t;
 
-static xtable_t tables[32];
+static xtable_t tables[64];
 static pthread_mutex_t tlock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint32_t hash(const char *s) {
@@ -85,28 +86,28 @@ static uint32_t hash(const char *s) {
     return h;
 }
 
-static xtable_t *table_of(const wdll_t *d) {
+static xtable_t *table_of(const wexport_t *ex, int count) {
     xtable_t *t = 0;
     pthread_mutex_lock(&tlock);
-    for (int i = 0; i < 32; i++) {
-        if (tables[i].dll == d) {
+    for (int i = 0; i < 64; i++) {
+        if (tables[i].ex == ex) {
             t = &tables[i];
             break;
         }
-        if (!tables[i].dll) {
+        if (!tables[i].ex) {
             int cap = 64;
             t = &tables[i];
-            while (cap < d->count * 2) cap <<= 1;
+            while (cap < count * 2) cap <<= 1;
             t->slot = calloc((size_t)cap, sizeof(int));
             t->cap = cap;
-            for (int k = 0; k < d->count; k++) {
+            for (int k = 0; k < count; k++) {
                 uint32_t h;
-                if (!d->exports[k].name) continue;
-                h = hash(d->exports[k].name) & (uint32_t)(cap - 1);
+                if (!ex[k].name) continue;
+                h = hash(ex[k].name) & (uint32_t)(cap - 1);
                 while (t->slot[h]) h = (h + 1) & (uint32_t)(cap - 1);
                 t->slot[h] = k + 1;
             }
-            __atomic_store_n(&t->dll, d, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->ex, ex, __ATOMIC_RELEASE);
             break;
         }
     }
@@ -114,29 +115,37 @@ static xtable_t *table_of(const wdll_t *d) {
     return t;
 }
 
-void *builtin_proc(const wdll_t *d, const char *name, int ordinal) {
-    if (!d) return 0;
+static void *lookup(const wexport_t *ex, int count, const char *name, int ordinal) {
+    if (!ex || count <= 0) return 0;
     if (!name) {
-        for (int k = 0; k < d->count; k++)
-            if (d->exports[k].ordinal == ordinal) return d->exports[k].fn;
+        for (int k = 0; k < count; k++)
+            if (ex[k].ordinal == ordinal && ordinal) return ex[k].fn;
         return 0;
     }
     {
-        xtable_t *t = table_of(d);
+        xtable_t *t = table_of(ex, count);
         uint32_t h;
         if (!t) {
-            for (int k = 0; k < d->count; k++)
-                if (d->exports[k].name && !strcmp(d->exports[k].name, name)) return d->exports[k].fn;
+            for (int k = 0; k < count; k++)
+                if (ex[k].name && !strcmp(ex[k].name, name)) return ex[k].fn;
             return 0;
         }
         h = hash(name) & (uint32_t)(t->cap - 1);
         while (t->slot[h]) {
-            const wexport_t *e = &d->exports[t->slot[h] - 1];
+            const wexport_t *e = &ex[t->slot[h] - 1];
             if (!strcmp(e->name, name)) return e->fn;
             h = (h + 1) & (uint32_t)(t->cap - 1);
         }
     }
     return 0;
+}
+
+void *builtin_proc(const wdll_t *d, const char *name, int ordinal) {
+    void *p;
+    if (!d) return 0;
+    p = lookup(d->exports, d->count, name, ordinal);
+    if (!p && d->more) p = lookup(d->more, *d->nmore, name, ordinal);
+    return p;
 }
 
 /* DLLs a program may name but that ICDA has nothing of: loading one gives a

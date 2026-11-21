@@ -507,7 +507,11 @@ static const char *const system_dlls[] = {
     "wininet.dll", "winhttp.dll", "normaliz.dll", "wldap32.dll", "shlwapi.dll", "mswsock.dll", "wsock32.dll",
     "d3d9.dll", "d3d11.dll", "dxgi.dll", "d3dcompiler_47.dll", "glu32.dll", "msimg32.dll", "winspool.drv",
     "userenv.dll", "wtsapi32.dll", "rpcrt4.dll", "msvcp140.dll", "ntdll.dll", "avrt.dll", "mmdevapi.dll",
-    "propsys.dll", "shcore.dll", "dnsapi.dll", "credui.dll", "netapi32.dll", 0
+    "propsys.dll", "shcore.dll", "dnsapi.dll", "credui.dll", "netapi32.dll", "urlmon.dll", "ncrypt.dll",
+    "wintrust.dll", "msi.dll", "mpr.dll", "oleacc.dll", "sspicli.dll", "wevtapi.dll", "taskschd.dll", "dwrite.dll",
+    "d2d1.dll", "dcomp.dll", "uiautomationcore.dll", "ntdsapi.dll", "rstrtmgr.dll", "winsta.dll", "dhcpcsvc.dll",
+    "fwpuclnt.dll", "wlanapi.dll", "msimg32.dll", "usp10.dll", "imagehlp.dll", "dxva2.dll", "mf.dll", "mfplat.dll",
+    "mfreadwrite.dll", "d3d12.dll", "xinput1_2.dll", "xinput1_1.dll", "winusb.dll", "bluetoothapis.dll", 0
 };
 
 static int is_system_dll(const char *n) {
@@ -690,6 +694,81 @@ void *ld_resource(wmodule_t *m, const WCHAR *type, const WCHAR *name, DWORD *siz
     if (!data) return 0;
     if (size) *size = data[1];
     return m->base + data[0];
+}
+
+/* the names (or the types, with type 0) a module has resources of: cb gets
+ * each, an id as a small number or a string; it returns 0 to stop */
+int ld_enum_resources(wmodule_t *m, const WCHAR *type, int (*cb)(void *ctx, const WCHAR *name), void *ctx) {
+    nt_headers_t *nt;
+    uint8_t *rbase;
+    res_dir_t *d;
+    res_entry_t *e;
+    int n = 0;
+    if (!m || m->builtin) return 0;
+    nt = nt_of(m->base);
+    if (!nt->dir[DIR_RESOURCE].rva) return 0;
+    rbase = m->base + nt->dir[DIR_RESOURCE].rva;
+    d = (res_dir_t *)rbase;
+    if (type) {
+        d = res_find(rbase, d, type, 0);
+        if (!d) return 0;
+    }
+    e = (res_entry_t *)(d + 1);
+    for (int i = 0; i < d->nnamed + d->nids; i++) {
+        WCHAR name[256];
+        const WCHAR *arg;
+        if (e[i].name & 0x80000000) {
+            uint16_t *s = (uint16_t *)(rbase + (e[i].name & 0x7FFFFFFF));
+            int len = s[0] < 255 ? s[0] : 255;
+            memcpy(name, s + 1, (size_t)len * 2);
+            name[len] = 0;
+            arg = name;
+        } else {
+            arg = (const WCHAR *)(uintptr_t)(e[i].name & 0xFFFF);
+        }
+        n++;
+        if (!cb(ctx, arg)) break;
+    }
+    return n;
+}
+
+/* a resource of a PE file on disk, without loading it (version.dll's
+ * GetFileVersionInfo): a malloc'ed copy, 0 if none */
+void *pe_file_resource(const char *upath, const WCHAR *type, const WCHAR *name, DWORD *size) {
+    size_t fsize = 0;
+    uint8_t *file = read_file(upath, &fsize), *img = 0, *res;
+    nt_headers_t *nt;
+    section_t *sec;
+    void *out = 0;
+    if (!file) return 0;
+    if (file[0] != 'M' || file[1] != 'Z' || *(uint32_t *)(file + 0x3C) + sizeof(nt_headers_t) > fsize) goto done;
+    nt = (nt_headers_t *)(file + *(uint32_t *)(file + 0x3C));
+    if (nt->sig != 0x4550 || nt->magic != 0x20B || !nt->dir[DIR_RESOURCE].rva) goto done;
+    /* only the sections the resources are in, laid out as in memory */
+    img = calloc(1, nt->image_size);
+    if (!img) goto done;
+    sec = (section_t *)((uint8_t *)&nt->magic + nt->opt_size);
+    for (int i = 0; i < nt->nsections; i++) {
+        uint32_t n = sec[i].raw_size;
+        if (sec[i].va >= nt->image_size) continue;
+        if (sec[i].va + n > nt->image_size) n = nt->image_size - sec[i].va;
+        if (sec[i].raw_ptr && n && sec[i].raw_ptr + n <= fsize) memcpy(img + sec[i].va, file + sec[i].raw_ptr, n);
+    }
+    res = img + nt->dir[DIR_RESOURCE].rva;
+    {
+        res_dir_t *d = res_find(res, (res_dir_t *)res, type, 0);
+        uint32_t *data;
+        if (!d || !(d = res_find(res, d, name, 0))) goto done;
+        data = (uint32_t *)(void *)res_find(res, d, 0, 1);
+        if (!data || data[0] + data[1] > nt->image_size) goto done;
+        out = malloc(data[1] ? data[1] : 1);
+        memcpy(out, img + data[0], data[1]);
+        if (size) *size = data[1];
+    }
+done:
+    free(img);
+    free(file);
+    return out;
 }
 
 /* ---- the program ------------------------------------------------------------------------------ */
