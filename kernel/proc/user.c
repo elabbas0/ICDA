@@ -736,6 +736,17 @@ static int build_shebang_argv(const char *script_path,
     return 0;
 }
 
+/* "MZ", and at e_lfanew "PE\0\0": a Windows program (any machine; the layer
+ * says when it cannot run one) */
+int user_image_is_pe(const char *image, uint64_t size) {
+    uint32_t pe;
+    if (!image || size < 0x40 || image[0] != 'M' || image[1] != 'Z') return 0;
+    pe = (uint32_t)(uint8_t)image[0x3C] | (uint32_t)(uint8_t)image[0x3D] << 8 | (uint32_t)(uint8_t)image[0x3E] << 16 |
+         (uint32_t)(uint8_t)image[0x3F] << 24;
+    return pe >= 0x40 && (uint64_t)pe + 24 <= size && image[pe] == 'P' && image[pe + 1] == 'E' && image[pe + 2] == 0 &&
+           image[pe + 3] == 0;
+}
+
 static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *const extra_argv[],
                                   uint64_t *pid_out, uint64_t depth) {
     process_t *user_proc;
@@ -772,6 +783,35 @@ static int user_spawn_pathv_depth(const char *path, uint64_t extra_argc, char *c
             shebang_argv[shebang_argc++] = extra_argv[i];
         }
         return user_spawn_pathv_depth(interp_path, shebang_argc, shebang_argv, pid_out, depth + 1);
+    }
+
+    /* a Windows program: the Windows layer runs it, given its full path */
+    if (user_image_is_pe(image, image_size)) {
+        static char layer[512], exe[512];
+        char *argv2[USER_ARG_MAX];
+        uint64_t argc2 = 0, pid = 0;
+        const char *base = path;
+        process_t *q;
+        if (1 + extra_argc > USER_ARG_MAX) return -1;
+        exe[0] = 0;
+        if (path[0] != '/' && current_proc && current_proc->cwd && vfs_getcwd(current_proc->cwd, exe, sizeof(exe)) == 0) {
+            uint64_t n = cstr_len(exe);
+            if (n > 1 && n + 1 < sizeof(exe)) exe[n++] = '/', exe[n] = 0;
+        }
+        if (cstr_len(exe) + cstr_len(path) + 1 > sizeof(exe)) return -1;
+        copy_cstr(exe + cstr_len(exe), path, sizeof(exe) - cstr_len(exe));
+        copy_cstr(layer, USER_WIN_LAYER, sizeof(layer));
+        (void)lx_overlay_path(layer);
+        argv2[argc2++] = exe;
+        for (uint64_t i = 0; i < extra_argc; i++) argv2[argc2++] = extra_argv[i];
+        if (user_spawn_pathv_depth(layer, argc2, argv2, &pid, depth + 1) != 0) return -1;
+        /* named as the program it runs, not as the layer */
+        for (const char *c = path; *c; c++)
+            if (*c == '/') base = c + 1;
+        q = sched_find_process(pid);
+        if (q) copy_cstr(q->name, base, sizeof(q->name));
+        if (pid_out) *pid_out = pid;
+        return 0;
     }
 
     user_proc = proc_create_empty(PROCESS_USER);

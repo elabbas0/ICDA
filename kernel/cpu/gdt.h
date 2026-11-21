@@ -64,5 +64,9 @@ void tss_set_rsp0(uint64_t rsp0);
 void cpu_syscall_init(void);
 uint64_t cpu_fs_base(void);
 void cpu_set_fs_base(uint64_t base);
+/* the user's GS base (GS_BASE); the kernel's per-CPU block is in
+ * KERNEL_GS_BASE and only the syscall entry stub swaps them */
+uint64_t cpu_gs_base(void);
+void cpu_set_gs_base(uint64_t base);
 
 #endif

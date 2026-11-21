@@ -31,6 +31,12 @@ void gui_flush(void);
  * (a frame of a video or a web page under unchanged surroundings). */
 void gui_flush_rect(int x, int y, int w, int h);
 void gui_set_cursor(int shape);
+/* draw straight into the window manager's buffer (for a whole-window
+ * redraw each frame: no copy, and a flush says "everything") */
+void gui_use_shared_buffer(int on);
+/* key presses and releases as GUI_KEY_RAW events, and pointer lock (see
+ * GUI_MSG_INPUT_MODE) */
+void gui_set_input_mode(int raw_keys, int pointer_lock);
 /* the window's id (0: none), for /dev/dialog's window= */
 uint32_t gui_window_id(void);
 /* tells the window manager a dialog request was just made (it looks at once) */

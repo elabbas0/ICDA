@@ -1,0 +1,620 @@
+/* Threads, the TEB and PEB, TLS slots, handles and waitable objects.
+ *
+ * Each thread running Windows code has a TEB (thread environment block) at
+ * GS, as on Windows: programs read their stack bounds, TLS pointer and last
+ * error through gs:[...].  The kernel keeps each thread's GS base
+ * (arch_prctl ARCH_SET_GS).  Windows threads are POSIX threads underneath.
+ *
+ * Waits: one lock and one condition variable for every waitable object, so
+ * WaitForMultipleObjects looks at its objects under one lock; any change
+ * wakes all waiters, who look again.  Plenty for a game's few threads. */
+#define _GNU_SOURCE
+#include "win.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <time.h>
+
+#define ARCH_SET_GS 0x1001
+
+/* TEB offsets (x64) */
+#define TEB_EXCEPTION_LIST 0x00
+#define TEB_STACK_BASE     0x08
+#define TEB_STACK_LIMIT    0x10
+#define TEB_SELF           0x30
+#define TEB_PID            0x40
+#define TEB_TID            0x48
+#define TEB_TLS_POINTER    0x58
+#define TEB_PEB            0x60
+#define TEB_LAST_ERROR     0x68
+#define TEB_TLS_SLOTS      0x1480
+#define TEB_TLS_EXPANSION  0x1780
+#define TEB_OURS           0x1800      /* the wthread_t (past what Windows defines) */
+#define TEB_SIZE           0x2000
+
+struct wthread {
+    uint8_t              *teb;
+    pthread_t             pt;
+    DWORD                 tid;
+    int                   done;
+    DWORD                 exit_code;
+    LPTHREAD_START_ROUTINE start;
+    void                 *param;
+    int                   suspended;
+    int                   refs;       /* its handles, and itself while running */
+    void                **tls_blocks; /* a module's static TLS, by its index */
+};
+
+static uint8_t *peb;
+static pthread_key_t thread_key;
+
+void *peb_get(void) { return peb; }
+
+static uint8_t *teb_raw(void) {
+    uint8_t *t;
+    __asm__ volatile("mov %%gs:0x30, %0" : "=r"(t));
+    return t;
+}
+
+void *teb_current(void) { return teb_raw(); }
+
+wthread_t *thread_current(void) {
+    return (wthread_t *)pthread_getspecific(thread_key);
+}
+
+DWORD thread_id(void) { return (DWORD)syscall(SYS_gettid); }
+
+void wset_last_error(DWORD e) {
+    uint8_t *t = teb_raw();
+    if (t) *(DWORD *)(t + TEB_LAST_ERROR) = e;
+}
+
+DWORD wget_last_error(void) {
+    uint8_t *t = teb_raw();
+    return t ? *(DWORD *)(t + TEB_LAST_ERROR) : 0;
+}
+
+void *tls_slot_get(DWORD i) {
+    uint8_t *t = teb_raw();
+    if (i < 64) return ((void **)(t + TEB_TLS_SLOTS))[i];
+    if (i < 64 + 1024) {
+        void **x = *(void ***)(t + TEB_TLS_EXPANSION);
+        return x ? x[i - 64] : 0;
+    }
+    return 0;
+}
+
+void *teb_new(wthread_t *t, void *stack_base, void *stack_limit) {
+    uint8_t *teb = mmap(0, TEB_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (teb == MAP_FAILED) return 0;
+    *(void **)(teb + TEB_EXCEPTION_LIST) = (void *)-1;
+    *(void **)(teb + TEB_STACK_BASE) = stack_base;
+    *(void **)(teb + TEB_STACK_LIMIT) = stack_limit;
+    *(void **)(teb + TEB_SELF) = teb;
+    *(uint64_t *)(teb + TEB_PID) = (uint64_t)getpid();
+    *(uint64_t *)(teb + TEB_TID) = t ? t->tid : thread_id();
+    *(void **)(teb + TEB_PEB) = peb;
+    *(void **)(teb + TEB_OURS) = t;
+    *(void **)(teb + TEB_TLS_EXPANSION) = calloc(1024, sizeof(void *));
+    if (t) t->teb = teb;
+    if (syscall(SYS_arch_prctl, ARCH_SET_GS, teb) != 0) {
+        wlog("arch_prctl(ARCH_SET_GS) failed: Windows programs need it");
+        return 0;
+    }
+    pthread_setspecific(thread_key, t);
+    return teb;
+}
+
+/* ---- the PEB --------------------------------------------------------------------------
+ * Programs mostly ask the API, but some read the PEB: the image base, the
+ * process heap, the OS version, BeingDebugged, and the loader's lists. */
+
+typedef struct { uint16_t Length, MaximumLength; uint32_t pad; WCHAR *Buffer; } UNICODE_STRING64;
+
+static void peb_init(void) {
+    static uint8_t ldr[0x58];
+    static uint8_t params[0x400];
+    peb = mmap(0, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    /* PEB_LDR_DATA: Length, Initialized, and three empty circular lists */
+    *(uint32_t *)(ldr + 0) = sizeof(ldr);
+    ldr[4] = 1;
+    for (int i = 0; i < 3; i++) {
+        void **list = (void **)(ldr + 0x10 + i * 16);
+        list[0] = list;
+        list[1] = list;
+    }
+    *(void **)(peb + 0x18) = ldr;
+    *(void **)(peb + 0x20) = params;
+    *(uint32_t *)(peb + 0x118) = 10;      /* Windows 10 */
+    *(uint32_t *)(peb + 0x11C) = 0;
+    *(uint16_t *)(peb + 0x120) = 19045;
+    *(uint32_t *)(peb + 0x124) = 2;       /* VER_PLATFORM_WIN32_NT */
+    *(uint32_t *)(peb + 0xB8) = 4;        /* NumberOfProcessors, refreshed by GetSystemInfo */
+}
+
+void thread_main_init(void *stack_base, void *stack_limit) {
+    wthread_t *t = calloc(1, sizeof(*t));
+    pthread_key_create(&thread_key, 0);
+    peb_init();
+    t->tid = thread_id();
+    t->pt = pthread_self();
+    t->refs = 1;
+    if (!teb_new(t, stack_base, stack_limit)) wfatal("Windows layer", "This system cannot run Windows programs (no GS base).");
+}
+
+/* ---- handles -------------------------------------------------------------------------- */
+
+#define MAX_HANDLES 4096
+static whandle_t handles[MAX_HANDLES];
+static pthread_mutex_t hlock = PTHREAD_MUTEX_INITIALIZER;
+
+/* handle values: multiples of 4 from 0x40, as on Windows (0 and -1 are not handles) */
+static HANDLE h_of(int i) { return (HANDLE)(uintptr_t)(0x40 + 4 * i); }
+
+static int h_index(HANDLE h) {
+    uintptr_t v = (uintptr_t)h;
+    if (v < 0x40 || (v & 3) || (v - 0x40) / 4 >= MAX_HANDLES) return -1;
+    return (int)((v - 0x40) / 4);
+}
+
+HANDLE h_new(int kind, void *obj) {
+    pthread_mutex_lock(&hlock);
+    for (int i = 1; i < MAX_HANDLES; i++) {
+        if (handles[i].kind == H_FREE) {
+            handles[i].kind = kind;
+            handles[i].obj = obj;
+            handles[i].refs = 1;
+            pthread_mutex_unlock(&hlock);
+            return h_of(i);
+        }
+    }
+    pthread_mutex_unlock(&hlock);
+    return 0;
+}
+
+whandle_t *h_get(HANDLE h, int kind) {
+    int i = h_index(h);
+    if (i <= 0 || handles[i].kind == H_FREE || (kind && handles[i].kind != kind)) return 0;
+    return &handles[i];
+}
+
+void h_close(HANDLE h) {
+    int i = h_index(h);
+    if (i <= 0) return;
+    pthread_mutex_lock(&hlock);
+    handles[i].kind = H_FREE;
+    handles[i].obj = 0;
+    pthread_mutex_unlock(&hlock);
+}
+
+/* ---- waitable objects ---------------------------------------------------------------- */
+
+static pthread_mutex_t slock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t scond = PTHREAD_COND_INITIALIZER;
+
+void sync_lock(void) { pthread_mutex_lock(&slock); }
+void sync_unlock(void) { pthread_mutex_unlock(&slock); }
+void sync_broadcast(void) { pthread_cond_broadcast(&scond); }
+
+static struct timespec deadline;
+static __thread struct timespec my_deadline;
+
+int sync_wait_ms(DWORD ms) {
+    (void)deadline;
+    if (ms == INFINITE) return pthread_cond_wait(&scond, &slock);
+    return pthread_cond_timedwait(&scond, &slock, &my_deadline);
+}
+
+void sync_deadline(DWORD ms) {
+    clock_gettime(CLOCK_REALTIME, &my_deadline);
+    my_deadline.tv_sec += ms / 1000;
+    my_deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (my_deadline.tv_nsec >= 1000000000L) my_deadline.tv_sec++, my_deadline.tv_nsec -= 1000000000L;
+}
+
+typedef struct { int manual, signaled; } wevent_t;
+typedef struct { DWORD owner; int count; } wmutex_t;
+typedef struct { LONG count, max; } wsem_t;
+
+/* signaled (and taken, when consume): under the sync lock */
+int wobj_signaled(whandle_t *h, int consume) {
+    switch (h->kind) {
+    case H_EVENT: {
+        wevent_t *e = h->obj;
+        if (!e->signaled) return 0;
+        if (consume && !e->manual) e->signaled = 0;
+        return 1;
+    }
+    case H_MUTEX: {
+        wmutex_t *m = h->obj;
+        if (m->count && m->owner != thread_id()) return 0;
+        if (consume) m->owner = thread_id(), m->count++;
+        return 1;
+    }
+    case H_SEMAPHORE: {
+        wsem_t *s = h->obj;
+        if (s->count <= 0) return 0;
+        if (consume) s->count--;
+        return 1;
+    }
+    case H_THREAD:
+        return ((wthread_t *)h->obj)->done;
+    case H_PROCESS:
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+HANDLE WINAPI CreateEventW(void *sa, BOOL manual, BOOL initial, const WCHAR *name) {
+    wevent_t *e = calloc(1, sizeof(*e));
+    (void)sa, (void)name;
+    e->manual = manual;
+    e->signaled = initial;
+    return h_new(H_EVENT, e);
+}
+
+HANDLE WINAPI CreateEventA(void *sa, BOOL manual, BOOL initial, const char *name) {
+    (void)name;
+    return CreateEventW(sa, manual, initial, 0);
+}
+
+HANDLE WINAPI CreateEventExW(void *sa, const WCHAR *name, DWORD flags, DWORD access) {
+    (void)access;
+    return CreateEventW(sa, (flags & 1) != 0, (flags & 2) != 0, name);
+}
+
+BOOL WINAPI SetEvent(HANDLE h) {
+    whandle_t *w = h_get(h, H_EVENT);
+    if (!w) return FALSE;
+    sync_lock();
+    ((wevent_t *)w->obj)->signaled = 1;
+    sync_broadcast();
+    sync_unlock();
+    return TRUE;
+}
+
+BOOL WINAPI ResetEvent(HANDLE h) {
+    whandle_t *w = h_get(h, H_EVENT);
+    if (!w) return FALSE;
+    sync_lock();
+    ((wevent_t *)w->obj)->signaled = 0;
+    sync_unlock();
+    return TRUE;
+}
+
+BOOL WINAPI PulseEvent(HANDLE h) {
+    SetEvent(h);
+    return ResetEvent(h);
+}
+
+HANDLE WINAPI CreateMutexW(void *sa, BOOL owned, const WCHAR *name) {
+    wmutex_t *m = calloc(1, sizeof(*m));
+    (void)sa, (void)name;
+    if (owned) m->owner = thread_id(), m->count = 1;
+    return h_new(H_MUTEX, m);
+}
+
+HANDLE WINAPI CreateMutexA(void *sa, BOOL owned, const char *name) {
+    (void)name;
+    return CreateMutexW(sa, owned, 0);
+}
+
+BOOL WINAPI ReleaseMutex(HANDLE h) {
+    whandle_t *w = h_get(h, H_MUTEX);
+    wmutex_t *m;
+    if (!w) return FALSE;
+    m = w->obj;
+    sync_lock();
+    if (!m->count || m->owner != thread_id()) {
+        sync_unlock();
+        wset_last_error(288);   /* ERROR_NOT_OWNER */
+        return FALSE;
+    }
+    if (--m->count == 0) m->owner = 0;
+    sync_broadcast();
+    sync_unlock();
+    return TRUE;
+}
+
+HANDLE WINAPI CreateSemaphoreW(void *sa, LONG initial, LONG max, const WCHAR *name) {
+    wsem_t *s = calloc(1, sizeof(*s));
+    (void)sa, (void)name;
+    s->count = initial;
+    s->max = max;
+    return h_new(H_SEMAPHORE, s);
+}
+
+HANDLE WINAPI CreateSemaphoreA(void *sa, LONG initial, LONG max, const char *name) {
+    (void)name;
+    return CreateSemaphoreW(sa, initial, max, 0);
+}
+
+HANDLE WINAPI CreateSemaphoreExW(void *sa, LONG initial, LONG max, const WCHAR *name, DWORD flags, DWORD access) {
+    (void)flags, (void)access;
+    return CreateSemaphoreW(sa, initial, max, name);
+}
+
+BOOL WINAPI ReleaseSemaphore(HANDLE h, LONG n, LONG *prev) {
+    whandle_t *w = h_get(h, H_SEMAPHORE);
+    wsem_t *s;
+    if (!w) return FALSE;
+    s = w->obj;
+    sync_lock();
+    if (prev) *prev = s->count;
+    if (s->count + n > s->max) {
+        sync_unlock();
+        wset_last_error(298);   /* ERROR_TOO_MANY_POSTS */
+        return FALSE;
+    }
+    s->count += n;
+    sync_broadcast();
+    sync_unlock();
+    return TRUE;
+}
+
+DWORD WINAPI WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms) {
+    whandle_t *w[64];
+    if (n == 0 || n > 64) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+    for (DWORD i = 0; i < n; i++) {
+        w[i] = h_get(hs[i], 0);
+        if (!w[i]) {
+            wset_last_error(ERROR_INVALID_HANDLE);
+            return WAIT_FAILED;
+        }
+    }
+    if (ms != INFINITE) sync_deadline(ms);
+    sync_lock();
+    for (;;) {
+        if (all) {
+            DWORD ok = 0;
+            for (DWORD i = 0; i < n; i++) ok += wobj_signaled(w[i], 0) > 0;
+            if (ok == n) {
+                for (DWORD i = 0; i < n; i++) (void)wobj_signaled(w[i], 1);
+                sync_unlock();
+                return WAIT_OBJECT_0;
+            }
+        } else {
+            for (DWORD i = 0; i < n; i++) {
+                if (wobj_signaled(w[i], 1) > 0) {
+                    sync_unlock();
+                    return WAIT_OBJECT_0 + i;
+                }
+            }
+        }
+        if (ms == 0 || sync_wait_ms(ms) == ETIMEDOUT) {
+            sync_unlock();
+            return WAIT_TIMEOUT;
+        }
+    }
+}
+
+DWORD WINAPI WaitForSingleObject(HANDLE h, DWORD ms) {
+    if (h == (HANDLE)(intptr_t)-1) {           /* the process: never, in its own threads */
+        if (ms == INFINITE) for (;;) pause();
+        usleep((useconds_t)ms * 1000);
+        return WAIT_TIMEOUT;
+    }
+    return WaitForMultipleObjects(1, &h, FALSE, ms);
+}
+
+DWORD WINAPI WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alertable) {
+    (void)alertable;
+    return WaitForSingleObject(h, ms);
+}
+
+DWORD WINAPI WaitForMultipleObjectsEx(DWORD n, const HANDLE *hs, BOOL all, DWORD ms, BOOL alertable) {
+    (void)alertable;
+    return WaitForMultipleObjects(n, hs, all, ms);
+}
+
+DWORD WINAPI SignalObjectAndWait(HANDLE sig, HANDLE wait, DWORD ms, BOOL alertable) {
+    whandle_t *w = h_get(sig, 0);
+    (void)alertable;
+    if (w && w->kind == H_EVENT) SetEvent(sig);
+    else if (w && w->kind == H_MUTEX) ReleaseMutex(sig);
+    else if (w && w->kind == H_SEMAPHORE) ReleaseSemaphore(sig, 1, 0);
+    return WaitForSingleObject(wait, ms);
+}
+
+/* ---- threads -------------------------------------------------------------------------- */
+
+void tls_thread_blocks(wthread_t *t);       /* loader.c: the static TLS of every module */
+void crash_handler_thread(void);            /* main.c */
+
+static void thread_finish(wthread_t *t, DWORD code) {
+    ld_thread_attach(0);
+    sync_lock();
+    t->exit_code = code;
+    t->done = 1;
+    sync_broadcast();
+    sync_unlock();
+}
+
+static void *thread_trampoline(void *arg) {
+    wthread_t *t = arg;
+    pthread_attr_t a;
+    void *addr = 0;
+    size_t size = 0;
+    DWORD rc;
+    t->tid = thread_id();
+    if (pthread_getattr_np(pthread_self(), &a) == 0) {
+        pthread_attr_getstack(&a, &addr, &size);
+        pthread_attr_destroy(&a);
+    }
+    if (!teb_new(t, (uint8_t *)addr + size, addr)) return 0;
+    crash_handler_thread();
+    tls_thread_blocks(t);
+    sync_lock();
+    while (t->suspended) sync_wait_ms(INFINITE);
+    sync_unlock();
+    ld_thread_attach(1);
+    rc = t->start(t->param);
+    thread_finish(t, rc);
+    return 0;
+}
+
+/* a thread the layer made (sound, timers) that calls into the program */
+void win_thread_setup(void) {
+    wthread_t *t;
+    pthread_attr_t a;
+    void *addr = 0;
+    size_t size = 0;
+    if (thread_current()) return;
+    t = calloc(1, sizeof(*t));
+    t->tid = thread_id();
+    t->pt = pthread_self();
+    t->refs = 1;
+    if (pthread_getattr_np(pthread_self(), &a) == 0) {
+        pthread_attr_getstack(&a, &addr, &size);
+        pthread_attr_destroy(&a);
+    }
+    teb_new(t, (uint8_t *)addr + size, addr);
+    crash_handler_thread();
+    tls_thread_blocks(t);
+}
+
+HANDLE WINAPI CreateThread(void *sa, SIZE_T stack, LPTHREAD_START_ROUTINE start, void *param, DWORD flags, DWORD *tid) {
+    wthread_t *t = calloc(1, sizeof(*t));
+    pthread_attr_t a;
+    HANDLE h;
+    (void)sa;
+    if (!t) return 0;
+    t->start = start;
+    t->param = param;
+    t->suspended = (flags & 4) != 0;      /* CREATE_SUSPENDED */
+    t->refs = 2;
+    h = h_new(H_THREAD, t);
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, stack > (1 << 20) ? stack : (size_t)8 << 20);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t->pt, &a, thread_trampoline, t) != 0) {
+        pthread_attr_destroy(&a);
+        h_close(h);
+        free(t);
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    pthread_attr_destroy(&a);
+    /* its id is known once it runs: wait for that */
+    for (int i = 0; i < 2000 && !__atomic_load_n(&t->tid, __ATOMIC_ACQUIRE); i++) usleep(50);
+    if (tid) *tid = t->tid;
+    return h;
+}
+
+DWORD WINAPI ResumeThread(HANDLE h) {
+    whandle_t *w = h_get(h, H_THREAD);
+    DWORD was;
+    if (!w) return (DWORD)-1;
+    sync_lock();
+    was = (DWORD)((wthread_t *)w->obj)->suspended;
+    ((wthread_t *)w->obj)->suspended = 0;
+    sync_broadcast();
+    sync_unlock();
+    return was;
+}
+
+DWORD WINAPI SuspendThread(HANDLE h) {
+    (void)h;
+    return 0;
+}
+
+void WINAPI ExitThread(DWORD code) {
+    wthread_t *t = thread_current();
+    if (t) thread_finish(t, code);
+    pthread_exit(0);
+}
+
+BOOL WINAPI GetExitCodeThread(HANDLE h, DWORD *code) {
+    whandle_t *w = h_get(h, H_THREAD);
+    if (!w) return FALSE;
+    *code = ((wthread_t *)w->obj)->done ? ((wthread_t *)w->obj)->exit_code : 259;   /* STILL_ACTIVE */
+    return TRUE;
+}
+
+BOOL WINAPI TerminateThread(HANDLE h, DWORD code) {
+    (void)h, (void)code;
+    wset_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+DWORD WINAPI GetThreadId(HANDLE h) {
+    whandle_t *w;
+    if (h == (HANDLE)(intptr_t)-2) return thread_id();
+    w = h_get(h, H_THREAD);
+    return w ? ((wthread_t *)w->obj)->tid : 0;
+}
+
+DWORD WINAPI GetCurrentThreadId(void) { return thread_id(); }
+DWORD WINAPI GetCurrentProcessId(void) { return (DWORD)getpid(); }
+HANDLE WINAPI GetCurrentThread(void) { return (HANDLE)(intptr_t)-2; }
+HANDLE WINAPI GetCurrentProcess(void) { return (HANDLE)(intptr_t)-1; }
+
+/* ---- TLS slots ------------------------------------------------------------------------- */
+
+static uint8_t slot_used[64 + 1024];
+
+DWORD WINAPI TlsAlloc(void) {
+    pthread_mutex_lock(&hlock);
+    for (DWORD i = 0; i < sizeof(slot_used); i++) {
+        if (!slot_used[i]) {
+            slot_used[i] = 1;
+            pthread_mutex_unlock(&hlock);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&hlock);
+    return 0xFFFFFFFF;
+}
+
+BOOL WINAPI TlsFree(DWORD i) {
+    if (i >= sizeof(slot_used)) return FALSE;
+    slot_used[i] = 0;
+    return TRUE;
+}
+
+void *WINAPI TlsGetValue(DWORD i) {
+    wset_last_error(0);
+    return tls_slot_get(i);
+}
+
+BOOL WINAPI TlsSetValue(DWORD i, void *v) {
+    uint8_t *t = teb_raw();
+    if (i < 64) {
+        ((void **)(t + TEB_TLS_SLOTS))[i] = v;
+        return TRUE;
+    }
+    if (i < 64 + 1024) {
+        void **x = *(void ***)(t + TEB_TLS_EXPANSION);
+        if (x) x[i - 64] = v;
+        return x != 0;
+    }
+    return FALSE;
+}
+
+/* fiber-local storage: like TLS here (no fibers) */
+DWORD WINAPI FlsAlloc(void *cb) {
+    (void)cb;
+    return TlsAlloc();
+}
+BOOL WINAPI FlsFree(DWORD i) { return TlsFree(i); }
+void *WINAPI FlsGetValue(DWORD i) { return TlsGetValue(i); }
+BOOL WINAPI FlsSetValue(DWORD i, void *v) { return TlsSetValue(i, v); }
+
+/* the module TLS array (TEB.ThreadLocalStoragePointer) */
+void teb_set_tls_pointer(void **blocks) {
+    *(void ***)(teb_raw() + TEB_TLS_POINTER) = blocks;
+}
+
+void **thread_tls_blocks(wthread_t *t) { return t ? t->tls_blocks : 0; }
+void thread_set_tls_blocks(wthread_t *t, void **b) {
+    if (t) t->tls_blocks = b;
+}

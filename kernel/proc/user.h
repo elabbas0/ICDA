@@ -6,6 +6,10 @@
 
 #define USER_TEXT_BASE  0x0000008000400000ULL
 
+/* A Windows program (a PE image): the Windows layer, a program of the Linux
+ * root, runs it the way an interpreter runs a script (userspace/winlayer) */
+#define USER_WIN_LAYER "/usr/bin/icda-win"
+int user_image_is_pe(const char *image, uint64_t size);
 int user_run_path(const char *path);
 int user_run_path_args(const char *path, const char *argline);
 int user_spawn_path(const char *path, uint64_t *pid_out);

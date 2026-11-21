@@ -148,6 +148,9 @@ typedef struct thread {
     /* handling a device interrupt: the thread it interrupted keeps the mark
      * when the interrupt switches threads (swap waits for a thread) */
     int              in_irq;
+    /* the user GS base (arch_prctl ARCH_SET_GS): Windows programs find their
+     * thread block through GS */
+    uint64_t         gs_base;
 } thread_t;
 
 #endif

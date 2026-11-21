@@ -2507,6 +2507,7 @@ static void lx_fork_child_start(void) {
     pf_set_current_as(p->addr_space);
     tss_set_rsp0(t->user_entry_stack_top ? t->user_entry_stack_top : t->kernel_stack_top);
     cpu_set_fs_base(t->fs_base);
+    cpu_set_gs_base(t->gs_base);
     bkl_exit();
     lx_resume_user(&frame);
 }
@@ -2581,6 +2582,7 @@ static uint64_t sys_clone_thread(struct registers *regs, uint64_t flags, uint64_
     t->lx_frame = frame;
     t->lx_sigmask = sched_current_thread()->lx_sigmask;
     t->fs_base = (flags & 0x80000) ? tls : cpu_fs_base();           /* CLONE_SETTLS */
+    t->gs_base = cpu_gs_base();
     t->clear_tid = (flags & 0x200000) ? child_tid : 0;              /* CLONE_CHILD_CLEARTID */
     tid = (int32_t)lx_tid(t);
     if ((flags & 0x100000) && parent_tid) (void)copy_to_user((void *)parent_tid, &tid, 4);  /* CLONE_PARENT_SETTID */
@@ -2803,6 +2805,7 @@ static uint64_t sys_fork(struct registers *regs, uint64_t flags, uint64_t new_sp
     thread->lx_frame = frame;
     thread->lx_sigmask = sched_current_thread()->lx_sigmask;
     thread->fs_base = cpu_fs_base();
+    thread->gs_base = cpu_gs_base();
     if ((flags & 0x01000000) && child_tid) { /* CLONE_CHILD_SETTID */
         uint64_t phys;
         (void)vmm_cow_break(child->addr_space, child_tid);
@@ -2850,6 +2853,7 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     uint64_t used = 0, size = 0, rip = 0, rsp = 0;
     int64_t argc, envc, rc = 0;
     const char *image = 0;
+    const char *winexe = 0;             /* a Windows program the layer is to run: the process is named after it */
     addr_space_t *old_as;
     int old_pers;
     void *old_vmas;
@@ -2926,6 +2930,27 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
             kstrcpy(path, interp, LX_PATH_MAX);
             continue;
         }
+        if (user_image_is_pe(image, size) && depth < 4) {
+            /* a Windows program: the Windows layer runs it (argv: the layer, the program, its arguments) */
+            char layer[LX_PATH_MAX];
+            kstrcpy(layer, USER_WIN_LAYER, LX_PATH_MAX);
+            (void)lx_overlay_path(layer);
+            if ((uint64_t)argc + 1 > LX_ARGV_MAX || used + kstrlen(path) + kstrlen(layer) + 2 > LX_ARG_BYTES + 1024) {
+                rc = -7;
+                goto out;
+            }
+            for (int64_t k = argc; k >= 1; k--) argv[k + 1] = argv[k];
+            kcopy(buf + used, path, kstrlen(path) + 1);
+            argv[1] = buf + used;
+            winexe = argv[1];
+            used += kstrlen(path) + 1;
+            kcopy(buf + used, layer, kstrlen(layer) + 1);
+            argv[0] = buf + used;
+            used += kstrlen(layer) + 1;
+            argc++;
+            kstrcpy(path, layer, LX_PATH_MAX);
+            continue;
+        }
         break;
     }
     old_as = p->addr_space;
@@ -2955,8 +2980,8 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     p->linux_mmap_next = 0;
     lxvm_free_list(old_vmas);
     {
-        const char *base = path;
-        for (const char *c = path; *c; c++) {
+        const char *named = winexe ? winexe : path, *base = named;
+        for (const char *c = named; *c; c++) {
             if (*c == '/') base = c + 1;
         }
         kstrcpy(p->name, base, sizeof(p->name));
@@ -2977,6 +3002,8 @@ static uint64_t sys_execve(struct registers *regs, const char *upath, const uint
     s->clear_tid = 0;
     t->fs_base = 0;
     cpu_set_fs_base(0);
+    t->gs_base = 0;
+    cpu_set_gs_base(0);
     kzero(regs, sizeof(*regs) - 5 * 8);
     regs->rip = rip;
     regs->rsp = rsp;
@@ -3200,6 +3227,16 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             }
             if (a0 == 0x1003) {
                 uint64_t base = cpu_fs_base();
+                return copy_to_user((void *)a1, &base, 8) ? ERR(EFAULT) : 0;
+            }
+            if (a0 == 0x1001) {                                     /* ARCH_SET_GS: the Windows layer's TEB */
+                if (a1 >= 0x0000800000000000ULL) return ERR(EPERM);
+                sched_current_thread()->gs_base = a1;
+                cpu_set_gs_base(a1);
+                return 0;
+            }
+            if (a0 == 0x1004) {                                     /* ARCH_GET_GS */
+                uint64_t base = cpu_gs_base();
                 return copy_to_user((void *)a1, &base, 8) ? ERR(EFAULT) : 0;
             }
             return ERR(EINVAL);

@@ -113,3 +113,11 @@ uint64_t cpu_fs_base(void) {
 void cpu_set_fs_base(uint64_t base) {
     wrmsr64(0xC0000100U, base);
 }
+
+uint64_t cpu_gs_base(void) {
+    return rdmsr64(0xC0000101U);
+}
+
+void cpu_set_gs_base(uint64_t base) {
+    wrmsr64(0xC0000101U, base);
+}

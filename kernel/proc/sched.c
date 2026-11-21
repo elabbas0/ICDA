@@ -604,6 +604,8 @@ static void schedule_inner(int force) {
 
     prev->fs_base = cpu_fs_base();
     if (next->fs_base != prev->fs_base) cpu_set_fs_base(next->fs_base);
+    prev->gs_base = cpu_gs_base();
+    if (next->gs_base != prev->gs_base) cpu_set_gs_base(next->gs_base);
     fpu_switch(prev->fpu_state, next->fpu_state);
     switch_context(prev, next);
 }

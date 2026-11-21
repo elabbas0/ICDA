@@ -30,8 +30,14 @@ static void gui_copy_pixels(uint32_t *dst, const uint32_t *src, uint64_t count) 
     for (uint64_t i = 0; i < count; i++) dst[i] = src[i];
 }
 
+static int gui_direct = 0;     /* drawing straight into the WM's buffer (games, video) */
+
 static void gui_use_pixel_buffer(void) {
     uint64_t pixels = (uint64_t)win_w * (uint64_t)win_h * (uint64_t)(win_scale * win_scale);
+    if (gui_direct) {
+        win_pixels = win_shm_pixels;
+        return;
+    }
     if (pixels <= GUI_STAGING_PIXELS) {
         win_pixels = gui_staging;
         if (win_shm_pixels) gui_copy_pixels(win_pixels, win_shm_pixels, pixels);
@@ -240,6 +246,24 @@ void gui_set_cursor(int shape) {
     msg.type = GUI_MSG_SET_CURSOR;
     msg.window_id = win_id;
     msg.cursor.shape = (uint8_t)shape;
+    icda_msg_send(win_reply_queue, &msg);
+}
+
+/* For a program that redraws the whole window each frame (a game): it draws
+ * into the WM's buffer itself, so a flush is a message and no copy. */
+void gui_use_shared_buffer(int on) {
+    gui_direct = on ? 1 : 0;
+    if (win_shm_pixels) gui_use_pixel_buffer();
+}
+
+void gui_set_input_mode(int raw_keys, int pointer_lock) {
+    gui_msg_t msg;
+    if (!win_reply_queue) return;
+    for (int i = 0; i < 64; i++) ((uint8_t*)&msg)[i] = 0;
+    msg.type = GUI_MSG_INPUT_MODE;
+    msg.window_id = win_id;
+    msg.input_mode.raw_keys = raw_keys ? 1 : 0;
+    msg.input_mode.pointer_lock = pointer_lock ? 1 : 0;
     icda_msg_send(win_reply_queue, &msg);
 }
 
