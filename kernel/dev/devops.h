@@ -79,4 +79,7 @@ static inline const dev_calls_t *dev_fb(void) {
 
 int dev_populate(void);
 
+/* the process that has the screen (the desktop), 0 if none */
+uint64_t devnodes_fb_owner(void);
+
 #endif

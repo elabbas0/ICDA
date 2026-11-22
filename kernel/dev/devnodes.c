@@ -231,6 +231,12 @@ static uint64_t dev_fb_claim_map(void *info) {
     return fb_virt + page_offset;
 }
 
+/* the process that has the screen: the desktop (0: none) */
+uint64_t devnodes_fb_owner(void) {
+    fb_release_if_owner_gone();
+    return fb_claimed ? fb_claim_pid : 0;
+}
+
 static int dev_fb_is_claimed(void) {
     fb_release_if_owner_gone();
     return fb_claimed ? 1 : 0;

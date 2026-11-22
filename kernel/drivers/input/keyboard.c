@@ -176,8 +176,53 @@ static void push_csi(const char *tail) {
     sched_wake_input_waiters();
 }
 
+/* Every key's press and release as it came, for the desktop to pass on to
+ * the window that asks (games): the set-1 code, | 0x100 for an E0-prefixed
+ * key, | 0x200 when pressed.  The desktop empties it all the time; full (no
+ * desktop yet), new keys are dropped, as in the character queue, so only
+ * the reader moves the tail. */
+#define RAW_KEYS 256
+static volatile uint16_t raw_keys[RAW_KEYS];
+static volatile uint32_t raw_head, raw_tail;
+static int raw_e0, raw_skip;
+
+static void raw_record(uint8_t sc) {
+    uint32_t next;
+    if (raw_skip) {
+        raw_skip--;
+        return;
+    }
+    if (sc == 0xE1) {            /* Pause: E1 1D 45 E1 9D C5, a key of no use here */
+        raw_skip = 5;
+        return;
+    }
+    if (sc == 0xE0) {
+        raw_e0 = 1;
+        return;
+    }
+    next = (raw_head + 1) % RAW_KEYS;
+    if (next != raw_tail) {
+        raw_keys[raw_head] = (uint16_t)((sc & 0x7F) | (raw_e0 ? 0x100 : 0) | ((sc & 0x80) ? 0 : 0x200));
+        raw_head = next;
+    }
+    raw_e0 = 0;
+}
+
+static void keyboard_poll_hardware(void);
+
+int keyboard_read_raw(void) {
+    int v;
+    keyboard_poll_hardware();
+    if (raw_tail == raw_head) return -1;
+    v = raw_keys[raw_tail];
+    raw_tail = (raw_tail + 1) % RAW_KEYS;
+    return v;
+}
+
 static void keyboard_handle_scancode(uint8_t scancode) {
     char c;
+
+    raw_record(scancode);
 
     if (scancode == 0xE0 || scancode == 0xE1) {
         extended_prefix = 1;

@@ -2091,30 +2091,44 @@ static uint64_t sys_clock_gettime(uint64_t clk, uint64_t *uts) {
     return copy_to_user(uts, ts, sizeof(ts)) ? ERR(EFAULT) : 0;
 }
 
-static uint64_t sleep_ticks(uint64_t ticks) {
+/* sleeps until the monotonic clock reaches the deadline, never less: a
+ * sleep of n scheduler ticks (10 ms) begins part way into the current one,
+ * so counted in ticks alone it could end up to a tick early */
+static uint64_t sleep_until_ns(uint64_t deadline_ns) {
     struct lx_state *s = lx_get(sched_current_process());
-    uint64_t end = sched_ticks() + ticks;
-    while (sched_ticks() < end) {
+    for (;;) {
+        uint64_t now = lx_mono_ns(), left;
+        if (now >= deadline_ns) return 0;
         if (signal_pending(s)) return ERR(EINTR);
-        sched_sleep(end - sched_ticks() > 10 ? 10 : end - sched_ticks());
+        left = (deadline_ns - now + 9999999ULL) / 10000000ULL;
+        sched_sleep(left > 10 ? 10 : left);
     }
-    return 0;
+}
+
+/* a timespec as nanoseconds (seconds capped at about 126 years) */
+static uint64_t ts_ns(const uint64_t *ts) {
+    return (ts[0] > 4000000000ULL ? 4000000000ULL : ts[0]) * 1000000000ULL + ts[1];
 }
 
 static uint64_t sys_nanosleep(const uint64_t *ureq) {
     uint64_t req[2];
     if (copy_from_user(req, ureq, sizeof(req)) != 0) return ERR(EFAULT);
     if (req[1] >= 1000000000ULL) return ERR(EINVAL);
-    return sleep_ticks(req[0] * 100 + (req[1] + 9999999ULL) / 10000000ULL);
+    return sleep_until_ns(lx_mono_ns() + ts_ns(req));
 }
 
 static uint64_t sys_clock_nanosleep(uint64_t clk, uint64_t flags, const uint64_t *ureq) {
-    uint64_t req[2], now, target;
+    uint64_t req[2], when;
     if (!(flags & 1)) return sys_nanosleep(ureq);
     if (copy_from_user(req, ureq, sizeof(req)) != 0) return ERR(EFAULT);
-    now = (clk == 0 ? now_epoch() * 100 : sched_ticks());
-    target = req[0] * 100 + req[1] / 10000000ULL;
-    return target > now ? sleep_ticks(target - now) : 0;
+    if (req[1] >= 1000000000ULL) return ERR(EINVAL);
+    when = ts_ns(req);
+    if (clk == 0 || clk == 5 || clk == 8 || clk == 11) {
+        /* a wall-clock deadline: as a monotonic one */
+        uint64_t real = lx_realtime_ns();
+        return when > real ? sleep_until_ns(lx_mono_ns() + (when - real)) : 0;
+    }
+    return sleep_until_ns(when);
 }
 
 static uint64_t sys_uname(char *ubuf) {
@@ -2308,7 +2322,8 @@ static int default_ignored(int sig) {
 
 static uint8_t fx_area[512] __attribute__((aligned(16)));
 
-static int build_sigframe(struct registers *regs, int sig, lx_sigaction_t *sa, uint64_t old_mask) {
+/* code and addr: the siginfo's si_code and si_addr (a fault's) */
+static int build_sigframe(struct registers *regs, int sig, lx_sigaction_t *sa, uint64_t old_mask, int code, uint64_t addr) {
     uint64_t sp = regs->rsp - 128, fx, info, uc;
     uint64_t g[32];
     uint64_t hdr[5];
@@ -2324,6 +2339,8 @@ static int build_sigframe(struct registers *regs, int sig, lx_sigaction_t *sa, u
     if (copy_to_user((void *)fx, fx_area, 512) != 0) return -1;
     kzero(si, sizeof(si));
     *(int32_t *)si = sig;
+    *(int32_t *)(si + 8) = code;
+    *(uint64_t *)(si + 16) = addr;
     if (copy_to_user((void *)info, si, sizeof(si)) != 0) return -1;
     kzero(hdr, sizeof(hdr));
     if (copy_to_user((void *)uc, hdr, sizeof(hdr)) != 0) return -1;
@@ -2424,7 +2441,7 @@ static void deliver_signals(struct registers *regs, int after_call) {
          * before the call, not the one the call waited with */
         old_mask = t->lx_in_suspend ? t->lx_suspend_mask : t->lx_sigmask;
         t->lx_in_suspend = 0;
-        if (build_sigframe(regs, sig, sa, old_mask) != 0) {
+        if (build_sigframe(regs, sig, sa, old_mask, 0, 0) != 0) {
             s->term_sig = 11;
             user_request_exit_to_kernel(128 + 11);
             return;
@@ -2639,11 +2656,14 @@ static int futex_cas(uint64_t uaddr, uint32_t old, uint32_t nv, uint32_t *seen) 
     return 0;
 }
 
-static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out) {
+/* a futex timeout: the ticks to wait, and the deadline on the monotonic
+ * clock (ticks counted from part way into the current one can run out
+ * before it: the wait goes on until the deadline, never times out early) */
+static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out, uint64_t *deadline) {
     uint64_t ts[2], now_ns, when_ns;
     if (copy_from_user(ts, (const void *)uts, sizeof(ts)) != 0) return ERR(EFAULT);
     if (ts[1] >= 1000000000ULL) return ERR(EINVAL);
-    when_ns = ts[0] * 1000000000ULL + ts[1];
+    when_ns = ts_ns(ts);
     if (abs) {
         /* Absolute deadlines use the same clock as clock_gettime/vDSO.
          * Raw TSC-based monotonic time need not start at the PIT tick zero. */
@@ -2651,6 +2671,7 @@ static int64_t futex_ticks(uint64_t uts, int abs, int realtime, uint64_t *out) {
         if (when_ns <= now_ns) return ERR(ETIMEDOUT);
         when_ns -= now_ns;
     }
+    *deadline = lx_mono_ns() + when_ns;
     *out = (when_ns + 9999999ULL) / 10000000ULL;
     if (!*out) *out = 1;
     return 0;
@@ -2664,18 +2685,28 @@ static uint64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t ut
     case 0:     /* FUTEX_WAIT (relative timeout) */
     case 9: {   /* FUTEX_WAIT_BITSET (absolute timeout) */
         int32_t cur;
-        uint64_t ticks = 0;
+        uint64_t ticks = 0, deadline = 0;
         if (cmd == 9 && !val3) return ERR(EINVAL);
         if (utime) {
-            int64_t r = futex_ticks(utime, cmd == 9, realtime, &ticks);
+            int64_t r = futex_ticks(utime, cmd == 9, realtime, &ticks, &deadline);
             if (r < 0) return (uint64_t)r;
         }
         if (copy_from_user(&cur, (const void *)uaddr, 4) != 0) return ERR(EFAULT);
         if (cur != (int32_t)val) return ERR(EAGAIN);
         if (signal_pending(s)) return ERR(EINTR);
-        if (sched_futex_wait(uaddr, ticks)) return 0;
-        if (signal_pending(s)) return ERR(EINTR);
-        return utime ? ERR(ETIMEDOUT) : 0;
+        for (;;) {
+            uint64_t now;
+            if (sched_futex_wait(uaddr, ticks)) return 0;
+            if (signal_pending(s)) return ERR(EINTR);
+            if (!utime) return 0;
+            now = lx_mono_ns();
+            if (now >= deadline) return ERR(ETIMEDOUT);
+            /* the ticks ran out before the deadline: wait out the rest,
+             * unless the word has changed meanwhile */
+            if (copy_from_user(&cur, (const void *)uaddr, 4) != 0) return ERR(EFAULT);
+            if (cur != (int32_t)val) return 0;
+            ticks = (deadline - now + 9999999ULL) / 10000000ULL;
+        }
     }
     case 1:     /* FUTEX_WAKE */
     case 10:    /* FUTEX_WAKE_BITSET */
@@ -2712,11 +2743,10 @@ static uint64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t ut
          * for the lock again.  musl's PTHREAD_PRIO_INHERIT mutexes use this
          * (PulseAudio's do; a failing lock is an assertion there). */
         uint32_t tid = (uint32_t)lx_tid(sched_current_thread()) & 0x3FFFFFFFU;
-        uint64_t ticks = 0;
+        uint64_t ticks = 0, deadline = 0;
         if (cmd == 6 && utime) {
-            int64_t r = futex_ticks(utime, 1, 1, &ticks);
+            int64_t r = futex_ticks(utime, 1, 1, &ticks, &deadline);
             if (r < 0) return (uint64_t)r;
-            if (!ticks) ticks = 1;
         }
         for (;;) {
             uint32_t cur, seen;
@@ -2734,7 +2764,11 @@ static uint64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t ut
                 if (seen != cur) continue;
             }
             if (signal_pending(s)) return ERR(EINTR);
-            if (!sched_futex_wait(uaddr, ticks) && utime) return ERR(ETIMEDOUT);
+            if (!sched_futex_wait(uaddr, ticks) && utime) {
+                uint64_t now = lx_mono_ns();
+                if (now >= deadline) return ERR(ETIMEDOUT);
+                ticks = (deadline - now + 9999999ULL) / 10000000ULL;
+            }
         }
     }
     case 7: {   /* FUTEX_UNLOCK_PI */
@@ -3317,6 +3351,8 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             return 8;
         }
         case 203: case 142: case 144: return 0;       /* sched_setaffinity / setparam / setscheduler */
+        case 140: return 20;                          /* getpriority: nice 0 (the call gives 20 - nice) */
+        case 141: return 0;                           /* setpriority: every thread is equal here */
         case 143: return a1 ? zero_user((void *)a1, 4) : 0;   /* sched_getparam */
         case 145: return 0;                           /* sched_getscheduler: SCHED_OTHER */
         case 146: case 147: return 0;                 /* sched_get_priority_max / min */
@@ -3499,7 +3535,7 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     struct lx_state *s;
     lx_sigaction_t *sa;
     char where[128];
-    (void)addr;
+    int code;
     if (!p || !t) return 0;
     lxvm_describe(p, regs->rip, where, sizeof(where));
     serial_write("lx: ");
@@ -3515,7 +3551,16 @@ int lx_fault_signal(struct registers *regs, int sig, uint64_t addr) {
     if (!p->linux_personality || !(s = p->lx)) return 0;
     sa = &s->sa[sig];
     if (sa->handler <= 1 || (t->lx_sigmask & (1ULL << (sig - 1)))) return 0;
-    if (build_sigframe(regs, sig, sa, t->lx_sigmask) != 0) return 0;
+    /* what siginfo says: a bad page's address (SEGV_MAPERR: nothing there,
+     * SEGV_ACCERR: not allowed), else the instruction's (SI_KERNEL for a
+     * protection fault or a breakpoint, as Linux gives) */
+    if (sig == 11 && addr) {
+        code = (regs->err_code & 1) ? 2 : 1;
+    } else {
+        code = sig == 4 ? 2 : sig == 8 ? 1 : sig == 7 ? 2 : 0x80;   /* ILL_ILLOPN, FPE_INTDIV, BUS_ADRERR */
+        addr = sig == 11 || sig == 5 ? 0 : regs->rip;
+    }
+    if (build_sigframe(regs, sig, sa, t->lx_sigmask, code, addr) != 0) return 0;
     t->lx_sigmask |= sa->mask;
     if (!(sa->flags & SA_NODEFER)) t->lx_sigmask |= 1ULL << (sig - 1);
     if (sa->flags & SA_RESETHAND) sa->handler = 0;

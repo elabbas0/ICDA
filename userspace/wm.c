@@ -79,6 +79,8 @@ typedef struct {
     int       pointer_in;     
     char      title[32];
     uint32_t  pid;            /* the program's (0: it did not say) */
+    uint8_t   raw_keys;       /* GUI_MSG_INPUT_MODE: key presses and releases too */
+    uint8_t   pointer_lock;   /* GUI_MSG_INPUT_MODE: relative mouse motion, pointer hidden */
 } wm_window_t;
 
 static wm_window_t windows[MAX_WINDOWS];
@@ -586,8 +588,14 @@ static uint32_t blend_over(uint32_t dst, uint32_t src, int alpha) {
 
 static int cur_save_x, cur_save_y, cur_save_w, cur_save_h;
 
+static int pointer_hidden;       /* a game has the pointer locked */
+
 static void draw_cursor_into_bb(int w, int h, int mx, int my) {
     const cur_sprite_t *s = &cur_sprites[cur_shape];
+    if (pointer_hidden) {
+        cur_save_w = 0;
+        return;
+    }
     int k = wm_scale;
     int ox = (mx - s->hx) * k, oy = (my - s->hy) * k;
     int x0 = ox < 0 ? 0 : ox, y0 = oy < 0 ? 0 : oy;
@@ -3200,6 +3208,19 @@ static int program_stopped(uint32_t pid, char *label, int cap) {
     return found;
 }
 
+/* A program that ended without closing its windows (a Linux or Windows
+ * program that crashed, or exited with its window open): the kernel sends
+ * no word of it, so once a second each window's program is looked for. */
+static void close_orphan_windows(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        wm_window_t *win = &windows[i];
+        icda_proc_info_t pi;
+        if (!win->valid || win->closing || !win->pid) continue;
+        if ((int64_t)icda_proc_info(win->pid, &pi) < 0 || pi.state >= 5)    /* gone, exited or reaped */
+            start_close(win);
+    }
+}
+
 static ic_rect_t dialog_rect_of(uint32_t window_id) {
     int slot = window_id ? find_window_by_id(window_id) : -1;
     ic_rect_t content = slot >= 0 ? ic_rect_make(windows[slot].x, windows[slot].y, windows[slot].w, windows[slot].h)
@@ -3805,6 +3826,83 @@ static void sc_chord(uint8_t mods, uint8_t key) {
     if (a >= 0) sc_run(sc_actions[a].id);
 }
 
+/* The focused window, when it gets input as a game asks it (raw keys,
+ * locked pointer): not while the desktop has something open over it. */
+static wm_window_t *game_window(void) {
+    wm_window_t *w;
+    if (focused_window_idx < 0) return 0;
+    w = &windows[focused_window_idx];
+    if (!w->valid || w->minimized || w->closing || w->anim_kind) return 0;
+    if (launcher_open || wifi_open || panel_open || ctx_open || props_open || overview_open || wm_ai_is_open()) return 0;
+    if (wm_dialog_has(w->id) || wm_dialog_has(0)) return 0;
+    return w;
+}
+
+/* key presses and releases, for the window that asked for them */
+static void pump_raw_keys(void) {
+    static int announced;
+    long ev;
+    int n = 0;
+    while (n++ < 64 && (ev = icda_input_read_keys()) >= 0) {
+        wm_window_t *w = game_window();
+        gui_msg_t m;
+        if (!announced) {
+            static const char msg[] = "wm: key presses and releases arriving\n";
+            announced = 1;
+            icda_write_file("/dev/serial", msg, sizeof msg - 1);
+        }
+        if (!w || !w->raw_keys) continue;
+        clear_msg(&m);
+        m.type = GUI_MSG_KEY_EVENT;
+        m.window_id = w->id;
+        m.key.keycode = GUI_KEY_RAW | (uint32_t)(ev & 0x1FF);
+        m.key.pressed = (ev & 0x200) ? 1 : 0;
+        send_maybe(w->app_queue_handle, &m);
+    }
+}
+
+/* the mouse's motion, for a window that locked the pointer: 1 if it took it */
+static int abs_last_x = -1, abs_last_y = -1;
+
+static int locked_mouse(const icda_mouse_event_t *ev) {
+    wm_window_t *w = game_window();
+    gui_msg_t m;
+    int dx, dy;
+    if (!w || !w->pointer_lock) {
+        abs_last_x = abs_last_y = -1;
+        return 0;
+    }
+    if (ev->absolute) {
+        /* a tablet (as in a virtual machine): the motion is the change */
+        dx = abs_last_x < 0 ? 0 : (int)ev->abs_x - abs_last_x;
+        dy = abs_last_y < 0 ? 0 : (int)ev->abs_y - abs_last_y;
+        abs_last_x = (int)ev->abs_x;
+        abs_last_y = (int)ev->abs_y;
+        /* in device units of 0..32767 for some tablets: to screen pixels */
+        if (fb_info.width > 0 && (int)ev->abs_x > (int)fb_info.width) {
+            dx = dx * (int)fb_info.width / 32768;
+            dy = dy * (int)fb_info.height / 32768;
+        }
+    } else {
+        dx = ev->dx;
+        dy = ev->dy;
+    }
+    clear_msg(&m);
+    m.type = GUI_MSG_MOUSE_EVENT;
+    m.window_id = w->id;
+    m.mouse.x = dx;
+    m.mouse.y = dy;
+    m.mouse.buttons = ev->buttons;
+    m.mouse.wheel = (int8_t)ev->dz;
+    m.mouse.relative = 1;
+    send_maybe(w->app_queue_handle, &m);
+    mouse_buttons = ev->buttons;
+    /* the pointer waits in the middle of the window, out of sight */
+    mouse_x = w->x + w->w / 2;
+    mouse_y = w->y + w->h / 2;
+    return 1;
+}
+
 static void handle_key(long key) {
     static int esc_swallow = 0;
     static int chord_state = 0;     /* 1 waiting for modifiers, 2 for the key */
@@ -4030,6 +4128,7 @@ int main(int argc, char **argv) {
         if (now - settings_last_reload >= 100) {
             int wch;
             settings_last_reload = now;
+            close_orphan_windows();
             settings_reload();
             clock_refresh();
             /* Wi-Fi status: every 3 s for the taskbar icon, every second
@@ -4060,6 +4159,20 @@ int main(int argc, char **argv) {
                 }
             } else if (msg.type == GUI_MSG_DIALOG) {
                 dialog_kick = 1;
+            } else if (msg.type == GUI_MSG_INPUT_MODE) {
+                int slot = find_window_by_id(msg.window_id);
+                if (slot != -1) {
+                    char line[80], n[12];
+                    windows[slot].raw_keys = msg.input_mode.raw_keys ? 1 : 0;
+                    windows[slot].pointer_lock = msg.input_mode.pointer_lock ? 1 : 0;
+                    ic_uint_to_str((uint64_t)msg.window_id, n, sizeof n);
+                    line[0] = 0;
+                    ic_strlcat(line, "wm: window ", sizeof line);
+                    ic_strlcat(line, n, sizeof line);
+                    ic_strlcat(line, windows[slot].raw_keys ? ": key releases on" : ": key releases off", sizeof line);
+                    ic_strlcat(line, windows[slot].pointer_lock ? ", pointer locked\n" : ", pointer free\n", sizeof line);
+                    icda_write_file("/dev/serial", line, ic_strlen(line));
+                }
             } else if (msg.type == GUI_MSG_SET_CURSOR) {
                 int slot = find_window_by_id(msg.window_id);
                 if (slot != -1) {
@@ -4093,10 +4206,26 @@ int main(int argc, char **argv) {
 
 
             icda_mouse_event_t mev;
+            {
+                /* a game that locked the pointer: the pointer is hidden while it has the focus */
+                wm_window_t *gw = game_window();
+                int hide = gw && gw->pointer_lock;
+                if (hide != pointer_hidden) {
+                    pointer_hidden = hide;
+                    if (hide) {
+                        mouse_x = gw->x + gw->w / 2;
+                        mouse_y = gw->y + gw->h / 2;
+                        pointer_initialized = 0;
+                    }
+                    mark_dirty(mouse_x - CUR_DIM, mouse_y - CUR_DIM, 2 * CUR_DIM, 2 * CUR_DIM);
+                    mark_dirty(prev_mouse_x - CUR_DIM, prev_mouse_y - CUR_DIM, 2 * CUR_DIM, 2 * CUR_DIM);
+                }
+            }
             while (icda_input_read_mouse(&mev) == 0) {
                 uint8_t prev_btn = mouse_buttons;
-                mouse_moved = 1;
                 wm_diag_mouse_events++;
+                if (locked_mouse(&mev)) continue;
+                mouse_moved = 1;
                 pointer_input(&mev);
                 mouse_buttons = mev.buttons;
                 if (mouse_x < 0) mouse_x = 0;
@@ -4122,10 +4251,13 @@ int main(int argc, char **argv) {
             }
         }
 
+        pump_raw_keys();
+
         {
             long key = icda_read_char_timeout(1);
             int in_seq = 0, chord_left = 0;
             for (int n = 0; key >= 0 && n < 16; n++) {
+                pump_raw_keys();        /* the press that typed it goes first, as on Windows */
                 handle_key(key);
                 if (chord_left) chord_left--;           /* chord bytes are not escape sequences */
                 else if (key == SC_CHORD) chord_left = 2;

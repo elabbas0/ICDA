@@ -93,7 +93,8 @@ enum {
     SYS_NET               = 80,
     SYS_AUDIO_MIX         = 81,
     SYS_SYS_STATS         = 82,
-    SYS_ACCOUNT           = 83
+    SYS_ACCOUNT           = 83,
+    SYS_INPUT_READ_KEYS   = 84
 };
 
 typedef struct {
@@ -295,6 +296,8 @@ static inline int icda_msg_poll(uint64_t handle) { return (int)sys_call1(SYS_MSG
 
 static inline uint64_t icda_map_framebuffer(icda_fb_info_t *info) { return sys_call1(SYS_MAP_FRAMEBUFFER, (uint64_t)(uintptr_t)info); }
 static inline int icda_input_read_mouse(icda_mouse_event_t *out) { return (int)sys_call1(SYS_INPUT_READ_MOUSE, (uint64_t)(uintptr_t)out); }
+/* the desktop's: the next key press or release (set-1 code, | 0x100 E0 key, | 0x200 pressed), -1 if none */
+static inline long icda_input_read_keys(void) { return (long)sys_call0(SYS_INPUT_READ_KEYS); }
 
 
 static inline int icda_gui_available(void) { return (int)sys_call0(SYS_GUI_AVAILABLE); }

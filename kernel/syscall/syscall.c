@@ -5,6 +5,7 @@
 #include "../drivers/display/framebuffer.h"
 #include "../power/power.h"
 #include "../drivers/input/mouse.h"
+#include "../drivers/input/keyboard.h"
 #include "../drivers/audio/speaker.h"
 #include "../drivers/audio/hda.h"
 #include "../drivers/audio/playback.h"
@@ -1810,6 +1811,12 @@ static uint64_t syscall_dispatch_calls(struct registers *regs) {
             return sys_exit(regs->rdi);
         case SYS_INPUT_READ:
             return sys_input_read();
+        case SYS_INPUT_READ_KEYS: {
+            /* only the desktop reads them (they include what is typed in other windows) */
+            process_t *me = sched_current_process();
+            if (!me || me->pid != devnodes_fb_owner()) return (uint64_t)-1;
+            return (uint64_t)(int64_t)keyboard_read_raw();
+        }
         case SYS_GETCWD:
             return sys_getcwd((char *)(uintptr_t)regs->rdi, regs->rsi);
         case SYS_CHDIR:

@@ -112,7 +112,8 @@ typedef enum {
     SYS_NET               = 80,
     SYS_AUDIO_MIX         = 81,
     SYS_SYS_STATS         = 82,
-    SYS_ACCOUNT           = 83     /* accounts and signing in (kernel/proc/accounts.h) */
+    SYS_ACCOUNT           = 83,    /* accounts and signing in (kernel/proc/accounts.h) */
+    SYS_INPUT_READ_KEYS   = 84     /* the desktop: key presses and releases (-1: none) */
 } syscall_number_t;
 
 /* SYS_AUDIO_MIX operations (rdi) */
