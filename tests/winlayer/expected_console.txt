@@ -1,0 +1,32 @@
+argc=3 argv0=EXE
+argv[1]=[one]
+argv[2]=[two words]
+ints: -42 123456 -1234567890123 1099511627776 4000000000 ff FF 10 00042|42   |+42
+floats: 3.141590 2.718 1.234568e+04 0.0001       1.50|2.5       |
+strings: hello abc      right|left      | ok wide wide2
+size_t: 8
+snprintf=11 [truncat]
+sscanf=4 12 34 word 5.5
+strtol=2147483647 strtoul=4294967295 sizeof(long)=4
+file lines=2 (case-blind open ok)
+CreateFile read=4 [CDEF] size=8
+FindFirstFile found=2
+missing file attrs=ffffffff err=2
+module=EXE drive=Z:
+cmdline has exe: 1
+threads counter=40000 exitcodes=30 main tls=5
+wait timeout=258
+wait signaled=0
+tls slot=0000000000001234
+longjmp got 4
+qsort 1 3 5 7 9
+math 0.8415 1.4142 1.4142 -2.0
+sleep ok=1
+year ok=1
+utf conv 6 7 ok
+virtualalloc aligned=1 state=1000
+env PATH set=1
+cpus>0=1 page=4096
+version 10.0
+done
+atexit ran

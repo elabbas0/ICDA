@@ -165,6 +165,17 @@ void bk_present(int x, int y, int w, int h) {
         }
     }
     fps_frames++;
+    {
+        /* ICDA_WIN_SLOW=ms: the frames that took longer, by number (a game's stalls) */
+        static const char *slow;
+        static int checked;
+        static uint64_t last;
+        uint64_t now = mono_ns();
+        if (!checked) slow = getenv("ICDA_WIN_SLOW"), checked = 1;
+        if (slow && last && now - last >= strtoull(slow, 0, 10) * 1000000ull)
+            wlog("frame %llu took %llu ms", (unsigned long long)frames, (unsigned long long)((now - last) / 1000000));
+        last = now;
+    }
     if (getenv("ICDA_WIN_FPS")) {
         uint64_t now = mono_ns();
         if (now - fps_t0 >= 5000000000ull) {
@@ -343,6 +354,8 @@ static void icda_events(void) {
         memset(&e, 0, sizeof(e));
         switch (m.type) {
         case GUI_MSG_KEY_EVENT:
+            if (wtrace) wlog("key %s 0x%x %s", (m.key.keycode & GUI_KEY_RAW) ? "raw" : "char",
+                             m.key.keycode & ~GUI_KEY_RAW, m.key.pressed ? "down" : "up");
             if (m.key.keycode & GUI_KEY_RAW) {
                 raw_seen = 1;
                 push_key((int)(m.key.keycode & 0x1FF), m.key.pressed);
@@ -366,6 +379,7 @@ static void icda_events(void) {
                 e.dx = nx - mouse_x, e.dy = ny - mouse_y;
                 e.x = mouse_x = nx, e.y = mouse_y = ny;
             }
+            if (wtrace && (m.mouse.buttons & 7) != mouse_b) wlog("mouse buttons %d", m.mouse.buttons & 7);
             e.buttons = mouse_b = m.mouse.buttons & 7;
             e.wheel = m.mouse.wheel;
             push(&e);
@@ -382,6 +396,7 @@ static void icda_events(void) {
             break;
         }
         case GUI_MSG_FOCUS:
+            if (wtrace) wlog("focus %s", m.focus.focused ? "gained" : "lost");
             e.type = BEV_FOCUS;
             e.down = m.focus.focused;
             push(&e);

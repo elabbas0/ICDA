@@ -8,6 +8,7 @@
  * they are copied. */
 #define _GNU_SOURCE
 #include "wingui.h"
+#include "../ic_font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,9 @@ typedef struct {
     int      own_bits;
     uint32_t palette[256];
     RECT     rgn;             /* regions: their bounds */
-    int      font_h;
+    int      font_h;          /* fonts: the size asked (LOGFONT lfHeight: < 0 the em, > 0 the cell) */
+    int      font_weight;     /* 400 normal, 700 bold */
+    int      font_fixed;      /* fixed pitch (a console font) */
     int      stock;
 } gobj_t;
 
@@ -55,7 +58,9 @@ __attribute__((constructor)) static void stock_init(void) {
         stock[i].stock = 1;
         stock[i].type = i <= 5 ? OBJ_BRUSH : i <= 8 ? OBJ_PEN : i <= 17 ? OBJ_FONT : OBJ_PAL;
         stock[i].color = i <= 5 ? colors[i] : i == 6 ? 0xFFFFFF : 0;
-        stock[i].font_h = 16;
+        stock[i].font_h = -13;
+        stock[i].font_weight = i == 12 || i == 13 ? 700 : 400;            /* SYSTEM_FONT, SYSTEM_FIXED_FONT bold */
+        stock[i].font_fixed = i == 10 || i == 11 || i == 16;              /* OEM, ANSI, SYSTEM fixed */
     }
 }
 
@@ -115,8 +120,12 @@ HDC WINAPI GetDCEx(HWND h, HRGN r, DWORD f) {
     return GetDC(h);
 }
 HDC WINAPI GetWindowDC(HWND h) { return GetDC(h); }
+/* drawing done through GetDC (outside WM_PAINT) is shown when it is given back */
 int WINAPI ReleaseDC(HWND h, HDC dc) {
-    (void)h, (void)dc;
+    wdc_t *d = dc_get(dc);
+    wwnd_t *w = d && d->hwnd ? wnd_get(d->hwnd) : 0;
+    if (w && w->gdi_drawn) wnd_present(w);
+    (void)h;
     return 1;
 }
 HWND WINAPI WindowFromDC(HDC dc) {
@@ -173,6 +182,7 @@ static uint32_t *dc_target(wdc_t *d, int *w, int *h, int *stride, wwnd_t **win) 
         wnd_surface(wn);
         *w = wn->sw, *h = wn->sh, *stride = wn->sw;
         *win = wn;
+        wn->gdi_drawn = 1;
         return wn->surface;
     }
     if (d->bitmap) {
@@ -656,100 +666,356 @@ BOOL WINAPI RoundRect(HDC dc, int l, int t, int r, int b, int w, int h) {
 }
 BOOL WINAPI GdiFlush(void) { return TRUE; }
 
-/* ---- text: an 8x16 cell per character, no glyphs drawn ----------------------------------------- */
+/* ---- text: ICDA's own typefaces --------------------------------------------------------------
+ *
+ * A Windows font asks for a size, a weight and a pitch; it is drawn with
+ * the nearest of ICDA's faces (Inter for text, a monospace face for fixed
+ * pitch), anti-aliased, in the DC's text colour and alignment. */
 
-void *WINAPI CreateFontIndirectW(const void *lf) {
+static gobj_t *font_new(const void *lf, int wide) {
+    const uint8_t *b = lf;
     gobj_t *o = obj_new(OBJ_FONT);
-    LONG h = lf ? *(const LONG *)lf : 16;
-    o->font_h = h < 0 ? -h : h ? h : 16;
+    LONG h = lf ? *(const LONG *)lf : 0;
+    o->font_h = h ? h : -13;
+    o->font_weight = lf && *(const LONG *)(b + 16) ? (int)*(const LONG *)(b + 16) : 400;
+    o->font_fixed = lf && (b[27] & 3) == 1;                 /* FIXED_PITCH */
+    if (lf && !o->font_fixed) {
+        /* the console faces by name */
+        char face[40];
+        if (wide) w_to_utf8((const WCHAR *)(b + 28), -1, face, sizeof(face));
+        else snprintf(face, sizeof(face), "%.31s", (const char *)(b + 28));
+        for (char *c = face; *c; c++) *c = (char)(*c >= 'A' && *c <= 'Z' ? *c + 32 : *c);
+        o->font_fixed = strstr(face, "courier") || strstr(face, "consol") || strstr(face, "lucida console") ||
+                        strstr(face, "fixedsys") || strstr(face, "terminal") || strstr(face, "mono");
+    }
     return o;
 }
-void *WINAPI CreateFontIndirectA(const void *lf) { return CreateFontIndirectW(lf); }
+
+void *WINAPI CreateFontIndirectW(const void *lf) { return font_new(lf, 1); }
+void *WINAPI CreateFontIndirectA(const void *lf) { return font_new(lf, 0); }
 void *WINAPI CreateFontW(int h, int w, int e, int o, int wt, DWORD it, DWORD u, DWORD s, DWORD cs, DWORD op, DWORD cp, DWORD q,
                          DWORD pf, const WCHAR *face) {
-    LONG lf[1] = { h };
-    (void)w, (void)e, (void)o, (void)wt, (void)it, (void)u, (void)s, (void)cs, (void)op, (void)cp, (void)q, (void)pf, (void)face;
-    return CreateFontIndirectW(lf);
+    uint8_t lf[92];
+    memset(lf, 0, sizeof(lf));
+    *(LONG *)lf = h;
+    *(LONG *)(lf + 16) = wt;
+    lf[27] = (uint8_t)pf;
+    if (face) memcpy(lf + 28, face, (w_len(face) < 31 ? w_len(face) : 31) * sizeof(WCHAR));
+    (void)w, (void)e, (void)o, (void)it, (void)u, (void)s, (void)cs, (void)op, (void)cp, (void)q;
+    return font_new(lf, 1);
 }
 void *WINAPI CreateFontA(int h, int w, int e, int o, int wt, DWORD it, DWORD u, DWORD s, DWORD cs, DWORD op, DWORD cp, DWORD q,
                          DWORD pf, const char *face) {
-    (void)face;
-    return CreateFontW(h, w, e, o, wt, it, u, s, cs, op, cp, q, pf, 0);
+    uint8_t lf[60];
+    memset(lf, 0, sizeof(lf));
+    *(LONG *)lf = h;
+    *(LONG *)(lf + 16) = wt;
+    lf[27] = (uint8_t)pf;
+    if (face) snprintf((char *)lf + 28, 32, "%s", face);
+    (void)w, (void)e, (void)o, (void)it, (void)u, (void)s, (void)cs, (void)op, (void)cp, (void)q;
+    return font_new(lf, 0);
 }
 
-static int font_h(HDC dc) {
-    wdc_t *d = dc_get(dc);
+/* the face for a DC's font */
+static const ic_face_t *dc_face(wdc_t *d) {
     gobj_t *f = d ? obj_get(d->font, OBJ_FONT) : 0;
-    return f && f->font_h > 0 ? f->font_h : 16;
+    int h = f ? f->font_h : -13, em, bold = f && f->font_weight >= 600;
+    em = h < 0 ? -h : h * 4 / 5;            /* a cell height: mostly the em */
+    if (f && f->font_fixed) return ic_font(em <= 12 ? IC_FONT_MONO_SMALL : IC_FONT_MONO);
+    if (em <= 11) return ic_font(IC_FONT_CAPTION);
+    if (em <= 12) return ic_font(IC_FONT_FOOTNOTE);
+    if (em <= 14) return ic_font(bold ? IC_FONT_BODY_EMPH : IC_FONT_BODY);
+    if (em <= 16) return ic_font(bold ? IC_FONT_TITLE3 : IC_FONT_SUBHEAD);
+    if (em <= 19) return ic_font(IC_FONT_TITLE2);
+    if (em <= 25) return ic_font(IC_FONT_TITLE1);
+    return ic_font(IC_FONT_LARGE_TITLE);
 }
 
+static int face_cell(const ic_face_t *f) { return f->ascent + f->descent; }
+
+static void text_metrics(HDC dc, LONG *t) {
+    const ic_face_t *f = dc_face(dc_get(dc));
+    wdc_t *d = dc_get(dc);
+    gobj_t *fo = d ? obj_get(d->font, OBJ_FONT) : 0;
+    t[0] = face_cell(f);                                     /* tmHeight */
+    t[1] = f->ascent;                                        /* tmAscent */
+    t[2] = f->descent;                                       /* tmDescent */
+    t[3] = face_cell(f) > f->px ? face_cell(f) - f->px : 0;  /* tmInternalLeading */
+    t[4] = f->line_h > face_cell(f) ? f->line_h - face_cell(f) : 0;
+    t[5] = (ic_text_measure(f, "abcdefghijklmnopqrstuvwxyz") + 13) / 26;   /* tmAveCharWidth */
+    t[6] = ic_text_measure(f, "W");                          /* tmMaxCharWidth */
+    t[7] = fo && fo->font_weight ? fo->font_weight : 400;    /* tmWeight */
+    t[9] = t[10] = 96;                                       /* tmDigitizedAspectX, Y */
+}
+
+/* TEXTMETRICW: the four characters are WCHARs; the pitch byte's FIXED bit
+ * means a variable pitch (Windows' own naming) */
 BOOL WINAPI GetTextMetricsW(HDC dc, void *tm) {
-    LONG *t = tm;
-    int h = font_h(dc);
+    uint8_t *b = tm;
+    const ic_face_t *f = dc_face(dc_get(dc));
     memset(tm, 0, 60);
-    t[0] = h;                 /* tmHeight */
-    t[1] = h * 4 / 5;         /* tmAscent */
-    t[2] = h - h * 4 / 5;     /* tmDescent */
-    t[5] = h / 2;             /* tmAveCharWidth */
-    t[6] = h;                 /* tmMaxCharWidth */
-    t[7] = 400;               /* tmWeight */
-    ((BYTE *)tm)[56] = 0x31;  /* fixed pitch, TrueType */
+    text_metrics(dc, tm);
+    *(WCHAR *)(b + 44) = 32, *(WCHAR *)(b + 46) = 0xFFFC, *(WCHAR *)(b + 48) = '?', *(WCHAR *)(b + 50) = ' ';
+    b[55] = (uint8_t)(f == ic_font(IC_FONT_MONO) || f == ic_font(IC_FONT_MONO_SMALL) ? 0x34 : 0x25);  /* modern / swiss, TrueType */
+    b[56] = 1;                /* DEFAULT_CHARSET */
     return TRUE;
 }
-BOOL WINAPI GetTextMetricsA(HDC dc, void *tm) { return GetTextMetricsW(dc, tm); }
+BOOL WINAPI GetTextMetricsA(HDC dc, void *tm) {
+    uint8_t *b = tm;
+    const ic_face_t *f = dc_face(dc_get(dc));
+    memset(tm, 0, 56);
+    text_metrics(dc, tm);
+    b[44] = 32, b[45] = 255, b[46] = '?', b[47] = ' ';
+    b[51] = (uint8_t)(f == ic_font(IC_FONT_MONO) || f == ic_font(IC_FONT_MONO_SMALL) ? 0x34 : 0x25);
+    b[52] = 0;                /* ANSI_CHARSET */
+    return TRUE;
+}
+
+/* a run of text as UTF-8 (the faces' own form); a code-page A string is
+ * taken as Latin-1 */
+static char *text_utf8(const WCHAR *w, const char *a, int n, int *len) {
+    char *out;
+    if (n < 0) n = w ? (int)w_len(w) : (int)strlen(a);
+    out = malloc((size_t)n * 3 + 1);
+    if (!out) return 0;
+    if (w) {
+        *len = w_to_utf8(w, n, out, n * 3 + 1);
+        if (*len > 0 && !out[*len - 1]) (*len)--;
+    } else {
+        int o = 0;
+        for (int i = 0; i < n; i++) {
+            uint8_t c = (uint8_t)a[i];
+            if (c < 0x80) out[o++] = (char)c;
+            else out[o++] = (char)(0xC0 | (c >> 6)), out[o++] = (char)(0x80 | (c & 0x3F));
+        }
+        *len = o;
+    }
+    out[*len < 0 ? 0 : *len] = 0;
+    if (*len < 0) *len = 0;
+    return out;
+}
+
+/* ICDA's drawing code allocates through these (on ICDA, its own heap) */
+void *ic_malloc(uint64_t size) { return malloc((size_t)size); }
+void *ic_calloc(uint64_t count, uint64_t size) { return calloc((size_t)count, (size_t)size); }
+void *ic_realloc(void *ptr, uint64_t size) { return realloc(ptr, (size_t)size); }
+void ic_free(void *ptr) { free(ptr); }
 
 BOOL WINAPI GetTextExtentPoint32W(HDC dc, const WCHAR *s, int n, SIZE *sz) {
-    int h = font_h(dc);
-    (void)s;
-    sz->cx = n * (h / 2);
-    sz->cy = h;
+    static const WCHAR none[1];
+    const ic_face_t *f = dc_face(dc_get(dc));
+    int len;
+    char *u = text_utf8(s ? s : none, 0, n, &len);
+    sz->cx = u ? ic_text_measure_n(f, u, len) : 0;
+    sz->cy = face_cell(f);
+    free(u);
     return TRUE;
 }
 BOOL WINAPI GetTextExtentPoint32A(HDC dc, const char *s, int n, SIZE *sz) {
-    (void)s;
-    return GetTextExtentPoint32W(dc, 0, n, sz);
-}
-BOOL WINAPI GetTextExtentExPointW(HDC dc, const WCHAR *s, int n, int max, int *fit, int *dx, SIZE *sz) {
-    int cw = font_h(dc) / 2;
-    GetTextExtentPoint32W(dc, s, n, sz);
-    if (fit) *fit = cw ? (max / cw < n ? max / cw : n) : n;
-    if (dx)
-        for (int i = 0; i < n; i++) dx[i] = (i + 1) * cw;
+    const ic_face_t *f = dc_face(dc_get(dc));
+    int len;
+    char *u = text_utf8(0, s ? s : "", n, &len);
+    sz->cx = u ? ic_text_measure_n(f, u, len) : 0;
+    sz->cy = face_cell(f);
+    free(u);
     return TRUE;
 }
+BOOL WINAPI GetTextExtentPointW(HDC dc, const WCHAR *s, int n, SIZE *sz) { return GetTextExtentPoint32W(dc, s, n, sz); }
+BOOL WINAPI GetTextExtentPointA(HDC dc, const char *s, int n, SIZE *sz) { return GetTextExtentPoint32A(dc, s, n, sz); }
+
+/* how many characters fit in max pixels, and where each one ends */
+BOOL WINAPI GetTextExtentExPointW(HDC dc, const WCHAR *s, int n, int max, int *fit, int *dx, SIZE *sz) {
+    const ic_face_t *f = dc_face(dc_get(dc));
+    char *u = malloc((size_t)(n > 0 ? n : 0) * 3 + 4);
+    int o = 0, fitted = 0;
+    sz->cx = 0, sz->cy = face_cell(f);
+    if (!u) return FALSE;
+    for (int i = 0; i < n; i++) {
+        int l = w_to_utf8(s + i, 1, u + o, 4), w;
+        if (l > 0 && !u[o + l - 1]) l--;
+        o += l > 0 ? l : 0;
+        w = ic_text_measure_n(f, u, o);
+        if (dx) dx[i] = w;
+        if (w <= max) fitted = i + 1;
+        sz->cx = w;
+    }
+    if (fit) *fit = fitted;
+    free(u);
+    return TRUE;
+}
+
+/* draws a UTF-8 run with its top left (TA_TOP | TA_LEFT) where the DC's
+ * alignment puts it; returns its width */
+static int text_out(wdc_t *d, int x, int y, UINT opts, const RECT *r, const char *u, int len) {
+    const ic_face_t *f = dc_face(d);
+    int tw, th, ts, width = ic_text_measure_n(f, u, len), cell = face_cell(f), left = x, top = y;
+    wwnd_t *win;
+    uint32_t *t = dc_target(d, &tw, &th, &ts, &win);
+    ic_canvas_t c;
+    int cx0, cy0, cx1, cy1;
+    if (!t) return width;
+    if ((d->text_align & 6) == 6) left = x - width / 2;             /* TA_CENTER */
+    else if (d->text_align & 2) left = x - width;                   /* TA_RIGHT */
+    if ((d->text_align & 24) == 24) top = y - f->ascent;            /* TA_BASELINE */
+    else if (d->text_align & 8) top = y - cell;                     /* TA_BOTTOM */
+    /* the background: the rectangle asked (ETO_OPAQUE), else the text's own cell */
+    if ((opts & 2) && r) fill(d, r, bgra_of(d->bk_color));
+    else if (d->bk_mode == 2) {
+        RECT b = { left, top, left + width, top + cell };
+        fill(d, &b, bgra_of(d->bk_color));
+    }
+    c = ic_canvas_make(t, ts, th);
+    cx0 = 0, cy0 = 0, cx1 = tw, cy1 = th;
+    if ((opts & 4) && r) {                                          /* ETO_CLIPPED */
+        if (r->left > cx0) cx0 = r->left;
+        if (r->top > cy0) cy0 = r->top;
+        if (r->right < cx1) cx1 = r->right;
+        if (r->bottom < cy1) cy1 = r->bottom;
+    }
+    if (cx1 <= cx0 || cy1 <= cy0) return width;
+    c.clip_x = cx0, c.clip_y = cy0, c.clip_w = cx1 - cx0, c.clip_h = cy1 - cy0;
+    ic_text_draw_n(&c, f, left, top + f->ascent, u, len, bgra_of(d->text_color));
+    /* the faces blend colour only: what they touched is made opaque again */
+    for (int yy = top < cy0 ? cy0 : top; yy < top + cell + 2 && yy < cy1; yy++)
+        for (int xx = left - 2 < cx0 ? cx0 : left - 2; xx < left + width + 2 && xx < cx1; xx++)
+            t[(size_t)yy * (size_t)ts + (size_t)xx] |= 0xFF000000u;
+    return width;
+}
+
 BOOL WINAPI ExtTextOutW(HDC dc, int x, int y, UINT o, const RECT *r, const WCHAR *s, UINT n, const int *dx) {
-    (void)dc, (void)x, (void)y, (void)o, (void)r, (void)s, (void)n, (void)dx;
+    wdc_t *d = dc_get(dc);
+    int len;
+    char *u;
+    (void)dx;
+    if (!d) return FALSE;
+    if (!s || !n) {
+        if ((o & 2) && r) fill(d, r, bgra_of(d->bk_color));
+        return TRUE;
+    }
+    u = (o & 0x10) ? 0 : text_utf8(s, 0, (int)n, &len);    /* ETO_GLYPH_INDEX: glyphs of a font we do not have */
+    if (u) text_out(d, x, y, o, r, u, len);
+    free(u);
     return TRUE;
 }
 BOOL WINAPI ExtTextOutA(HDC dc, int x, int y, UINT o, const RECT *r, const char *s, UINT n, const int *dx) {
-    (void)s;
-    return ExtTextOutW(dc, x, y, o, r, 0, n, dx);
-}
-BOOL WINAPI TextOutW(HDC dc, int x, int y, const WCHAR *s, int n) {
-    (void)dc, (void)x, (void)y, (void)s, (void)n;
-    return TRUE;
-}
-BOOL WINAPI TextOutA(HDC dc, int x, int y, const char *s, int n) {
-    (void)dc, (void)x, (void)y, (void)s, (void)n;
-    return TRUE;
-}
-int WINAPI DrawTextW(HDC dc, const WCHAR *s, int n, RECT *r, UINT f) {
-    int h = font_h(dc);
-    if (n < 0) n = (int)w_len(s);
-    if (f & 0x400) {          /* DT_CALCRECT */
-        r->right = r->left + n * (h / 2);
-        r->bottom = r->top + h;
+    wdc_t *d = dc_get(dc);
+    int len;
+    char *u;
+    (void)dx;
+    if (!d) return FALSE;
+    if (!s || !n) {
+        if ((o & 2) && r) fill(d, r, bgra_of(d->bk_color));
+        return TRUE;
     }
+    u = text_utf8(0, s, (int)n, &len);
+    if (u) text_out(d, x, y, o, r, u, len);
+    free(u);
+    return TRUE;
+}
+BOOL WINAPI TextOutW(HDC dc, int x, int y, const WCHAR *s, int n) { return ExtTextOutW(dc, x, y, 0, 0, s, (UINT)(n < 0 ? 0 : n), 0); }
+BOOL WINAPI TextOutA(HDC dc, int x, int y, const char *s, int n) { return ExtTextOutA(dc, x, y, 0, 0, s, (UINT)(n < 0 ? 0 : n), 0); }
+
+/* DrawText: lines (and words wrapped, DT_WORDBREAK) in a rectangle, "&x"
+ * shown as x (DT_NOPREFIX keeps the &) */
+static int draw_text_utf8(wdc_t *d, char *u, int len, RECT *r, UINT fl) {
+    const ic_face_t *f = dc_face(d);
+    int line_h = face_cell(f), y = r->top, max_w = 0, total, nlines = 0, saved_align;
+    int width = r->right - r->left;
+    char *lines[256];
+    int lens[256];
+    /* "&&" is "&"; "&x" is x underlined (no underline here) */
+    if (!(fl & 0x800)) {
+        int o = 0;
+        for (int i = 0; i < len; i++) {
+            if (u[i] == '&') {
+                if (i + 1 < len && u[i + 1] == '&') i++;
+                else continue;
+            }
+            u[o++] = u[i];
+        }
+        len = o;
+        u[len] = 0;
+    }
+    /* the lines */
+    for (int i = 0; i < len && nlines < 256;) {
+        int end = i, n;
+        if (fl & 0x20) end = len;                                   /* DT_SINGLELINE */
+        else
+            while (end < len && u[end] != '\n' && u[end] != '\r') end++;
+        n = end - i;
+        if ((fl & 0x10) && !(fl & 0x20) && width > 0) {           /* DT_WORDBREAK */
+            while (n > 0 && nlines < 256) {
+                int fit = ic_text_fit(f, u + i, width), cut = n;
+                if (fit < n) {
+                    cut = fit;
+                    while (cut > 0 && u[i + cut] != ' ') cut--;
+                    if (cut == 0) cut = fit > 0 ? fit : 1;
+                }
+                lines[nlines] = u + i, lens[nlines++] = cut;
+                i += cut;
+                n -= cut;
+                while (n > 0 && u[i] == ' ') i++, n--;
+            }
+        } else {
+            lines[nlines] = u + i, lens[nlines++] = n;
+        }
+        i = end;
+        if (i < len && u[i] == '\r') i++;
+        if (i < len && u[i] == '\n') i++;
+    }
+    if (!nlines) lens[0] = 0, lines[0] = u, nlines = 1;
+    for (int k = 0; k < nlines; k++) {
+        int w = ic_text_measure_n(f, lines[k], lens[k]);
+        if (w > max_w) max_w = w;
+    }
+    total = nlines * line_h;
+    if (fl & 0x400) {                                               /* DT_CALCRECT */
+        r->right = r->left + max_w;
+        r->bottom = r->top + total;
+        return total;
+    }
+    if (fl & 0x20) {
+        if (fl & 4) y = r->top + (r->bottom - r->top - line_h) / 2;   /* DT_VCENTER */
+        else if (fl & 8) y = r->bottom - line_h;                     /* DT_BOTTOM */
+    }
+    saved_align = d->text_align;
+    d->text_align = 0;
+    for (int k = 0; k < nlines; k++, y += line_h) {
+        int w = ic_text_measure_n(f, lines[k], lens[k]), x = r->left;
+        RECT clip = *r;
+        if (fl & 1) x = r->left + (width - w) / 2;                  /* DT_CENTER */
+        else if (fl & 2) x = r->right - w;                          /* DT_RIGHT */
+        text_out(d, x, y, (fl & 0x100) ? 0 : 4, &clip, lines[k], lens[k]);
+    }
+    d->text_align = saved_align;
+    return total;
+}
+
+int WINAPI DrawTextW(HDC dc, const WCHAR *s, int n, RECT *r, UINT f) {
+    wdc_t *d = dc_get(dc);
+    int len, h;
+    char *u;
+    if (!d || !s || !r) return 0;
+    u = text_utf8(s, 0, n, &len);
+    if (!u) return 0;
+    h = draw_text_utf8(d, u, len, r, f);
+    free(u);
     return h;
 }
 int WINAPI DrawTextA(HDC dc, const char *s, int n, RECT *r, UINT f) {
-    int h = font_h(dc);
-    if (n < 0) n = (int)strlen(s);
-    if (f & 0x400) {
-        r->right = r->left + n * (h / 2);
-        r->bottom = r->top + h;
-    }
+    wdc_t *d = dc_get(dc);
+    int len, h;
+    char *u;
+    if (!d || !s || !r) return 0;
+    u = text_utf8(0, s, n, &len);
+    if (!u) return 0;
+    h = draw_text_utf8(d, u, len, r, f);
+    free(u);
     return h;
+}
+int WINAPI DrawTextExW(HDC dc, WCHAR *s, int n, RECT *r, UINT f, void *p) {
+    (void)p;
+    return DrawTextW(dc, s, n, r, f);
 }
 uint32_t WINAPI SetTextColor(HDC dc, uint32_t c) {
     wdc_t *d = dc_get(dc);
@@ -780,8 +1046,16 @@ int WINAPI SetBkMode(HDC dc, int m) {
     return o;
 }
 UINT WINAPI SetTextAlign(HDC dc, UINT a) {
-    (void)dc, (void)a;
-    return 0;
+    wdc_t *d = dc_get(dc);
+    UINT o;
+    if (!d) return 0xFFFFFFFF;            /* GDI_ERROR */
+    o = (UINT)d->text_align;
+    d->text_align = (int)a;
+    return o;
+}
+UINT WINAPI GetTextAlign(HDC dc) {
+    wdc_t *d = dc_get(dc);
+    return d ? (UINT)d->text_align : 0xFFFFFFFF;
 }
 int WINAPI SetMapMode(HDC dc, int m) {
     (void)dc, (void)m;
@@ -932,7 +1206,7 @@ static const wexport_t g32[] = {
     X(GdiFlush), X(CreateFontIndirectW), X(CreateFontIndirectA), X(CreateFontW), X(CreateFontA), X(GetTextMetricsW),
     X(GetTextMetricsA), X(GetTextExtentPoint32W), X(GetTextExtentPoint32A), X(GetTextExtentExPointW), X(ExtTextOutW),
     X(ExtTextOutA), X(TextOutW), X(TextOutA), X(SetTextColor), X(GetTextColor), X(SetBkColor), X(SetBkMode),
-    X(SetTextAlign), X(SetMapMode), X(SetStretchBltMode), X(SetGraphicsMode), X(AddFontResourceExW),
+    X(SetTextAlign), X(GetTextAlign), X(GetTextExtentPointW), X(GetTextExtentPointA), X(SetMapMode), X(SetStretchBltMode), X(SetGraphicsMode), X(AddFontResourceExW),
     X(EnumFontFamiliesExW), X(GetFontData), X(GetDeviceCaps), X(GetDeviceGammaRamp), X(SetDeviceGammaRamp),
     X(GetICMProfileW), X(GetICMProfileA), X(DescribePixelFormat), X(ChoosePixelFormat), X(SetPixelFormat),
     X(GetPixelFormat), X(SwapBuffers), WEXPN("GetTextExtentPointW", GetTextExtentPoint32W),

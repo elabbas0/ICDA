@@ -632,14 +632,15 @@ void ld_thread_attach(int attach) {
 
 /* ---- resources ------------------------------------------------------------------------------ */
 
+/* (naturally aligned: no packing needed) */
 typedef struct {
     uint32_t chars, timestamp;
     uint16_t major, minor, nnamed, nids;
-} __attribute__((packed)) res_dir_t;
+} res_dir_t;
 
 typedef struct {
     uint32_t name, offset;
-} __attribute__((packed)) res_entry_t;
+} res_entry_t;
 
 static int res_match(uint8_t *rbase, res_entry_t *e, const WCHAR *want) {
     if ((uintptr_t)want < 0x10000) return !(e->name & 0x80000000) && (e->name & 0xFFFF) == (uintptr_t)want;

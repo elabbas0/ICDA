@@ -91,6 +91,124 @@ static void WINAPI t_glDebugMessageCallbackAMD(void *cb, void *user) {
     if (f) f(cb ? debug_tramp_amd : 0, user);
 }
 
+/* ---- anisotropic filtering, capped ----------------------------------------------------------- */
+
+/* llvmpipe filters anisotropically by taking a sample for each step of a
+ * texture's stretch: a floor or water seen at a low angle costs several
+ * times a plain surface, and one seen edge-on (the camera at water level)
+ * took Mesa 24.0 nearly two minutes for one frame.  Without it, Ironwail's
+ * LibreQuake timedemo runs 3.9 times as fast.  So the most a program gets
+ * is 1 (trilinear filtering), or what ICDA_WIN_ANISO allows, and that is
+ * the maximum it is told of. */
+#define ANISO     0x84FE        /* GL_TEXTURE_MAX_ANISOTROPY */
+#define ANISO_MAX 0x84FF        /* GL_MAX_TEXTURE_MAX_ANISOTROPY */
+
+static float aniso_cap(void) {
+    static float cap;
+    if (!cap) {
+        const char *e = getenv("ICDA_WIN_ANISO");
+        cap = e && atof(e) >= 1.0 ? (float)atof(e) : 1.0f;
+    }
+    return cap;
+}
+
+static void *mesa_of(const char *name) {
+    const gl_func_t *f = gl_find(name);
+    return f ? *f->mesa : 0;
+}
+
+#define CAPF(v) ((v) > aniso_cap() ? aniso_cap() : (v))
+#define CAPI(v) ((float)(v) > aniso_cap() ? (GLint)aniso_cap() : (v))
+
+/* the setters: (object), pname, value; the vector forms read one value for this pname */
+#define SETTER(name, obj_t, val_t, cap)                                                   \
+    static void WINAPI o_##name(obj_t o, GLenum pname, val_t v) {                         \
+        static void (*m)(obj_t, GLenum, val_t);                                            \
+        if (!m) m = (void (*)(obj_t, GLenum, val_t))mesa_of(#name);                        \
+        if (pname == ANISO) v = cap(v);                                                    \
+        if (m) m(o, pname, v);                                                             \
+    }
+#define SETTERV(name, obj_t, val_t, cap)                                                  \
+    static void WINAPI o_##name(obj_t o, GLenum pname, const val_t *v) {                  \
+        static void (*m)(obj_t, GLenum, const val_t *);                                    \
+        val_t one;                                                                         \
+        if (!m) m = (void (*)(obj_t, GLenum, const val_t *))mesa_of(#name);                \
+        if (pname == ANISO && v) one = cap(*v), v = &one;                                  \
+        if (m) m(o, pname, v);                                                             \
+    }
+#define SETTER_EXT(name, val_t, cap)                                                      \
+    static void WINAPI o_##name(GLuint o, GLenum target, GLenum pname, val_t v) {         \
+        static void (*m)(GLuint, GLenum, GLenum, val_t);                                   \
+        if (!m) m = (void (*)(GLuint, GLenum, GLenum, val_t))mesa_of(#name);               \
+        if (pname == ANISO) v = cap(v);                                                    \
+        if (m) m(o, target, pname, v);                                                     \
+    }
+#define SETTERV_EXT(name, val_t, cap)                                                     \
+    static void WINAPI o_##name(GLuint o, GLenum target, GLenum pname, const val_t *v) {  \
+        static void (*m)(GLuint, GLenum, GLenum, const val_t *);                           \
+        val_t one;                                                                         \
+        if (!m) m = (void (*)(GLuint, GLenum, GLenum, const val_t *))mesa_of(#name);       \
+        if (pname == ANISO && v) one = cap(*v), v = &one;                                  \
+        if (m) m(o, target, pname, v);                                                     \
+    }
+
+SETTER(glTexParameterf, GLenum, GLfloat, CAPF)
+SETTER(glTexParameteri, GLenum, GLint, CAPI)
+SETTERV(glTexParameterfv, GLenum, GLfloat, CAPF)
+SETTERV(glTexParameteriv, GLenum, GLint, CAPI)
+SETTER(glTextureParameterf, GLuint, GLfloat, CAPF)
+SETTER(glTextureParameteri, GLuint, GLint, CAPI)
+SETTERV(glTextureParameterfv, GLuint, GLfloat, CAPF)
+SETTERV(glTextureParameteriv, GLuint, GLint, CAPI)
+SETTER(glSamplerParameterf, GLuint, GLfloat, CAPF)
+SETTER(glSamplerParameteri, GLuint, GLint, CAPI)
+SETTERV(glSamplerParameterfv, GLuint, GLfloat, CAPF)
+SETTERV(glSamplerParameteriv, GLuint, GLint, CAPI)
+SETTER_EXT(glTextureParameterfEXT, GLfloat, CAPF)
+SETTER_EXT(glTextureParameteriEXT, GLint, CAPI)
+SETTERV_EXT(glTextureParameterfvEXT, GLfloat, CAPF)
+SETTERV_EXT(glTextureParameterivEXT, GLint, CAPI)
+
+/* the maximum a program is told of */
+static void WINAPI o_glGetFloatv(GLenum pname, GLfloat *v) {
+    static void (*m)(GLenum, GLfloat *);
+    if (!m) m = (void (*)(GLenum, GLfloat *))mesa_of("glGetFloatv");
+    if (m) m(pname, v);
+    if (pname == ANISO_MAX && v) *v = CAPF(*v);
+}
+static void WINAPI o_glGetIntegerv(GLenum pname, GLint *v) {
+    static void (*m)(GLenum, GLint *);
+    if (!m) m = (void (*)(GLenum, GLint *))mesa_of("glGetIntegerv");
+    if (m) m(pname, v);
+    if (pname == ANISO_MAX && v) *v = CAPI(*v);
+}
+static void WINAPI o_glGetDoublev(GLenum pname, GLdouble *v) {
+    static void (*m)(GLenum, GLdouble *);
+    if (!m) m = (void (*)(GLenum, GLdouble *))mesa_of("glGetDoublev");
+    if (m) m(pname, v);
+    if (pname == ANISO_MAX && v && *v > aniso_cap()) *v = aniso_cap();
+}
+
+/* the GL functions answered here rather than by Mesa directly */
+static const struct {
+    const char *name;
+    void       *fn;
+} gl_overrides[] = {
+#define O(n) { #n, (void *)o_##n }
+    O(glTexParameterf), O(glTexParameteri), O(glTexParameterfv), O(glTexParameteriv),
+    O(glTextureParameterf), O(glTextureParameteri), O(glTextureParameterfv), O(glTextureParameteriv),
+    O(glSamplerParameterf), O(glSamplerParameteri), O(glSamplerParameterfv), O(glSamplerParameteriv),
+    O(glTextureParameterfEXT), O(glTextureParameteriEXT), O(glTextureParameterfvEXT), O(glTextureParameterivEXT),
+    O(glGetFloatv), O(glGetIntegerv), O(glGetDoublev),
+#undef O
+};
+
+static void *gl_override(const char *name) {
+    for (unsigned i = 0; i < sizeof(gl_overrides) / sizeof(gl_overrides[0]); i++)
+        if (!strcmp(gl_overrides[i].name, name)) return gl_overrides[i].fn;
+    return 0;
+}
+
 /* ---- contexts ------------------------------------------------------------------------------- */
 
 typedef struct glctx {
@@ -387,7 +505,7 @@ void *WINAPI wglGetProcAddress(const char *name) {
     for (unsigned i = 0; i < sizeof(wgl_procs) / sizeof(wgl_procs[0]); i++)
         if (!strcmp(wgl_procs[i].name, name)) return wgl_procs[i].fn;
     f = gl_find(name);
-    if (f && *f->mesa) return f->thunk;
+    if (f && *f->mesa) return gl_override(name) ? gl_override(name) : f->thunk;
     if (wtrace >= 2) wlog("wglGetProcAddress(%s): none", name);
     return 0;
 }
@@ -445,8 +563,9 @@ __attribute__((constructor)) static void gl_exports_init(void) {
     for (int i = 0; i < WGL_EXPORTS; i++) gl_exports[n++] = wgl[i];
     /* the GL functions opengl32.dll has itself (gl.h's: 1.0 to 1.3) */
     for (int i = 0; i < gl_ncore && n < 4096 + WGL_EXPORTS; i++) {
+        void *o = gl_override(gl_funcs[i].name);
         gl_exports[n].name = gl_funcs[i].name;
-        gl_exports[n].fn = gl_funcs[i].thunk;
+        gl_exports[n].fn = o ? o : gl_funcs[i].thunk;
         gl_exports[n].ordinal = 0;
         n++;
     }

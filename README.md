@@ -316,3 +316,63 @@ in memory. If the disk fails while a page is read back, only the program
 that owned it is stopped. `make swapfile-test` checks the making, reuse
 and removal of `/swapfile` on the host; nptestlx (`icda.test=nptestlx`, with
 a swap partition) checks swapping with fork, mprotect, mremap and munmap.
+
+## Windows programs
+
+ICDA runs 64-bit Windows programs (`.exe`) itself, as it runs Linux ones:
+starting one from Terminal, or from a program by any means (a Linux
+program's `execve` included), runs it. The kernel hands a Windows program
+to `/usr/bin/icda-win` in the Linux root, as it hands a script to its
+interpreter, and `icda-win`, a Linux program, loads it and gives it the
+Windows it expects: its threads have their TEB at GS (the kernel keeps
+each thread's GS base), and the DLLs it imports are ICDA's own (kernel32
+and ntdll, the C runtimes from msvcrt to the UCRT and vcruntime140, user32,
+gdi32, opengl32, winmm, advapi32 with the registry, shell32, ole32,
+ws2_32, bcrypt, cabinet, version and more) or the program's own, from its
+folder. System DLLs ICDA has nothing of load as stubs where a program only
+links to them, and fail to load where it asks for them, so it can manage
+without.
+
+`C:` is `~/.windows/c` (`ICDA_WIN_PREFIX` names another folder) and `Z:` is
+`/`, with names found whatever their case. The registry is
+`C:\Windows\registry.txt`, shared by every program using the drive. A
+program's window is an ICDA window: it gets the keys and the mouse as
+Windows messages, raw input (`WM_INPUT`) for a game's mouse look (when a
+game reads the raw mouse and hides its pointer, the window manager hands it
+the motion and keeps the pointer out of sight), and `MessageBox` is an ICDA
+dialog. GDI draws bitmaps, rectangles and text, in ICDA's typefaces.
+OpenGL, up to 4.5, is Mesa's llvmpipe drawing into the window; what it
+compiles of a program's shaders is kept in `~/.windows/cache/mesa`, so a
+game stutters only the first time it shows something. Anisotropic
+filtering is capped at 1 (plain trilinear filtering; `ICDA_WIN_ANISO=16`
+allows it again): llvmpipe takes a texture sample for each step of a
+surface's slant, so floors and water seen at a low angle cost several
+times as much, and a surface seen edge-on took it nearly two minutes for
+one frame. Sound (waveOut) plays
+through ICDA's audio. Programs start others (`CreateProcess`, with pipes,
+named pipes and 32-bit exit codes) and use the network through Winsock.
+When a program stops on a fault, a dialog says where (the module and
+offset), and `ICDA_WIN_TRACE=1` prints what it loads and calls of note
+(`2`: also every call to something not implemented). `ICDA_WIN_FPS=1`
+prints the frame rate every five seconds, and `ICDA_WIN_SLOW=<ms>` each
+frame that took longer.
+
+What was tried: the Quake engine Ironwail (GPL) with the free LibreQuake
+game plays on ICDA (menus, console, maps, mouse look and keys); its
+timedemo of LibreQuake's first demo, at 960x540 on four cores, runs at 43
+frames a second (11 before anisotropic filtering was capped, with one frame
+of 108 seconds), and with the compiled shaders kept its slowest frame takes
+0.2 seconds instead of 1.1. Chrome's x64 offline installer installs Chrome. Not there: 32-bit programs,
+Direct3D (games need an OpenGL renderer), .NET, the standard controls
+(buttons, edit fields and lists in a program's window are not drawn), and
+Chrome itself does not start yet.
+
+`userspace/winlayer/build.sh` builds `icda-win` (in Docker, against
+Alpine's Mesa), and `tests/linux/mkroot.sh` puts it in the Linux root with
+the libraries it needs. `tests/winlayer/run.sh` builds test programs with
+MinGW-w64 and checks them under `icda-win` on Linux (the C runtimes,
+threads and waits, files, the registry, processes, version resources,
+OpenGL, keys and GDI text); the programs, left in `tests/winlayer/out`,
+run on ICDA too. In QEMU without KVM, give the guest `-cpu max,-avx,-avx2`:
+QEMU 8.2 emulates some AVX2 instructions wrongly, and llvmpipe's 2D
+drawing then goes wrong (an empty menu, a grey sky) or faults.

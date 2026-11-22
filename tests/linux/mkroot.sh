@@ -9,6 +9,8 @@ MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$*" -v "$(pwd -W 2>/de
 set -e
 apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
+# the Windows layer, when built, needs Mesa'"'"'s OSMesa (OpenGL) and libmspack (.cab archives)
+[ -f userspace/winlayer/out/icda-win ] && PKGS="$PKGS mesa-osmesa libmspack"
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
     -U --allow-untrusted --root $R --initdb add musl zlib busybox $PKGS >/dev/null
 S=/tmp/stage/linux
@@ -40,6 +42,7 @@ rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin
 for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; done; true
 [ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
+[ -f userspace/winlayer/out/icda-win ] && cp userspace/winlayer/out/icda-win $S/usr/bin/icda-win || true
 [ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $S/usr/lib/gstreamer-1.0/ || true
 # GStreamer plugin registry, so programs do not read every plugin on first use
 # (icda-webkit sets GST_REGISTRY to it, with GST_REGISTRY_UPDATE=no)

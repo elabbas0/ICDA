@@ -153,6 +153,24 @@ static void crash_handlers(void) {
     setvbuf(stdout, 0, _IOLBF, 0);
 }
 
+/* ---- compiled shaders, kept ------------------------------------------------------------- */
+
+/* Mesa (llvmpipe) compiles each shader the first time a program draws with
+ * it, and a game stutters while it does; what it compiled is kept on disk
+ * for the next run.  Mesa's own place is under the account's home folder in
+ * the password file, which a Linux root need not have: here it is beside the
+ * C: drive's folder (~/.windows/cache/mesa), unless the user chose one. */
+static void shader_cache(void) {
+    char dir[1100], *s;
+    if (getenv("MESA_SHADER_CACHE_DIR") || getenv("XDG_CACHE_HOME")) return;
+    snprintf(dir, sizeof(dir), "%s", path_prefix());
+    s = strrchr(dir, '/');
+    if (!s || s == dir) return;
+    snprintf(s, sizeof(dir) - (size_t)(s - dir), "/cache/mesa");
+    setenv("MESA_SHADER_CACHE_DIR", dir, 0);
+    if (wtrace) wlog("compiled shaders kept in %s", dir);
+}
+
 /* ---- the program's thread ----------------------------------------------------------------- */
 
 void ExitProcess(UINT code) __attribute__((ms_abi));
@@ -186,6 +204,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     path_init();
+    shader_cache();
     /* the program: a Unix path, or a Windows one ("C:\Games\x.exe") */
     if (!realpath(argv[1], found)) {
         char tmp[1024];

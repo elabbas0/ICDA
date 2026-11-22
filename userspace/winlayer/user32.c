@@ -366,7 +366,9 @@ void wnd_surface(wwnd_t *w) {
 }
 
 void wnd_present(wwnd_t *w) {
-    if (w && w->top && bk_is_open()) bk_present(0, 0, 0, 0);
+    if (!w) return;
+    w->gdi_drawn = 0;
+    if (w->top && bk_is_open()) bk_present(0, 0, 0, 0);
 }
 
 static LRESULT send_msg(HWND h, UINT m, WPARAM wp, LPARAM lp);
@@ -1213,8 +1215,11 @@ HDC WINAPI BeginPaint(HWND h, PAINTSTRUCT *ps) {
     return ps->hdc;
 }
 
+/* what WM_PAINT drew (FillRect, TextOut ...) is shown when it ends */
 BOOL WINAPI EndPaint(HWND h, const PAINTSTRUCT *ps) {
-    (void)h, (void)ps;
+    wwnd_t *w = wnd_get(h);
+    (void)ps;
+    if (w && w->gdi_drawn) wnd_present(w);
     return TRUE;
 }
 
@@ -2120,7 +2125,7 @@ BOOL WINAPI SetKeyboardState(BYTE *s) {
 static WCHAR vk_char(UINT vk, int shift) {
     static const char shifted_digits[] = ")!@#$%^&*(";
     if (vk >= 'A' && vk <= 'Z') return (WCHAR)(shift ? vk : vk + 32);
-    if (vk >= '0' && vk <= '9') return (WCHAR)(shift ? shifted_digits[vk - '0'] : vk);
+    if (vk >= '0' && vk <= '9') return (WCHAR)(shift ? (UINT)(uint8_t)shifted_digits[vk - '0'] : vk);
     switch (vk) {
     case 0x20: return ' ';
     case 0x0D: return '\r';
@@ -3059,6 +3064,7 @@ int WINAPI ReleaseDC(HWND h, HDC dc);
 int WINAPI FillRect(HDC dc, const RECT *r, HBRUSH b);
 int WINAPI FrameRect(HDC dc, const RECT *r, HBRUSH b);
 int WINAPI DrawTextW(HDC dc, const WCHAR *s, int n, RECT *r, UINT f);
+int WINAPI DrawTextExW(HDC dc, WCHAR *s, int n, RECT *r, UINT f, void *p);
 int WINAPI DrawTextA(HDC dc, const char *s, int n, RECT *r, UINT f);
 BOOL WINAPI DrawEdge(HDC dc, RECT *r, UINT e, UINT f);
 BOOL WINAPI DrawFocusRect(HDC dc, const RECT *r);
@@ -3121,7 +3127,7 @@ static const wexport_t u32[] = {
     X(EqualRect), X(CharUpperW), X(CharLowerW), X(CharUpperA), X(CharLowerA), X(CharUpperBuffW), X(CharNextW),
     X(CharNextA), X(CharPrevW), X(IsCharAlphaW), X(IsCharAlphaNumericW), X(wvsprintfA), X(wvsprintfW), X(wsprintfA),
     X(wsprintfW), X(LoadStringW), X(LoadStringA), X(GetDC), X(GetDCEx), X(GetWindowDC), X(ReleaseDC), X(FillRect),
-    X(FrameRect), X(DrawTextW), X(DrawTextA), X(DrawEdge), X(DrawFocusRect), X(InvertRect),
+    X(FrameRect), X(DrawTextW), X(DrawTextA), X(DrawTextExW), X(DrawEdge), X(DrawFocusRect), X(InvertRect),
 };
 
 const wdll_t dll_user32 = { "user32.dll", u32, sizeof(u32) / sizeof(u32[0]) };

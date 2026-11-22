@@ -57,6 +57,7 @@ typedef struct wwnd {
     uint32_t  *surface;
     int        sw, sh;
     int        own_surface;
+    int        gdi_drawn;         /* GDI drew into it since it was last shown */
     int        pixel_format;
 } wwnd_t;
 
@@ -73,6 +74,7 @@ typedef struct wdc {
     void     *brush, *pen, *font;
     uint32_t  text_color, bk_color;
     int       bk_mode;
+    int       text_align;        /* TA_ flags */
     int       pixel_format;
     int       is_display;
 } wdc_t;
