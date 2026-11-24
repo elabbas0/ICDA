@@ -1,6 +1,6 @@
 icda-ota 1
-version 1.11.1
-notes install now puts /usr/bin/icda-win in the installed system
+version 1.11.2
+notes release now hashes raw file bytes (no git text filter), so text bundles like the CA store verify; installer puts /usr/bin/icda-win in the installed system
 file EFI/ICDA/GRUBX64.EFI 5378048 8a835714983fc57f7576a3e9d013e0db992253ec2da7603883e38e267b4c405a
 file EFI/ICDA/KERNEL.BIN 7394256 f371655972f5126018de104169707a6e1ba73ce7c3807a9495d3e84a3ae3be0a
 file SYSTEM/apps/browser.app 4183176 d211b9183ee3c150016df405c49686cefac5337d2a50633431130f5ada05b757
@@ -96,4 +96,4 @@ wfile linux/usr/share/hwdata/pci.ids 1450318 824a883ef280b330803e5592dec90f05856
 wfile linux/usr/share/libdrm/amdgpu.ids 17212 c30ec9234067efc3b4e26cce8fcfd90b610a014b3ca6bf609f9cb5ff8807d00a 172418944
 wfile linux/usr/share/udhcpc/default.script 3688 c4e5a7c4783a7a73dec48dee009ee687015d2de7ff86b269679b95bef2c60e13 172436156
 wpack linux.pack 172439844 b04b66e69b0e825d45befe0c66a78f159bc09a046d716c6aa2e096a3e4d370b1 2
-signature 2351a6d2c0b4205c9df021951e7c7d28945e69d402d472709b5ba7ede179e7981cc495ee643fc25c4e7fe1956cd249b71ae4411a2d2197f63838a425aa7a620d
+signature 7ff31cb23af94fd977c44f8e570dcd79fd19af48521b749ee2fac670ce7a3181335a4d568e6a397d20468525cf23a2da17465462698de2b593f785448dc1dd02
