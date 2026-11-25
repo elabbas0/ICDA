@@ -24,6 +24,7 @@
 #define WIN_W        1024
 #define WIN_H        720
 #define STATUS_H     24
+#define NOTICE_H     30
 #define HISTORY_CAP  64
 #define SHEETS_CAP   96
 #define IMAGES_CAP   384
@@ -170,6 +171,13 @@ static void normalize_input(const char *in, char *out, size_t cap) {
 
 /* ---- layout rectangles -------------------------------------------------- */
 
+/* Started because Surfer's WebKit engine is not on this system (not with
+ * --classic): a bar under the toolbar says so, since this engine does not
+ * run sites such as YouTube */
+static int no_webkit;       /* start_webkit's answer: -1 missing, -2 did not start */
+
+static int notice_h(void) { return no_webkit ? NOTICE_H : 0; }
+
 static ic_rect_t toolbar_rect(ic_app_t *app) { return ic_rect_make(0, 0, app->width, IC_H_TOOLBAR); }
 
 static ic_rect_t back_rect(ic_app_t *app) {
@@ -196,7 +204,7 @@ static ic_rect_t addr_rect(ic_app_t *app) {
 }
 
 static ic_rect_t page_rect(ic_app_t *app) {
-    return ic_rect_make(0, IC_H_TOOLBAR, app->width, app->height - IC_H_TOOLBAR - STATUS_H);
+    return ic_rect_make(0, IC_H_TOOLBAR + notice_h(), app->width, app->height - IC_H_TOOLBAR - notice_h() - STATUS_H);
 }
 
 static ic_rect_t status_rect(ic_app_t *app) {
@@ -1669,6 +1677,20 @@ static void draw_toolbar(ic_app_t *app, ic_canvas_t *c) {
     ic_ui_textfield(c, addr_rect(app), &tf);
 }
 
+static void draw_notice(ic_app_t *app, ic_canvas_t *c) {
+    const ic_palette_t *pal = ic_palette();
+    int y = IC_H_TOOLBAR, h = NOTICE_H;
+    if (!no_webkit) return;
+    ic_gfx_fill(c, 0, y, app->width, h, ic_color_with_alpha(pal->warning, 0x30));
+    ic_gfx_fill(c, 0, y + h - 1, app->width, 1, pal->separator);
+    ic_symbol_draw(c, IC_SYM_WARNING, (float)(IC_SP_3 + 8), (float)y + h / 2.0f, 16.0f, pal->warning);
+    ic_text_draw_in(c, ic_font(IC_FONT_FOOTNOTE), ic_rect_make(IC_SP_3 + 24, y, app->width - IC_SP_3 * 2 - 24, h),
+                    no_webkit == -2 ? "Surfer's web engine (WebKit) did not start, so sites such as YouTube will not work."
+                    : "Surfer's web engine (WebKit) is missing, so sites such as YouTube will not work. "
+                      "Install the latest ICDA update to bring it back.",
+                    pal->label, IC_ALIGN_LEFT);
+}
+
 static void draw_page(ic_app_t *app, ic_canvas_t *c) {
     ic_rect_t p = page_rect(app);
     ic_rect_t saved;
@@ -1721,6 +1743,7 @@ static void draw(ic_app_t *app, ic_canvas_t *c) {
     }
     ic_ui_window_bg(c, ic_rect_make(0, 0, app->width, app->height));
     draw_toolbar(app, c);
+    draw_notice(app, c);
     draw_page(app, c);
     draw_status(app, c);
     dl_draw(app, c);
@@ -2023,7 +2046,8 @@ static void init(ic_app_t *app) {
 
 /* Surfer on WebKit (userspace/webkit): with a Linux root holding it - on the
  * system's own partition or a disk - pages are WebKit's.  Started with the
- * URL; this engine stays for systems without it and for --classic. */
+ * URL; this engine stays for systems without it and for --classic.  -1: not
+ * on this system, -2: there but it did not start. */
 static int start_webkit(const char *url) {
     static const char *const vols[] = { "fat32", "exfat", "ntfs", "usb" };
     static const char *const programs[] = { "icda-surfer", "icda-webkit" };
@@ -2035,7 +2059,7 @@ static int start_webkit(const char *url) {
             if (v < 0) snprintf(path, sizeof path, "/linux/usr/bin/%s", programs[program]);
             else snprintf(path, sizeof path, "/volumes/%s-%d/linux/usr/bin/%s", vols[v], i, programs[program]);
             if (icda_stat(path, &st) != 0) continue;
-            return (int64_t)icda_spawn_args(path, url ? url : "") > 0 ? 0 : -1;
+            return (int64_t)icda_spawn_args(path, url ? url : "") > 0 ? 0 : -2;
         }
       }
     }
@@ -2046,7 +2070,7 @@ int main(int argc, char **argv) {
     static const ic_app_desc_t desc = { "Surfer", WIN_W, WIN_H, init, draw, event, tick };
     const char *arg = argc > 1 && argv ? argv[1] : 0;
     if (arg && !strcmp(arg, "--classic")) arg = argc > 2 ? argv[2] : 0;
-    else if (start_webkit(arg) == 0) return 0;
+    else if ((no_webkit = start_webkit(arg)) == 0) return 0;
     media_set_audio(&media_sink);
     if (ic_app_run(&desc, (void *)arg) != 0) {
         icda_write("surfer requires the desktop (Ctrl+Alt+F1)\n");
