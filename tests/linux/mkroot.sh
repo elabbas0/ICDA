@@ -4,13 +4,35 @@
 # need), plus the dynamic tests at the top.  ICDA mounts it under /volumes
 # and Linux programs find /lib, /usr ... there (kernel/linux/lx.c overlay).
 # usage: sh tests/linux/mkroot.sh [extra alpine packages...]
+#
+# The root is what a release ships (scripts/ota-release.sh publishes it, and
+# the USB stick's "linux" folder is a copy): Surfer's WebKit engine with
+# GStreamer's media, and the Windows layer.  A release built from a root
+# without them removes them from every system that updates (1.11.1 and
+# 1.11.2 did: Surfer fell back to its classic engine), so they are always
+# in it; ICDA_ROOT=minimal makes a small root for tests of the Linux
+# personality alone, which is never to be released.
 cd "$(dirname "$0")/../.."
-MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$*" -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
+RELEASE_PKGS="ca-certificates cog font-dejavu glib-networking gsettings-desktop-schemas gstreamer gst-libav
+  gst-plugins-bad gst-plugins-base gst-plugins-good mesa-dri-gallium mesa-egl mesa-gbm mesa-gles wpewebkit"
+if [ "${ICDA_ROOT:-}" = minimal ]; then
+    PKGS_ALL="$*"
+else
+    PKGS_ALL="$(echo $RELEASE_PKGS) $*"
+    # Surfer's engine (icda-webkit, the release's icda-surfer) is built first when it is not
+    [ -f userspace/webkit/out/icda-webkit ] || sh userspace/webkit/build.sh
+    [ -f userspace/webkit/out/icda-webkit ] || { echo "mkroot: icda-webkit did not build (userspace/webkit/build.sh)"; exit 1; }
+fi
+# Windows programs: the Windows layer (icda-win) ships in every root, so it is
+# built first when it is not
+[ -f userspace/winlayer/out/icda-win ] || sh userspace/winlayer/build.sh
+[ -f userspace/winlayer/out/icda-win ] || { echo "mkroot: icda-win did not build (userspace/winlayer/build.sh)"; exit 1; }
+MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$PKGS_ALL" -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
 set -e
 apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
-# the Windows layer, when built, needs Mesa'"'"'s OSMesa (OpenGL) and libmspack (.cab archives)
-[ -f userspace/winlayer/out/icda-win ] && PKGS="$PKGS mesa-osmesa libmspack"
+# the Windows layer needs Mesa'"'"'s OSMesa (OpenGL) and libmspack (.cab archives)
+PKGS="$PKGS mesa-osmesa libmspack"
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
     -U --allow-untrusted --root $R --initdb add musl zlib busybox $PKGS >/dev/null
 S=/tmp/stage/linux
@@ -42,7 +64,7 @@ rm -rf $S/usr/bin $S/usr/sbin $S/usr/share/man $S/usr/share/doc
 mkdir -p $S/usr/bin
 for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; done; true
 [ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
-[ -f userspace/winlayer/out/icda-win ] && cp userspace/winlayer/out/icda-win $S/usr/bin/icda-win || true
+cp userspace/winlayer/out/icda-win $S/usr/bin/icda-win
 [ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $S/usr/lib/gstreamer-1.0/ || true
 # GStreamer plugin registry, so programs do not read every plugin on first use
 # (icda-webkit sets GST_REGISTRY to it, with GST_REGISTRY_UPDATE=no)

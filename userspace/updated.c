@@ -222,6 +222,18 @@ static const entry_t *find(const manifest_t *m, const char *rel) {
     return 0;
 }
 
+/* Surfer's WebKit engine is in a manifest: its program (the release's
+ * icda-surfer, or the root's icda-webkit) and WebKit's library */
+static int has_webkit_engine(const manifest_t *m) {
+    int prog = 0, lib = 0;
+    for (int i = 0; i < m->count; i++) {
+        const char *r = m->files[i].rel;
+        if (!strcmp(r, "linux/usr/bin/icda-surfer") || !strcmp(r, "linux/usr/bin/icda-webkit")) prog = 1;
+        if (!strncmp(r, "linux/usr/lib/libWPEWebKit-", 27)) lib = 1;
+    }
+    return prog && lib;
+}
+
 static void to_hex(const uint8_t d[32], char out[65]) {
     static const char h[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
@@ -527,9 +539,18 @@ static void check(void) {
             need++;
         }
     }
-    for (int i = 0; i < have.count && !hotfix; i++) {
-        if (!find(&want, have.files[i].rel))
-            used += (size_t)snprintf(commit + used, cap - used, "remove %s\n", have.files[i].rel);
+    {
+        /* A release without Surfer's WebKit engine, on a system that has it:
+         * its Linux root stays (1.11.1 and 1.11.2 were published without
+         * WebKit by mistake, and updating removed it, so Surfer fell back to
+         * its classic engine).  Only a release that has WebKit replaces it. */
+        int keep_linux = !has_webkit_engine(&want) && has_webkit_engine(&have);
+        if (keep_linux) status("Update %s has no WebKit: keeping this system's%s", want.version, 0);
+        for (int i = 0; i < have.count && !hotfix; i++) {
+            if (keep_linux && !strncmp(have.files[i].rel, "linux/", 6)) continue;
+            if (!find(&want, have.files[i].rel))
+                used += (size_t)snprintf(commit + used, cap - used, "remove %s\n", have.files[i].rel);
+        }
     }
     /* the manifest itself becomes the installed manifest */
     {

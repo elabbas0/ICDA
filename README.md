@@ -172,6 +172,18 @@ strip, and it loads again when you select it. Tabs playing sound are kept.
 measures Surfer before and after a change; the measurements of these changes
 are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md).
 
+The engine (WebKit with its JavaScript JIT, and GStreamer for video and
+sound) is in the Linux root, `/linux`. Without it Surfer falls back to its
+classic engine, which cannot run sites such as YouTube. Releases 1.11.1 and
+1.11.2 were published from a root without WebKit, and updating to them
+removed it; a release built from the full root brings it back. So
+`tests/linux/mkroot.sh` always builds the root a release ships, with WebKit,
+GStreamer and the Windows layer (`ICDA_ROOT=minimal` makes a small one for
+tests of the Linux personality, never to be released);
+`scripts/ota-release.sh` refuses a root without WebKit, or with fewer than
+half of the last release's Linux files; and the updater keeps a system's
+WebKit when a release does not have it.
+
 ## Dialogs
 
 A program asks the window manager for a dialog (an error, a warning, or a
@@ -367,9 +379,13 @@ Direct3D (games need an OpenGL renderer), .NET, the standard controls
 (buttons, edit fields and lists in a program's window are not drawn), and
 Chrome itself does not start yet.
 
-`userspace/winlayer/build.sh` builds `icda-win` (in Docker, against
-Alpine's Mesa), and `tests/linux/mkroot.sh` puts it in the Linux root with
-the libraries it needs. `tests/winlayer/run.sh` builds test programs with
+`icda-win` ships with ICDA: `tests/linux/mkroot.sh` builds it (with
+`userspace/winlayer/build.sh`, in Docker, against Alpine's Mesa) when it is
+not built yet and puts it in every Linux root with the libraries it needs
+(OSMesa and libmspack, 14 MB beside WebKit's), so the USB stick's `linux`
+folder and every install have it. `scripts/ota-release.sh` will not publish
+a release without it, and ships it as a file of its own, so an update to the
+Windows layer does not download the WebKit pack again. `tests/winlayer/run.sh` builds test programs with
 MinGW-w64 and checks them under `icda-win` on Linux (the C runtimes,
 threads and waits, files, the registry, processes, version resources,
 OpenGL, keys and GDI text); the programs, left in `tests/winlayer/out`,

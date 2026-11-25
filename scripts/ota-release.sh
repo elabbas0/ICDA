@@ -28,9 +28,34 @@ PART=$((90 * 1024 * 1024))
 CACHE=.verify/ota-cache     # the WebKit pack and its manifest lines, reused while the root is unchanged
 [ -n "$VERSION" ] || { echo "usage: $0 <version> \"<notes>\" [--publish]"; exit 2; }
 [ -f "$KEY" ] || { echo "signing key $KEY missing"; exit 1; }
-# a release without the WebKit root makes updaters remove WebKit from installed systems
-[ -d "$LINUXROOT/usr/bin" ] || [ -n "${NO_WEBKIT:-}" ] || {
-    echo "WebKit root $LINUXROOT missing: not publishing a release that removes WebKit (NO_WEBKIT=1 overrides)"; exit 1; }
+# A release without the WebKit root makes updaters remove WebKit from
+# installed systems, and Surfer falls back to its classic engine (1.11.1 and
+# 1.11.2 were built from a root with only the Windows layer in it): the root
+# must hold WebKit itself, not only a usr/bin folder.
+wk_ok=1
+[ -f "$LINUXROOT/usr/bin/icda-webkit" ] || wk_ok=0
+ls "$LINUXROOT"/usr/lib/libWPEWebKit-*.so* >/dev/null 2>&1 || wk_ok=0
+[ -f userspace/webkit/out/icda-webkit ] || wk_ok=0
+[ "$wk_ok" = 1 ] || [ -n "${NO_WEBKIT:-}" ] || {
+    echo "Surfer's WebKit is not in $LINUXROOT (tests/linux/mkroot.sh builds the release root):"
+    echo "not publishing a release that removes WebKit (NO_WEBKIT=1 overrides)"; exit 1; }
+# Nor a release that drops most of the Linux root systems have: an update
+# removes every file its manifest does not list
+git fetch -q origin ota 2>/dev/null || true
+if [ -z "${ALLOW_REMOVALS:-}" ] && git rev-parse -q --verify origin/ota >/dev/null; then
+    before=$(git show origin/ota:manifest.txt 2>/dev/null | grep -c '^[wl]file linux/' || true)
+    now=$(find "$LINUXROOT" -type f | wc -l | tr -d ' ')
+    if [ "${before:-0}" -gt 0 ] && [ "$now" -lt $((before / 2)) ]; then
+        echo "$LINUXROOT has $now files, the last release's Linux root $before: an update would remove most of them"
+        echo "(ALLOW_REMOVALS=1 overrides)"; exit 1
+    fi
+fi
+
+# Windows programs: the Windows layer is in every release, on its own (an
+# lfile), so a change to it does not make systems download the WebKit pack
+[ -f userspace/winlayer/out/icda-win ] || sh userspace/winlayer/build.sh
+[ -f userspace/winlayer/out/icda-win ] || [ -n "${NO_WEBKIT:-}" ] || {
+    echo "icda-win missing and did not build: not publishing a release without the Windows layer"; exit 1; }
 
 echo "[ota] building"
 spin "kernel + apps" "$OUT.build.log" env MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
@@ -75,6 +100,7 @@ body=$(mktemp)
         # launcher in its existing pack so UI fixes do not replace that pack.
         set -- loose:linux/usr/bin/icda-surfer=userspace/webkit/out/icda-webkit \
                linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
+               loose:linux/usr/bin/icda-win=userspace/winlayer/out/icda-win \
                loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
                loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \
                loose:linux/usr/bin/icda-stt=userspace/llm/out/icda-stt \
