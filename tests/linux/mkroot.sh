@@ -31,8 +31,9 @@ MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$PKGS_ALL" -v "$(pwd -
 set -e
 apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
-# the Windows layer needs Mesa'"'"'s OSMesa (OpenGL) and libmspack (.cab archives)
-PKGS="$PKGS mesa-osmesa libmspack"
+# the Windows layer needs Mesa'"'"'s OSMesa (OpenGL), libmspack (.cab archives)
+# and FreeType (DirectWrite'"'"'s fonts)
+PKGS="$PKGS mesa-osmesa libmspack freetype"
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
     -U --allow-untrusted --root $R --initdb add musl zlib busybox $PKGS >/dev/null
 S=/tmp/stage/linux

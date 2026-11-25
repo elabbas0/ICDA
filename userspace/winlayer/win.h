@@ -105,7 +105,7 @@ typedef struct wdll {
 /* each dll_*.c defines one or more of these */
 extern const wdll_t dll_kernel32, dll_ntdll, dll_msvcrt, dll_ucrt, dll_vcruntime, dll_user32, dll_gdi32,
     dll_opengl32, dll_winmm, dll_advapi32, dll_shell32, dll_ole32, dll_oleaut32, dll_imm32, dll_setupapi,
-    dll_version, dll_ws2_32, dll_bcrypt, dll_cabinet, dll_misc;
+    dll_version, dll_ws2_32, dll_bcrypt, dll_cabinet, dll_dwrite, dll_misc;
 
 /* the builtin for a DLL name (any case, with or without .dll), 0 if none */
 const wdll_t *builtin_find(const char *dll);

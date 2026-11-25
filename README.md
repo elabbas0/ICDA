@@ -353,6 +353,12 @@ Windows messages, raw input (`WM_INPUT`) for a game's mouse look (when a
 game reads the raw mouse and hides its pointer, the window manager hands it
 the motion and keeps the pointer out of sight), and `MessageBox` is an ICDA
 dialog. GDI draws bitmaps, rectangles and text, in ICDA's typefaces.
+DirectWrite, the font system programs such as Chrome draw their text with,
+reads TrueType and OpenType fonts with FreeType: ICDA's own, the Linux
+root's (DejaVu) and any put in the prefix's `C:\Windows\Fonts`. Windows'
+family names (Segoe UI, Arial, Times New Roman, Consolas ...) find the
+nearest family there is, and characters a font lacks fall back to one that
+has them. Its text layout and text analyzer are not there.
 OpenGL, up to 4.5, is Mesa's llvmpipe drawing into the window; what it
 compiles of a program's shaders is kept in `~/.windows/cache/mesa`, so a
 game stutters only the first time it shows something. Anisotropic
@@ -377,7 +383,8 @@ of 108 seconds), and with the compiled shaders kept its slowest frame takes
 0.2 seconds instead of 1.1. Chrome's x64 offline installer installs Chrome. Not there: 32-bit programs,
 Direct3D (games need an OpenGL renderer), .NET, the standard controls
 (buttons, edit fields and lists in a program's window are not drawn), and
-Chrome itself does not start yet.
+Chrome itself does not start yet: it gets through most of its start-up
+(its own DLLs, the profile, policies, DPI and OLE) but shows no window.
 
 `icda-win` ships with ICDA: `tests/linux/mkroot.sh` builds it (with
 `userspace/winlayer/build.sh`, in Docker, against Alpine's Mesa) when it is
@@ -388,7 +395,7 @@ a release without it, and ships it as a file of its own, so an update to the
 Windows layer does not download the WebKit pack again. `tests/winlayer/run.sh` builds test programs with
 MinGW-w64 and checks them under `icda-win` on Linux (the C runtimes,
 threads and waits, files, the registry, processes, version resources,
-OpenGL, keys and GDI text); the programs, left in `tests/winlayer/out`,
+OpenGL, keys, GDI text and DirectWrite); the programs, left in `tests/winlayer/out`,
 run on ICDA too. In QEMU without KVM, give the guest `-cpu max,-avx,-avx2`:
 QEMU 8.2 emulates some AVX2 instructions wrongly, and llvmpipe's 2D
 drawing then goes wrong (an empty menu, a grey sky) or faults.

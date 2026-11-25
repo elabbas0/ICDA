@@ -8,7 +8,7 @@
 cd "$(dirname "$0")/../.."
 MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
 set -e
-apk add --no-cache build-base mesa-dev mesa-osmesa libmspack-dev python3 mingw-w64-gcc >/dev/null
+apk add --no-cache build-base mesa-dev mesa-osmesa libmspack-dev freetype-dev font-dejavu python3 mingw-w64-gcc >/dev/null
 O=/w/tests/winlayer/out
 mkdir -p $O
 rm -f $O/icda-win
@@ -25,6 +25,7 @@ $CC -O1 -o $O/t_proc.exe t_proc.c
 x86_64-w64-mingw32-windres t_ver.rc -O coff -o $O/t_ver.res
 $CC -O1 -o $O/t_ver.exe t_ver.c $O/t_ver.res -lversion
 $CC -O2 -o $O/t_keys.exe t_keys.c -luser32 -lgdi32
+$CC -O1 -o $O/t_dwrite.exe t_dwrite.c -ldwrite
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
 cp /usr/x86_64-w64-mingw32/bin/libwinpthread-1.dll $O/
@@ -84,6 +85,15 @@ green = sum(1 for i in range(0, len(px) - 2, 3) if px[i + 1] > 200 and px[i] < 1
 sys.exit(0 if green > 200 else 1)
 "
 check "t_keys.exe: GDI text" $?
+# DirectWrite: the system fonts (DejaVu, and ICDA'"'"'s Inter as Segoe UI), glyphs,
+# outlines, coverage, fallback, and a font loaded from memory
+mkdir -p fonts && cp /w/resources/fonts/Inter-*.ttf fonts/
+ICDA_WIN_FONTS=$O/fonts timeout 60 ./icda-win t_dwrite.exe /usr/share/fonts/dejavu/DejaVuSans.ttf > t_dwrite.out 2>&1
+grep -q "^segoe ui -> Inter" t_dwrite.out && grep -q "^arial bold italic -> DejaVu Sans weight 700" t_dwrite.out &&
+    grep -q "^fallback 05D0 -> DejaVu Sans length 2" t_dwrite.out && grep -q "^memory font DejaVu Sans" t_dwrite.out &&
+    grep -q "^done, 0 failed" t_dwrite.out
+check "t_dwrite.exe: fonts, glyphs, fallback" $?
+grep "^FAIL" t_dwrite.out
 echo "$fails failed"
 exit $fails
 '

@@ -13,7 +13,7 @@
 static const wdll_t *const all_dlls[] = {
     &dll_kernel32, &dll_ntdll, &dll_msvcrt, &dll_ucrt, &dll_vcruntime, &dll_user32, &dll_gdi32, &dll_opengl32,
     &dll_winmm, &dll_advapi32, &dll_shell32, &dll_ole32, &dll_oleaut32, &dll_imm32, &dll_setupapi, &dll_version,
-    &dll_ws2_32, &dll_bcrypt, &dll_cabinet, 0
+    &dll_ws2_32, &dll_bcrypt, &dll_cabinet, &dll_dwrite, 0
 };
 
 static const struct {
