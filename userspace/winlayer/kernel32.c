@@ -49,6 +49,9 @@ typedef struct {
     int  delete_on_close;  /* FILE_FLAG_DELETE_ON_CLOSE, FileDispositionInfo */
     int  listen_fd;        /* a named pipe's server end: the socket it accepts on, -1 */
     char pipe_name[256];   /* a named pipe's Unix socket path */
+    void *iocp;            /* the completion port it is associated with, or 0 */
+    ULONG_PTR iocp_key;
+    UCHAR iocp_modes;      /* SetFileCompletionNotificationModes */
 } wfileobj_t;
 
 #define GENERIC_READ    0x80000000U
@@ -488,6 +491,7 @@ typedef struct {
 } OVERLAPPED;
 
 BOOL WINAPI SetEvent(HANDLE h);
+static void file_completed(whandle_t *w, OVERLAPPED *ov, DWORD bytes);
 
 BOOL WINAPI ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
     int fd = file_fd(h);
@@ -509,6 +513,7 @@ BOOL WINAPI ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
         ov->Internal = 0;
         ov->InternalHigh = (ULONG_PTR)r;
         if (ov->hEvent) SetEvent(ov->hEvent);
+        file_completed(w, ov, (DWORD)r);
     }
     return TRUE;
 }
@@ -535,9 +540,237 @@ BOOL WINAPI WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *put, OVERLAPPED
         ov->Internal = 0;
         ov->InternalHigh = (ULONG_PTR)r;
         if (ov->hEvent) SetEvent(ov->hEvent);
+        file_completed(w, ov, (DWORD)r);
     }
     return TRUE;
 }
+
+/* ---- I/O completion ports --------------------------------------------------------------------
+ *
+ * A port is a queue of completion packets.  ICDA's file I/O is done before
+ * ReadFile or WriteFile returns, so a file associated with a port posts its
+ * packet then (unless the program asked for none on success); the program
+ * posts its own.  Waits for packets use the waitable objects' one lock. */
+typedef struct {
+    ULONG_PTR   key;
+    OVERLAPPED *ov;
+    DWORD       bytes, status;
+} iopkt_t;
+
+typedef struct {
+    int      magic;
+    iopkt_t *q;
+    int      head, n, cap;
+} iocp_t;
+
+#define IOCP_MAGIC 0x494F4350
+
+static iocp_t *iocp_of(HANDLE h) {
+    whandle_t *w = h_get(h, H_OTHER);
+    iocp_t *p = w ? w->obj : 0;
+    return p && p->magic == IOCP_MAGIC ? p : 0;
+}
+
+static void iocp_post(iocp_t *p, ULONG_PTR key, OVERLAPPED *ov, DWORD bytes, DWORD status) {
+    sync_lock();
+    if (p->n == p->cap) {
+        int nc = p->cap ? p->cap * 2 : 64;
+        iopkt_t *nq = malloc((size_t)nc * sizeof(*nq));
+        for (int i = 0; i < p->n; i++) nq[i] = p->q[(p->head + i) % p->cap];
+        free(p->q);
+        p->q = nq, p->cap = nc, p->head = 0;
+    }
+    p->q[(p->head + p->n) % p->cap] = (iopkt_t){ key, ov, bytes, status };
+    p->n++;
+    sync_broadcast();
+    sync_unlock();
+}
+
+static void file_completed(whandle_t *w, OVERLAPPED *ov, DWORD bytes) {
+    wfileobj_t *f = w ? w->obj : 0;
+    if (f && f->iocp && !(f->iocp_modes & 1))          /* FILE_SKIP_COMPLETION_PORT_ON_SUCCESS */
+        iocp_post(f->iocp, f->iocp_key, ov, bytes, 0);
+}
+
+HANDLE WINAPI CreateIoCompletionPort(HANDLE file, HANDLE existing, ULONG_PTR key, DWORD threads) {
+    iocp_t *p = existing ? iocp_of(existing) : 0;
+    HANDLE port = existing;
+    (void)threads;
+    if (existing && !p) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (!p) {
+        p = calloc(1, sizeof(*p));
+        p->magic = IOCP_MAGIC;
+        port = h_new(H_OTHER, p);
+    }
+    if (file && file != INVALID_HANDLE_VALUE) {
+        whandle_t *w = h_get(file, H_FILE);
+        if (w) {
+            ((wfileobj_t *)w->obj)->iocp = p;
+            ((wfileobj_t *)w->obj)->iocp_key = key;
+        }
+    }
+    return port;
+}
+
+BOOL WINAPI PostQueuedCompletionStatus(HANDLE port, DWORD bytes, ULONG_PTR key, OVERLAPPED *ov) {
+    iocp_t *p = iocp_of(port);
+    if (!p) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    iocp_post(p, key, ov, bytes, 0);
+    return TRUE;
+}
+
+/* waits until the port has packets (under the sync lock): 0, or WAIT_TIMEOUT */
+static DWORD iocp_wait(iocp_t *p, DWORD ms) {
+    if (ms != INFINITE) sync_deadline(ms);
+    while (!p->n) {
+        if (ms == 0 || sync_wait_ms(ms) == ETIMEDOUT) return WAIT_TIMEOUT;
+    }
+    return 0;
+}
+
+BOOL WINAPI GetQueuedCompletionStatus(HANDLE port, DWORD *bytes, ULONG_PTR *key, OVERLAPPED **ov, DWORD ms) {
+    iocp_t *p = iocp_of(port);
+    iopkt_t k;
+    if (ov) *ov = 0;
+    if (!p) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    sync_lock();
+    if (iocp_wait(p, ms)) {
+        sync_unlock();
+        wset_last_error(WAIT_TIMEOUT);
+        return FALSE;
+    }
+    k = p->q[p->head];
+    p->head = (p->head + 1) % p->cap;
+    p->n--;
+    sync_unlock();
+    if (bytes) *bytes = k.bytes;
+    if (key) *key = k.key;
+    if (ov) *ov = k.ov;
+    if (k.status) {
+        wset_last_error(k.status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+typedef struct {
+    ULONG_PTR   key;
+    OVERLAPPED *ov;
+    ULONG_PTR   internal;
+    DWORD       bytes;
+} OVERLAPPED_ENTRY;
+
+BOOL WINAPI GetQueuedCompletionStatusEx(HANDLE port, OVERLAPPED_ENTRY *e, ULONG count, ULONG *removed, DWORD ms, BOOL alertable) {
+    iocp_t *p = iocp_of(port);
+    ULONG got = 0;
+    (void)alertable;
+    if (removed) *removed = 0;
+    if (!p || !e || !count) {
+        wset_last_error(p ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    sync_lock();
+    if (iocp_wait(p, ms)) {
+        sync_unlock();
+        wset_last_error(WAIT_TIMEOUT);
+        return FALSE;
+    }
+    while (p->n && got < count) {
+        iopkt_t k = p->q[p->head];
+        p->head = (p->head + 1) % p->cap;
+        p->n--;
+        e[got].key = k.key, e[got].ov = k.ov, e[got].internal = k.status, e[got].bytes = k.bytes;
+        got++;
+    }
+    sync_unlock();
+    if (removed) *removed = got;
+    return TRUE;
+}
+
+BOOL WINAPI SetFileCompletionNotificationModes(HANDLE h, UCHAR modes) {
+    whandle_t *w = h_get(h, H_FILE);
+    if (w) ((wfileobj_t *)w->obj)->iocp_modes = modes;
+    return TRUE;
+}
+
+/* ---- waits of the thread pool (RegisterWaitForSingleObject) -------------------------------------
+ * Each registered wait is a thread of its own, waiting for the object or a
+ * cancel event, and calling the program back. */
+typedef void (WCALLBACK *WAITORTIMERCALLBACK)(void *, BOOLEAN);
+typedef struct {
+    int                 magic;
+    HANDLE              obj, cancel, done;
+    WAITORTIMERCALLBACK cb;
+    void               *ctx;
+    DWORD               ms;
+    ULONG               flags;
+    pthread_t           th;
+    DWORD               tid;
+} rwait_t;
+
+#define RWAIT_MAGIC 0x52574149
+HANDLE WINAPI CreateEventW(void *sa, BOOL manual, BOOL initial, const WCHAR *name);
+DWORD WINAPI WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms);
+DWORD WINAPI WaitForSingleObject(HANDLE h, DWORD ms);
+
+static void *rwait_thread(void *arg) {
+    rwait_t *r = arg;
+    win_thread_setup();
+    r->tid = thread_id();
+    for (;;) {
+        HANDLE hs[2] = { r->cancel, r->obj };
+        DWORD got = WaitForMultipleObjects(2, hs, FALSE, r->ms);
+        if (got == WAIT_OBJECT_0 || got == WAIT_FAILED) break;
+        r->cb(r->ctx, got == WAIT_TIMEOUT);
+        if (r->flags & 8) break;                    /* WT_EXECUTEONLYONCE */
+        if (WaitForSingleObject(r->cancel, 0) == WAIT_OBJECT_0) break;
+    }
+    if (r->done) SetEvent(r->done);
+    return 0;
+}
+
+BOOL WINAPI RegisterWaitForSingleObject(HANDLE *out, HANDLE obj, WAITORTIMERCALLBACK cb, void *ctx, ULONG ms, ULONG flags) {
+    rwait_t *r = calloc(1, sizeof(*r));
+    pthread_attr_t a;
+    r->magic = RWAIT_MAGIC;
+    r->obj = obj, r->cb = cb, r->ctx = ctx, r->ms = ms, r->flags = flags;
+    r->cancel = CreateEventW(0, TRUE, FALSE, 0);
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, 1u << 20);
+    if (pthread_create(&r->th, &a, rwait_thread, r) != 0) {
+        free(r);
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    *out = h_new(H_OTHER, r);
+    return TRUE;
+}
+
+BOOL WINAPI UnregisterWaitEx(HANDLE h, HANDLE completion) {
+    whandle_t *w = h_get(h, H_OTHER);
+    rwait_t *r = w ? w->obj : 0;
+    if (!r || r->magic != RWAIT_MAGIC) {
+        wset_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (completion && completion != INVALID_HANDLE_VALUE) r->done = completion;
+    SetEvent(r->cancel);
+    if (completion == INVALID_HANDLE_VALUE && r->tid != thread_id()) pthread_join(r->th, 0);   /* its callbacks are over */
+    else pthread_detach(r->th);
+    h_close(h);
+    return TRUE;
+}
+
+BOOL WINAPI UnregisterWait(HANDLE h) { return UnregisterWaitEx(h, 0); }
 
 BOOL WINAPI GetOverlappedResult(HANDLE h, OVERLAPPED *ov, DWORD *n, BOOL wait) {
     (void)h, (void)wait;
@@ -709,11 +942,13 @@ BOOL WINAPI SetFileAttributesW(const WCHAR *name, DWORD a) {
     return TRUE;
 }
 
+/* as Windows lays it out: the volume's serial number comes before the size */
 typedef struct {
     DWORD    dwFileAttributes;
     FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime;
-    DWORD    nFileSizeHigh, nFileSizeLow, dwVolumeSerialNumber, nNumberOfLinks, nFileIndexHigh, nFileIndexLow;
+    DWORD    dwVolumeSerialNumber, nFileSizeHigh, nFileSizeLow, nNumberOfLinks, nFileIndexHigh, nFileIndexLow;
 } BY_HANDLE_FILE_INFORMATION;
+_Static_assert(sizeof(BY_HANDLE_FILE_INFORMATION) == 52, "BY_HANDLE_FILE_INFORMATION is 52 bytes");
 
 BOOL WINAPI GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION *i) {
     struct stat st;
@@ -1260,26 +1495,143 @@ BOOL WINAPI UnlockFileEx(HANDLE h, DWORD r, DWORD lo, DWORD hi, OVERLAPPED *ov) 
     return TRUE;
 }
 
-/* file mappings: views are mmaps of the descriptor */
-typedef struct {
-    int      fd;
-    DWORD    prot;
-    uint64_t size;
+/* ---- file mappings (sections) ---------------------------------------------------------------
+ *
+ * A view is an mmap of a descriptor.  A section of memory alone (no file)
+ * is a memfd the section's size, so every view of it is the same memory, as
+ * Windows has it (Chrome maps one region twice: to write, and read-only).
+ * Handles to a section, duplicated or opened by name, share it; it goes
+ * with the last, while its views stay.  The views are kept so VirtualQuery
+ * can say how large one is and UnmapViewOfFile can unmap it. */
+typedef struct wmapping {
+    int              fd;
+    DWORD            prot;
+    uint64_t         size;
+    int              refs;
+    WCHAR            name[128];
+    struct wmapping *next;      /* the named ones */
 } wmapping_t;
 
+typedef struct {
+    uint8_t *base;
+    size_t   size;
+    int      write, exec;
+} wview_t;
+
+static pthread_mutex_t maplock = PTHREAD_MUTEX_INITIALIZER;
+static wmapping_t *named_maps;
+static wview_t *views;
+static int nviews, cviews;
+
+static void mapping_unref(wmapping_t *m) {
+    pthread_mutex_lock(&maplock);
+    if (--m->refs > 0) {
+        pthread_mutex_unlock(&maplock);
+        return;
+    }
+    for (wmapping_t **pp = &named_maps; *pp; pp = &(*pp)->next)
+        if (*pp == m) {
+            *pp = m->next;
+            break;
+        }
+    pthread_mutex_unlock(&maplock);
+    if (m->fd >= 0) close(m->fd);
+    free(m);
+}
+
+static void mapping_ref(wmapping_t *m) {
+    pthread_mutex_lock(&maplock);
+    m->refs++;
+    pthread_mutex_unlock(&maplock);
+}
+
+/* memory for a section without a file: a memfd, else an unlinked file in /tmp */
+static int section_fd(uint64_t size) {
+    int fd = memfd_create("icda-section", MFD_CLOEXEC);
+    if (fd < 0) {
+        char path[] = "/tmp/icda-section-XXXXXX";
+        fd = mkstemp(path);
+        if (fd >= 0) unlink(path);
+    }
+    if (fd >= 0 && ftruncate(fd, (off_t)size) != 0) {
+        close(fd);
+        fd = -1;
+    }
+    return fd;
+}
+
 HANDLE WINAPI CreateFileMappingW(HANDLE file, void *sa, DWORD prot, DWORD hi, DWORD lo, const WCHAR *name) {
-    wmapping_t *m = calloc(1, sizeof(*m));
-    (void)sa, (void)name;
-    m->fd = file == INVALID_HANDLE_VALUE ? -1 : file_fd(file);
+    wmapping_t *m;
+    uint64_t size = (uint64_t)hi << 32 | lo;
+    (void)sa;
+    if (name && *name) {
+        pthread_mutex_lock(&maplock);
+        for (m = named_maps; m; m = m->next)
+            if (!w_icmp(m->name, name)) break;
+        if (m) {
+            m->refs++;
+            pthread_mutex_unlock(&maplock);
+            wset_last_error(ERROR_ALREADY_EXISTS);
+            return h_new(H_MAPPING, m);
+        }
+        pthread_mutex_unlock(&maplock);
+    }
+    m = calloc(1, sizeof(*m));
+    m->refs = 1;
     m->prot = prot;
-    m->size = (uint64_t)hi << 32 | lo;
-    if (m->fd >= 0) m->fd = dup(m->fd);
+    m->size = size;
+    if (file == INVALID_HANDLE_VALUE || !file) {
+        if (!size || (m->fd = section_fd(size)) < 0) {
+            free(m);
+            wset_last_error(size ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    } else {
+        int fd = file_fd(file);
+        struct stat st;
+        m->fd = fd >= 0 ? dup(fd) : -1;
+        /* a writable mapping larger than its file makes the file that large */
+        if (m->fd >= 0 && size && (prot & 0xCC) && fstat(m->fd, &st) == 0 && (uint64_t)st.st_size < size)
+            if (ftruncate(m->fd, (off_t)size) != 0) wlog("CreateFileMapping: the file could not grow");
+    }
+    if (name && *name) {
+        size_t n = w_len(name) < 127 ? w_len(name) : 127;
+        memcpy(m->name, name, n * sizeof(WCHAR));
+        pthread_mutex_lock(&maplock);
+        m->next = named_maps;
+        named_maps = m;
+        pthread_mutex_unlock(&maplock);
+    }
+    wset_last_error(0);
     return h_new(H_MAPPING, m);
 }
 
 HANDLE WINAPI CreateFileMappingA(HANDLE file, void *sa, DWORD prot, DWORD hi, DWORD lo, const char *name) {
-    (void)name;
-    return CreateFileMappingW(file, sa, prot, hi, lo, 0);
+    WCHAR w[128];
+    if (name) utf8_to_w(name, -1, w, 128);
+    return CreateFileMappingW(file, sa, prot, hi, lo, name ? w : 0);
+}
+
+HANDLE WINAPI OpenFileMappingW(DWORD access, BOOL inherit, const WCHAR *name) {
+    wmapping_t *m;
+    (void)access, (void)inherit;
+    pthread_mutex_lock(&maplock);
+    for (m = named_maps; m && name; m = m->next)
+        if (!w_icmp(m->name, name)) break;
+    if (m) m->refs++;
+    pthread_mutex_unlock(&maplock);
+    if (!m) {
+        wset_last_error(ERROR_FILE_NOT_FOUND);
+        return 0;
+    }
+    return h_new(H_MAPPING, m);
+}
+
+HANDLE WINAPI OpenFileMappingA(DWORD access, BOOL inherit, const char *name) {
+    WCHAR w[128];
+    if (!name) return OpenFileMappingW(access, inherit, 0);
+    utf8_to_w(name, -1, w, 128);
+    return OpenFileMappingW(access, inherit, w);
 }
 
 void *WINAPI MapViewOfFile(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n) {
@@ -1294,17 +1646,35 @@ void *WINAPI MapViewOfFile(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n)
     }
     m = w->obj;
     if (access & 2) prot |= PROT_WRITE;   /* FILE_MAP_WRITE */
-    if (access & 0x20) prot |= PROT_EXEC;
+    if (access & 0x20) prot |= PROT_EXEC; /* FILE_MAP_EXECUTE */
     if (!n) {
         struct stat st;
-        n = m->size ? m->size - off : (m->fd >= 0 && fstat(m->fd, &st) == 0 ? (SIZE_T)st.st_size - off : 0);
+        uint64_t total = m->size ? m->size : (fstat(m->fd, &st) == 0 ? (uint64_t)st.st_size : 0);
+        n = total > off ? (SIZE_T)(total - off) : 0;
     }
-    if (m->fd < 0) p = mmap(0, n, prot, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    else p = mmap(0, n, prot, (access & 1) ? MAP_PRIVATE : MAP_SHARED, m->fd, (off_t)off);   /* FILE_MAP_COPY */
+    if (!n || m->fd < 0) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    p = mmap(0, n, prot, (access & 1) ? MAP_PRIVATE : MAP_SHARED, m->fd, (off_t)off);    /* FILE_MAP_COPY */
     if (p == MAP_FAILED) {
         set_errno_error();
         return 0;
     }
+    pthread_mutex_lock(&maplock);
+    if (nviews == cviews) {
+        int nc = cviews ? cviews * 2 : 64;
+        wview_t *nv = realloc(views, (size_t)nc * sizeof(*nv));
+        if (nv) views = nv, cviews = nc;
+    }
+    if (nviews < cviews) {
+        views[nviews].base = p;
+        views[nviews].size = (n + 4095) & ~(size_t)4095;
+        views[nviews].write = (prot & PROT_WRITE) != 0;
+        views[nviews].exec = (prot & PROT_EXEC) != 0;
+        nviews++;
+    }
+    pthread_mutex_unlock(&maplock);
     return p;
 }
 
@@ -1314,8 +1684,17 @@ void *WINAPI MapViewOfFileEx(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T 
 }
 
 BOOL WINAPI UnmapViewOfFile(const void *p) {
-    (void)p;      /* the size is not known: views stay (programs map few) */
-    return TRUE;
+    pthread_mutex_lock(&maplock);
+    for (int i = 0; i < nviews; i++) {
+        if (views[i].base != p) continue;
+        munmap(views[i].base, views[i].size);
+        views[i] = views[--nviews];
+        pthread_mutex_unlock(&maplock);
+        return TRUE;
+    }
+    pthread_mutex_unlock(&maplock);
+    wset_last_error(487);      /* ERROR_INVALID_ADDRESS */
+    return FALSE;
 }
 
 BOOL WINAPI FlushViewOfFile(const void *p, SIZE_T n) {
@@ -1536,12 +1915,9 @@ BOOL WINAPI CloseHandle(HANDLE h) {
         free(f);
         break;
     }
-    case H_MAPPING: {
-        wmapping_t *m = w->obj;
-        if (m->fd >= 0) close(m->fd);
-        free(m);
+    case H_MAPPING:
+        mapping_unref(w->obj);
         break;
-    }
     case H_CONSOLE:
         return TRUE;    /* the standard handles stay */
     case H_FIND:
@@ -1575,6 +1951,9 @@ BOOL WINAPI DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD
     if (w->kind == H_FILE) {
         wfileobj_t *f = w->obj;
         *dst = file_handle(dup(f->fd), f->path, f->is_dir);
+    } else if (w->kind == H_MAPPING) {
+        mapping_ref(w->obj);
+        *dst = h_new(H_MAPPING, w->obj);
     } else {
         *dst = h_new(w->kind, w->obj);
     }
@@ -1907,6 +2286,31 @@ typedef struct {
     DWORD   State, Protect, Type;
 } MEMORY_BASIC_INFORMATION;
 
+/* the view an address is in, for VirtualQuery: 1 if it is in one */
+static int view_query(const void *addr, MEMORY_BASIC_INFORMATION *mbi) {
+    const uint8_t *a = addr;
+    int found = 0;
+    pthread_mutex_lock(&maplock);
+    for (int i = 0; i < nviews; i++) {
+        if (a < views[i].base || a >= views[i].base + views[i].size) continue;
+        {
+            uint8_t *page = (uint8_t *)((uintptr_t)a & ~(uintptr_t)4095);
+            DWORD pr = views[i].exec ? (views[i].write ? 0x40 : 0x20) : (views[i].write ? 0x04 : 0x02);
+            mbi->BaseAddress = page;
+            mbi->AllocationBase = views[i].base;
+            mbi->AllocationProtect = pr;
+            mbi->RegionSize = (size_t)(views[i].base + views[i].size - page);
+            mbi->State = MEM_COMMIT;
+            mbi->Protect = pr;
+            mbi->Type = 0x40000;      /* MEM_MAPPED */
+            found = 1;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&maplock);
+    return found;
+}
+
 SIZE_T WINAPI VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T n) {
     vregion_t *r;
     if (n < sizeof(*mbi)) return 0;
@@ -1928,6 +2332,7 @@ SIZE_T WINAPI VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE
         return sizeof(*mbi);
     }
     pthread_mutex_unlock(&vlock);
+    if (view_query(addr, mbi)) return sizeof(*mbi);
     /* a module's image? */
     for (wmodule_t *m = ld_modules(); m; m = m->next) {
         if ((const uint8_t *)addr >= m->base && (const uint8_t *)addr < m->base + m->size) {
@@ -2573,6 +2978,19 @@ BOOL WINAPI IsWow64Process(HANDLE h, BOOL *r) {
     *r = FALSE;
     return TRUE;
 }
+
+/* a 64-bit process on a 64-bit PC: no emulation (IMAGE_FILE_MACHINE_UNKNOWN), AMD64 */
+BOOL WINAPI IsWow64Process2(HANDLE h, USHORT *process, USHORT *native) {
+    (void)h;
+    if (process) *process = 0;
+    if (native) *native = 0x8664;
+    return TRUE;
+}
+
+/* the file APIs' A forms take UTF-8 here, which a program asking takes for ANSI */
+BOOL WINAPI AreFileApisANSI(void) { return TRUE; }
+void WINAPI SetFileApisToANSI(void) {}
+void WINAPI SetFileApisToOEM(void) {}
 
 BOOL WINAPI IsDebuggerPresent(void) { return FALSE; }
 BOOL WINAPI CheckRemoteDebuggerPresent(HANDLE h, BOOL *r) {
@@ -3302,6 +3720,25 @@ BOOL WINAPI EnumSystemLocalesW(LOCALE_ENUMPROCW fn, DWORD flags) {
     return TRUE;
 }
 
+typedef BOOL (WCALLBACK *LOCALE_ENUMPROCEX)(WCHAR *, DWORD, LPARAM);
+BOOL WINAPI EnumSystemLocalesEx(LOCALE_ENUMPROCEX fn, DWORD flags, LPARAM param, void *reserved) {
+    WCHAR s[] = u"en-US";
+    (void)flags, (void)reserved;
+    fn(s, 1 /* LOCALE_WINDOWS */, param);
+    return TRUE;
+}
+
+int WINAPI GetDateFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n);
+int WINAPI GetTimeFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n);
+int WINAPI GetDateFormatEx(const WCHAR *locale, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n, const WCHAR *cal) {
+    (void)locale, (void)cal;
+    return GetDateFormatW(0x409, f, st, fmt, buf, n);
+}
+int WINAPI GetTimeFormatEx(const WCHAR *locale, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
+    (void)locale;
+    return GetTimeFormatW(0x409, f, st, fmt, buf, n);
+}
+
 int WINAPI GetDateFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
     char a[64];
     SYSTEMTIME now;
@@ -3746,7 +4183,7 @@ HMODULE WINAPI GetModuleHandleW(const WCHAR *name) {
     return GetModuleHandleA(a);
 }
 
-static wmodule_t *module_at(const void *p) {
+wmodule_t *module_at(const void *p) {
     for (wmodule_t *m = ld_modules(); m; m = m->next)
         if ((const uint8_t *)p >= m->base && (const uint8_t *)p < m->base + m->size) return m;
     return 0;
@@ -3925,7 +4362,15 @@ FARPROC WINAPI GetProcAddress(HMODULE h, const char *name) {
     if ((uintptr_t)name < 0x10000) p = ld_proc(m, 0, (int)(uintptr_t)name);
     else p = ld_proc(m, name, 0);
     if (!p) {
-        if (wtrace >= 2) wlog("GetProcAddress(%s, %s): none", m->name, (uintptr_t)name < 0x10000 ? "#" : name);
+        void *ld_delay_stub(wmodule_t *m, const char *name, int ordinal);
+        p = (uintptr_t)name < 0x10000 ? ld_delay_stub(m, 0, (int)(uintptr_t)name) : ld_delay_stub(m, name, 0);
+        if (p) return p;
+    }
+    if (!p) {
+        if (wtrace >= 2) {
+            if ((uintptr_t)name < 0x10000) wlog("GetProcAddress(%s, #%d): none", m->name, (int)(uintptr_t)name);
+            else wlog("GetProcAddress(%s, %s): none", m->name, name);
+        }
         wset_last_error(ERROR_PROC_NOT_FOUND);
     }
     return p;
@@ -4483,9 +4928,43 @@ ULONG WINAPI RemoveVectoredContinueHandler(void *h) {
     return 1;
 }
 
-void WINAPI RaiseException(DWORD code, DWORD flags, DWORD n, const ULONG_PTR *args) {
-    (void)flags, (void)args;
+/* RaiseException: its entry keeps the caller's registers (a CONTEXT), so the
+ * report says where the exception came from, frame by frame */
+__asm__(".text\n"
+        ".globl RaiseException\n"
+        "RaiseException:\n"              /* ms_abi: rcx code, rdx flags, r8 count, r9 values */
+        "  sub $0x4f8, %rsp\n"
+        "  lea 0x30(%rsp), %rax\n"
+        "  mov %rcx, 0x80(%rax)\n"
+        "  mov %rdx, 0x88(%rax)\n"
+        "  mov %rbx, 0x90(%rax)\n"
+        "  lea 0x500(%rsp), %r10\n"
+        "  mov %r10, 0x98(%rax)\n"
+        "  mov %rbp, 0xa0(%rax)\n"
+        "  mov %rsi, 0xa8(%rax)\n"
+        "  mov %rdi, 0xb0(%rax)\n"
+        "  mov %r8, 0xb8(%rax)\n"
+        "  mov %r9, 0xc0(%rax)\n"
+        "  mov %r12, 0xd8(%rax)\n"
+        "  mov %r13, 0xe0(%rax)\n"
+        "  mov %r14, 0xe8(%rax)\n"
+        "  mov %r15, 0xf0(%rax)\n"
+        "  mov 0x4f8(%rsp), %r10\n"
+        "  mov %r10, 0xf8(%rax)\n"
+        "  mov %rax, 0x20(%rsp)\n"
+        "  call raise_impl\n"
+        "  add $0x4f8, %rsp\n"
+        "  ret\n");
+
+void WINAPI RaiseException(DWORD code, DWORD flags, DWORD n, const ULONG_PTR *args);
+
+__attribute__((ms_abi, used)) void raise_impl(DWORD code, DWORD flags, DWORD n, const ULONG_PTR *args, void *ctx) {
+    void unwind_report(void *ctx);
+    (void)flags;
     if (code == 0x406D1388) return;       /* naming a thread for a debugger */
+    wlog("exception 0x%08X raised", code);
+    for (DWORD i = 0; args && i < n && i < 8; i++) wlog("  value %u: 0x%llx", i, (unsigned long long)args[i]);
+    unwind_report(ctx);
     if (code == 0xE06D7363) wfatal("Windows program", "The program threw a C++ exception that ICDA cannot handle yet.");
     wfatal("Windows program", "The program stopped with exception 0x%08X (%u values).", code, n);
 }
@@ -4509,33 +4988,6 @@ void WINAPI FatalAppExitW(UINT a, const WCHAR *msg) {
 
 void WINAPI DebugBreak(void) { wlog("DebugBreak"); }
 
-/* the unwinding API: enough for code that asks on its way to crashing */
-void WINAPI RtlCaptureContext(void *ctx) { memset(ctx, 0, 0x4D0); }
-void *WINAPI RtlLookupFunctionEntry(DWORD64 pc, DWORD64 *base, void *hist) {
-    wmodule_t *m = module_at((void *)(uintptr_t)pc);
-    (void)hist;
-    if (base) *base = m ? (DWORD64)(uintptr_t)m->base : 0;
-    return 0;
-}
-void *WINAPI RtlVirtualUnwind(DWORD type, DWORD64 base, DWORD64 pc, void *fe, void *ctx, void **data, DWORD64 *frame,
-                              void *ptrs) {
-    (void)type, (void)base, (void)pc, (void)fe, (void)ctx, (void)ptrs;
-    if (data) *data = 0;
-    if (frame) *frame = 0;
-    return 0;
-}
-BOOLEAN WINAPI RtlAddFunctionTable(void *t, DWORD n, DWORD64 base) {
-    (void)t, (void)n, (void)base;
-    return TRUE;
-}
-BOOLEAN WINAPI RtlDeleteFunctionTable(void *t) {
-    (void)t;
-    return TRUE;
-}
-BOOLEAN WINAPI RtlInstallFunctionTableCallback(DWORD64 id, DWORD64 base, DWORD len, void *fn, void *ctx, const WCHAR *dll) {
-    (void)id, (void)base, (void)len, (void)fn, (void)ctx, (void)dll;
-    return TRUE;
-}
 void *WINAPI RtlPcToFileHeader(void *pc, void **base) {
     wmodule_t *m = module_at(pc);
     *base = m ? m->base : 0;
@@ -4546,12 +4998,6 @@ void WINAPI RtlUnwindEx(void *frame, void *target, void *rec, void *ret, void *c
     wfatal("Windows program", "The program needs exception unwinding, which ICDA does not have yet.");
 }
 void WINAPI RtlUnwind(void *frame, void *target, void *rec, void *ret) { RtlUnwindEx(frame, target, rec, ret, 0, 0); }
-
-USHORT WINAPI RtlCaptureStackBackTrace(ULONG skip, ULONG n, void **frames, ULONG *hash) {
-    (void)skip, (void)n, (void)frames;
-    if (hash) *hash = 0;
-    return 0;
-}
 
 ULONG WINAPI RtlNtStatusToDosError(LONG status) {
     if (status == 0) return 0;
@@ -4691,7 +5137,7 @@ static const wexport_t k32[] = {
     X(GetWindowsDirectoryW), X(GetWindowsDirectoryA), X(GetSystemWindowsDirectoryW), X(GetSystemWow64DirectoryW),
     X(GetDriveTypeW), X(GetDriveTypeA), X(GetLogicalDrives), X(GetLogicalDriveStringsW), X(GetDiskFreeSpaceExW),
     X(GetDiskFreeSpaceW), X(GetVolumeInformationW), X(DeviceIoControl), X(PeekNamedPipe), X(LockFile), X(UnlockFile),
-    X(LockFileEx), X(UnlockFileEx), X(CreateFileMappingW), X(CreateFileMappingA), X(MapViewOfFile),
+    X(LockFileEx), X(UnlockFileEx), X(CreateFileMappingW), X(CreateFileMappingA), X(MapViewOfFile), X(OpenFileMappingW), X(OpenFileMappingA),
     X(MapViewOfFileEx), X(UnmapViewOfFile), X(FlushViewOfFile), X(CloseHandle), X(DuplicateHandle),
     X(GetHandleInformation), X(SetHandleInformation), X(GetStdHandle), X(SetStdHandle), X(WriteConsoleW),
     X(WriteConsoleA), X(ReadConsoleW), X(ReadConsoleA), X(GetConsoleMode), X(SetConsoleMode), X(AllocConsole),
@@ -4771,24 +5217,27 @@ static const wexport_t k32[] = {
     X(SetUnhandledExceptionFilter), X(UnhandledExceptionFilter), X(AddVectoredExceptionHandler),
     X(RemoveVectoredExceptionHandler), X(AddVectoredContinueHandler), X(RemoveVectoredContinueHandler),
     X(RaiseException), X(RaiseFailFastException), X(FatalAppExitA), X(FatalAppExitW), X(DebugBreak),
-    X(RtlCaptureContext), X(RtlLookupFunctionEntry), X(RtlVirtualUnwind), X(RtlAddFunctionTable),
-    X(RtlDeleteFunctionTable), X(RtlInstallFunctionTableCallback), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind),
-    X(RtlCaptureStackBackTrace), X(CreateEventW), X(CreateEventA), X(CreateEventExW), X(CreateEventExA), X(SetEvent),
+    X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(CreateEventW), X(CreateEventA), X(CreateEventExW), X(CreateEventExA), X(SetEvent),
     X(ResetEvent), X(PulseEvent), X(OpenEventW), X(CreateMutexW), X(CreateMutexA), X(CreateMutexExW), X(OpenMutexW),
     X(ReleaseMutex), X(CreateSemaphoreW), X(CreateSemaphoreA), X(CreateSemaphoreExW), X(ReleaseSemaphore),
     X(WaitForMultipleObjects), X(WaitForSingleObject), X(WaitForSingleObjectEx), X(WaitForMultipleObjectsEx),
     X(SignalObjectAndWait), X(CreateThread), X(ResumeThread), X(SuspendThread), X(ExitThread), X(GetExitCodeThread),
     X(TerminateThread), X(GetThreadId), X(GetCurrentThreadId), X(GetCurrentProcessId), X(GetCurrentThread),
     X(GetCurrentProcess), X(TlsAlloc), X(TlsFree), X(TlsGetValue), X(TlsSetValue), X(FlsAlloc), X(FlsFree),
-    X(FlsGetValue), X(FlsSetValue), WEXPN("RtlZeroMemory", RtlZeroMemory), WEXPN("RtlMoveMemory", RtlMoveMemory),
+    X(FlsGetValue), WEXPN("FlsGetValue2", FlsGetValue), X(FlsSetValue),
+    X(CreateIoCompletionPort), X(PostQueuedCompletionStatus), X(GetQueuedCompletionStatus),
+    X(GetQueuedCompletionStatusEx), X(SetFileCompletionNotificationModes), X(RegisterWaitForSingleObject),
+    X(UnregisterWaitEx), X(UnregisterWait), X(IsWow64Process2), X(AreFileApisANSI),
+    X(SetFileApisToANSI), X(SetFileApisToOEM), X(EnumSystemLocalesEx), X(GetDateFormatEx), X(GetTimeFormatEx), WEXPN("RtlZeroMemory", RtlZeroMemory), WEXPN("RtlMoveMemory", RtlMoveMemory),
     WEXPN("RtlFillMemory", RtlFillMemory),
 };
 
-const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]) };
+extern const wexport_t unwind_exports[];
+extern const int unwind_nexports;
+const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]), unwind_exports, &unwind_nexports };
 
 static const wexport_t ntd[] = {
-    X(RtlGetVersion), X(RtlCaptureContext), X(RtlLookupFunctionEntry), X(RtlVirtualUnwind), X(RtlAddFunctionTable),
-    X(RtlDeleteFunctionTable), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(RtlCaptureStackBackTrace),
+    X(RtlGetVersion), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind),
     X(RtlNtStatusToDosError), X(NtQuerySystemInformation), X(NtQueryInformationProcess), X(NtSetInformationThread),
     X(NtDelayExecution), X(NtQueryTimerResolution), X(NtSetTimerResolution), X(RtlAllocateHeap), X(RtlFreeHeap),
     X(RtlZeroMemory), X(RtlMoveMemory), X(RtlFillMemory), X(RtlCompareMemory),
@@ -4802,4 +5251,5 @@ static const wexport_t ntd[] = {
 
 extern const wexport_t reg_nt_exports[];
 extern const int reg_nt_nexports;
-const wdll_t dll_ntdll = { "ntdll.dll", ntd, sizeof(ntd) / sizeof(ntd[0]), reg_nt_exports, &reg_nt_nexports };
+const wdll_t dll_ntdll = { "ntdll.dll", ntd, sizeof(ntd) / sizeof(ntd[0]), reg_nt_exports, &reg_nt_nexports,
+                           unwind_exports, &unwind_nexports };

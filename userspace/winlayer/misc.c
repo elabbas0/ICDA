@@ -143,6 +143,55 @@ static BOOL WINAPI GetTokenInformation(HANDLE t, int cls, void *info, DWORD n, D
         if (ret) *ret = 4;
         return TRUE;
     }
+    /* TokenIntegrityLevel (TOKEN_MANDATORY_LABEL, then the label's SID: medium),
+     * TokenOwner / TokenPrimaryGroup (a SID pointer, then the user's SID) */
+    if (cls == 25 || cls == 4 || cls == 5) {
+        static const uint8_t medium[] = { 1, 1, 0, 0, 0, 0, 0, 16, 0x00, 0x20, 0, 0 };
+        const uint8_t *sid = cls == 25 ? medium : user_sid;
+        DWORD sl = cls == 25 ? sizeof(medium) : sizeof(user_sid), need = 16 + sl;
+        if (ret) *ret = need;
+        if (n < need || !info) {
+            wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        memset(info, 0, 16);
+        *(void **)info = (uint8_t *)info + 16;
+        if (cls == 25) *(DWORD *)((uint8_t *)info + 8) = 0x20;     /* SE_GROUP_INTEGRITY */
+        memcpy((uint8_t *)info + 16, sid, sl);
+        return TRUE;
+    }
+    /* DWORD answers: TokenSessionId (12) 1, TokenType (8) primary, TokenImpersonationLevel (9),
+     * TokenIsAppContainer (29), TokenUIAccess (26), TokenVirtualizationAllowed/Enabled (23, 24),
+     * TokenHasRestrictions (21), TokenIsRestricted (40), TokenMandatoryPolicy (27) */
+    if ((cls == 12 || cls == 8 || cls == 9 || cls == 29 || cls == 26 || cls == 23 || cls == 24 || cls == 21 || cls == 40 ||
+         cls == 27) && n >= 4) {
+        *(DWORD *)info = cls == 12 ? 1 : cls == 8 ? 1 : cls == 9 ? 2 : cls == 27 ? 3 : 0;
+        if (ret) *ret = 4;
+        return TRUE;
+    }
+    /* groups and privileges: none (TokenGroups 2, TokenPrivileges 3, TokenRestrictedSids 11,
+     * TokenLogonSid 28, TokenCapabilities 30); TokenAppContainerSid (31): a NULL SID;
+     * TokenDefaultDacl (6): no DACL */
+    if ((cls == 2 || cls == 3 || cls == 11 || cls == 28 || cls == 30 || cls == 31 || cls == 6) && n >= 8) {
+        memset(info, 0, 8);
+        if (ret) *ret = 8;
+        return TRUE;
+    }
+    if (cls == 2 || cls == 3 || cls == 11 || cls == 28 || cls == 30 || cls == 31 || cls == 6 || cls == 10) {
+        if (ret) *ret = cls == 10 ? 56 : 8;
+        if (cls != 10 || n < 56 || !info) {
+            wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+    }
+    if (cls == 10 && n >= 56) {   /* TokenStatistics */
+        memset(info, 0, 56);
+        ((DWORD *)info)[0] = 0x1234;   /* TokenId */
+        ((DWORD *)info)[2] = 0x3E7;    /* AuthenticationId */
+        ((DWORD *)info)[8] = 1;        /* TokenType: primary */
+        if (ret) *ret = 56;
+        return TRUE;
+    }
     if (ret) *ret = 0;
     wset_last_error(ERROR_NOT_SUPPORTED);
     return FALSE;
@@ -236,18 +285,20 @@ static const wexport_t advapi[] = {
     WEXPN("CryptDestroyHash", SecTrue), WEXPN("CryptImportKey", CryptFail), WEXPN("CryptDestroyKey", SecTrue),
     WEXPN("CryptEncrypt", CryptFail), WEXPN("CryptDecrypt", CryptFail), WEXP(OpenProcessToken), WEXP(OpenThreadToken),
     WEXP(GetTokenInformation), WEXP(AllocateAndInitializeSid), WEXP(FreeSid), WEXP(CheckTokenMembership),
-    WEXPN("InitializeSecurityDescriptor", SecTrue), WEXPN("SetSecurityDescriptorDacl", SecTrue), WEXP(EventRegister),
+    WEXP(EventRegister),
     WEXP(ConvertSidToStringSidW), WEXP(ConvertSidToStringSidA), WEXP(ConvertStringSecurityDescriptorToSecurityDescriptorW),
     WEXP(SetNamedSecurityInfoW), WEXP(GetNamedSecurityInfoW), WEXP(IsValidSid), WEXP(GetLengthSid), WEXP(EqualSid),
-    WEXP(CopySid), WEXPN("SetSecurityInfo", SetNamedSecurityInfoW), WEXPN("SetEntriesInAclW", EventZero),
-    WEXPN("AddAccessAllowedAce", SecTrue), WEXPN("InitializeAcl", SecTrue), WEXPN("SetKernelObjectSecurity", SecTrue),
+    WEXP(CopySid),
     WEXPN("ImpersonateSelf", SecTrue), WEXPN("RevertToSelf", SecTrue), WEXP(DuplicateTokenEx),
     WEXPN("EventUnregister", EventZero), WEXPN("EventWriteTransfer", EventZero), WEXPN("EventWrite", EventZero),
     WEXPN("EventSetInformation", EventZero), WEXPN("EventEnabled", EventZero),
 };
 extern const wexport_t reg_exports[];
 extern const int reg_nexports;
-const wdll_t dll_advapi32 = { "advapi32.dll", advapi, sizeof(advapi) / sizeof(advapi[0]), reg_exports, &reg_nexports };
+extern const wexport_t sec_exports[];
+extern const int sec_nexports;
+const wdll_t dll_advapi32 = { "advapi32.dll", advapi, sizeof(advapi) / sizeof(advapi[0]), reg_exports, &reg_nexports,
+                              sec_exports, &sec_nexports };
 
 /* ---- bcrypt ---------------------------------------------------------------------------------- */
 
@@ -594,6 +645,70 @@ static HRESULT WINAPI PropVariantClear(void *v) {
 }
 static HRESULT WINAPI OleOk(void) { return 0; }
 static HRESULT WINAPI OleFail(void) { return (HRESULT)0x80004005; }   /* E_FAIL */
+static HRESULT WINAPI OleNotImpl(void) { return (HRESULT)0x80004001; } /* E_NOTIMPL */
+
+/* ---- Windows Runtime: strings, and no runtime classes ---------------------------------------
+ * An HSTRING is a length and its characters; one made by reference
+ * (WindowsCreateStringReference) lives in the caller's HSTRING_HEADER. */
+typedef struct {
+    uint32_t       flags;       /* 1: a reference (not ours to free) */
+    uint32_t       len;
+    const WCHAR *buf;
+    WCHAR        data[];
+} hstr_t;
+
+static HRESULT WINAPI WindowsCreateString(const WCHAR *src, uint32_t len, hstr_t **out) {
+    hstr_t *h;
+    if (!out) return (HRESULT)0x80070057;     /* E_INVALIDARG */
+    *out = 0;
+    if (!len) return 0;
+    if (!src) return (HRESULT)0x80004003;     /* E_POINTER */
+    h = malloc(sizeof(*h) + ((size_t)len + 1) * 2);
+    if (!h) return (HRESULT)0x8007000E;       /* E_OUTOFMEMORY */
+    h->flags = 0, h->len = len;
+    memcpy(h->data, src, (size_t)len * 2);
+    h->data[len] = 0;
+    h->buf = h->data;
+    *out = h;
+    return 0;
+}
+static HRESULT WINAPI WindowsCreateStringReference(const WCHAR *src, uint32_t len, void *header, hstr_t **out) {
+    hstr_t *h = header;          /* HSTRING_HEADER: 24 bytes, ours fits (16) */
+    if (!out || !header) return (HRESULT)0x80070057;
+    *out = 0;
+    if (!len) return 0;
+    h->flags = 1, h->len = len, h->buf = src;
+    *out = h;
+    return 0;
+}
+static HRESULT WINAPI WindowsDeleteString(hstr_t *h) {
+    if (h && !(h->flags & 1)) free(h);
+    return 0;
+}
+static const WCHAR *WINAPI WindowsGetStringRawBuffer(hstr_t *h, uint32_t *len) {
+    static const WCHAR empty[1];
+    if (len) *len = h ? h->len : 0;
+    return h ? h->buf : empty;
+}
+static uint32_t WINAPI WindowsGetStringLen(hstr_t *h) { return h ? h->len : 0; }
+static BOOL WINAPI WindowsIsStringEmpty(hstr_t *h) { return !h || !h->len; }
+static HRESULT WINAPI WindowsDuplicateString(hstr_t *h, hstr_t **out) {
+    return h ? WindowsCreateString(h->buf, h->len, out) : (*out = 0, 0);
+}
+/* no runtime class is registered */
+static HRESULT WINAPI RoNoClass(void) { return (HRESULT)0x80040154; }    /* REGDB_E_CLASSNOTREG */
+
+/* COM bits a program asks before using it */
+static HRESULT WINAPI CoGetApartmentType(int *type, int *qual) {
+    if (type) *type = 1;           /* APTTYPE_MTA */
+    if (qual) *qual = 0;
+    return 0;
+}
+static HRESULT WINAPI CoRegisterInitializeSpy(void *spy, uint64_t *cookie) {
+    (void)spy;
+    if (cookie) *cookie = 1;
+    return 0;
+}
 
 static const wexport_t ole[] = {
     WEXP(CoInitializeEx), WEXP(CoInitialize), WEXP(CoUninitialize), WEXP(CoCreateInstance), WEXP(CoTaskMemAlloc),
@@ -602,6 +717,15 @@ static const wexport_t ole[] = {
     WEXPN("RegisterDragDrop", OleOk), WEXPN("RevokeDragDrop", OleOk), WEXPN("CoRegisterClassObject", OleFail),
     WEXPN("CoGetClassObject", CoCreateInstance), WEXPN("CoInitializeSecurity", OleOk),
     WEXPN("CoSetProxyBlanket", OleOk), WEXPN("CoWaitForMultipleHandles", OleFail),
+    WEXPN("RoInitialize", OleOk), WEXPN("RoUninitialize", OleOk), WEXPN("RoGetActivationFactory", RoNoClass),
+    WEXPN("RoActivateInstance", RoNoClass), WEXPN("RoGetAgileReference", OleNotImpl), WEXP(WindowsCreateString),
+    WEXP(WindowsCreateStringReference), WEXP(WindowsDeleteString), WEXP(WindowsGetStringRawBuffer),
+    WEXP(WindowsGetStringLen), WEXP(WindowsIsStringEmpty), WEXP(WindowsDuplicateString), WEXP(CoGetApartmentType),
+    WEXP(CoRegisterInitializeSpy), WEXPN("CoRevokeInitializeSpy", OleOk), WEXPN("CoAllowSetForegroundWindow", OleOk),
+    WEXPN("CoRegisterMessageFilter", OleOk), WEXPN("CreateStreamOnHGlobal", OleNotImpl),
+    WEXPN("CoCreateFreeThreadedMarshaler", OleNotImpl), WEXPN("CoMarshalInterThreadInterfaceInStream", OleNotImpl),
+    WEXPN("CoGetInterfaceAndReleaseStream", OleNotImpl), WEXPN("CoUnmarshalInterface", OleNotImpl),
+    WEXPN("CoGetObject", OleNotImpl), WEXPN("DoDragDrop", OleNotImpl),
 };
 const wdll_t dll_ole32 = { "ole32.dll", ole, sizeof(ole) / sizeof(ole[0]) };
 

@@ -90,6 +90,26 @@ static int is_code(uintptr_t a) {
     return a > 0x10000 && dladdr((void *)a, &di) && di.dli_fname != 0;
 }
 
+/* return addresses on a stack, as module+offset (for a crash, or an exception raised) */
+void wlog_stack(const uintptr_t *sp, int most) {
+    int shown = 0;
+    for (int i = 0; i < 512 && shown < most && sp; i++) {
+        uintptr_t v = sp[i];
+        if (is_code(v)) {
+            char w[200];
+            where_is(v, w, sizeof(w));
+            wlog("  stack+%03x: %s", i * 8, w);
+            shown++;
+        }
+    }
+}
+
+static int module_at_pc(uintptr_t a) {
+    for (wmodule_t *m = ld_modules(); m; m = m->next)
+        if (!m->builtin && a >= (uintptr_t)m->base && a < (uintptr_t)m->base + m->size) return 1;
+    return 0;
+}
+
 static void crash(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
@@ -102,6 +122,18 @@ static void crash(int sig, siginfo_t *si, void *ctx) {
              sig == SIGFPE ? "an arithmetic fault" : sig == SIGTRAP ? "a breakpoint (a check in the program failed)" :
              "a bus error",
              where, si->si_addr);
+    /* in Windows code: its callers, frame by frame, from the modules' unwind data */
+    if (module_at_pc(rip)) {
+        void unwind_report(void *ctx);
+        static uint8_t wctx[0x4D0] __attribute__((aligned(16)));
+        static const int order[16] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                       REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
+        memset(wctx, 0, sizeof(wctx));
+        for (int i = 0; i < 16; i++) ((uint64_t *)(wctx + 0x78))[i] = (uint64_t)uc->uc_mcontext.gregs[order[i]];
+        *(uint64_t *)(wctx + 0xF8) = (uint64_t)rip;
+        wlog("crash: rip %s, rsp %p; the frames:", where, (void *)sp);
+        unwind_report(wctx);
+    } else
     /* what called it: return addresses on the stack */
     {
         int shown = 0;

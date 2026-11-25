@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -138,16 +139,18 @@ wmodule_t *ld_by_name(const char *name) {
 /* ---- stubs for what a builtin lacks ------------------------------------------------- */
 
 typedef struct {
-    char name[96];
-    int  calls;
+    char     name[96];
+    int      calls;
+    uint64_t ret;           /* what it returns: a failure, as the DLL's functions say one */
 } stub_info_t;
 
-WINAPI void *stub_hit(stub_info_t *s) {
+WINAPI uint64_t stub_hit(stub_info_t *s) {
     if (s->calls++ < 3 || wtrace >= 2) wlog("unimplemented: %s", s->name);
-    return 0;
+    wset_last_error(120);   /* ERROR_CALL_NOT_IMPLEMENTED */
+    return s->ret;
 }
 
-/* r10 = the stub's info; called the Windows way, returns 0 */
+/* r10 = the stub's info; called the Windows way, returns stub_hit's value */
 __asm__(".text\n"
         ".globl stub_entry\n"
         "stub_entry:\n"
@@ -155,8 +158,29 @@ __asm__(".text\n"
         "  mov %r10, %rcx\n"
         "  call stub_hit\n"
         "  add $40, %rsp\n"
-        "  xor %eax, %eax\n"
         "  ret\n");
+
+/* What a missing function returns: 0 (FALSE, NULL) for most DLLs; for those
+ * whose functions return a status, a failing one, as 0 would say success
+ * (S_OK, STATUS_SUCCESS, NO_ERROR) with nothing filled in. */
+static uint64_t stub_failure(const char *dll) {
+    static const char *const hresult[] = {
+        "ole32", "oleaut32", "combase", "shell32", "shcore", "propsys", "uxtheme", "dwmapi", "dwrite", "d2d1",
+        "dcomp", "d3d11", "d3d12", "d3d9", "dxgi", "mfplat", "mf.dll", "mfreadwrite", "uiautomationcore", "oleacc",
+        "api-ms-win-core-winrt", "api-ms-win-shcore", "urlmon", "mmdevapi", "dxva2", "taskschd", "d3dcompiler", 0
+    };
+    char low[96];
+    snprintf(low, sizeof(low), "%s", dll);
+    for (char *c = low; *c; c++) *c = (char)(*c >= 'A' && *c <= 'Z' ? *c + 32 : *c);
+    for (int i = 0; hresult[i]; i++)
+        if (!strncmp(low, hresult[i], strlen(hresult[i]))) return 0x80004001u;      /* E_NOTIMPL */
+    if (!strncmp(low, "ntdll", 5)) return 0xC0000002u;                              /* STATUS_NOT_IMPLEMENTED */
+    if (!strncmp(low, "secur32", 7) || !strncmp(low, "sspicli", 7)) return 0x80090302u;   /* SEC_E_UNSUPPORTED_FUNCTION */
+    if (!strncmp(low, "netapi32", 8) || !strncmp(low, "iphlpapi", 8) || !strncmp(low, "wlanapi", 7) ||
+        !strncmp(low, "dhcpcsvc", 8) || !strncmp(low, "cfgmgr32", 8) || !strncmp(low, "tbs.dll", 7))
+        return 50;                                                                   /* ERROR_NOT_SUPPORTED */
+    return 0;
+}
 extern char stub_entry[];
 
 static uint8_t *stub_page;
@@ -172,6 +196,7 @@ static void *make_stub(const char *dll, const char *name) {
     }
     s = calloc(1, sizeof(*s));
     snprintf(s->name, sizeof(s->name), "%s!%s", dll, name);
+    s->ret = stub_failure(dll);
     c = stub_page + stub_used;
     stub_used += 32;
     c[0] = 0x49, c[1] = 0xBA;                  /* movabs r10, s */
@@ -283,6 +308,119 @@ static int file_exists(const char *p) {
     return stat(p, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+/* ---- side-by-side assemblies, a program's own -------------------------------------------------
+ *
+ * A program's manifest (its RT_MANIFEST resource) names the assemblies it
+ * depends on.  A private one is in the program's folder: a manifest there
+ * (name.manifest, or name\name.manifest) lists the DLLs it holds, which are
+ * then found in its folder.  Chrome finds chrome_elf.dll in its version
+ * folder so.  (Shared ones, as the common controls, are ICDA's own DLLs.) */
+#define SXS_MAX 64
+static struct {
+    char file[96];
+    char dir[1024];
+} sxs[SXS_MAX];
+static int nsxs;
+
+static char *read_text(const char *path) {
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    char *buf;
+    ssize_t n;
+    if (fd < 0) return 0;
+    if (fstat(fd, &st) != 0 || st.st_size > (1 << 20) || !(buf = malloc((size_t)st.st_size + 1))) {
+        close(fd);
+        return 0;
+    }
+    n = read(fd, buf, (size_t)st.st_size);
+    close(fd);
+    buf[n > 0 ? n : 0] = 0;
+    return buf;
+}
+
+/* attr's value in the tag from p to end (name='x' or name="x") */
+static int xml_attr(const char *p, const char *end, const char *attr, char *out, size_t cap) {
+    size_t al = strlen(attr);
+    for (; p + al + 2 < end; p++) {
+        if (strncmp(p, attr, al) || p[al] != '=' || (p[al + 1] != '\'' && p[al + 1] != '"')) continue;
+        if (p[-1] != ' ' && p[-1] != '\t' && p[-1] != '\n' && p[-1] != '\r') continue;
+        {
+            const char *v = p + al + 2, *e = memchr(v, p[al + 1], (size_t)(end - v));
+            size_t n;
+            if (!e) return -1;
+            n = (size_t)(e - v) < cap - 1 ? (size_t)(e - v) : cap - 1;
+            memcpy(out, v, n);
+            out[n] = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* each <tag ...> of a manifest: cb(the tag's text, its end) */
+static void xml_tags(const char *text, const char *tag, void (*cb)(const char *, const char *, void *), void *ctx) {
+    size_t tl = strlen(tag);
+    for (const char *p = strstr(text, tag); p; p = strstr(p + tl, tag)) {
+        const char *end = strchr(p, '>');
+        if (!end) break;
+        if (p[tl] == ' ' || p[tl] == '\t' || p[tl] == '\n' || p[tl] == '\r' || p[tl] == '/') cb(p, end, ctx);
+    }
+}
+
+static void sxs_file(const char *tag, const char *end, void *dir) {
+    char name[96];
+    if (nsxs < SXS_MAX && xml_attr(tag, end, "name", name, sizeof(name)) == 0 && !strchr(name, '/') && !strchr(name, '\\')) {
+        snprintf(sxs[nsxs].file, sizeof(sxs[0].file), "%s", name);
+        snprintf(sxs[nsxs].dir, sizeof(sxs[0].dir), "%s", (const char *)dir);
+        if (wtrace) wlog("assembly: %s is in %s", name, (const char *)dir);
+        nsxs++;
+    }
+}
+
+/* a dependent assembly the program names: its manifest in the program's folder */
+static void sxs_assembly(const char *tag, const char *end, void *appdir) {
+    char name[128], path[1300], dir[1100], *text = 0;
+    if (xml_attr(tag, end, "name", name, sizeof(name)) != 0 || strchr(name, '/') || strstr(name, "..")) return;
+    snprintf(dir, sizeof(dir), "%s", (const char *)appdir);
+    snprintf(path, sizeof(path), "%s/%s.manifest", dir, name);
+    if (!(text = read_text(path))) {
+        snprintf(dir, sizeof(dir), "%s/%s", (const char *)appdir, name);
+        snprintf(path, sizeof(path), "%s/%s.manifest", dir, name);
+        text = read_text(path);
+    }
+    if (!text) return;                  /* a shared assembly (the common controls): ours */
+    xml_tags(text, "<file", sxs_file, dir);
+    free(text);
+}
+
+static void sxs_init(const char *exe_unix) {
+    DWORD size = 0;
+    char *res = pe_file_resource(exe_unix, (const WCHAR *)(uintptr_t)24, (const WCHAR *)(uintptr_t)1, &size), *text;
+    char appdir[1024], *s;
+    if (!res) return;
+    text = malloc((size_t)size + 1);
+    if (text) {
+        memcpy(text, res, size);
+        text[size] = 0;
+        snprintf(appdir, sizeof(appdir), "%s", exe_unix);
+        s = strrchr(appdir, '/');
+        if (s) *s = 0;
+        xml_tags(text, "<assemblyIdentity", sxs_assembly, appdir);
+        free(text);
+    }
+    free(res);
+}
+
+/* a DLL of one of the program's assemblies */
+static int sxs_find(const char *name, char *out, size_t cap) {
+    for (int i = 0; i < nsxs; i++) {
+        if (strcasecmp(sxs[i].file, name)) continue;
+        snprintf(out, cap, "%s/%s", sxs[i].dir, sxs[i].file);
+        if (file_exists(out)) return 0;
+    }
+    return -1;
+}
+
 /* where a DLL file is: next to whoever asks, the program's folder, the current
  * folder, then C:\Windows\System32 */
 static int find_dll(const char *name, const char *referrer_dir, char *out, size_t cap) {
@@ -292,6 +430,7 @@ static int find_dll(const char *name, const char *referrer_dir, char *out, size_
         if (path_to_unix(name, out, cap) == 0 && file_exists(out)) return 0;
         return -1;
     }
+    if (sxs_find(name, out, cap) == 0) return 0;
     if (referrer_dir && *referrer_dir) snprintf(dirs[nd++], sizeof(dirs[0]), "%s", referrer_dir);
     if (main_mod) {
         char *s;
@@ -366,6 +505,7 @@ static int relocate(uint8_t *base, nt_headers_t *nt, int64_t delta) {
 
 static int load_deps(wmodule_t *m);
 static int check_mode;      /* ICDA_WIN_CHECK: list what is missing, run nothing */
+static void bind_delay_imports(wmodule_t *m);
 
 static wmodule_t *load_pe(const char *path, const char *as_name, int *err, int is_main) {
     size_t fsize = 0;
@@ -432,6 +572,7 @@ static wmodule_t *load_pe(const char *path, const char *as_name, int *err, int i
         *err = ERROR_MOD_NOT_FOUND;
         return 0;
     }
+    if (!check_mode) bind_delay_imports(m);
     /* the sections' own protections, now that imports are written (only
      * for page-aligned sections) */
     if (nt->sect_align >= 4096) {
@@ -456,6 +597,81 @@ static wmodule_t *load_pe(const char *path, const char *as_name, int *err, int i
     }
     if (ninit < 256) init_order[ninit++] = m;   /* after its dependencies, which loaded first */
     return m;
+}
+
+/* Delay-loaded imports of the system's DLLs are bound now, as plain imports
+ * are: the program's delay-load helper would load the DLL and look up each
+ * function on its first call, and a DLL or function ICDA lacks would end
+ * the program there (exception 0xC06D007E or 0xC06D007F); bound now, a
+ * missing one is a stub that fails.  The program's own DLLs stay delayed. */
+static int is_system_dll(const char *n);
+wmodule_t *ld_load(const char *name, const char *referrer_dir, int *err);
+
+/* the stubs given for what modules delay-import and a builtin lacks: such a
+ * function exists as far as the program knows (it was linked against it),
+ * so GetProcAddress gives the same stub, as a program's delay-load helper
+ * (__HrLoadAllImportsForDll) asks for each one again */
+typedef struct delay_stub {
+    struct delay_stub *next;
+    const wdll_t      *dll;
+    char               label[96];
+    void              *fn;
+} delay_stub_t;
+static delay_stub_t *delay_stubs;
+
+void *ld_delay_stub(wmodule_t *m, const char *name, int ordinal) {
+    char label[96];
+    if (!m || !m->builtin) return 0;
+    if (name) snprintf(label, sizeof(label), "%s", name);
+    else snprintf(label, sizeof(label), "#%d", ordinal);
+    for (delay_stub_t *d = delay_stubs; d; d = d->next)
+        if (d->dll == m->builtin && !strcmp(d->label, label)) return d->fn;
+    return 0;
+}
+
+static void *delay_stub_for(wmodule_t *dep, const char *label) {
+    delay_stub_t *d;
+    void *fn = ld_delay_stub(dep, label[0] == '#' ? 0 : label, label[0] == '#' ? atoi(label + 1) : 0);
+    if (fn) return fn;
+    fn = make_stub(dep->name, label);
+    d = calloc(1, sizeof(*d));
+    d->dll = dep->builtin;
+    snprintf(d->label, sizeof(d->label), "%s", label);
+    d->fn = fn;
+    d->next = delay_stubs;
+    delay_stubs = d;
+    return fn;
+}
+
+static void bind_delay_imports(wmodule_t *m) {
+    nt_headers_t *nt = nt_of(m->base);
+    uint32_t *d;
+    if (!nt->dir[13].rva) return;
+    for (d = (uint32_t *)(m->base + nt->dir[13].rva); d[1]; d += 8) {
+        const char *dname = (const char *)(m->base + d[1]);
+        char b[64];
+        uint64_t *iat = (uint64_t *)(m->base + d[3]), *names = (uint64_t *)(m->base + d[4]);
+        wmodule_t *dep;
+        int err = 0;
+        if (!(d[0] & 1)) continue;                  /* old-style (addresses, not RVAs): left to the helper */
+        base_name(dname, b, sizeof(b));
+        if (!builtin_find(b) && !is_system_dll(b)) continue;
+        dep = ld_load(dname, 0, &err);
+        if (!dep) continue;
+        if (d[2]) *(void **)(m->base + d[2]) = dep->base;        /* the helper's module handle slot */
+        for (int i = 0; names[i]; i++) {
+            void *fn;
+            char label[96];
+            if (names[i] >> 63) {
+                fn = ld_proc(dep, 0, (int)(names[i] & 0xFFFF));
+                snprintf(label, sizeof(label), "#%d", (int)(names[i] & 0xFFFF));
+            } else {
+                snprintf(label, sizeof(label), "%s", (const char *)(m->base + (uint32_t)names[i] + 2));
+                fn = ld_proc(dep, label, 0);
+            }
+            iat[i] = (uint64_t)(uintptr_t)(fn ? fn : dep->builtin ? delay_stub_for(dep, label) : make_stub(dep->name, label));
+        }
+    }
 }
 
 static int load_deps(wmodule_t *m) {
@@ -776,6 +992,42 @@ done:
 
 typedef DWORD (WCALLBACK *exe_entry_t)(void *peb);
 
+/* check mode: what a module delay-loads (the DLL and its functions are
+ * looked up when first called), as its imports are checked when loaded */
+static void check_delay_imports(wmodule_t *m) {
+    nt_headers_t *nt;
+    uint32_t *d;
+    char dir[1024], *s;
+    if (m->builtin) return;
+    nt = nt_of(m->base);
+    if (!nt->dir[13].rva) return;
+    snprintf(dir, sizeof(dir), "%s", m->path);
+    s = strrchr(dir, '/');
+    if (s) *s = 0;
+    for (d = (uint32_t *)(m->base + nt->dir[13].rva); d[1]; d += 8) {
+        const char *dname = (const char *)(m->base + d[1]);
+        const wdll_t *bd = builtin_find(dname);
+        uint64_t *names = (uint64_t *)(m->base + d[4]);
+        if (!bd) {
+            char path[1024], b[64];
+            base_name(dname, b, sizeof(b));
+            if (find_dll(dname, dir, path, sizeof(path)) != 0)
+                wlog("%s: delay-loads %s, which is %s", m->name, dname, is_system_dll(b) ? "stubs only" : "not there");
+            continue;
+        }
+        for (int i = 0; names[i]; i++) {
+            const char *fname = 0;
+            int ord = 0;
+            if (names[i] >> 63) ord = (int)(names[i] & 0xFFFF);
+            else fname = (const char *)(m->base + (uint32_t)names[i] + 2);
+            if (!builtin_proc(bd, fname, ord)) {
+                if (fname) wlog("%s: %s has no %s (delay-loaded)", m->name, dname, fname);
+                else wlog("%s: %s has no #%d (delay-loaded)", m->name, dname, ord);
+            }
+        }
+    }
+}
+
 int ld_run_exe(const char *unix_path, char *const *argv) {
     int err = 0;
     char b[64];
@@ -797,6 +1049,7 @@ int ld_run_exe(const char *unix_path, char *const *argv) {
         free(file);
     }
     pthread_mutex_unlock(&ldlock);
+    sxs_init(unix_path);
     main_mod = calloc(1, sizeof(*main_mod));          /* placeholder so find_dll knows the folder */
     snprintf(main_mod->path, sizeof(main_mod->path), "%s", unix_path);
     {
@@ -808,6 +1061,25 @@ int ld_run_exe(const char *unix_path, char *const *argv) {
     }
     if (!main_mod) wfatal("Windows program", "%s could not be loaded (error %d).", b, err);
     if (check_mode) {
+        /* DLLs the program loads later (ICDA_WIN_CHECK_DLLS: Unix paths, ':' between) */
+        const char *more = getenv("ICDA_WIN_CHECK_DLLS");
+        while (more && *more) {
+            char one[1024];
+            const char *e = strchr(more, ':');
+            size_t n = e ? (size_t)(e - more) : strlen(more);
+            snprintf(one, sizeof(one), "%.*s", (int)n, more);
+            {
+                char nb[64];
+                wmodule_t *dm;
+                base_name(one, nb, sizeof(nb));
+                pthread_mutex_lock(&ldlock);
+                dm = load_pe(one, nb, &err, 0);
+                pthread_mutex_unlock(&ldlock);
+                if (!dm) wlog("%s could not be loaded (error %d)", one, err);
+            }
+            more = e ? e + 1 : 0;
+        }
+        for (wmodule_t *m = ld_modules(); m; m = m->next) check_delay_imports(m);
         wlog("checked %s: the lines above are the functions ICDA lacks", b);
         exit(0);
     }

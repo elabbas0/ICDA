@@ -41,6 +41,7 @@ typedef struct { LONG cx, cy; } SIZE;
 typedef struct { DWORD dwLowDateTime, dwHighDateTime; } FILETIME;
 typedef union { struct { DWORD LowPart; LONG HighPart; } u; LONGLONG QuadPart; } LARGE_INTEGER;
 typedef struct { DWORD Data1; WORD Data2, Data3; BYTE Data4[8]; } GUID;
+typedef struct { DWORD LowPart; LONG HighPart; } LUID;
 
 /* error codes (GetLastError) */
 #define ERROR_SUCCESS               0
@@ -93,6 +94,8 @@ typedef struct wdll {
     int              count;
     const wexport_t *more;     /* a second table (another file's), or 0 */
     const int       *nmore;
+    const wexport_t *more2;    /* a third, or 0 */
+    const int       *nmore2;
 } wdll_t;
 
 #define WEXP(f)        { #f, (void *)f, 0 }

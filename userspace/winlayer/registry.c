@@ -951,6 +951,47 @@ LONG WINAPI NtOpenKeyEx(HKEY *out, DWORD access, OBJECT_ATTRIBUTES *oa, ULONG op
 
 LONG WINAPI NtOpenKey(HKEY *out, DWORD access, OBJECT_ATTRIBUTES *oa) { return NtOpenKeyEx(out, access, oa, 0); }
 
+static WCHAR *us_dup(const UNICODE_STRING *u) {
+    WCHAR *n = calloc((size_t)(u ? u->Length / 2 : 0) + 1, sizeof(WCHAR));
+    if (n && u && u->Buffer) memcpy(n, u->Buffer, u->Length);
+    return n;
+}
+
+LONG WINAPI NtCreateKey(HKEY *out, DWORD access, OBJECT_ATTRIBUTES *oa, ULONG title, UNICODE_STRING *cls, ULONG opts, ULONG *disp) {
+    WCHAR *name;
+    const WCHAR *rest;
+    HKEY root;
+    LONG r;
+    DWORD d = 0;
+    (void)title, (void)cls;
+    if (!oa || !oa->ObjectName) return (LONG)0xC000000D;
+    name = us_dup(oa->ObjectName);
+    if (oa->RootDirectory) {
+        r = RegCreateKeyExW(oa->RootDirectory, name, 0, 0, opts, access, 0, out, &d);
+    } else {
+        root = native_root(name, &rest);
+        r = root ? RegCreateKeyExW(root, rest, 0, 0, opts, access, 0, out, &d) : ERROR_FILE_NOT_FOUND;
+    }
+    free(name);
+    if (disp) *disp = d;
+    return r == 0 ? 0 : r == ERROR_FILE_NOT_FOUND ? (LONG)0xC0000034 : (LONG)0xC0000022;
+}
+
+LONG WINAPI NtSetValueKey(HKEY h, UNICODE_STRING *name, ULONG title, ULONG type, const void *data, ULONG size) {
+    WCHAR *n = us_dup(name);
+    LONG r = RegSetValueExW(h, n, 0, type, data, size);
+    (void)title;
+    free(n);
+    return r == 0 ? 0 : (LONG)0xC0000022;
+}
+
+LONG WINAPI NtDeleteValueKey(HKEY h, UNICODE_STRING *name) {
+    WCHAR *n = us_dup(name);
+    LONG r = RegDeleteValueW(h, n);
+    free(n);
+    return r == 0 ? 0 : (LONG)0xC0000034;
+}
+
 LONG WINAPI NtDeleteKey(HKEY h) { return RegDeleteTreeW(h, 0) == 0 ? 0 : (LONG)0xC0000034; }
 
 /* KEY_VALUE_PARTIAL_INFORMATION (class 2) is what programs ask */
@@ -1006,6 +1047,8 @@ const int reg_nexports = sizeof(reg_exports) / sizeof(reg_exports[0]);
 const wexport_t reg_nt_exports[] = {
     X(RtlFormatCurrentUserKeyPath), X(RtlInitUnicodeString), X(RtlFreeUnicodeString), X(NtOpenKeyEx), X(NtOpenKey),
     X(NtDeleteKey), X(NtQueryValueKey), X(NtClose), WEXPN("ZwClose", NtClose), WEXPN("ZwOpenKeyEx", NtOpenKeyEx),
-    WEXPN("ZwQueryValueKey", NtQueryValueKey),
+    WEXPN("ZwQueryValueKey", NtQueryValueKey), X(NtCreateKey), X(NtSetValueKey), X(NtDeleteValueKey),
+    WEXPN("ZwCreateKey", NtCreateKey), WEXPN("ZwSetValueKey", NtSetValueKey), WEXPN("ZwDeleteValueKey", NtDeleteValueKey),
+    WEXPN("ZwOpenKey", NtOpenKey), WEXPN("ZwDeleteKey", NtDeleteKey),
 };
 const int reg_nt_nexports = sizeof(reg_nt_exports) / sizeof(reg_nt_exports[0]);

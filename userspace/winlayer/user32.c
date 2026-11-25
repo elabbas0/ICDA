@@ -684,6 +684,35 @@ HWND WINAPI FindWindowW(const WCHAR *cls, const WCHAR *title) {
     }
     return 0;
 }
+/* parent: a window, HWND_MESSAGE (-3) for message-only windows, or 0 for
+ * top-level ones; after: the search starts past it */
+HWND WINAPI FindWindowExW(HWND parent, HWND after, const WCHAR *cls, const WCHAR *title) {
+    int i = 0;
+    if (after)
+        for (; i < MAX_WND; i++)
+            if (wnds[i].used && wnds[i].h == after) {
+                i++;
+                break;
+            }
+    for (; i < MAX_WND; i++) {
+        wwnd_t *w = &wnds[i];
+        if (!w->used || w->destroyed) continue;
+        if (parent == (HWND)(intptr_t)-3 ? w->parent != parent : parent ? w->parent != parent : (w->style & WS_CHILD) != 0)
+            continue;
+        if (cls && !is_atom(cls) && w_icmp(w->cls->name, cls)) continue;
+        if (title && w_cmp(w->title, title)) continue;
+        return w->h;
+    }
+    return 0;
+}
+
+HWND WINAPI FindWindowExA(HWND parent, HWND after, const char *cls, const char *title) {
+    WCHAR c[128], t[256];
+    if (cls && !is_atom(cls)) utf8_to_w(cls, -1, c, 128);
+    if (title) utf8_to_w(title, -1, t, 256);
+    return FindWindowExW(parent, after, cls ? (is_atom(cls) ? (const WCHAR *)cls : c) : 0, title ? t : 0);
+}
+
 HWND WINAPI FindWindowA(const char *cls, const char *title) {
     WCHAR c[128], t[256];
     if (cls && !is_atom(cls)) utf8_to_w(cls, -1, c, 128);
@@ -3077,7 +3106,7 @@ static const wexport_t u32[] = {
     X(CreateWindowExA), X(DestroyWindow), X(IsWindow), X(IsWindowVisible), X(IsWindowEnabled), X(EnableWindow),
     X(IsIconic), X(IsZoomed), X(IsChild), X(GetParent), X(GetAncestor), X(SetParent), X(GetDesktopWindow),
     X(GetShellWindow), X(GetWindow), X(GetTopWindow), X(GetWindowThreadProcessId), X(EnumWindows),
-    X(EnumThreadWindows), X(EnumChildWindows), X(FindWindowW), X(FindWindowA), X(SetPropW), X(GetPropW),
+    X(EnumThreadWindows), X(EnumChildWindows), X(FindWindowW), X(FindWindowA), X(FindWindowExW), X(FindWindowExA), X(SetPropW), X(GetPropW),
     X(RemovePropW), X(SetPropA), X(GetPropA), X(RemovePropA), X(GetWindowLongPtrW), X(SetWindowLongPtrW),
     WEXPN("GetWindowLongPtrA", GetWindowLongPtrW), WEXPN("SetWindowLongPtrA", SetWindowLongPtrW), X(GetWindowLongW),
     X(SetWindowLongW), WEXPN("GetWindowLongA", GetWindowLongW), WEXPN("SetWindowLongA", SetWindowLongW),

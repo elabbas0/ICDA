@@ -39,6 +39,7 @@ static const struct {
     const wdll_t *dll;
 } apisets[] = {
     { "api-ms-win-crt-", &dll_ucrt },
+    { "api-ms-win-core-winrt-", &dll_ole32 },          /* combase's */
     { "api-ms-win-core-", &dll_kernel32 },
     { "api-ms-win-security-", &dll_advapi32 },
     { "api-ms-win-eventing-", &dll_advapi32 },
@@ -145,6 +146,7 @@ void *builtin_proc(const wdll_t *d, const char *name, int ordinal) {
     if (!d) return 0;
     p = lookup(d->exports, d->count, name, ordinal);
     if (!p && d->more) p = lookup(d->more, *d->nmore, name, ordinal);
+    if (!p && d->more2) p = lookup(d->more2, *d->nmore2, name, ordinal);
     return p;
 }
 
