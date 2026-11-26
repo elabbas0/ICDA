@@ -160,9 +160,10 @@ __asm__(".text\n"
         "  add $40, %rsp\n"
         "  ret\n");
 
-/* What a missing function returns: 0 (FALSE, NULL) for most DLLs; for those
- * whose functions return a status, a failing one, as 0 would say success
- * (S_OK, STATUS_SUCCESS, NO_ERROR) with nothing filled in. */
+/* What a missing function returns when its kind is not known: 0 (FALSE,
+ * NULL) for most DLLs; for those whose functions return a status, a failing
+ * one, as 0 would say success (S_OK, STATUS_SUCCESS, NO_ERROR) with nothing
+ * filled in. */
 static uint64_t stub_failure(const char *dll) {
     static const char *const hresult[] = {
         "ole32", "oleaut32", "combase", "shell32", "shcore", "propsys", "uxtheme", "dwmapi", "dwrite", "d2d1",
@@ -179,7 +180,21 @@ static uint64_t stub_failure(const char *dll) {
     if (!strncmp(low, "netapi32", 8) || !strncmp(low, "iphlpapi", 8) || !strncmp(low, "wlanapi", 7) ||
         !strncmp(low, "dhcpcsvc", 8) || !strncmp(low, "cfgmgr32", 8) || !strncmp(low, "tbs.dll", 7))
         return 50;                                                                   /* ERROR_NOT_SUPPORTED */
+    if (!strncmp(low, "xinput", 6)) return 1167;                                     /* ERROR_DEVICE_NOT_CONNECTED */
     return 0;
+}
+
+/* a missing function's failure: by what it returns (apis.c), else by its DLL;
+ * functions of DLLs whose integers are error codes keep the DLL's value */
+static uint64_t stub_value(const char *dll, const char *fname) {
+    int known = 0;
+    uint64_t v = api_failure(fname, &known);
+    if (known) return v;
+    if (api_kind(fname) == 'i') {
+        uint64_t d = stub_failure(dll);
+        return d == 0x80004001u || d == 0xC0000002u || d == 0x80090302u ? 0 : d;   /* an int is no HRESULT */
+    }
+    return stub_failure(dll);
 }
 extern char stub_entry[];
 
@@ -195,8 +210,14 @@ static void *make_stub(const char *dll, const char *name) {
         stub_used = 0;
     }
     s = calloc(1, sizeof(*s));
-    snprintf(s->name, sizeof(s->name), "%s!%s", dll, name);
-    s->ret = stub_failure(dll);
+    {
+        /* by number: its name, when known */
+        const char *fname = name;
+        if (name[0] == '#') fname = api_ordinal_name(dll, atoi(name + 1));
+        if (fname && fname != name) snprintf(s->name, sizeof(s->name), "%s!%s (%s)", dll, name, fname);
+        else snprintf(s->name, sizeof(s->name), "%s!%s", dll, name);
+        s->ret = fname ? stub_value(dll, fname) : stub_failure(dll);
+    }
     c = stub_page + stub_used;
     stub_used += 32;
     c[0] = 0x49, c[1] = 0xBA;                  /* movabs r10, s */

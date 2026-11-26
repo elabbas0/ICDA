@@ -147,6 +147,11 @@ void *builtin_proc(const wdll_t *d, const char *name, int ordinal) {
     p = lookup(d->exports, d->count, name, ordinal);
     if (!p && d->more) p = lookup(d->more, *d->nmore, name, ordinal);
     if (!p && d->more2) p = lookup(d->more2, *d->nmore2, name, ordinal);
+    if (!p && !name && ordinal) {
+        /* by number: the function of that name, if the DLL has it */
+        const char *n = api_ordinal_name(d->name, ordinal);
+        if (n) return builtin_proc(d, n, 0);
+    }
     return p;
 }
 

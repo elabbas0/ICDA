@@ -343,7 +343,13 @@ gdi32, opengl32, winmm, advapi32 with the registry, shell32, ole32,
 ws2_32, bcrypt, cabinet, version and more) or the program's own, from its
 folder. System DLLs ICDA has nothing of load as stubs where a program only
 links to them, and fail to load where it asks for them, so it can manage
-without.
+without. A function the layer does not have fails the way its callers
+check for: `apis_gen.h`, made by `userspace/winlayer/gen_apis.py` from
+MinGW-w64's headers, says what each of about 10,000 Windows functions
+returns (FALSE with an error, NULL, `INVALID_HANDLE_VALUE`, `E_NOTIMPL`, an
+NTSTATUS or a Win32 error code), and gives the names behind the export
+numbers programs import `oleaut32`, `ws2_32`, `comctl32`, `shlwapi` and
+`shell32` functions by.
 
 `C:` is `~/.windows/c` (`ICDA_WIN_PREFIX` names another folder) and `Z:` is
 `/`, with names found whatever their case. The registry is

@@ -26,6 +26,7 @@ x86_64-w64-mingw32-windres t_ver.rc -O coff -o $O/t_ver.res
 $CC -O1 -o $O/t_ver.exe t_ver.c $O/t_ver.res -lversion
 $CC -O2 -o $O/t_keys.exe t_keys.c -luser32 -lgdi32
 $CC -O1 -o $O/t_dwrite.exe t_dwrite.c -ldwrite
+$CC -O1 -o $O/t_stubs.exe t_stubs.c -ldsound -ldinput8 -ldxguid -lxinput1_4 -lshlwapi -lole32 -liphlpapi -lsecur32 -luuid
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
 cp /usr/x86_64-w64-mingw32/bin/libwinpthread-1.dll $O/
@@ -94,6 +95,11 @@ grep -q "^segoe ui -> Inter" t_dwrite.out && grep -q "^arial bold italic -> Deja
     grep -q "^done, 0 failed" t_dwrite.out
 check "t_dwrite.exe: fonts, glyphs, fallback" $?
 grep "^FAIL" t_dwrite.out
+# what the layer lacks fails as its callers expect
+timeout 60 ./icda-win t_stubs.exe > t_stubs.out 2>&1
+grep -q "^done, 0 failed" t_stubs.out
+check "t_stubs.exe: missing functions fail correctly" $?
+grep "^FAIL" t_stubs.out
 echo "$fails failed"
 exit $fails
 '
