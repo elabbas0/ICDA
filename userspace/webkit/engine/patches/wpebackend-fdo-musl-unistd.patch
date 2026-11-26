@@ -1,0 +1,10 @@
+--- a/src/ws-egl.cpp
++++ b/src/ws-egl.cpp
+@@ -32,6 +32,7 @@
+ #include <cstring>
+ #include <vector>
+ #include <sys/mman.h>
++#include <unistd.h>
+ #include <sys/stat.h>
+ 
+ #ifndef EGL_WL_bind_wayland_display
