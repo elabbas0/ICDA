@@ -1,0 +1,9 @@
+<!doctype html>
+<!-- Its title says whether Surfer's script for video ran in it (canPlayType
+     is then not the browser's own) and whether WebGL is offered. -->
+<html><head><meta charset="utf-8"><title>Probe</title></head><body><script>
+var gl = null;
+try { gl = document.createElement('canvas').getContext('webgl'); } catch (e) {}
+document.title = 'Probe: script ' + (HTMLMediaElement.prototype.canPlayType.toString().indexOf('native code') < 0) +
+  ', webgl ' + !!gl;
+</script></body></html>

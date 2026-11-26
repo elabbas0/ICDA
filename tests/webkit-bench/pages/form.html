@@ -1,0 +1,7 @@
+<!doctype html>
+<!-- A text field near the top left: what is typed shows in the title. -->
+<html><head><meta charset="utf-8"><title>Form</title>
+<style>body { margin: 0; padding: 20px; font: 16px sans-serif; } input { font: 18px sans-serif; width: 400px; height: 32px; }</style>
+</head><body>
+  <input id="q" autocomplete="off" oninput="document.title = 'Form: ' + this.value">
+</body></html>

@@ -1613,6 +1613,9 @@ int     mouse_read_event(mouse_event_t *out);   /* 0=got event, -1=empty */
 
 ## /scripts/gen_sounds.py
 
+(These describe the sounds as they were before every sound was made again by
+tools/soundgen/soundgen.c; its header describes the sounds ICDA has now.)
+
 #!/usr/bin/env python3
     # Warm power-on: E5 (659.25) then B5 (987.77) overlapping, soft 3rd.
     # Soft notification ping: A5 + octave shimmer, fast bloom, ~1 s tail.

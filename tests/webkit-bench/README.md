@@ -7,6 +7,7 @@ change, on real web sites and on a few local pages, on a Linux host.
 tests/webkit-bench/run.sh            # HEAD against the working tree
 tests/webkit-bench/run.sh v1.10.3    # a release against the working tree
 tests/webkit-bench/run.sh HEAD .verify/webkit-bench --reps 1 --only site-cnn,tabs-8-on-4GB
+tests/webkit-bench/run.sh HEAD .verify/webkit-bench --proc-before icda-new   # both builds on today's /proc
 ```
 
 Needs Linux and Docker; the container runs privileged. Results land in
@@ -46,6 +47,8 @@ load times, crashes, out-of-memory kills, discarded tabs.
 | `local-static` | nothing moves (control) |
 | `local-raf-canvas` | a canvas redrawn every animation frame (motion meant to be seen) |
 | `local-video` | a 30 frames-a-second video playing |
+| `local-ticker` | a number changed ten times a second (a ticker, a countdown): each change seen, the frames between change nothing |
+| `local-mse` | a YouTube-like player: 720p VP9 through Media Source Extensions |
 | `local-background-tab` | the box-shadow animation (repainted on the main thread) in a tab not shown |
 | `local-background-tab-compositor` | a transform/opacity animation (run by the compositor thread) in a tab not shown |
 | `site-*` | load, 15 s idle, 10 s of scrolling on a real site (down for 6 s, back up for 4) |
@@ -67,3 +70,8 @@ builds alternate, and `analyze.py` reports medians.
 - `ppm2png.py` - screenshots to PNG
 - `latency.py` - how soon wheel notches reach the screen, from the traces
   `bench.py --env BENCH_TRACE=file` writes (`pages/long.html` is made for it)
+- `functional.py` - the browser's functions driven as a person drives them
+  (the address bar, a click and typing into a page, Back and Forward, a new
+  tab, switching and closing tabs, reloading, a link that opens a new tab
+  and whether that page gets Surfer's video script and no WebGL), each step
+  checked by the page's title: `python3 functional.py --bin <icda-webkit>` in the container

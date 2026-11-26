@@ -30,7 +30,7 @@ def url(name):
 
 def scenarios():
     s = []
-    for page in ("anim-hidden", "anim-visible", "static", "raf-canvas", "video"):
+    for page in ("anim-hidden", "anim-visible", "static", "raf-canvas", "video", "ticker", "mse"):
         s.append((f"local-{page}", ["single", "--url", f"{PAGES}/{page}.html", "--idle", "15", "--scroll", "6",
                                      "--load-timeout", "20", "--ram-mb", "8192"], 3))
     s.append(("local-background-tab", ["tabs", "--urls", f"{PAGES}/anim-hidden.html,{PAGES}/static.html", "--idle", "15",
@@ -52,6 +52,8 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--reps", type=int, help="overrides every scenario's repetitions")
     ap.add_argument("--only", help="comma-separated scenario names")
+    ap.add_argument("--proc-before", default="icda-old",
+                    help="the /proc the before build sees (icda-old: ICDA 1.10.3's; icda-new when the kernel is not compared)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     # the pages, and a 30 frames-a-second test video made with GStreamer for pages/video.html
@@ -64,8 +66,13 @@ def main():
                         "video/x-raw,width=640,height=360,framerate=30/1", "!", "vp8enc", "deadline=1", "!", "webmmux", "!",
                         "filesink", f"location={os.path.join(pages, 'test.webm')}"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # and for pages/mse.html: 720p VP9, 20 s
+        subprocess.run(["gst-launch-1.0", "-q", "videotestsrc", "num-buffers=600", "pattern=ball", "!",
+                        "video/x-raw,width=1280,height=720,framerate=30/1", "!", "vp9enc", "deadline=1", "cpu-used=8", "!",
+                        "webmmux", "!", "filesink", f"location={os.path.join(pages, 'test-vp9.webm')}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
-        print("campaign: no gst-launch-1.0 (gstreamer-tools): local-video plays nothing", file=sys.stderr)
+        print("campaign: no gst-launch-1.0 (gstreamer-tools): local-video and local-mse play nothing", file=sys.stderr)
     server = subprocess.Popen([sys.executable, "-m", "http.server", "18080", "--bind", "127.0.0.1"], cwd=pages,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
@@ -80,7 +87,7 @@ def main():
                     out = os.path.join(args.out, f"{name}-{build}-r{rep}.json")
                     if os.path.exists(out):
                         continue
-                    proc = "icda-old" if build == "before" else "icda-new"
+                    proc = args.proc_before if build == "before" else "icda-new"
                     full = [sys.executable, "/bench/bench.py", *cmd, "--bin", f"/bench/out/icda-webkit-{build}",
                             "--proc", proc, "--out", out, "--label", f"{name} {build} r{rep}"]
                     if rep == 1:

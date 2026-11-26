@@ -154,11 +154,33 @@ a missing DHCP offer from a missing acknowledgement.
 
 ## Surfer on WebKit
 
-Surfer shows a page's frames at the display's pace: 60 a second, 15 once
-nothing on screen has changed for half a second (a page animating something
-hidden), and one a second for tabs that are not shown. A key press, the
-pointer or a visible change brings the full rate back at once. Only the parts
-of a frame that changed are copied to the window.
+Surfer shows a page's frames at the pace the page needs. Without a GPU each
+frame is the whole page put together again in software, whatever changed (up
+to 70 ms of processor time on a page with blurred or layered parts), so a
+frame that shows nothing new is waste. Frames come 60 a second while a key or
+the pointer is in use, while the picture keeps changing (a video, a scroll, a
+smooth animation) and while a page loads; otherwise as often as the picture
+really changes (twice as often: a ticker that changes ten times a second gets
+20 frames, not 60); 15 a second after half a second with no change, 4 after a
+second, and one a second for tabs that are not shown. A key press, the
+pointer or a change brings the full rate back at once. On one or two
+processors a page whose frames take long to draw gets at most two thirds of
+the time for drawing, so its scripts still run (`SURFER_FULL_RATE=1` turns
+that off). Only the parts of a frame that changed are copied to the window.
+
+Video is offered only as the machine can play it: a script at the start of
+every page tells players such as YouTube's that there is no AV1 and nothing
+above 720p at 30 frames a second (480p on one or two processors, 1080p at 60
+with the GPU), so they choose H.264 or VP9 at a size that plays;
+`SURFER_MEDIA_ANY=1` lifts the limits. libaom's AV1 decoder is not used at
+all: it decodes on one processor at half VP9's speed. Without the GPU, pages
+are told there is no WebGL (drawn by the processors it takes them all and
+still crawls). Requests to 88 advertising and tracking networks from other
+sites' pages are not made, except on YouTube's own pages, which stop playing
+when they fail (`SURFER_TRACKERS=allow` makes them all). Known in
+WebKit 2.40 with GStreamer 1.24: about half of the muted streaming videos
+(MSE) that are out of view when they load never start; WebKit pauses muted
+videos out of view, and that pause comes before the player has its source.
 
 Memory is watched, because swap is far slower than memory (and a live start
 has none). A page gives memory back as it

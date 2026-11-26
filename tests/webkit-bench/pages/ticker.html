@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- A page that changes a little ten times a second (a ticker, a countdown,
+     a carousel's progress bar): each change is seen, most frames in between
+     change nothing. -->
+<html><head><meta charset="utf-8"><title>Ticker</title>
+<style>
+  body { margin: 0; font: 16px/1.5 sans-serif; padding: 40px; }
+  #t { font: 32px monospace; }
+</style></head>
+<body>
+  <h1>A ticker</h1>
+  <div id="t">0.0</div>
+  <p style="margin-top: 200px">Plain text that does not change.</p>
+  <script>
+    var t0 = Date.now(), el = document.getElementById('t');
+    setInterval(function () { el.textContent = ((Date.now() - t0) / 1000).toFixed(1); }, 100);
+  </script>
+</body></html>

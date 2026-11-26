@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- A YouTube-like player: Media Source Extensions, the stream (test-vp9.webm,
+     720p VP9 at 30 frames a second, made by campaign.py) appended in 1 MB
+     pieces about 15 s ahead of playback, played with sound on (no audio
+     track), looping.  window.__stat says how playback goes. -->
+<html><head><meta charset="utf-8"><title>MSE video</title>
+<style>body{margin:0;background:#111;color:#ccc;font:14px sans-serif}video{width:100%;max-height:90vh;display:block;background:#000}</style>
+</head><body>
+<video id="v" playsinline></video>
+<div id="s">starting</div>
+<script>
+var v = document.getElementById('v'), ms = new MediaSource();
+window.__stat = 'init';
+v.src = URL.createObjectURL(ms);
+ms.addEventListener('sourceopen', function () {
+  var sb = ms.addSourceBuffer('video/webm; codecs="vp9"'), data, off = 0, CH = 1 << 20;
+  fetch('test-vp9.webm').then(function (r) { return r.arrayBuffer(); }).then(function (b) {
+    data = new Uint8Array(b);
+    function more() {
+      if (sb.updating) return;
+      var ahead = sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) - v.currentTime : 0;
+      if (off >= data.length) { if (ms.readyState === 'open') ms.endOfStream(); return; }
+      if (ahead > 15) return;
+      sb.appendBuffer(data.subarray(off, Math.min(off + CH, data.length)));
+      off += CH;
+    }
+    sb.addEventListener('updateend', more);
+    setInterval(more, 250);
+    more();
+    v.play().catch(function (e) { window.__stat = 'play failed ' + e; });
+  });
+});
+v.addEventListener('ended', function () { v.currentTime = 0; v.play(); });
+setInterval(function () {
+  var p = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {};
+  window.__stat = [v.currentTime.toFixed(1), v.paused ? 'paused' : 'playing', 'frames ' + p.totalVideoFrames,
+    'dropped ' + p.droppedVideoFrames].join(' ');
+  document.getElementById('s').textContent = window.__stat;
+}, 1000);
+</script></body></html>

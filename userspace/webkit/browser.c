@@ -74,7 +74,10 @@ typedef struct {
     /* frame pacing (below) */
     guint ack_source;              /* the frame complete waiting to be sent, or 0 */
     uint32_t last_ack;             /* when the last one was sent (ms) */
-    unsigned still;                /* frames in a row that changed nothing on screen */
+    uint32_t last_change;          /* when a frame last changed something on screen (ms) */
+    unsigned run;                  /* frames in a row that changed something */
+    uint32_t changes[64];          /* when the last frames that changed something came (ms), a ring */
+    unsigned nchanges;
     uint32_t draw_ms;              /* what drawing a frame takes lately (ms, averaged): frame complete to the frame */
     /* memory (below) */
     uint32_t last_shown;           /* when it was last the active tab (ms) */
@@ -425,19 +428,40 @@ static void frame_stats(unsigned t0) {
  * page faults a second, each one through ICDA's kernel lock - though not a
  * pixel changed.
  *
- * So frame complete goes at the display's rate, 60 a second; at 15 a second
- * once half a second of frames has changed nothing on screen and no key or
- * pointer has moved (a page animating something invisible); once a second
- * for a tab that is not shown.  The first visible change, key or pointer
- * movement brings the full rate back. */
+ * So frame complete goes at the display's rate, 60 a second, while a key or
+ * the pointer is in use and while the picture keeps changing (two frames in a
+ * row that changed something: a video, a smooth animation, a scroll) and while
+ * the page loads.
+ * Otherwise it follows how often the picture really changes: twice as many
+ * frames as changes came in the last second (from 15 to 60 a second).
+ * Each frame is the whole page put together again in software, whatever
+ * changed, and that costs up to 70 ms of processor time on a page with
+ * blurred or layered parts (microsoft.com, cnn.com): a page whose banner ticks
+ * ten times a second was drawn 62 times a second, 52 of them the same picture.
+ * After half a second with no change it is 15 a second, after a second 4 (a
+ * page animating something invisible), and once a second for a tab that is
+ * not shown.  A key, the pointer or a change seen at once brings 60 back. */
 #define FRAME_MS        16
 #define STILL_FRAME_MS  66
-#define STILL_AFTER     30
+#define STILL_AFTER_MS  500
+#define QUIET_FRAME_MS  250
+#define QUIET_AFTER_MS  1000
 #define HIDDEN_FRAME_MS 1000
 #define INPUT_HOLD_MS   500
 #define BUSY_FRAME_MS   50         /* the slowest pace a busy page is given: 20 frames a second */
 static uint32_t last_input;        /* ms of the last key or pointer event */
 static int busy_pace;              /* one or two processors (heavy pages, below) */
+
+/* frames that changed something in the last second */
+static unsigned changes_per_second(tab_t *t, uint32_t now) {
+    unsigned n = 0, have = t->nchanges < 64 ? t->nchanges : 64;
+    for (unsigned i = 0; i < have; i++) {
+        uint32_t when = t->changes[(t->nchanges - 1 - i) % 64];
+        if (now - when > 1000) break;
+        n++;
+    }
+    return n;
+}
 
 static gboolean frame_complete(gpointer data) {
     tab_t *t = (tab_t *)data;
@@ -448,17 +472,34 @@ static gboolean frame_complete(gpointer data) {
 }
 
 static uint32_t frame_interval(tab_t *t) {
+    uint32_t now = now_ms(), quiet, ms;
+    unsigned fps;
     if (!ntabs || t != tabs[active]) return HIDDEN_FRAME_MS;
-    if (t->still >= STILL_AFTER && now_ms() - last_input > INPUT_HOLD_MS) return STILL_FRAME_MS;
+    /* full pace while a key or the pointer is in use, while the picture keeps
+     * changing, and while the page loads (pages that chain their loading
+     * through requestAnimationFrame would load at the slow pace) */
+    if (now - last_input < INPUT_HOLD_MS || t->run >= 2 || t->loading) {
+        ms = FRAME_MS;
+    } else if ((quiet = now - t->last_change) >= QUIET_AFTER_MS) {
+        ms = QUIET_FRAME_MS;
+    } else if (quiet >= STILL_AFTER_MS) {
+        ms = STILL_FRAME_MS;
+    } else {
+        fps = changes_per_second(t, now) * 2;
+        if (fps > 1000 / FRAME_MS) fps = 1000 / FRAME_MS;
+        if (fps < 15) fps = 15;
+        ms = 1000 / fps;
+    }
     /* On one or two processors a page whose frames take long to draw would
      * be drawing all the time, and its scripts (and everything else) wait
-     * behind the drawing: a frame's turn is then one and a half times what
-     * drawing it takes, so a third of the time is left over. */
+     * behind the drawing: a frame's turn is then at least one and a half
+     * times what drawing it takes, so a third of the time is left over. */
     if (busy_pace && t->draw_ms > FRAME_MS * 2 / 3) {
-        uint32_t ms = t->draw_ms + t->draw_ms / 2;
-        return ms > BUSY_FRAME_MS ? BUSY_FRAME_MS : ms;
+        uint32_t busy = t->draw_ms + t->draw_ms / 2;
+        if (busy > BUSY_FRAME_MS) busy = BUSY_FRAME_MS;
+        if (ms < busy) ms = busy;
     }
-    return FRAME_MS;
+    return ms;
 }
 
 /* frame complete for t's last frame, as soon as its pace allows */
@@ -479,10 +520,7 @@ static void hurry_frame(tab_t *t) {
 
 static void note_input(void) {
     last_input = now_ms();
-    if (ntabs) {
-        tabs[active]->still = 0;
-        hurry_frame(tabs[active]);
-    }
+    if (ntabs) hurry_frame(tabs[active]);
 }
 
 /* ---- frames in --------------------------------------------------------------------------- */
@@ -556,8 +594,8 @@ static void frame_done(tab_t *t, int changed, int y0, int y1, unsigned t0) {
     static int damage_log = -1;
     if (damage_log < 0) damage_log = getenv("WPE_DAMAGE") != NULL;
     if (damage_log)
-        fprintf(stderr, "icda-webkit damage: ms %u tab %s rows %d-%d still %u\n", now_ms(),
-                ntabs && t == tabs[active] ? "shown" : "hidden", changed ? y0 : -1, changed ? y1 : -1, t->still);
+        fprintf(stderr, "icda-webkit damage: ms %u tab %s rows %d-%d next %u\n", now_ms(),
+                ntabs && t == tabs[active] ? "shown" : "hidden", changed ? y0 : -1, changed ? y1 : -1, frame_interval(t));
     if (changed && ntabs && t == tabs[active]) update_rows(y0, y1);
     if (!timing_painted) {
         timing_painted = 1;
@@ -570,7 +608,14 @@ static void frame_done(tab_t *t, int changed, int y0, int y1, unsigned t0) {
         if (t->last_ack && took < 200) t->draw_ms = (t->draw_ms * 7 + took + 4) / 8;
         else t->draw_ms = 0;
     }
-    t->still = changed ? 0 : t->still < 1000000 ? t->still + 1 : t->still;
+    if (changed) {
+        uint32_t now = now_ms();
+        t->last_change = now;
+        t->changes[t->nchanges++ % 64] = now;
+        t->run++;
+    } else {
+        t->run = 0;
+    }
     pace_frame(t);
 }
 
@@ -965,10 +1010,10 @@ static gboolean memory_watch(gpointer d) {
  *   - video the machine cannot play smoothly is not offered: a script at the
  *     start of every document answers the questions players ask
  *     (MediaSource.isTypeSupported, canPlayType, mediaCapabilities) with no
- *     for AV1 in software, for more than MEDIA frames a second and for
- *     pictures larger than the limit, so YouTube and the like pick H.264 or
- *     VP9 at a size that plays (720p at 30 in software, 480p on one or two
- *     processors; 1080p at 60 on the GPU);
+ *     for AV1, for more frames a second than the limit and for pictures
+ *     larger than it, so YouTube and the like pick H.264 or VP9 at a size
+ *     that plays (720p at 30 in software, 480p on one or two processors;
+ *     1080p at 60 on the GPU);
  *   - requests to advertising and tracking networks from other sites' pages
  *     are not made (WebKit's content filter, compiled once into the cache):
  *     on news sites they are most of the scripts that keep running.
@@ -1023,7 +1068,10 @@ static const char *const tracker_hosts[] = {
     "adtechus.com", "serving-sys.com", "flashtalking.com", "innovid.com", "springserve.com", "spotxchange.com",
     "freewheel.tv", "fwmrm.net", "admanmedia.com", "aniview.com", "connatix.com", "primis.tech", "vidazoo.com",
 };
-#define TRACKER_FILTER "icda-trackers-2"
+/* YouTube's own pages are left alone: when its requests to the ad networks
+ * fail it stops playing videos and asks for the blocker to be turned off.
+ * A new list or rule needs a new name, or the one compiled before is used. */
+#define TRACKER_FILTER "icda-trackers-3"
 
 static void filter_ready(WebKitUserContentFilter *f, GError *err, const char *how) {
     if (f) {
@@ -1060,7 +1108,8 @@ static void filter_loaded(GObject *o, GAsyncResult *res, gpointer d) {
                 if (*p == '.') g_string_append(json, "\\\\.");
                 else g_string_append_c(json, *p);
             }
-            g_string_append(json, "[:/]\",\"load-type\":[\"third-party\"]},\"action\":{\"type\":\"block\"}}");
+            g_string_append(json, "[:/]\",\"load-type\":[\"third-party\"],\"unless-domain\":[\"*youtube.com\"]},"
+                                  "\"action\":{\"type\":\"block\"}}");
         }
         g_string_append_c(json, ']');
         bytes = g_string_free_to_bytes(json);
@@ -1076,9 +1125,12 @@ static void heavy_setup(void) {
     WebKitUserScript *script;
     ncpu = n > 0 ? (int)n : 1;
     busy_pace = ncpu <= 2 && !getenv("SURFER_FULL_RATE");
-    if (gpu_mode && ncpu > 2) { max_w = 1920; max_h = 1080; max_fps = 60; av1 = 1; }
-    else if (ncpu > 2) { max_w = 1280; max_h = 720; max_fps = 30; av1 = 0; }
-    else { max_w = 854; max_h = 480; max_fps = 30; av1 = 0; }
+    /* no AV1 even on the GPU: the decoding is done on the processors all the
+     * same, by libaom, on one of them (GST_PLUGIN_FEATURE_RANK in main) */
+    av1 = 0;
+    if (gpu_mode && ncpu > 2) { max_w = 1920; max_h = 1080; max_fps = 60; }
+    else if (ncpu > 2) { max_w = 1280; max_h = 720; max_fps = 30; }
+    else { max_w = 854; max_h = 480; max_fps = 30; }
     content = webkit_user_content_manager_new();
     if (!getenv("SURFER_MEDIA_ANY")) {
         js = g_strdup_printf(media_script, max_h, max_w, max_fps, av1);
@@ -1112,7 +1164,7 @@ static void select_tab(int i) {
     active = i;
     t = tabs[i];
     t->last_shown = now_ms();
-    t->still = 0;
+    t->last_change = now_ms();         /* shown again: at full pace until it settles */
     wpe_view_backend_add_activity_state(t->wb, wpe_view_activity_state_visible | wpe_view_activity_state_focused |
                                                 wpe_view_activity_state_in_window);
     if (t->discarded) {                     /* back from memory, below: load the page again */
@@ -1148,11 +1200,19 @@ static int add_tab(const char *url, WebKitWebView *related) {
         tab_t *opener = tab_of_view(related);
         t->related = 1;
         if (opener) opener->related = 1;
-        t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related, NULL));
+        /* the opener's web process and settings; the scripts and filters
+         * (heavy pages, below) are not shared unless given */
+        t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related,
+                                               "user-content-manager", content, NULL));
     } else {
         t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "settings", settings,
                                                "web-context", web_context, "user-content-manager", content, NULL));
     }
+    /* WebGL drawn by the processors takes them all and still crawls: without
+     * the GPU, pages are told there is none and use what they have for that
+     * (maps their flat tiles, sites a still picture).  Set here because
+     * making a view turns it on again in the settings it is given */
+    if (!gpu_mode) webkit_settings_set_enable_webgl(webkit_web_view_get_settings(t->view), FALSE);
     set_sizes(t);
     g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), NULL);
     g_signal_connect(t->view, "notify::uri", G_CALLBACK(on_uri), NULL);
@@ -1676,8 +1736,12 @@ int main(int argc, char **argv) {
     env_default("EGL_PLATFORM", "wayland");
     env_default("GSETTINGS_BACKEND", "memory");
     /* no PulseAudio server here: sound goes through icdasink, and probing
-     * for PulseAudio devices only costs time */
-    env_default("GST_PLUGIN_FEATURE_RANK", "pulsesink:NONE,pulsesrc:NONE,pulsedeviceprovider:NONE");
+     * for PulseAudio devices only costs time.  libaom's AV1 decoder is left
+     * out: it decodes on one processor at half VP9's speed (1080p at 30
+     * frames a second takes 68% of a fast core, 60 frames a second more than
+     * one), so with it sites such as YouTube send AV1 and the video stutters;
+     * without it they send VP9 */
+    env_default("GST_PLUGIN_FEATURE_RANK", "pulsesink:NONE,pulsesrc:NONE,pulsedeviceprovider:NONE,av1dec:NONE");
     /* the plugin registry made with the Linux root (tests/linux/mkroot.sh): with
      * none, GStreamer reads every plugin (seconds of disk reads) on first use */
     env_default("GST_REGISTRY", "/usr/lib/icda/gst-registry.bin");
@@ -1709,10 +1773,6 @@ int main(int argc, char **argv) {
      * 4 GB machine.  Below 6 GB, going back loads the page again from the
      * disk cache instead. */
     if (ram_mb < 6144) webkit_settings_set_enable_page_cache(settings, FALSE);
-    /* WebGL drawn by the processors takes them all and still crawls: without
-     * the GPU, pages are told there is none and use what they have for that
-     * (maps their flat tiles, sites a still picture) */
-    if (!gpu_mode) webkit_settings_set_enable_webgl(settings, FALSE);
     heavy_setup();
     g_signal_connect(webkit_network_session_get_default(), "download-started", G_CALLBACK(on_download), NULL);
 
