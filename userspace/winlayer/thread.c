@@ -215,6 +215,7 @@ HANDLE h_new(int kind, void *obj) {
             handles[i].kind = kind;
             handles[i].obj = obj;
             handles[i].refs = 1;
+            handles[i].access = ~0u;
             pthread_mutex_unlock(&hlock);
             return h_of(i);
         }
@@ -651,8 +652,11 @@ DWORD WINAPI SignalObjectAndWait(HANDLE sig, HANDLE wait, DWORD ms, BOOL alertab
 void tls_thread_blocks(wthread_t *t);       /* loader.c: the static TLS of every module */
 void crash_handler_thread(void);            /* main.c */
 
+void tls_thread_gone(wthread_t *t);        /* loader.c */
+
 static void thread_finish(wthread_t *t, DWORD code) {
     ld_thread_attach(0);
+    tls_thread_gone(t);
     sync_lock();
     t->exit_code = code;
     t->done = 1;

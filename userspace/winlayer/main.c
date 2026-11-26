@@ -22,6 +22,8 @@
 #include <limits.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
+#include <dirent.h>
+#include <sys/syscall.h>
 
 char   *g_cmdline_a;
 WCHAR  *g_cmdline_w;
@@ -110,6 +112,73 @@ static int module_at_pc(uintptr_t a) {
     return 0;
 }
 
+static void ctx_from_signal(const ucontext_t *uc, uint8_t *wctx) {
+    static const int order[16] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                   REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
+    memset(wctx, 0, 0x4D0);
+    for (int i = 0; i < 16; i++) ((uint64_t *)(wctx + 0x78))[i] = (uint64_t)uc->uc_mcontext.gregs[order[i]];
+    *(uint64_t *)(wctx + 0xF8) = (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+}
+
+/* ---- where each thread is: kill -QUIT (Ctrl+\) with ICDA_WIN_TRACE set ------------------------
+ * Every thread prints its Windows frames: those of the program's code it is
+ * in, or the layer function it waits in and the program's frames that
+ * called it.  For a program that hangs or does nothing. */
+
+static int stacks_lock;
+
+static void stacks_here(const ucontext_t *uc) {
+    const char *barrier_innermost(void *ctx);
+    void unwind_report(void *ctx);
+    static __thread uint8_t wctx[0x4D0] __attribute__((aligned(16)));
+    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    const char *in;
+    while (__atomic_exchange_n(&stacks_lock, 1, __ATOMIC_ACQUIRE)) {
+    }
+    if (module_at_pc(rip)) {
+        char where[200];
+        where_is(rip, where, sizeof(where));
+        wlog("thread %ld: in the program at %s", (long)syscall(SYS_gettid), where);
+        ctx_from_signal(uc, wctx);
+        unwind_report(wctx);
+    } else if ((in = barrier_innermost(memset(wctx, 0, sizeof(wctx))))) {
+        wlog("thread %ld: in %s, called from", (long)syscall(SYS_gettid), in);
+        unwind_report(wctx);
+    } else {
+        /* in the layer, not through the barrier: where, and the program's
+         * return addresses on the stack */
+        uintptr_t *sp = (uintptr_t *)uc->uc_mcontext.gregs[REG_RSP];
+        char where[200];
+        int shown = 0;
+        where_is(rip, where, sizeof(where));
+        wlog("thread %ld: at %s; on its stack:", (long)syscall(SYS_gettid), where);
+        for (int i = 0; i < 4096 && shown < 16 && sp; i++)
+            if (module_at_pc(sp[i])) {
+                where_is(sp[i], where, sizeof(where));
+                wlog("  stack+%03x: %s", i * 8, where);
+                shown++;
+            }
+    }
+    __atomic_store_n(&stacks_lock, 0, __ATOMIC_RELEASE);
+}
+
+static void stacks_signal(int sig, siginfo_t *si, void *ctx) {
+    (void)sig;
+    /* from outside: every thread is asked, this one included */
+    if (si->si_code == SI_USER && si->si_pid != getpid()) {
+        DIR *d = opendir("/proc/self/task");
+        struct dirent *e;
+        long self = (long)syscall(SYS_gettid);
+        wlog("the threads, where they are:");
+        while (d && (e = readdir(d))) {
+            long tid = strtol(e->d_name, 0, 10);
+            if (tid > 0 && tid != self) syscall(SYS_tgkill, getpid(), tid, SIGQUIT);
+        }
+        if (d) closedir(d);
+    }
+    stacks_here(ctx);
+}
+
 static void crash(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
     /* a bad pointer a program passed to the layer: that call fails */
@@ -133,11 +202,7 @@ static void crash(int sig, siginfo_t *si, void *ctx) {
     if (module_at_pc(rip)) {
         void unwind_report(void *ctx);
         static uint8_t wctx[0x4D0] __attribute__((aligned(16)));
-        static const int order[16] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
-                                       REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
-        memset(wctx, 0, sizeof(wctx));
-        for (int i = 0; i < 16; i++) ((uint64_t *)(wctx + 0x78))[i] = (uint64_t)uc->uc_mcontext.gregs[order[i]];
-        *(uint64_t *)(wctx + 0xF8) = (uint64_t)rip;
+        ctx_from_signal(uc, wctx);
         wlog("crash: rip %s, rsp %p; the frames:", where, (void *)sp);
         unwind_report(wctx);
     } else
@@ -184,6 +249,11 @@ static void crash_handlers(void) {
     sigaction(SIGFPE, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
     sigaction(SIGTRAP, &sa, 0);
+    if (wtrace) {
+        sa.sa_sigaction = stacks_signal;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+        sigaction(SIGQUIT, &sa, 0);
+    }
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, stop_signal);
     signal(SIGINT, stop_signal);

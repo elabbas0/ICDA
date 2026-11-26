@@ -31,7 +31,9 @@ static __thread int wsa_error;
 static int wsa_of(int e) {
     switch (e) {
     case EWOULDBLOCK: return 10035;
-    case EINPROGRESS: return 10036;
+    /* a non-blocking connect under way: Windows says WSAEWOULDBLOCK (its
+     * WSAEINPROGRESS is Winsock 1's blocking call in progress) */
+    case EINPROGRESS: return 10035;
     case EALREADY: return 10037;
     case ENOTSOCK: case EBADF: return 10038;
     case EDESTADDRREQ: return 10039;

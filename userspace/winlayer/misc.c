@@ -968,10 +968,90 @@ const wdll_t dll_setupapi = { "setupapi.dll", setupapi, sizeof(setupapi) / sizeo
  * tree: each node is wLength, wValueLength, wType, a key, then its value and
  * its children, each 32-bit aligned. */
 
+/* A DLL of the layer's own has no file, so no version resource to read: it
+ * gets one made here, of the Windows the layer says it is (10.0.19045).
+ * Programs read kernel32's or kernelbase's to learn the Windows version
+ * (Chrome stops if it cannot). */
+
+static uint8_t *vb_align(uint8_t *base, uint8_t *p) {
+    while ((p - base) & 3) *p++ = 0;
+    return p;
+}
+
+/* a node's header, key and value; its wLength is set by vb_end */
+static uint8_t *vb_node(uint8_t *base, uint8_t *p, const char *key, int text, const void *val, WORD vlen, size_t vbytes) {
+    ((WORD *)p)[0] = 0, ((WORD *)p)[1] = vlen, ((WORD *)p)[2] = (WORD)text;
+    p += 6;
+    p += utf8_to_w(key, -1, (WCHAR *)p, 64) * 2;
+    p = vb_align(base, p);
+    if (vbytes) memcpy(p, val, vbytes), p += vbytes;
+    return p;
+}
+
+static uint8_t *vb_end(uint8_t *base, uint8_t *node, uint8_t *p) {
+    *(WORD *)node = (WORD)(p - node);
+    return vb_align(base, p);
+}
+
+static uint8_t *vb_string(uint8_t *base, uint8_t *p, const char *key, const char *value) {
+    WCHAR w[128];
+    int n = utf8_to_w(value, -1, w, 128);
+    uint8_t *node = p;
+    p = vb_node(base, p, key, 1, w, (WORD)n, (size_t)n * 2);
+    return vb_end(base, node, p);
+}
+
+static void *builtin_version(const char *path, DWORD *size) {
+    static const DWORD fixed[13] = { 0xFEEF04BD, 0x00010000, (10u << 16) | 0, (19045u << 16) | 1, (10u << 16) | 0,
+                                     (19045u << 16) | 1, 0x3F, 0, 0x40004 /* VOS_NT_WINDOWS32 */, 2 /* VFT_DLL */, 0, 0, 0 };
+    static const WORD translation[2] = { 0x0409, 0x04B0 };
+    const char *base_name = path;
+    const wdll_t *d;
+    char name[96], internal[96], desc[160];
+    uint8_t *b, *p, *root, *sfi, *table, *vfi, *var;
+    for (const char *c = path; *c; c++)
+        if (*c == '\\' || *c == '/') base_name = c + 1;
+    d = builtin_find(base_name);
+    if (!d || d == &dll_misc) return 0;
+    snprintf(name, sizeof(name), "%s", base_name);
+    for (char *c = name; *c; c++)
+        if (*c >= 'A' && *c <= 'Z') *c += 32;
+    snprintf(internal, sizeof(internal), "%s", name);
+    if (strchr(internal, '.')) *strchr(internal, '.') = 0;
+    snprintf(desc, sizeof(desc), "%s of ICDA's Windows layer", name);
+    b = p = calloc(1, 4096);
+    if (!b) return 0;
+    root = p;
+    p = vb_node(b, p, "VS_VERSION_INFO", 0, fixed, sizeof(fixed), sizeof(fixed));
+    p = vb_align(b, p);
+    sfi = p;
+    p = vb_node(b, p, "StringFileInfo", 1, 0, 0, 0);
+    table = p;
+    p = vb_node(b, p, "040904B0", 1, 0, 0, 0);
+    p = vb_string(b, p, "CompanyName", "ICDA");
+    p = vb_string(b, p, "FileDescription", desc);
+    p = vb_string(b, p, "FileVersion", "10.0.19045.1");
+    p = vb_string(b, p, "InternalName", internal);
+    p = vb_string(b, p, "OriginalFilename", name);
+    p = vb_string(b, p, "ProductName", "ICDA Windows layer");
+    p = vb_string(b, p, "ProductVersion", "10.0.19045.1");
+    p = vb_end(b, table, p);
+    p = vb_end(b, sfi, p);
+    vfi = p;
+    p = vb_node(b, p, "VarFileInfo", 1, 0, 0, 0);
+    var = p;
+    p = vb_node(b, p, "Translation", 0, translation, sizeof(translation), sizeof(translation));
+    p = vb_end(b, var, p);
+    p = vb_end(b, vfi, p);
+    p = vb_end(b, root, p);
+    *size = (DWORD)(p - b);
+    return b;
+}
+
 static void *version_block(const WCHAR *wpath, DWORD *size) {
     char a[1100], up[1100];
     w_to_utf8(wpath, -1, a, sizeof(a));
-    if (path_find(a, up, sizeof(up)) != 0) return 0;
+    if (path_find(a, up, sizeof(up)) != 0 || access(up, F_OK) != 0) return builtin_version(a, size);
     return pe_file_resource(up, (const WCHAR *)(uintptr_t)16, (const WCHAR *)(uintptr_t)1, size);   /* RT_VERSION, 1 */
 }
 

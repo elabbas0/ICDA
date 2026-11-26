@@ -46,7 +46,8 @@ version winmm ws2_32 wsock32 mswsock iphlpapi dnsapi winhttp wininet urlmon cryp
 setupapi cfgmgr32 hid dbghelp imagehlp psapi powrprof userenv wtsapi32 netapi32 mpr imm32 uxtheme dwmapi shcore
 propsys d3d9 d3d11 d3d12 dxgi d3dcompiler_47 dsound dinput8 xinput1_4 xinput9_1_0 opengl32 glu32 msimg32 winspool
 usp10 dwrite d2d1 mfplat mf mfreadwrite avrt ole32 rpcrt4 wldap32 normaliz credui wevtapi taskschd ntdsapi
-rstrtmgr dhcpcsvc fwpuclnt wlanapi winusb bluetoothapis cabinet msi msvcrt ucrtbase""".split()
+rstrtmgr dhcpcsvc fwpuclnt wlanapi winusb bluetoothapis cabinet msi msvcrt ucrtbase pdh ndfapi
+cryptui tbs esent bthprops""".split()
 
 HEADERS = """winsock2.h ws2tcpip.h windows.h winternl.h ole2.h oleauto.h objbase.h combaseapi.h shlobj.h shlwapi.h
 shellapi.h commctrl.h commdlg.h mmsystem.h mmreg.h winver.h iphlpapi.h wininet.h winhttp.h urlmon.h wincrypt.h
@@ -55,7 +56,8 @@ userenv.h wtsapi32.h lm.h winnetwk.h imm.h uxtheme.h dwmapi.h shellscalingapi.h 
 d3d11.h d3d12.h dxgi1_6.h d3dcompiler.h dsound.h dinput.h xinput.h GL/gl.h GL/glu.h winspool.h usp10.h dwrite_3.h
 d2d1.h mfapi.h mfidl.h mfreadwrite.h avrt.h rpc.h winldap.h wincred.h winevt.h taskschd.h ntdsapi.h
 restartmanager.h dhcpcsdk.h fwpmu.h wlanapi.h winusb.h bluetoothapis.h fdi.h fci.h msi.h roapi.h winstring.h
-aclapi.h sddl.h ntsecapi.h tlhelp32.h winioctl.h processthreadsapi.h synchapi.h hidsdi.h windns.h""".split()
+aclapi.h sddl.h ntsecapi.h tlhelp32.h winioctl.h processthreadsapi.h synchapi.h hidsdi.h windns.h pdh.h
+ndfapi.h cryptuiapi.h tbs.h esent.h""".split()
 
 def resource_dir():
     """clang's own headers (x86intrin.h ...), which libclang does not always find"""
@@ -78,10 +80,14 @@ INVALID_IS_MINUS_ONE = re.compile(r"^(CreateFile|CreateFile2|CreateFileTransacte
 
 STATUS = {"HRESULT": "h", "NTSTATUS": "n", "BOOL": "b", "WINBOOL": "b", "BOOLEAN": "b", "LSTATUS": "e",
           "NET_API_STATUS": "e", "RPC_STATUS": "e", "WIN32_ERROR": "e", "MMRESULT": "m", "MCIERROR": "m",
-          "CONFIGRET": "c", "SECURITY_STATUS": "s"}
+          "CONFIGRET": "c", "SECURITY_STATUS": "s", "PDH_STATUS": "e", "TBS_RESULT": "e"}
 
 
 PER_DLL = {}          # dll -> every function it exports
+
+
+# DLLs whose file is not NAME.dll
+FILE_OF = {"winspool": "winspool.drv", "bthprops": "bthprops.cpl"}
 
 
 def exports():
@@ -195,7 +201,7 @@ def main():
     line = '    "'
     count = 0
     for dll in sorted(PER_DLL):
-        names = ["%s.dll" % dll] + sorted(PER_DLL[dll]) + [""]
+        names = [FILE_OF.get(dll, "%s.dll" % dll)] + sorted(PER_DLL[dll]) + [""]
         for n in names:
             entry = "%s\\0" % n
             if len(line) + len(entry) > 116:

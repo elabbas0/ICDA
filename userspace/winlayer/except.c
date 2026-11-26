@@ -539,7 +539,15 @@ static void unhandled(EXCEPTION_RECORD *rec, void *ctx) {
     void *filter = __atomic_load_n(&unhandled_filter, __ATOMIC_ACQUIRE);
     if (filter) {
         EXCEPTION_POINTERS ep = { rec, ctx };
-        LONG r = ((LONG (WCALLBACK *)(EXCEPTION_POINTERS *))filter)(&ep);
+        LONG r;
+        /* the program's filter may end it (a crash reporter does): say what it was first */
+        if (wtrace) {
+            wlog("exception 0x%08X not handled: to the program's filter", rec->ExceptionCode);
+            for (DWORD i = 0; i < rec->NumberParameters && i < 4; i++)
+                wlog("  value %u: 0x%llx", i, (unsigned long long)rec->ExceptionInformation[i]);
+            unwind_report(ctx);
+        }
+        r = ((LONG (WCALLBACK *)(EXCEPTION_POINTERS *))filter)(&ep);
         if (r == -1) restore_context(ctx);                   /* EXCEPTION_CONTINUE_EXECUTION */
         if (r == 1) _exit((int)rec->ExceptionCode);          /* EXCEPTION_EXECUTE_HANDLER */
     }

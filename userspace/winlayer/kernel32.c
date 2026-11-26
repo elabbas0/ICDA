@@ -7,6 +7,7 @@
  * with the Unix side unchanged. */
 #define _GNU_SOURCE
 #include "win.h"
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -280,6 +281,20 @@ BOOL WINAPI ConnectNamedPipe(HANDLE h, void *ov) {
     if (f->fd >= 0) {
         wset_last_error(535);                 /* ERROR_PIPE_CONNECTED */
         return FALSE;
+    }
+    {
+        /* a client that connected before this call: a good connection, and
+         * yet the answer is FALSE and ERROR_PIPE_CONNECTED, as on Windows
+         * (Chrome's Mojo checks for exactly that) */
+        struct pollfd pf = { f->listen_fd, POLLIN, 0 };
+        if (poll(&pf, 1, 0) == 1 && (pf.revents & POLLIN)) {
+            int fd = accept4(f->listen_fd, 0, 0, SOCK_CLOEXEC);
+            if (fd >= 0) {
+                f->fd = fd;
+                wset_last_error(535);
+                return FALSE;
+            }
+        }
     }
     if (ov) {
         /* overlapped: accepted by a thread of ours, the event says when */
@@ -837,12 +852,29 @@ DWORD WINAPI SetFilePointer(HANDLE h, LONG lo, LONG *hi, DWORD method) {
     return (DWORD)n.QuadPart;
 }
 
+/* the file's new size, as Windows allows it: not smaller while a view maps
+ * what would go (ERROR_USER_MAPPED_FILE; Linux would cut it, and the view's
+ * pages past the end would fault, as SQLite's did in Chrome) */
+static int file_mapped_beyond(int fd, uint64_t size);
+static BOOL set_file_size(int fd, uint64_t size) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && size < (uint64_t)st.st_size && file_mapped_beyond(fd, size)) {
+        wset_last_error(1224);      /* ERROR_USER_MAPPED_FILE */
+        return FALSE;
+    }
+    if (ftruncate(fd, (off_t)size) != 0) {
+        set_errno_error();
+        return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL WINAPI SetEndOfFile(HANDLE h) {
     int fd = file_fd(h);
     off_t pos;
     if (fd < 0) return FALSE;
     pos = lseek(fd, 0, SEEK_CUR);
-    return ftruncate(fd, pos) == 0;
+    return set_file_size(fd, (uint64_t)pos);
 }
 
 DWORD WINAPI GetFileType(HANDLE h) {
@@ -1514,6 +1546,7 @@ BOOL WINAPI UnlockFileEx(HANDLE h, DWORD r, DWORD lo, DWORD hi, OVERLAPPED *ov) 
  * can say how large one is and UnmapViewOfFile can unmap it. */
 typedef struct wmapping {
     int              fd;
+    int              is_file;   /* a file's, not memory alone */
     DWORD            prot;
     uint64_t         size;
     int              refs;
@@ -1525,6 +1558,9 @@ typedef struct {
     uint8_t *base;
     size_t   size;
     int      write, exec;
+    dev_t    dev;               /* the file it maps (0, 0: none) and from where */
+    ino_t    ino;
+    uint64_t off;
 } wview_t;
 
 static pthread_mutex_t maplock = PTHREAD_MUTEX_INITIALIZER;
@@ -1599,6 +1635,7 @@ HANDLE WINAPI CreateFileMappingW(HANDLE file, void *sa, DWORD prot, DWORD hi, DW
         int fd = file_fd(file);
         struct stat st;
         m->fd = fd >= 0 ? dup(fd) : -1;
+        m->is_file = 1;
         /* a writable mapping larger than its file makes the file that large */
         if (m->fd >= 0 && size && (prot & 0xCC) && fstat(m->fd, &st) == 0 && (uint64_t)st.st_size < size)
             if (ftruncate(m->fd, (off_t)size) != 0) wlog("CreateFileMapping: the file could not grow");
@@ -1612,7 +1649,11 @@ HANDLE WINAPI CreateFileMappingW(HANDLE file, void *sa, DWORD prot, DWORD hi, DW
         pthread_mutex_unlock(&maplock);
     }
     wset_last_error(0);
-    return h_new(H_MAPPING, m);
+    {
+        HANDLE h = h_new(H_MAPPING, m);
+        if (h) h_get(h, H_MAPPING)->access = 0xF001F;     /* SECTION_ALL_ACCESS */
+        return h;
+    }
 }
 
 HANDLE WINAPI CreateFileMappingA(HANDLE file, void *sa, DWORD prot, DWORD hi, DWORD lo, const char *name) {
@@ -1621,9 +1662,10 @@ HANDLE WINAPI CreateFileMappingA(HANDLE file, void *sa, DWORD prot, DWORD hi, DW
     return CreateFileMappingW(file, sa, prot, hi, lo, name ? w : 0);
 }
 
+static uint32_t section_access(DWORD a);
 HANDLE WINAPI OpenFileMappingW(DWORD access, BOOL inherit, const WCHAR *name) {
     wmapping_t *m;
-    (void)access, (void)inherit;
+    (void)inherit;
     pthread_mutex_lock(&maplock);
     for (m = named_maps; m && name; m = m->next)
         if (!w_icmp(m->name, name)) break;
@@ -1633,7 +1675,11 @@ HANDLE WINAPI OpenFileMappingW(DWORD access, BOOL inherit, const WCHAR *name) {
         wset_last_error(ERROR_FILE_NOT_FOUND);
         return 0;
     }
-    return h_new(H_MAPPING, m);
+    {
+        HANDLE h = h_new(H_MAPPING, m);
+        if (h) h_get(h, H_MAPPING)->access = section_access(access);
+        return h;
+    }
 }
 
 HANDLE WINAPI OpenFileMappingA(DWORD access, BOOL inherit, const char *name) {
@@ -1654,6 +1700,10 @@ void *WINAPI MapViewOfFile(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n)
         return 0;
     }
     m = w->obj;
+    if ((access & 2) && !(w->access & 2)) {      /* FILE_MAP_WRITE of a handle without SECTION_MAP_WRITE */
+        wset_last_error(ERROR_ACCESS_DENIED);
+        return 0;
+    }
     if (access & 2) prot |= PROT_WRITE;   /* FILE_MAP_WRITE */
     if (access & 0x20) prot |= PROT_EXEC; /* FILE_MAP_EXECUTE */
     if (!n) {
@@ -1681,6 +1731,13 @@ void *WINAPI MapViewOfFile(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n)
         views[nviews].size = (n + 4095) & ~(size_t)4095;
         views[nviews].write = (prot & PROT_WRITE) != 0;
         views[nviews].exec = (prot & PROT_EXEC) != 0;
+        {
+            struct stat st;
+            int known = fstat(m->fd, &st) == 0;
+            views[nviews].dev = known ? st.st_dev : 0;
+            views[nviews].ino = known ? st.st_ino : 0;
+        }
+        views[nviews].off = off;
         nviews++;
     }
     pthread_mutex_unlock(&maplock);
@@ -1690,6 +1747,38 @@ void *WINAPI MapViewOfFile(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n)
 void *WINAPI MapViewOfFileEx(HANDLE h, DWORD access, DWORD hi, DWORD lo, SIZE_T n, void *at) {
     (void)at;
     return MapViewOfFile(h, access, hi, lo, n);
+}
+
+/* ntdll's NtQuerySection: a section's basic facts (Chrome checks each shared
+ * memory region it is handed with it, and drops those it cannot ask about).
+ * SECTION_BASIC_INFORMATION: BaseAddress, Attributes, Size (24 bytes) */
+LONG WINAPI NtQuerySection(HANDLE h, int cls, void *out, ULONG len, ULONG *ret) {
+    whandle_t *w = h_get(h, H_MAPPING);
+    wmapping_t *m = w ? w->obj : 0;
+    uint8_t *b = out;
+    uint64_t size;
+    struct stat st;
+    if (!m) return (LONG)0xC0000008;                  /* STATUS_INVALID_HANDLE */
+    if (cls == 1) return (LONG)0xC0000049;            /* SectionImageInformation: STATUS_SECTION_NOT_IMAGE */
+    if (cls != 0) return (LONG)0xC0000003;            /* STATUS_INVALID_INFO_CLASS */
+    if (len < 24 || !b) return (LONG)0xC0000004;      /* STATUS_INFO_LENGTH_MISMATCH */
+    size = m->size ? m->size : (fstat(m->fd, &st) == 0 ? (uint64_t)st.st_size : 0);
+    memset(b, 0, 24);
+    *(uint32_t *)(b + 8) = m->is_file ? 0x800000 : 0x8000000;   /* SEC_FILE, SEC_COMMIT */
+    memcpy(b + 16, &size, 8);
+    if (ret) *ret = 24;
+    return 0;
+}
+
+static int file_mapped_beyond(int fd, uint64_t size) {
+    struct stat st;
+    int found = 0;
+    if (fstat(fd, &st) != 0) return 0;
+    pthread_mutex_lock(&maplock);
+    for (int i = 0; i < nviews && !found; i++)
+        if (views[i].ino == st.st_ino && views[i].dev == st.st_dev && views[i].off + views[i].size > size) found = 1;
+    pthread_mutex_unlock(&maplock);
+    return found;
 }
 
 BOOL WINAPI UnmapViewOfFile(const void *p) {
@@ -1813,7 +1902,7 @@ BOOL WINAPI SetFileInformationByHandle(HANDLE h, int cls, void *info, DWORD size
     case 5:                          /* FileAllocationInfo */
         return TRUE;
     case 6:                          /* FileEndOfFileInfo */
-        return ftruncate(f->fd, (off_t)*(int64_t *)info) == 0;
+        return set_file_size(f->fd, (uint64_t)*(int64_t *)info);
     default:
         wset_last_error(ERROR_NOT_SUPPORTED);
         return FALSE;
@@ -1947,9 +2036,23 @@ BOOL WINAPI CloseHandle(HANDLE h) {
     return TRUE;
 }
 
+/* a section's access with the generic rights spelled out */
+static uint32_t section_access(DWORD a) {
+    uint32_t r = a & ~0xF0000000u;
+    if (a & 0x80000000u) r |= 0x20000 | 0x5;          /* GENERIC_READ: query, map for reading */
+    if (a & 0x40000000u) r |= 0x20000 | 0x2;          /* GENERIC_WRITE: map for writing */
+    if (a & 0x20000000u) r |= 0x20000 | 0x8;          /* GENERIC_EXECUTE */
+    if (a & 0x10000000u) r |= 0xF001F;                /* GENERIC_ALL: SECTION_ALL_ACCESS */
+    return r;
+}
+
+/* A duplicate of a section's handle has the access asked for, and no more
+ * than the handle duplicated has (ERROR_ACCESS_DENIED): a read-only one
+ * stays read-only, which is how Chrome tells read-only shared memory. */
 BOOL WINAPI DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD access, BOOL inherit, DWORD opts) {
     whandle_t *w;
-    (void)sp, (void)tp, (void)access, (void)inherit;
+    uint32_t want = ~0u;
+    (void)sp, (void)tp, (void)inherit;
     if (src == (HANDLE)(intptr_t)-2 || src == (HANDLE)(intptr_t)-1) {
         /* a real handle for the current thread */
         if (src == (HANDLE)(intptr_t)-2) {
@@ -1964,12 +2067,21 @@ BOOL WINAPI DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD
         wset_last_error(ERROR_INVALID_HANDLE);
         return FALSE;
     }
+    if (w->kind == H_MAPPING) {
+        want = (opts & 2) ? w->access : section_access(access);      /* DUPLICATE_SAME_ACCESS */
+        if (access & 0x2000000u) want = w->access;                 /* MAXIMUM_ALLOWED */
+        if (want & ~w->access) {
+            wset_last_error(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+    }
     if (w->kind == H_FILE) {
         wfileobj_t *f = w->obj;
         *dst = file_handle(dup(f->fd), f->path, f->is_dir);
     } else if (w->kind == H_MAPPING) {
         mapping_ref(w->obj);
         *dst = h_new(H_MAPPING, w->obj);
+        if (*dst) h_get(*dst, H_MAPPING)->access = want;
     } else {
         *dst = h_new(w->kind, w->obj);
         if (*dst && (w->kind == H_EVENT || w->kind == H_MUTEX || w->kind == H_SEMAPHORE)) named_ref(w->obj, 1);
@@ -4269,53 +4381,88 @@ BOOL WINAPI WaitOnAddress(volatile void *addr, void *cmp, SIZE_T size, DWORD ms)
 void WINAPI WakeByAddressSingle(void *addr) { futex(addr, FUTEX_WAKE_PRIVATE, 1, 0); }
 void WINAPI WakeByAddressAll(void *addr) { futex(addr, FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, 0); }
 
-/* one-time initialisation */
+/* one-time initialisation: an INIT_ONCE is 0 (not run), 1 (a thread runs
+ * it; the others wait on it) or its context | 2 (done).  Nothing is held
+ * while the function runs, so it may start other INIT_ONCEs, as BoringSSL's
+ * do (a lock for all of them deadlocked Chrome there). */
 typedef BOOL (WCALLBACK *INIT_ONCE_FN)(void *, void *, void **);
-static int once_lock;
+
+static void once_set(void **once, uintptr_t v) {
+    __atomic_store_n((uintptr_t *)once, v, __ATOMIC_RELEASE);
+    futex(once, FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, 0);
+}
+
+/* 1: this thread runs it; 0: it is done (*ctx its context) */
+static int once_claim(void **once, void **ctx) {
+    for (;;) {
+        uintptr_t v = __atomic_load_n((uintptr_t *)once, __ATOMIC_ACQUIRE), none = 0;
+        if (v & 2) {
+            if (ctx) *ctx = (void *)(v & ~(uintptr_t)3);
+            return 0;
+        }
+        if (v == 0 && __atomic_compare_exchange_n((uintptr_t *)once, &none, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return 1;
+        if (v == 1) futex(once, FUTEX_WAIT_PRIVATE, 1, 0);      /* the low word is 1 while it runs */
+    }
+}
 
 BOOL WINAPI InitOnceExecuteOnce(void **once, INIT_ONCE_FN fn, void *param, void **ctx) {
-    if (__atomic_load_n((uintptr_t *)once, __ATOMIC_ACQUIRE) & 2) {
-        if (ctx) *ctx = (void *)((uintptr_t)*once & ~(uintptr_t)3);
-        return TRUE;
+    void *c = 0;
+    if (!once_claim(once, ctx)) return TRUE;
+    if (!fn(once, param, &c)) {
+        once_set(once, 0);            /* failed: the next caller tries again */
+        return FALSE;
     }
-    fmutex_lock(&once_lock);
-    if (!((uintptr_t)*once & 2)) {
-        void *c = 0;
-        BOOL ok = fn(once, param, &c);
-        if (!ok) {
-            fmutex_unlock(&once_lock);
-            return FALSE;
-        }
-        __atomic_store_n((uintptr_t *)once, ((uintptr_t)c & ~(uintptr_t)3) | 2, __ATOMIC_RELEASE);
-    }
-    fmutex_unlock(&once_lock);
-    if (ctx) *ctx = (void *)((uintptr_t)*once & ~(uintptr_t)3);
+    once_set(once, ((uintptr_t)c & ~(uintptr_t)3) | 2);
+    if (ctx) *ctx = (void *)((uintptr_t)c & ~(uintptr_t)3);
     return TRUE;
 }
 
 void WINAPI InitOnceInitialize(void **once) { *once = 0; }
 
+/* flags: INIT_ONCE_CHECK_ONLY 1, INIT_ONCE_ASYNC 2 (callers may race; the
+ * first InitOnceComplete wins) */
 BOOL WINAPI InitOnceBeginInitialize(void **once, DWORD flags, BOOL *pending, void **ctx) {
-    (void)flags;
-    if ((uintptr_t)*once & 2) {
+    uintptr_t v = __atomic_load_n((uintptr_t *)once, __ATOMIC_ACQUIRE);
+    if (!once || !pending || (flags & ~3u) || flags == 3) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (v & 2) {
         *pending = FALSE;
-        if (ctx) *ctx = (void *)((uintptr_t)*once & ~(uintptr_t)3);
+        if (ctx) *ctx = (void *)(v & ~(uintptr_t)3);
         return TRUE;
     }
-    fmutex_lock(&once_lock);
-    if ((uintptr_t)*once & 2) {
-        fmutex_unlock(&once_lock);
-        *pending = FALSE;
-        if (ctx) *ctx = (void *)((uintptr_t)*once & ~(uintptr_t)3);
+    if (flags & 1) {
+        wset_last_error(31);          /* ERROR_GEN_FAILURE: not done yet */
+        return FALSE;
+    }
+    if (flags & 2) {
+        *pending = TRUE;
         return TRUE;
     }
-    *pending = TRUE;      /* the lock stays held until InitOnceComplete */
+    *pending = once_claim(once, ctx);
     return TRUE;
 }
 
+/* flags: INIT_ONCE_ASYNC 2, INIT_ONCE_INIT_FAILED 4 */
 BOOL WINAPI InitOnceComplete(void **once, DWORD flags, void *ctx) {
-    if (!(flags & 4)) __atomic_store_n((uintptr_t *)once, ((uintptr_t)ctx & ~(uintptr_t)3) | 2, __ATOMIC_RELEASE);  /* not INIT_ONCE_INIT_FAILED */
-    fmutex_unlock(&once_lock);
+    if (!once || ((uintptr_t)ctx & 3) || (flags & ~6u)) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (flags & 2) {
+        uintptr_t none = 0;
+        if (flags & 4) return TRUE;
+        if (!__atomic_compare_exchange_n((uintptr_t *)once, &none, (uintptr_t)ctx | 2, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            wset_last_error(ERROR_ALREADY_EXISTS);     /* another caller finished first */
+            return FALSE;
+        }
+        futex(once, FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, 0);
+        return TRUE;
+    }
+    once_set(once, (flags & 4) ? 0 : (uintptr_t)ctx | 2);
     return TRUE;
 }
 
@@ -5464,6 +5611,7 @@ const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]),
 
 static const wexport_t ntd[] = {
     X(RtlGetVersion), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(RtlRaiseException), X(RtlRestoreContext),
+    X(NtQuerySection),
     WEXPN("RtlEncodePointer", EncodePointer), WEXPN("RtlDecodePointer", DecodePointer),
     WEXPN("RtlEncodeSystemPointer", EncodeSystemPointer), WEXPN("RtlDecodeSystemPointer", DecodeSystemPointer),
     X(__C_specific_handler), WEXPN("RtlAddVectoredExceptionHandler", AddVectoredExceptionHandler),

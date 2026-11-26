@@ -391,7 +391,12 @@ through ICDA's audio. Programs start others (`CreateProcess`, with pipes,
 named pipes and 32-bit exit codes) and use the network through Winsock.
 When a program stops on a fault, a dialog says where (the module and
 offset), and `ICDA_WIN_TRACE=1` prints what it loads and calls of note
-(`2`: also every call to something not implemented). `ICDA_WIN_FPS=1`
+(`2`: also every call to something not implemented; `3`: also the first
+call of each function the layer has, a short list of what a program uses).
+With tracing on, `kill -QUIT` (Ctrl+\\ in a terminal) prints where each of
+the program's threads is: the program's frames, or the layer function it
+waits in and the frames that called it, for a program that hangs or does
+nothing. `ICDA_WIN_FPS=1`
 prints the frame rate every five seconds, and `ICDA_WIN_SLOW=<ms>` each
 frame that took longer.
 
@@ -404,11 +409,16 @@ of 108 seconds), and with the compiled shaders kept its slowest frame takes
 `7z.dll`, and `7za.exe`) makes, lists, tests and extracts archives (7z, zip,
 tar.gz, AES with a password), which Linux's 7-Zip reads back unchanged, and
 its benchmark rates 19,360 MIPS on four cores, where Alpine's Linux 7-Zip
-rates 14,296. Chrome's x64 offline installer installs Chrome. Not there: 32-bit programs,
+rates 14,296. Chrome's x64 offline installer installs Chrome, and Chrome
+158 starts: it opens its window, and with `--single-process` it loads a
+page (the window's title becomes the page's), but draws nothing yet, since
+it finds no graphics to draw with (no Direct3D, and its ANGLE does not come
+as DLLs); in its usual form, its renderer and GPU processes do not start,
+as handles do not pass to other processes yet. Not there: 32-bit programs,
 Direct3D (games need an OpenGL renderer), .NET, the standard controls
-(buttons, edit fields and lists in a program's window are not drawn), and
-Chrome itself does not start yet: it gets through most of its start-up
-(its own DLLs, the profile, policies, DPI and OLE) but shows no window.
+(comctl32 has `InitCommonControlsEx` and window subclassing, but buttons,
+edit fields and lists in a program's window are not drawn) and handles
+inherited by or duplicated into another process.
 
 `icda-win` ships with ICDA: `tests/linux/mkroot.sh` builds it (with
 `userspace/winlayer/build.sh`, in Docker, against Alpine's Mesa) when it is
@@ -431,7 +441,7 @@ against a conformance suite: Wine's test programs for each Windows DLL
 writes a scoreboard per DLL (tests passed, failed, crashed, or still
 running after the timeout, and checks failed) to
 `tests/winlayer/out/conformance`. For the layer's 22 DLLs, 215 tests: 18
-pass, 70 fail some checks, 110 crash and 17 do not finish, with 3,201,212
+pass, 70 fail some checks, 110 crash and 17 do not finish, with 3,201,217
 checks run; the crashes are the work list (the standard controls, dialogs
 and menus among them).
 

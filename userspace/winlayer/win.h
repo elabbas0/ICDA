@@ -106,7 +106,7 @@ typedef struct wdll {
 /* each dll_*.c defines one or more of these */
 extern const wdll_t dll_kernel32, dll_ntdll, dll_msvcrt, dll_ucrt, dll_vcruntime, dll_user32, dll_gdi32,
     dll_opengl32, dll_winmm, dll_advapi32, dll_shell32, dll_ole32, dll_oleaut32, dll_imm32, dll_setupapi,
-    dll_version, dll_ws2_32, dll_bcrypt, dll_cabinet, dll_dwrite, dll_misc;
+    dll_version, dll_ws2_32, dll_bcrypt, dll_cabinet, dll_dwrite, dll_comctl32, dll_misc;
 
 /* the builtin for a DLL name (any case, with or without .dll), 0 if none */
 const wdll_t *builtin_find(const char *dll);
@@ -116,6 +116,7 @@ void *ansi_proc(const char *dll, const char *name);                 /* ansi.c */
 /* what Windows API functions return (apis.c): a missing function's failure */
 int         api_kind(const char *name);
 int         api_exported(const char *dll, const char *name);   /* Windows' DLL has it */
+int         api_has_dll(const char *dll);                      /* a DLL of Windows' own */
 
 /* bad pointers passed to the API fail the call (barrier.c) */
 void *barrier_wrap(const char *dll, const char *name, int ordinal, void *fn);
@@ -180,9 +181,10 @@ enum { H_FREE = 0, H_FILE, H_EVENT, H_MUTEX, H_SEMAPHORE, H_THREAD, H_FIND, H_PR
        H_SOCKET, H_OTHER };
 
 typedef struct whandle {
-    int   kind;
-    int   refs;
-    void *obj;
+    int      kind;
+    int      refs;
+    void    *obj;
+    uint32_t access;            /* what the handle may do (sections); ~0: anything */
 } whandle_t;
 
 HANDLE     h_new(int kind, void *obj);

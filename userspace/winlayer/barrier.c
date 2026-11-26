@@ -38,6 +38,7 @@ typedef struct barrier_info {
     uint64_t             fail;        /* what the function returns when it fails */
     uint32_t             lasterr;     /* the last error it sets then */
     int                  reported;
+    int                  called;      /* ICDA_WIN_TRACE=3: its first call is shown */
     struct barrier_info *next;        /* by function, in the cache */
     void                *thunk;
     char                 name[80];
@@ -72,6 +73,7 @@ __attribute__((ms_abi, used)) barrier_rec_t *barrier_push(barrier_info_t *info, 
     if (depth >= DEPTH) return 0;
     r = &recs[depth++];
     r->info = info;
+    if (wtrace >= 3 && !__atomic_exchange_n(&info->called, 1, __ATOMIC_RELAXED)) wlog("first call: %s", info->name);
     r->entry_rsp = entry_rsp;
     r->ret = stack[0];
     for (int i = 0; i < 4; i++) r->args[i] = regargs[i];
@@ -312,6 +314,15 @@ int barrier_recover(void *ucontext, uintptr_t addr) {
     if (!r->info->reported++ || wtrace)
         wlog("%s: a bad pointer (%p) was passed; the call fails", r->info->name, (void *)addr);
     return 1;
+}
+
+/* the innermost call into the layer on this thread: the function's name
+ * and its caller as a CONTEXT (for ICDA_WIN_TRACE's thread stacks); 0 if
+ * the thread is not in the layer */
+int barrier_caller(uint64_t rsp, void *ctx);
+const char *barrier_innermost(void *ctx) {
+    if (depth <= 0 || !barrier_caller(0, ctx)) return 0;
+    return recs[depth - 1].info ? recs[depth - 1].info->name : "?";
 }
 
 /* For exceptions crossing the layer: the Windows caller of the innermost

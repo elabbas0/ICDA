@@ -30,6 +30,7 @@ $CC -O1 -o $O/t_barrier.exe t_barrier.c
 $CC -O1 -o $O/t_except.exe t_except.c
 x86_64-w64-mingw32-g++ -O1 -static -o $O/t_cxx.exe t_cxx.cpp
 $CC -O1 -o $O/t_ansi.exe t_ansi.c -lws2_32 -lshell32 -ladvapi32 -lgdi32 -luser32
+$CC -O1 -o $O/t_chrome.exe t_chrome.c -lws2_32 -lcomctl32
 $CC -O1 -o $O/t_stubs.exe t_stubs.c -ldsound -ldinput8 -ldxguid -lxinput1_4 -lshlwapi -lole32 -liphlpapi -lsecur32 -luuid
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
@@ -75,6 +76,10 @@ check "t_proc.exe: registry, CreateProcess, exit code" $?
 timeout 60 ./icda-win t_ver.exe > t_ver.out 2>&1
 grep -q "^file version 1.2.3.4" t_ver.out && grep -q "^product version 1.2.3.4" t_ver.out
 check "t_ver.exe: version resource" $?
+# a builtin DLL has no file on disk: it gets the version of the Windows the layer says it is
+timeout 60 ./icda-win t_ver.exe kernelbase.dll > t_ver_k.out 2>&1
+grep -q "^file version 10.0.19045.1" t_ver_k.out && grep -q "^product version 10.0.19045.1" t_ver_k.out
+check "t_ver.exe: the version of a builtin DLL" $?
 # keys from a script: A pressed and released, then Q (which quits)
 ICDA_WIN_INPUT="1:kd1e,1:ku1e,1:cha,1:kd10" ICDA_WIN_SHOT=$O/keys ICDA_WIN_SHOT_AT=1 timeout 60 ./icda-win t_keys.exe > t_keys.out 2>&1
 sed "s/^ *[0-9]* //" t_keys.out | grep -v "^\[win\]" > t_keys.got
@@ -109,6 +114,11 @@ timeout 60 ./icda-win t_ansi.exe > t_ansi.out 2>&1
 grep -q "^done, 0 failed" t_ansi.out
 check "t_ansi.exe: ANSI functions in UTF-8" $?
 grep "^FAIL" t_ansi.out
+# what running Chrome turned up: nested INIT_ONCEs, pipes, sections, mapped files, comctl32
+timeout 60 ./icda-win t_chrome.exe > t_chrome.out 2>&1
+grep -q "^done, 0 failed" t_chrome.out
+check "t_chrome.exe: what Chrome needs of Windows" $?
+grep "^FAIL" t_chrome.out
 # bad pointers passed to the API fail the call, as on Windows
 timeout 60 ./icda-win t_barrier.exe > t_barrier.out 2>&1
 grep -q "^done, 0 failed" t_barrier.out

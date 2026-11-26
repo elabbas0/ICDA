@@ -780,10 +780,12 @@ static const char *const system_dlls[] = {
     "mfreadwrite.dll", "d3d12.dll", "xinput1_2.dll", "xinput1_1.dll", "winusb.dll", "bluetoothapis.dll", 0
 };
 
+/* one of those, or any DLL of Windows' the API metadata knows (pdh.dll,
+ * which Chrome delay-loads, among them) */
 static int is_system_dll(const char *n) {
     for (int i = 0; system_dlls[i]; i++)
         if (!strcmp(n, system_dlls[i])) return 1;
-    return 0;
+    return api_has_dll(n);
 }
 
 wmodule_t *ld_load(const char *name, const char *referrer_dir, int *err) {
@@ -834,11 +836,51 @@ static void *tls_block(wmodule_t *m) {
     return b;
 }
 
+/* Every live thread's TLS array: a DLL with TLS loaded while threads run
+ * gets a block in each of them, as on Windows (a thread pool's threads run
+ * code of DLLs loaded after they started). */
+static void **tls_arrays[4096];
+static pthread_mutex_t tlslock = PTHREAD_MUTEX_INITIALIZER;
+
 void tls_thread_blocks(wthread_t *t) {
     void **blocks = calloc(64, sizeof(void *));
+    if (!blocks) return;
+    pthread_mutex_lock(&tlslock);
     for (int i = 0; i < ntls; i++) blocks[i] = tls_mods[i] ? tls_block(tls_mods[i]) : 0;
+    for (int i = 0; i < 4096; i++)
+        if (!tls_arrays[i]) {
+            tls_arrays[i] = blocks;
+            break;
+        }
+    pthread_mutex_unlock(&tlslock);
     thread_set_tls_blocks(t, blocks);
     teb_set_tls_pointer(blocks);
+}
+
+/* a thread ends: its blocks go (after its DLL_THREAD_DETACH calls) */
+void tls_thread_gone(wthread_t *t) {
+    void **blocks = thread_tls_blocks(t);
+    if (!blocks) return;
+    pthread_mutex_lock(&tlslock);
+    for (int i = 0; i < 4096; i++)
+        if (tls_arrays[i] == blocks) tls_arrays[i] = 0;
+    pthread_mutex_unlock(&tlslock);
+    thread_set_tls_blocks(t, 0);
+    teb_set_tls_pointer(0);
+    for (int i = 0; i < 64; i++) free(blocks[i]);
+    free(blocks);
+}
+
+/* the modules loaded since: their blocks in every thread */
+static void tls_fill_all(void) {
+    pthread_mutex_lock(&tlslock);
+    for (int a = 0; a < 4096; a++) {
+        void **b = tls_arrays[a];
+        if (!b) continue;
+        for (int i = 0; i < ntls; i++)
+            if (!b[i] && tls_mods[i]) __atomic_store_n(&b[i], tls_block(tls_mods[i]), __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&tlslock);
 }
 
 static void tls_callbacks(wmodule_t *m, DWORD reason) {
@@ -870,14 +912,11 @@ static int init_module(wmodule_t *m) {
 
 int ld_init_all(void) {
     int rc = 0;
-    /* the TLS blocks of the calling thread, for modules loaded since */
+    /* the TLS blocks of modules loaded since, in every thread */
     {
         wthread_t *t = thread_current();
-        void **b = thread_tls_blocks(t);
-        if (!b) tls_thread_blocks(t);
-        else
-            for (int i = 0; i < ntls; i++)
-                if (!b[i] && tls_mods[i]) b[i] = tls_block(tls_mods[i]);
+        if (!thread_tls_blocks(t)) tls_thread_blocks(t);
+        tls_fill_all();
     }
     for (int i = 0; i < ninit; i++)
         if (init_order[i] != main_mod && init_module(init_order[i]) != 0) rc = -1;
@@ -1110,6 +1149,16 @@ int ld_run_exe(const char *unix_path, char *const *argv) {
         free(placeholder);
     }
     if (!main_mod) wfatal("Windows program", "%s could not be loaded (error %d).", b, err);
+    /* ntdll, kernel32 and kernelbase are in every Windows process, whatever
+     * it imports: programs ask GetModuleHandle for them (Chrome does, for
+     * ntdll's NtQuerySection) */
+    {
+        static const char *const always[] = { "ntdll.dll", "kernel32.dll", "kernelbase.dll" };
+        for (unsigned i = 0; i < 3; i++) {
+            int e = 0;
+            ld_load(always[i], 0, &e);
+        }
+    }
     if (check_mode) {
         /* DLLs the program loads later (ICDA_WIN_CHECK_DLLS: Unix paths, ':' between) */
         const char *more = getenv("ICDA_WIN_CHECK_DLLS");

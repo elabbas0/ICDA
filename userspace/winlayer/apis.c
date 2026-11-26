@@ -53,6 +53,17 @@ static void lower_dll(const char *dll, char *low, size_t cap) {
     if (!strchr(low, '.')) strcat(low, ".dll");
 }
 
+/* a DLL of Windows' own (one the metadata has the exports of) */
+int api_has_dll(const char *dll) {
+    char low[64];
+    if (!dll) return 0;
+    pthread_once(&once, index_table);
+    lower_dll(dll, low, sizeof(low));
+    for (int i = 0; i < ndlls; i++)
+        if (!strcmp(dlls[i].dll, low)) return 1;
+    return 0;
+}
+
 /* the DLL (Windows') exports a function of that name */
 int api_exported(const char *dll, const char *name) {
     char low[64];
