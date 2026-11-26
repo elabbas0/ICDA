@@ -4939,6 +4939,75 @@ void WINAPI FatalAppExitW(UINT a, const WCHAR *msg) {
 
 void WINAPI DebugBreak(void) { wlog("DebugBreak"); }
 
+/* EncodePointer: a pointer kept so it is not usable as one (XOR with this
+ * process's cookie, then rotated, as Windows does); DecodePointer undoes it */
+static uint64_t pointer_cookie(void) {
+    static uint64_t cookie;
+    if (!cookie) {
+        uint64_t c = (uint64_t)now_100ns() ^ ((uint64_t)getpid() << 32) ^ 0x9E3779B97F4A7C15ull;
+        __atomic_compare_exchange_n(&cookie, &(uint64_t){ 0 }, c | 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+    return cookie;
+}
+void *WINAPI EncodePointer(void *p) {
+    uint64_t c = pointer_cookie(), v = (uint64_t)(uintptr_t)p ^ c;
+    unsigned r = (unsigned)(c & 63);
+    return (void *)(uintptr_t)(r ? (v >> r | v << (64 - r)) : v);
+}
+void *WINAPI DecodePointer(void *p) {
+    uint64_t c = pointer_cookie(), v = (uint64_t)(uintptr_t)p;
+    unsigned r = (unsigned)(c & 63);
+    return (void *)(uintptr_t)((r ? (v << r | v >> (64 - r)) : v) ^ c);
+}
+void *WINAPI EncodeSystemPointer(void *p) { return EncodePointer(p); }
+
+/* every processor sees this thread's writes */
+void WINAPI FlushProcessWriteBuffers(void) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+
+/* CopyFile2(from, to, COPYFILE2_EXTENDED_PARAMETERS *): CopyFileW, an HRESULT */
+HRESULT WINAPI CopyFile2(const WCHAR *from, const WCHAR *to, const void *params) {
+    DWORD flags = params ? ((const DWORD *)params)[1] : 0;          /* dwSize, dwCopyFlags ... */
+    if (CopyFileW(from, to, (flags & 1) != 0)) return 0;             /* COPY_FILE_FAIL_IF_EXISTS */
+    return (HRESULT)(0x80070000u | (wget_last_error() & 0xFFFF));
+}
+
+/* a symbolic link; the target as given (a relative one stays relative) */
+BOOLEAN WINAPI CreateSymbolicLinkW(const WCHAR *link, const WCHAR *target, DWORD flags) {
+    char wl[1024], wt[1024], ul[1024], ut[1024];
+    (void)flags;
+    if (!link || !target || w_to_utf8(link, -1, wl, sizeof(wl)) <= 0 || w_to_utf8(target, -1, wt, sizeof(wt)) <= 0 ||
+        path_to_unix(wl, ul, sizeof(ul)) != 0) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if ((wt[0] && wt[1] == ':') || wt[0] == '\\' || wt[0] == '/') {
+        if (path_to_unix(wt, ut, sizeof(ut)) != 0) {
+            wset_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    } else {
+        size_t i = 0;
+        for (; wt[i] && i + 1 < sizeof(ut); i++) ut[i] = wt[i] == '\\' ? '/' : wt[i];
+        ut[i] = 0;
+    }
+    if (symlink(ut, ul) != 0) {
+        wset_last_error(errno_to_win(errno));
+        return FALSE;
+    }
+    return TRUE;
+}
+BOOLEAN WINAPI CreateSymbolicLinkA(const char *link, const char *target, DWORD flags) {
+    WCHAR l[1024], t[1024];
+    if (!link || !target) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    utf8_to_w(link, -1, l, 1024);
+    utf8_to_w(target, -1, t, 1024);
+    return CreateSymbolicLinkW(l, t, flags);
+}
+void *WINAPI DecodeSystemPointer(void *p) { return DecodePointer(p); }
+
 void *WINAPI RtlPcToFileHeader(void *pc, void **base) {
     wmodule_t *m = module_at(pc);
     *base = m ? m->base : 0;
@@ -5164,7 +5233,9 @@ static const wexport_t k32[] = {
     X(SetUnhandledExceptionFilter), X(UnhandledExceptionFilter), X(AddVectoredExceptionHandler),
     X(RemoveVectoredExceptionHandler), X(AddVectoredContinueHandler), X(RemoveVectoredContinueHandler),
     X(RaiseException), X(RaiseFailFastException), X(FatalAppExitA), X(FatalAppExitW), X(DebugBreak),
-    X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(CreateEventW), X(CreateEventA), X(CreateEventExW), X(CreateEventExA), X(SetEvent),
+    X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(EncodePointer), X(DecodePointer), X(EncodeSystemPointer),
+    X(DecodeSystemPointer), X(FlushProcessWriteBuffers), X(CopyFile2), X(CreateSymbolicLinkW), X(CreateSymbolicLinkA),
+    X(CreateEventW), X(CreateEventA), X(CreateEventExW), X(CreateEventExA), X(SetEvent),
     X(ResetEvent), X(PulseEvent), X(OpenEventW), X(CreateMutexW), X(CreateMutexA), X(CreateMutexExW), X(OpenMutexW),
     X(ReleaseMutex), X(CreateSemaphoreW), X(CreateSemaphoreA), X(CreateSemaphoreExW), X(ReleaseSemaphore),
     X(WaitForMultipleObjects), X(WaitForSingleObject), X(WaitForSingleObjectEx), X(WaitForMultipleObjectsEx),
@@ -5179,12 +5250,15 @@ static const wexport_t k32[] = {
     WEXPN("RtlFillMemory", RtlFillMemory),
 };
 
-extern const wexport_t unwind_exports[];
-extern const int unwind_nexports;
-const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]), unwind_exports, &unwind_nexports };
+extern const wexport_t unwind_exports[], tpool_exports[];
+extern const int unwind_nexports, tpool_nexports;
+const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]), unwind_exports, &unwind_nexports,
+                              tpool_exports, &tpool_nexports };
 
 static const wexport_t ntd[] = {
     X(RtlGetVersion), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(RtlRaiseException), X(RtlRestoreContext),
+    WEXPN("RtlEncodePointer", EncodePointer), WEXPN("RtlDecodePointer", DecodePointer),
+    WEXPN("RtlEncodeSystemPointer", EncodeSystemPointer), WEXPN("RtlDecodeSystemPointer", DecodeSystemPointer),
     X(__C_specific_handler), WEXPN("RtlAddVectoredExceptionHandler", AddVectoredExceptionHandler),
     WEXPN("RtlRemoveVectoredExceptionHandler", RemoveVectoredExceptionHandler),
     WEXPN("RtlAddVectoredContinueHandler", AddVectoredContinueHandler),

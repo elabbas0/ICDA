@@ -81,6 +81,18 @@ static void *wrap_file(FILE *f) {
 }
 
 static void *WINAPI c___iob_func(void) { return iob; }
+
+/* the stream's buffer fields, which msvcp140's stream buffers read and
+ * write directly when there is buffered data: ours always say none, so it
+ * calls the stdio functions */
+static int WINAPI c__get_stream_buffer_pointers(void *stream, char ***base, char ***ptr, int **count) {
+    legacy_file_t *l = stream;
+    if (!l) return EINVAL;
+    if (base) *base = &l->_base;
+    if (ptr) *ptr = &l->_ptr;
+    if (count) *count = &l->_cnt;
+    return 0;
+}
 static void *WINAPI c___acrt_iob_func(unsigned i) { return i < 3 ? &iob[i] : 0; }
 
 /* "rt", "wb+", "r, ccs=UTF-8": the C library's mode */
@@ -1125,9 +1137,14 @@ static int WINAPI c__set_new_mode(int m) {
     return o;
 }
 static int WINAPI c__query_new_mode(void) { return new_mode; }
+/* the new handler (operator new calls _callnewh when memory runs out) */
+typedef int (WCALLBACK *new_handler_t)(size_t);
+static new_handler_t new_handler;
+static new_handler_t WINAPI c__set_new_handler(new_handler_t h) { return __atomic_exchange_n(&new_handler, h, __ATOMIC_ACQ_REL); }
+static new_handler_t WINAPI c__query_new_handler(void) { return __atomic_load_n(&new_handler, __ATOMIC_ACQUIRE); }
 static int WINAPI c__callnewh(size_t n) {
-    (void)n;
-    return 0;
+    new_handler_t h = __atomic_load_n(&new_handler, __ATOMIC_ACQUIRE);
+    return h && h(n) ? 1 : 0;
 }
 static int WINAPI c__heapchk(void) { return -2; /* _HEAPOK */ }
 static int WINAPI c__heapmin(void) { return 0; }
@@ -2097,6 +2114,103 @@ static size_t WINAPI c_wcsftime(WCHAR *b, size_t n, const WCHAR *fmt, const wtm_
     if ((size_t)utf8_to_w(out, -1, 0, 0) > n) return 0;
     return (size_t)utf8_to_w(out, -1, b, (int)n) - 1;
 }
+
+/* ---- the C locale's names of days and months (the C++ library's time facets) ---- */
+
+static const char *const day_abbr[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+static const char *const day_full[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+static const char *const mon_abbr[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+static const char *const mon_full[12] = { "January", "February", "March", "April", "May", "June", "July", "August",
+                                          "September", "October", "November", "December" };
+
+/* ":Sun:Sunday:Mon:Monday..." */
+static char *names_list(const char *const *abbr, const char *const *full, int n) {
+    size_t len = 1;
+    char *s, *p;
+    for (int i = 0; i < n; i++) len += strlen(abbr[i]) + strlen(full[i]) + 2;
+    s = p = malloc(len);
+    if (!s) return 0;
+    for (int i = 0; i < n; i++) p += sprintf(p, ":%s:%s", abbr[i], full[i]);
+    return s;
+}
+static WCHAR *names_list_w(const char *const *abbr, const char *const *full, int n) {
+    char *a = names_list(abbr, full, n);
+    WCHAR *w = a ? utf8_to_w_dup(a) : 0;
+    free(a);
+    return w;
+}
+static char *WINAPI c__Getdays(void) { return names_list(day_abbr, day_full, 7); }
+static char *WINAPI c__Getmonths(void) { return names_list(mon_abbr, mon_full, 12); }
+static WCHAR *WINAPI c__W_Getdays(void) { return names_list_w(day_abbr, day_full, 7); }
+static WCHAR *WINAPI c__W_Getmonths(void) { return names_list_w(mon_abbr, mon_full, 12); }
+
+/* __crt_lc_time_data, in one allocation with its strings (freed with free) */
+typedef struct {
+    char    *wday_abbr[7], *wday[7], *month_abbr[12], *month[12], *ampm[2];
+    char    *sdatefmt, *ldatefmt, *timefmt;
+    int32_t  caltype, refcount;
+    WCHAR   *w_wday_abbr[7], *w_wday[7], *w_month_abbr[12], *w_month[12], *w_ampm[2];
+    WCHAR   *w_sdatefmt, *w_ldatefmt, *w_timefmt, *w_locale_name;
+} lc_time_t;
+
+static void *WINAPI c__Gettnames(void) {
+    const char *src[45];
+    int n = 0;
+    size_t len = sizeof(lc_time_t);
+    lc_time_t *t;
+    char *p;
+    for (int i = 0; i < 7; i++) src[n++] = day_abbr[i];
+    for (int i = 0; i < 7; i++) src[n++] = day_full[i];
+    for (int i = 0; i < 12; i++) src[n++] = mon_abbr[i];
+    for (int i = 0; i < 12; i++) src[n++] = mon_full[i];
+    src[n++] = "AM", src[n++] = "PM";
+    src[n++] = "MM/dd/yy", src[n++] = "dddd, MMMM dd, yyyy", src[n++] = "HH:mm:ss";
+    src[n++] = "";                                         /* the locale's name (wide only) */
+    for (int i = 0; i < n; i++) len += strlen(src[i]) + 1 + (strlen(src[i]) + 1) * 2 + 2;
+    t = calloc(1, len);
+    if (!t) return 0;
+    p = (char *)(t + 1);
+    {
+        char **narrow[44];
+        WCHAR **wide[45];
+        int k = 0;
+        for (int i = 0; i < 7; i++) narrow[k] = &t->wday_abbr[i], wide[k++] = &t->w_wday_abbr[i];
+        for (int i = 0; i < 7; i++) narrow[k] = &t->wday[i], wide[k++] = &t->w_wday[i];
+        for (int i = 0; i < 12; i++) narrow[k] = &t->month_abbr[i], wide[k++] = &t->w_month_abbr[i];
+        for (int i = 0; i < 12; i++) narrow[k] = &t->month[i], wide[k++] = &t->w_month[i];
+        narrow[k] = &t->ampm[0], wide[k++] = &t->w_ampm[0];
+        narrow[k] = &t->ampm[1], wide[k++] = &t->w_ampm[1];
+        narrow[k] = &t->sdatefmt, wide[k++] = &t->w_sdatefmt;
+        narrow[k] = &t->ldatefmt, wide[k++] = &t->w_ldatefmt;
+        narrow[k] = &t->timefmt, wide[k++] = &t->w_timefmt;
+        wide[k] = &t->w_locale_name;
+        for (int i = 0; i < n; i++) {
+            size_t l = strlen(src[i]);
+            if (i < 44) {
+                *narrow[i] = p;
+                memcpy(p, src[i], l + 1);
+                p += l + 1;
+            }
+            p = (char *)(((uintptr_t)p + 1) & ~(uintptr_t)1);
+            *wide[i] = (WCHAR *)p;
+            for (size_t c = 0; c <= l; c++) ((WCHAR *)p)[c] = (unsigned char)src[i][c];
+            p += (l + 1) * 2;
+        }
+    }
+    t->refcount = 1;
+    return t;
+}
+static void *WINAPI c__W_Gettnames(void) { return c__Gettnames(); }
+
+/* strftime with a locale's time names: the C locale's here */
+static size_t WINAPI c__Strftime(char *b, size_t n, const char *fmt, const wtm_t *w, void *lc) {
+    (void)lc;
+    return c_strftime(b, n, fmt, w);
+}
+static size_t WINAPI c__Wcsftime(WCHAR *b, size_t n, const WCHAR *fmt, const wtm_t *w, void *lc) {
+    (void)lc;
+    return c_wcsftime(b, n, fmt, w);
+}
 static char *WINAPI c_asctime(const wtm_t *w) {
     static __thread char buf[32];
     struct tm t;
@@ -2449,6 +2563,20 @@ static int WINAPI c__seh_filter_dll(DWORD code, void *info) {
     return 0;
 }
 static void WINAPI c__register_thread_local_exe_atexit_callback(void *cb) { (void)cb; }
+/* the C runtime's locale lock (taken around locale changes and reads) */
+static pthread_mutex_t locale_lock;
+static pthread_once_t locale_once = PTHREAD_ONCE_INIT;
+static void locale_lock_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&locale_lock, &a);
+}
+static void WINAPI c__lock_locales(void) {
+    pthread_once(&locale_once, locale_lock_init);
+    pthread_mutex_lock(&locale_lock);
+}
+static void WINAPI c__unlock_locales(void) { pthread_mutex_unlock(&locale_lock); }
 static int WINAPI c__configthreadlocale(int f) {
     (void)f;
     return 2;      /* _DISABLE_PER_THREAD_LOCALE */
@@ -2615,6 +2743,20 @@ static void WINAPI c__free_locale(void *l) { free(l); }
 static void *WINAPI c__get_current_locale(void) { return calloc(1, 64); }
 static int mb_cur_max = 4;
 static unsigned WINAPI c____lc_codepage_func(void) { return 65001; }
+static unsigned WINAPI c____lc_collate_cp_func(void) { return 65001; }
+static size_t WINAPI c___strncnt(const char *s, size_t n) { return strnlen(s, n); }
+static float WINAPI c_lgammaf(float x) { return lgammaf(x); }
+static double WINAPI c_lgammal(double x) { return lgamma(x); }     /* long double is double on Windows */
+/* the this pointer of a base, from a derived object: PMD { mdisp, pdisp, vdisp } */
+static void *WINAPI c___AdjustPointer(void *obj, const int32_t *pmd) {
+    char *p = obj;
+    if (!p) return 0;
+    if (pmd[1] >= 0) {
+        char *vb = p + pmd[1];
+        p = vb + *(const int32_t *)(*(char **)vb + pmd[2]);
+    }
+    return p + pmd[0];
+}
 static int WINAPI c____mb_cur_max_func(void) { return mb_cur_max; }
 static int WINAPI c____mb_cur_max_l_func(void *l) {
     (void)l;
@@ -2788,13 +2930,15 @@ static void WINAPI c___std_exception_destroy(void *e) {
 void WINAPI _CxxThrowException(void *obj, const void *info);
 DWORD WINAPI __CxxFrameHandler3(void *rec, uint64_t frame, void *ctx, void *dc);
 #define c__CxxThrowException _CxxThrowException
+void *WINAPI __RTDynamicCast(void *obj, LONG delta, void *src, void *dst, BOOL isref);
+void *WINAPI __RTtypeid(void *obj);
+void *WINAPI __RTCastToVoid(void *obj);
 static LONG WINAPI c___CxxFrameHandler(void *a, void *b, void *c, void *d) {
     return (LONG)__CxxFrameHandler3(a, (uint64_t)(uintptr_t)b, c, d);
 }
-/* FH4's compressed tables: not read yet, the frame is passed */
+DWORD WINAPI __CxxFrameHandler4(void *rec, uint64_t frame, void *ctx, void *dc);
 static LONG WINAPI c___CxxFrameHandler4(void *a, void *b, void *c, void *d) {
-    (void)a, (void)b, (void)c, (void)d;
-    return 1;
+    return (LONG)__CxxFrameHandler4(a, (uint64_t)(uintptr_t)b, c, d);
 }
 static int WINAPI c___uncaught_exceptions(void) { return cxx_uncaught_exceptions(); }
 static void *WINAPI c__set_se_translator(void *f) { return f; }
@@ -2851,7 +2995,7 @@ static void WINAPI c__assert(const char *msg, const char *file, unsigned line) {
     C(scanf), C(vsscanf),                                                                                                \
     C(malloc), C(free), C(calloc), C(realloc), C(_msize), C(_expand), C(_recalloc), C(_aligned_malloc),                  \
     C(_aligned_free), C(_aligned_realloc), C(_aligned_offset_malloc), C(_aligned_msize), C(_set_new_mode),               \
-    C(_query_new_mode), C(_callnewh), C(_heapchk), C(_heapmin),                                                          \
+    C(_query_new_mode), C(_callnewh), C(_set_new_handler), C(_query_new_handler), C(_heapchk), C(_heapmin),                                                          \
     C(memcpy), C(memmove), C(memset), C(memcmp), C(memchr), C(memcpy_s), C(memmove_s), C(_memicmp), C(strlen),           \
     C(strnlen), C(strcpy), C(strncpy), C(strcat), C(strncat), C(strcmp), C(strncmp), C(strcoll), C(strxfrm), C(strchr),  \
     C(strrchr), C(strstr), C(strspn), C(strcspn), C(strpbrk), C(strtok), C(strtok_s), C(_strdup), C(_stricmp),          \
@@ -2911,11 +3055,13 @@ static void WINAPI c__assert(const char *msg, const char *file, unsigned line) {
     C(__p___wargv), C(__p__environ), C(__p__wenviron), C(__p__pgmptr), C(__p__wpgmptr), C(_get_pgmptr),                  \
     C(_get_wpgmptr), C(_get_narrow_winmain_command_line), C(_get_wide_winmain_command_line), C(__getmainargs),           \
     C(__wgetmainargs), C(__set_app_type), C(_seh_filter_exe), C(_seh_filter_dll),                                        \
-    C(_register_thread_local_exe_atexit_callback), C(_configthreadlocale), C(_errno), C(__doserrno), C(_get_errno),     \
+    C(_register_thread_local_exe_atexit_callback), C(_configthreadlocale), C(_lock_locales), C(_unlock_locales), C(_errno), C(__doserrno), C(_get_errno),     \
     C(_set_errno), C(_get_doserrno), C(__sys_errlist), C(__sys_nerr), C(getenv), C(_wgetenv), C(_putenv), C(_wputenv),   \
     C(_putenv_s), C(_wputenv_s), C(getenv_s), C(_dupenv_s), C(_wdupenv_s), C(system), C(_getpid), C(signal), C(raise),  \
     C(_lock), C(_unlock), C(localeconv), C(setlocale), C(_wsetlocale), C(_create_locale), C(_wcreate_locale),           \
-    C(_free_locale), C(_get_current_locale), C(___lc_codepage_func), C(___mb_cur_max_func), C(___mb_cur_max_l_func),    \
+    C(_free_locale), C(_get_current_locale), C(___lc_codepage_func), C(___lc_collate_cp_func), C(__strncnt), \
+    C(lgammaf), C(lgammal), C(_Getdays), C(_Getmonths), C(_Gettnames), C(_W_Getdays), C(_W_Getmonths),        \
+    C(_W_Gettnames), C(_Strftime), C(_Wcsftime), C(___mb_cur_max_func), C(___mb_cur_max_l_func),    \
     C(___lc_locale_name_func), C(_getmbcp), C(_setmbcp), C(_beginthreadex), C(_endthreadex), C(_beginthread),           \
     C(_endthread), C(_kbhit), C(_getch), C(_getche), C(_putch), C(_cputs), C(__iob_func), C(__acrt_iob_func),           \
     WEXPN("_setjmp", ms_setjmp), WEXPN("setjmp", ms_setjmp), WEXPN("_setjmpex", ms_setjmp),                             \
@@ -2936,6 +3082,7 @@ static const wexport_t msvcrt_exports[] = {
     WEXPN("_vsnprintf_l", c__vsnprintf), WEXPN("vsnprintf", c__vsnprintf), WEXPN("snprintf", c__snprintf),
     WEXPN("_ctime32", c__ctime64), WEXPN("_mktime", c__mktime64), WEXPN("_wtoi", c__wtoi),
     WEXPN("__CxxFrameHandler", c___CxxFrameHandler), WEXPN("__CxxFrameHandler3", c___CxxFrameHandler),
+    WEXPN("__RTDynamicCast", __RTDynamicCast), WEXPN("__RTtypeid", __RTtypeid), WEXPN("__RTCastToVoid", __RTCastToVoid),
     WEXPN("_CxxThrowException", c__CxxThrowException), WEXPN("_set_se_translator", c__set_se_translator),
     WEXPN("__uncaught_exception", c___uncaught_exceptions), WEXPN("_wassert", c__wassert), WEXPN("_assert", c__assert),
 };
@@ -2951,7 +3098,7 @@ static const wexport_t ucrt_exports[] = {
     WEXPN("_fstat", c__fstat64i32), WEXPN("_wstat", c__wstat64i32), WEXPN("_findfirst", c__findfirst64i32),
     WEXPN("_findnext", c__findnext64i32), WEXPN("vsnprintf", c_vsnprintf), WEXPN("snprintf", c_snprintf),
     WEXPN("_wcsicmp_l", c__wcsicmp), WEXPN("_stricmp_l", c__stricmp), WEXPN("_strnicmp_l", c__strnicmp),
-    WEXPN("_get_stream_buffer_pointers", c__invalid_parameter_noinfo), WEXPN("__intrinsic_setjmp", ms_setjmp),
+    C(_get_stream_buffer_pointers), WEXPN("__intrinsic_setjmp", ms_setjmp),
     WEXPN("__intrinsic_setjmpex", ms_setjmp), C(__current_exception), C(__current_exception_context),
     C(__std_type_info_name), C(__std_type_info_compare), C(__std_type_info_hash), C(__std_exception_copy),
     C(__std_exception_destroy), C(_CxxThrowException), C(__uncaught_exceptions), C(wcsrchr),
@@ -2966,7 +3113,9 @@ static const wexport_t vcrt_exports[] = {
     WEXPN("__intrinsic_setjmp", ms_setjmp), WEXPN("__intrinsic_setjmpex", ms_setjmp), WEXPN("_setjmp", ms_setjmp),
     WEXPN("_setjmpex", ms_setjmp), WEXPN("longjmp", ms_longjmp), C(__std_type_info_destroy_list),
     C(__std_type_info_name), C(__std_type_info_compare), C(__std_type_info_hash), C(__std_exception_copy),
-    C(__std_exception_destroy), C(_CxxThrowException), WEXPN("__CxxFrameHandler3", c___CxxFrameHandler),
+    C(__std_exception_destroy), C(_CxxThrowException), C(__AdjustPointer), WEXPN("__std_terminate", c_terminate),
+    WEXPN("__RTDynamicCast", __RTDynamicCast), WEXPN("__RTtypeid", __RTtypeid), WEXPN("__RTCastToVoid", __RTCastToVoid),
+    WEXPN("__CxxFrameHandler3", c___CxxFrameHandler),
     WEXPN("__CxxFrameHandler4", c___CxxFrameHandler4), WEXPN("__CxxFrameHandler", c___CxxFrameHandler), C(_purecall),
     C(__uncaught_exceptions), WEXPN("__uncaught_exception", c___uncaught_exceptions), C(_set_se_translator),
     C(_is_exception_typeof), C(_set_purecall_handler), WEXPN("__vcrt_InitializeCriticalSectionEx", c__heapmin),

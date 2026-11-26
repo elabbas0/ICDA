@@ -437,7 +437,18 @@ leaves; a fault in a program's code (an access violation, a division by
 zero) is an exception it may handle. C++ exceptions work both MinGW's way
 (libgcc's handler) and MSVC's (`_CxxThrowException` and the FH3 frame
 handler, `cxxeh.c`): 7-Zip, built with MSVC, reports a bad switch or a
-damaged archive as it does on Windows. Not yet: MSVC's newer FH4 tables
-(`__CxxFrameHandler4`, Visual Studio 2019 and later), and exceptions
-crossing frames of the layer's own that were not entered through the
-barrier.
+damaged archive as it does on Windows. Programs built with Visual Studio
+2019 and later use the compressed FH4 tables (`__CxxFrameHandler4`), read
+too, and `dynamic_cast` and `typeid` work from MSVC's RTTI (a failed cast to
+a reference throws `std::bad_cast`). Microsoft's own C++ library,
+`msvcp140.dll`, which programs carry beside them, runs on the layer's C
+runtime (its locale's names of days and months, stream buffers, the new
+handler), and the Windows thread pool (work, timers, waits, cleanup groups)
+is there for it and for `std::async`. Not yet: exceptions crossing frames of
+the layer's own that were not entered through the barrier.
+
+`tests/winlayer/apps.sh` checks real programs, downloaded: 7-Zip 25.01
+(archives made and read back, Linux's 7-Zip agreeing; AES; a bad switch)
+and exiv2 0.28 from conda-forge, built with Visual Studio 2022 (an error it
+throws and catches; EXIF tags it writes into a JPEG and reads back, which
+exiftool agrees with).
