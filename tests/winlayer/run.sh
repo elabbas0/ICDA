@@ -26,6 +26,7 @@ x86_64-w64-mingw32-windres t_ver.rc -O coff -o $O/t_ver.res
 $CC -O1 -o $O/t_ver.exe t_ver.c $O/t_ver.res -lversion
 $CC -O2 -o $O/t_keys.exe t_keys.c -luser32 -lgdi32
 $CC -O1 -o $O/t_dwrite.exe t_dwrite.c -ldwrite
+$CC -O1 -o $O/t_barrier.exe t_barrier.c
 $CC -O1 -o $O/t_stubs.exe t_stubs.c -ldsound -ldinput8 -ldxguid -lxinput1_4 -lshlwapi -lole32 -liphlpapi -lsecur32 -luuid
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
@@ -100,6 +101,11 @@ timeout 60 ./icda-win t_stubs.exe > t_stubs.out 2>&1
 grep -q "^done, 0 failed" t_stubs.out
 check "t_stubs.exe: missing functions fail correctly" $?
 grep "^FAIL" t_stubs.out
+# bad pointers passed to the API fail the call, as on Windows
+timeout 60 ./icda-win t_barrier.exe > t_barrier.out 2>&1
+grep -q "^done, 0 failed" t_barrier.out
+check "t_barrier.exe: bad pointers fail the call" $?
+grep "^FAIL" t_barrier.out
 echo "$fails failed"
 exit $fails
 '

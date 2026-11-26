@@ -289,7 +289,7 @@ static void *export_lookup(wmodule_t *m, const char *name, int ordinal, int dept
     uint32_t *funcs, *names;
     uint16_t *ords;
     uint32_t rva = 0;
-    if (m->builtin) return builtin_proc(m->builtin, name, ordinal);
+    if (m->builtin) return barrier_wrap(m->builtin->name, name, ordinal, builtin_proc(m->builtin, name, ordinal));
     nt = nt_of(m->base);
     if (!nt->dir[DIR_EXPORT].rva) return 0;
     ed = (export_dir_t *)(m->base + nt->dir[DIR_EXPORT].rva);

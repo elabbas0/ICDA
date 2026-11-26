@@ -116,6 +116,22 @@ DWORD errno_to_win(int e) {
     case EMFILE: case ENFILE: return ERROR_TOO_MANY_OPEN_FILES;
     case EINVAL:  return ERROR_INVALID_PARAMETER;
     case ENOSPC:  return 112;   /* ERROR_DISK_FULL */
+    case EFAULT:  return 998;   /* ERROR_NOACCESS: a bad buffer */
+    case EISDIR:  return ERROR_ACCESS_DENIED;
+    case ENAMETOOLONG: return 206;   /* ERROR_FILENAME_EXCED_RANGE */
+    case ELOOP:   return 1921;  /* ERROR_CANT_RESOLVE_FILENAME */
+    case EBUSY:   return 170;   /* ERROR_BUSY */
+    case ETXTBSY: return 32;    /* ERROR_SHARING_VIOLATION */
+    case EPIPE:   return 109;   /* ERROR_BROKEN_PIPE */
+    case EXDEV:   return 17;    /* ERROR_NOT_SAME_DEVICE */
+    case EFBIG:   return 223;   /* ERROR_FILE_TOO_LARGE */
+    case EIO:     return 1117;  /* ERROR_IO_DEVICE */
+    case ESPIPE:  return 132;   /* ERROR_SEEK_ON_DEVICE */
+    case EMLINK:  return 1142;  /* ERROR_TOO_MANY_LINKS */
+    case ENODEV: case ENXIO: return 55;   /* ERROR_DEV_NOT_EXIST */
+    case EDQUOT:  return 1295;  /* ERROR_DISK_QUOTA_EXCEEDED */
+    case ETIMEDOUT: return ERROR_TIMEOUT;
+    case ENOSYS: case EOPNOTSUPP: return ERROR_NOT_SUPPORTED;
     default:      return ERROR_INVALID_FUNCTION;
     }
 }

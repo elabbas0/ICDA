@@ -417,6 +417,14 @@ against a conformance suite: Wine's test programs for each Windows DLL
 writes a scoreboard per DLL (tests passed, failed, crashed, or still
 running after the timeout, and checks failed) to
 `tests/winlayer/out/conformance`. For the layer's 22 DLLs, 215 tests: 18
-pass, 62 fail some checks, 122 crash and 13 do not finish; the crashes are
-the work list (missing parameter checks in the layer, the standard
-controls, dialogs and menus).
+pass, 68 fail some checks, 111 crash and 18 do not finish, with 828,580
+checks run; the crashes are the work list (the standard controls, dialogs
+and menus among them).
+
+A bad pointer a program passes to the layer fails the call, as on Windows,
+where the layer's code would have faulted: its functions are entered
+through a barrier (`barrier.c`) that notes the caller's state, and a fault
+in the layer's code at NULL or within an argument ends the call with the
+function's own failure (from `apis_gen.h`) and `ERROR_NOACCESS`. It costs
+about 30 ns a call; locks, TLS, heaps, the C runtimes and OpenGL are
+called directly. `ICDA_WIN_BARRIER=0` turns it off.
