@@ -2742,13 +2742,22 @@ __asm__(".text\n"
         "  jmp *80(%rcx)\n");
 extern char ms_setjmp[], ms_longjmp[];
 
+DWORD WINAPI __C_specific_handler(void *rec, uint64_t frame, void *ctx, void *dc);     /* except.c */
 static LONG WINAPI c___C_specific_handler(void *rec, void *frame, void *ctx, void *dc) {
-    (void)rec, (void)frame, (void)ctx, (void)dc;
-    return 1;     /* ExceptionContinueSearch */
+    return (LONG)__C_specific_handler(rec, (uint64_t)(uintptr_t)frame, ctx, dc);
 }
+/* the exception the innermost catch block handles (cxxeh.c) */
+void *cxx_current_exception(void **ctx);
+int cxx_uncaught_exceptions(void);
 static __thread void *cur_exception, *cur_exception_ctx;
-static void **WINAPI c___current_exception(void) { return &cur_exception; }
-static void **WINAPI c___current_exception_context(void) { return &cur_exception_ctx; }
+static void **WINAPI c___current_exception(void) {
+    cur_exception = cxx_current_exception(&cur_exception_ctx);
+    return &cur_exception;
+}
+static void **WINAPI c___current_exception_context(void) {
+    cur_exception = cxx_current_exception(&cur_exception_ctx);
+    return &cur_exception_ctx;
+}
 static void WINAPI c___std_type_info_destroy_list(void *l) { (void)l; }
 static const char *WINAPI c___std_type_info_name(void *ti, void *list) {
     (void)list;
@@ -2775,15 +2784,19 @@ static void WINAPI c___std_exception_destroy(void *e) {
     p[0] = 0;
     ((uint8_t *)e)[8] = 0;
 }
-static void WINAPI c__CxxThrowException(void *obj, void *info) {
-    (void)obj, (void)info;
-    wfatal("Windows program", "The program threw a C++ exception that ICDA cannot handle yet.");
-}
+/* C++ exceptions: cxxeh.c */
+void WINAPI _CxxThrowException(void *obj, const void *info);
+DWORD WINAPI __CxxFrameHandler3(void *rec, uint64_t frame, void *ctx, void *dc);
+#define c__CxxThrowException _CxxThrowException
 static LONG WINAPI c___CxxFrameHandler(void *a, void *b, void *c, void *d) {
+    return (LONG)__CxxFrameHandler3(a, (uint64_t)(uintptr_t)b, c, d);
+}
+/* FH4's compressed tables: not read yet, the frame is passed */
+static LONG WINAPI c___CxxFrameHandler4(void *a, void *b, void *c, void *d) {
     (void)a, (void)b, (void)c, (void)d;
     return 1;
 }
-static int WINAPI c___uncaught_exceptions(void) { return 0; }
+static int WINAPI c___uncaught_exceptions(void) { return cxx_uncaught_exceptions(); }
 static void *WINAPI c__set_se_translator(void *f) { return f; }
 static int WINAPI c__is_exception_typeof(void *t, void *e) {
     (void)t, (void)e;
@@ -2954,7 +2967,7 @@ static const wexport_t vcrt_exports[] = {
     WEXPN("_setjmpex", ms_setjmp), WEXPN("longjmp", ms_longjmp), C(__std_type_info_destroy_list),
     C(__std_type_info_name), C(__std_type_info_compare), C(__std_type_info_hash), C(__std_exception_copy),
     C(__std_exception_destroy), C(_CxxThrowException), WEXPN("__CxxFrameHandler3", c___CxxFrameHandler),
-    WEXPN("__CxxFrameHandler4", c___CxxFrameHandler), WEXPN("__CxxFrameHandler", c___CxxFrameHandler), C(_purecall),
+    WEXPN("__CxxFrameHandler4", c___CxxFrameHandler4), WEXPN("__CxxFrameHandler", c___CxxFrameHandler), C(_purecall),
     C(__uncaught_exceptions), WEXPN("__uncaught_exception", c___uncaught_exceptions), C(_set_se_translator),
     C(_is_exception_typeof), C(_set_purecall_handler), WEXPN("__vcrt_InitializeCriticalSectionEx", c__heapmin),
 };

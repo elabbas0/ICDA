@@ -428,3 +428,16 @@ in the layer's code at NULL or within an argument ends the call with the
 function's own failure (from `apis_gen.h`) and `ERROR_NOACCESS`. It costs
 about 30 ns a call; locks, TLS, heaps, the C runtimes and OpenGL are
 called directly. `ICDA_WIN_BARRIER=0` turns it off.
+
+Exceptions are dispatched as on x64 Windows (`except.c`): vectored
+handlers first, then each frame's language handler, found from the
+functions' unwind data, then the program's unhandled exception filter.
+`RtlUnwindEx` runs the cleanups (`__finally`, destructors) of the frames it
+leaves; a fault in a program's code (an access violation, a division by
+zero) is an exception it may handle. C++ exceptions work both MinGW's way
+(libgcc's handler) and MSVC's (`_CxxThrowException` and the FH3 frame
+handler, `cxxeh.c`): 7-Zip, built with MSVC, reports a bad switch or a
+damaged archive as it does on Windows. Not yet: MSVC's newer FH4 tables
+(`__CxxFrameHandler4`, Visual Studio 2019 and later), and exceptions
+crossing frames of the layer's own that were not entered through the
+barrier.

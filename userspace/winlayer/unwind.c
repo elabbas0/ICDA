@@ -148,12 +148,24 @@ typedef struct {
     uint16_t codes[];
 } unwind_info_t;
 
-/* the caller's registers, from a frame's; returns the language handler (0 here) */
+/* the caller's registers, from a frame's; returns the frame's language
+ * handler when type asks for one (UNW_FLAG_EHANDLER 1, UNW_FLAG_UHANDLER 2)
+ * and the function has one, past its prologue; *data is its data */
 void *WINAPI RtlVirtualUnwind(DWORD type, DWORD64 base, DWORD64 pc, RUNTIME_FUNCTION *fn, void *ctx, void **data,
                               DWORD64 *establisher, void *ptrs) {
     uint64_t frame;
-    (void)type, (void)ptrs;
+    void *handler = 0;
+    (void)ptrs;
     if (data) *data = 0;
+    if (fn) {
+        unwind_info_t *ui = (unwind_info_t *)(uintptr_t)(base + (fn->unwind & ~1u));
+        uint32_t offset = (uint32_t)(pc - base - fn->begin);
+        if (((ui->ver_flags >> 3) & type & 3) && offset >= ui->prolog) {
+            const uint32_t *h = (const uint32_t *)&ui->codes[(ui->ncodes + 1) & ~1];
+            handler = (void *)(uintptr_t)(base + h[0]);
+            if (data) *data = (void *)(h + 1);
+        }
+    }
     if (!fn) {                                    /* a leaf: only its return address on the stack */
         CTX_RIP(ctx) = *(uint64_t *)(uintptr_t)CTX_RSP(ctx);
         CTX_RSP(ctx) += 8;
@@ -232,7 +244,7 @@ void *WINAPI RtlVirtualUnwind(DWORD type, DWORD64 base, DWORD64 pc, RUNTIME_FUNC
                     uint64_t sp = CTX_RSP(ctx) + (info ? 8 : 0);
                     CTX_RIP(ctx) = *(uint64_t *)(uintptr_t)sp;
                     CTX_RSP(ctx) = *(uint64_t *)(uintptr_t)(sp + 24);
-                    return 0;
+                    return handler;
                 }
                 break;
             default:
@@ -244,7 +256,7 @@ void *WINAPI RtlVirtualUnwind(DWORD type, DWORD64 base, DWORD64 pc, RUNTIME_FUNC
     }
     CTX_RIP(ctx) = *(uint64_t *)(uintptr_t)CTX_RSP(ctx);
     CTX_RSP(ctx) += 8;
-    return 0;
+    return handler;
 }
 
 /* the return addresses from a context up, while they are in Windows code */

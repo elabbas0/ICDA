@@ -313,3 +313,28 @@ int barrier_recover(void *ucontext, uintptr_t addr) {
         wlog("%s: a bad pointer (%p) was passed; the call fails", r->info->name, (void *)addr);
     return 1;
 }
+
+/* For exceptions crossing the layer: the Windows caller of the innermost
+ * call into the layer above rsp (a frame of ours, which has no Windows
+ * unwind data), as a CONTEXT: its return address, stack and the registers
+ * it keeps.  0 if there is none. */
+int barrier_caller(uint64_t rsp, void *ctx) {
+    uint8_t *c = ctx;
+    for (int i = depth - 1; i >= 0; i--) {
+        barrier_rec_t *r = &recs[i];
+        if (r->entry_rsp < rsp) continue;                 /* below: already left */
+        *(uint64_t *)(c + 0x90) = r->rbx;
+        *(uint64_t *)(c + 0xA0) = r->rbp;
+        *(uint64_t *)(c + 0xA8) = r->rsi;
+        *(uint64_t *)(c + 0xB0) = r->rdi;
+        *(uint64_t *)(c + 0xD8) = r->r12;
+        *(uint64_t *)(c + 0xE0) = r->r13;
+        *(uint64_t *)(c + 0xE8) = r->r14;
+        *(uint64_t *)(c + 0xF0) = r->r15;
+        *(uint64_t *)(c + 0x98) = r->entry_rsp + 8;
+        *(uint64_t *)(c + 0xF8) = r->ret;
+        memcpy(c + 0x200, r->xmm, sizeof(r->xmm));       /* Xmm6 ... Xmm15 */
+        return 1;
+    }
+    return 0;
+}

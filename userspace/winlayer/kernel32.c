@@ -4906,76 +4906,19 @@ DWORD WINAPI GetLastError(void) { return wget_last_error(); }
 void WINAPI SetLastError(DWORD e) { wset_last_error(e); }
 void WINAPI RestoreLastError(DWORD e) { wset_last_error(e); }
 
-static void *unhandled_filter;
-
-void *WINAPI SetUnhandledExceptionFilter(void *fn) {
-    void *o = unhandled_filter;
-    unhandled_filter = fn;
-    return o;
-}
-
-LONG WINAPI UnhandledExceptionFilter(void *info) {
-    (void)info;
-    return 1;     /* EXCEPTION_EXECUTE_HANDLER */
-}
-
-void *WINAPI AddVectoredExceptionHandler(ULONG first, void *fn) {
-    (void)first;
-    return fn;
-}
-ULONG WINAPI RemoveVectoredExceptionHandler(void *h) {
-    (void)h;
-    return 1;
-}
-void *WINAPI AddVectoredContinueHandler(ULONG first, void *fn) {
-    (void)first;
-    return fn;
-}
-ULONG WINAPI RemoveVectoredContinueHandler(void *h) {
-    (void)h;
-    return 1;
-}
-
-/* RaiseException: its entry keeps the caller's registers (a CONTEXT), so the
- * report says where the exception came from, frame by frame */
-__asm__(".text\n"
-        ".globl RaiseException\n"
-        "RaiseException:\n"              /* ms_abi: rcx code, rdx flags, r8 count, r9 values */
-        "  sub $0x4f8, %rsp\n"
-        "  lea 0x30(%rsp), %rax\n"
-        "  mov %rcx, 0x80(%rax)\n"
-        "  mov %rdx, 0x88(%rax)\n"
-        "  mov %rbx, 0x90(%rax)\n"
-        "  lea 0x500(%rsp), %r10\n"
-        "  mov %r10, 0x98(%rax)\n"
-        "  mov %rbp, 0xa0(%rax)\n"
-        "  mov %rsi, 0xa8(%rax)\n"
-        "  mov %rdi, 0xb0(%rax)\n"
-        "  mov %r8, 0xb8(%rax)\n"
-        "  mov %r9, 0xc0(%rax)\n"
-        "  mov %r12, 0xd8(%rax)\n"
-        "  mov %r13, 0xe0(%rax)\n"
-        "  mov %r14, 0xe8(%rax)\n"
-        "  mov %r15, 0xf0(%rax)\n"
-        "  mov 0x4f8(%rsp), %r10\n"
-        "  mov %r10, 0xf8(%rax)\n"
-        "  mov %rax, 0x20(%rsp)\n"
-        "  call raise_impl\n"
-        "  add $0x4f8, %rsp\n"
-        "  ret\n");
-
+/* exceptions: except.c */
+void *WINAPI SetUnhandledExceptionFilter(void *fn);
+LONG WINAPI UnhandledExceptionFilter(void *info);
+void *WINAPI AddVectoredExceptionHandler(ULONG first, void *fn);
+ULONG WINAPI RemoveVectoredExceptionHandler(void *h);
+void *WINAPI AddVectoredContinueHandler(ULONG first, void *fn);
+ULONG WINAPI RemoveVectoredContinueHandler(void *h);
 void WINAPI RaiseException(DWORD code, DWORD flags, DWORD n, const ULONG_PTR *args);
-
-__attribute__((ms_abi, used)) void raise_impl(DWORD code, DWORD flags, DWORD n, const ULONG_PTR *args, void *ctx) {
-    void unwind_report(void *ctx);
-    (void)flags;
-    if (code == 0x406D1388) return;       /* naming a thread for a debugger */
-    wlog("exception 0x%08X raised", code);
-    for (DWORD i = 0; args && i < n && i < 8; i++) wlog("  value %u: 0x%llx", i, (unsigned long long)args[i]);
-    unwind_report(ctx);
-    if (code == 0xE06D7363) wfatal("Windows program", "The program threw a C++ exception that ICDA cannot handle yet.");
-    wfatal("Windows program", "The program stopped with exception 0x%08X (%u values).", code, n);
-}
+void WINAPI RtlRaiseException(void *rec);
+void WINAPI RtlUnwindEx(void *frame, void *target, void *rec, void *ret, void *ctx, void *hist);
+void WINAPI RtlUnwind(void *frame, void *target, void *rec, void *ret);
+void WINAPI RtlRestoreContext(void *ctx, void *rec);
+DWORD WINAPI __C_specific_handler(void *rec, uint64_t frame, void *ctx, void *dc);
 
 void WINAPI RaiseFailFastException(void *rec, void *ctx, DWORD flags) {
     (void)rec, (void)ctx, (void)flags;
@@ -5001,11 +4944,6 @@ void *WINAPI RtlPcToFileHeader(void *pc, void **base) {
     *base = m ? m->base : 0;
     return *base;
 }
-void WINAPI RtlUnwindEx(void *frame, void *target, void *rec, void *ret, void *ctx, void *hist) {
-    (void)frame, (void)target, (void)rec, (void)ret, (void)ctx, (void)hist;
-    wfatal("Windows program", "The program needs exception unwinding, which ICDA does not have yet.");
-}
-void WINAPI RtlUnwind(void *frame, void *target, void *rec, void *ret) { RtlUnwindEx(frame, target, rec, ret, 0, 0); }
 
 ULONG WINAPI RtlNtStatusToDosError(LONG status) {
     if (status == 0) return 0;
@@ -5246,7 +5184,11 @@ extern const int unwind_nexports;
 const wdll_t dll_kernel32 = { "kernel32.dll", k32, sizeof(k32) / sizeof(k32[0]), unwind_exports, &unwind_nexports };
 
 static const wexport_t ntd[] = {
-    X(RtlGetVersion), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind),
+    X(RtlGetVersion), X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(RtlRaiseException), X(RtlRestoreContext),
+    X(__C_specific_handler), WEXPN("RtlAddVectoredExceptionHandler", AddVectoredExceptionHandler),
+    WEXPN("RtlRemoveVectoredExceptionHandler", RemoveVectoredExceptionHandler),
+    WEXPN("RtlAddVectoredContinueHandler", AddVectoredContinueHandler),
+    WEXPN("RtlRemoveVectoredContinueHandler", RemoveVectoredContinueHandler),
     X(RtlNtStatusToDosError), X(NtQuerySystemInformation), X(NtQueryInformationProcess), X(NtSetInformationThread),
     X(NtDelayExecution), X(NtQueryTimerResolution), X(NtSetTimerResolution), X(RtlAllocateHeap), X(RtlFreeHeap),
     X(RtlZeroMemory), X(RtlMoveMemory), X(RtlFillMemory), X(RtlCompareMemory),

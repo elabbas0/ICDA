@@ -27,6 +27,8 @@ $CC -O1 -o $O/t_ver.exe t_ver.c $O/t_ver.res -lversion
 $CC -O2 -o $O/t_keys.exe t_keys.c -luser32 -lgdi32
 $CC -O1 -o $O/t_dwrite.exe t_dwrite.c -ldwrite
 $CC -O1 -o $O/t_barrier.exe t_barrier.c
+$CC -O1 -o $O/t_except.exe t_except.c
+x86_64-w64-mingw32-g++ -O1 -static -o $O/t_cxx.exe t_cxx.cpp
 $CC -O1 -o $O/t_stubs.exe t_stubs.c -ldsound -ldinput8 -ldxguid -lxinput1_4 -lshlwapi -lole32 -liphlpapi -lsecur32 -luuid
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
@@ -106,6 +108,17 @@ timeout 60 ./icda-win t_barrier.exe > t_barrier.out 2>&1
 grep -q "^done, 0 failed" t_barrier.out
 check "t_barrier.exe: bad pointers fail the call" $?
 grep "^FAIL" t_barrier.out
+# exceptions: vectored handlers, faults in the program code, the
+# unhandled exception filter (which ends the program with the exception code)
+timeout 60 ./icda-win t_except.exe > t_except.out 2>&1
+grep -q "^ok unhandled filter called for 0xe0005678" t_except.out && grep -q "^done, 0 failed" t_except.out
+check "t_except.exe: exceptions dispatched to handlers" $?
+grep "^FAIL" t_except.out
+# C++ exceptions through Windows unwinding: destructors, then the catch
+timeout 60 ./icda-win t_cxx.exe > t_cxx.out 2>&1
+[ "$(grep -c "^destroyed inner" t_cxx.out)" = 4 ] && grep -q "^caught: boom" t_cxx.out && grep -q "^caught int 42" t_cxx.out &&
+    grep -q "^done" t_cxx.out
+check "t_cxx.exe: C++ exceptions caught" $?
 echo "$fails failed"
 exit $fails
 '

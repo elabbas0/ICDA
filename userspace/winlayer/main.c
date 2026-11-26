@@ -114,6 +114,11 @@ static void crash(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
     /* a bad pointer a program passed to the layer: that call fails */
     if ((sig == SIGSEGV || sig == SIGBUS) && barrier_recover(ctx, (uintptr_t)si->si_addr)) return;
+    /* a fault in a program's code: an exception it may handle */
+    {
+        int except_from_signal(int sig, siginfo_t *si, void *ucontext);
+        if (except_from_signal(sig, si, ctx)) return;
+    }
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     uintptr_t *sp = (uintptr_t *)uc->uc_mcontext.gregs[REG_RSP];
     char where[200], msg[700];
