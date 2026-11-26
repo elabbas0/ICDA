@@ -13,10 +13,12 @@
 # userspace/webkit/out/engine-build, where a build that stopped goes on from
 # where it was; skipped when the tarball exists.
 #
-# As Alpine builds WebKit 2.54 (aports community/webkit2gtk-6.0): clang,
-# lld and ThinLTO, _FORTIFY_SOURCE off.  Left out, as ICDA has no use for
-# them: the bubblewrap sandbox, WebDriver, speech, spelling, the
-# accessibility bus, the new WPE Platform API (Surfer uses libwpe and
+# As Alpine builds WebKit 2.54 (aports community/webkit2gtk-6.0): clang and
+# lld, _FORTIFY_SOURCE off; clang 18, as clang 17 (Alpine 3.20's default)
+# cannot compile it against GCC 13's C++ library (std::tuple in C++23).  No
+# ThinLTO: Alpine 3.20 has no lld 18 to link clang 18's.  Left out, as ICDA
+# has no use for them: the bubblewrap sandbox, WebDriver, speech, spelling,
+# the accessibility bus, the new WPE Platform API (Surfer uses libwpe and
 # WPEBackend-fdo, which WPE WebKit still supports as its legacy API).
 set -e
 cd "$(dirname "$0")/../../.."
@@ -31,7 +33,7 @@ MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e HTTPS_PROXY -e https_proxy -
     -e WEBKIT=$WEBKIT -e LIBWPE=$LIBWPE -e FDO=$FDO \
     -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
 set -e
-apk add --no-cache build-base clang lld llvm cmake samurai meson pkgconf bison flex gperf perl python3 ruby unifdef \
+apk add --no-cache build-base clang18 lld llvm18 cmake samurai meson pkgconf bison flex gperf perl python3 ruby unifdef \
     curl patch glib-dev harfbuzz-dev icu-dev libjpeg-turbo-dev libepoxy-dev libgcrypt-dev libsoup3-dev libtasn1-dev \
     libxkbcommon-dev libxml2-dev libxslt-dev libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev fontconfig-dev \
     woff2-dev lcms2-dev libavif-dev libjxl-dev hyphen-dev libdrm-dev mesa-dev mesa-gbm wayland-dev wayland-protocols \
@@ -57,20 +59,20 @@ for p in libwpe-$LIBWPE wpebackend-fdo-$FDO; do
     DESTDIR=$B/stage ninja -C $p/build install >/dev/null
     ninja -C $p/build install >/dev/null       # and here, for WebKit to build against
 done
-export CC=clang CXX=clang++ AR=llvm-ar NM=llvm-nm RANLIB=llvm-ranlib
+L=/usr/lib/llvm18/bin
+export CC=$L/clang CXX=$L/clang++ AR=$L/llvm-ar NM=$L/llvm-nm RANLIB=$L/llvm-ranlib
 export LDFLAGS="-fuse-ld=lld -Wl,-O1,--as-needed"
 export CFLAGS="-O2 -g0 -U_FORTIFY_SOURCE" CXXFLAGS="-O2 -g0 -U_FORTIFY_SOURCE"
 export WEBKIT_NINJA_COMPILE_MAX=$JOBS
-[ -f wk/build.ninja ] || cmake -S wpewebkit-$WEBKIT -B wk -G Ninja \
+[ -f webkit/build.ninja ] || cmake -S wpewebkit-$WEBKIT -B webkit -G Ninja \
     -DPORT=WPE -DCMAKE_BUILD_TYPE=Release -DCMAKE_SKIP_RPATH=ON -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
-    -DLTO_MODE=thin \
     -DENABLE_DOCUMENTATION=OFF -DENABLE_INTROSPECTION=OFF -DENABLE_JOURNALD_LOG=OFF -DENABLE_BUBBLEWRAP_SANDBOX=OFF \
     -DENABLE_WEBDRIVER=OFF -DENABLE_SPEECH_SYNTHESIS=OFF -DENABLE_SPELLCHECK=OFF -DENABLE_MINIBROWSER=OFF \
     -DENABLE_GAMEPAD=OFF -DENABLE_WPE_PLATFORM=OFF -DENABLE_WPE_QT_API=OFF -DENABLE_SAMPLING_PROFILER=OFF \
     -DUSE_ATK=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSPROF_CAPTURE=OFF -DUSE_FLITE=OFF >/dev/null
-ninja -C wk -j$JOBS | grep -v "^\[" || true
-ninja -C wk -j$JOBS >/dev/null     # fails here when the build did
-DESTDIR=$B/stage ninja -C wk install >/dev/null
+ninja -C webkit -j$JOBS | grep -v "^\[" || true
+ninja -C webkit -j$JOBS >/dev/null     # fails here when the build did
+DESTDIR=$B/stage ninja -C webkit install >/dev/null
 cd $B/stage
 find usr -type f \( -name "*.so*" -o -perm -u+x \) -exec sh -c "file \"\$1\" | grep -q ELF && strip --strip-unneeded \"\$1\"" _ {} \;
 # the Alpine packages the libraries need (what is not the engine itself)
