@@ -380,7 +380,11 @@ game plays on ICDA (menus, console, maps, mouse look and keys); its
 timedemo of LibreQuake's first demo, at 960x540 on four cores, runs at 43
 frames a second (11 before anisotropic filtering was capped, with one frame
 of 108 seconds), and with the compiled shaders kept its slowest frame takes
-0.2 seconds instead of 1.1. Chrome's x64 offline installer installs Chrome. Not there: 32-bit programs,
+0.2 seconds instead of 1.1. 7-Zip 25.01's command line (`7z.exe` with
+`7z.dll`, and `7za.exe`) makes, lists, tests and extracts archives (7z, zip,
+tar.gz, AES with a password), which Linux's 7-Zip reads back unchanged, and
+its benchmark rates 19,360 MIPS on four cores, where Alpine's Linux 7-Zip
+rates 14,296. Chrome's x64 offline installer installs Chrome. Not there: 32-bit programs,
 Direct3D (games need an OpenGL renderer), .NET, the standard controls
 (buttons, edit fields and lists in a program's window are not drawn), and
 Chrome itself does not start yet: it gets through most of its start-up

@@ -729,32 +729,90 @@ static const wexport_t ole[] = {
 };
 const wdll_t dll_ole32 = { "ole32.dll", ole, sizeof(ole) / sizeof(ole[0]) };
 
-static WCHAR *WINAPI SysAllocStringLen(const WCHAR *s, UINT n) {
-    uint32_t *b = malloc(4 + ((size_t)n + 1) * 2);
-    WCHAR *w = (WCHAR *)(b + 1);
-    b[0] = n * 2;
-    if (s) memcpy(w, s, (size_t)n * 2);
-    else memset(w, 0, (size_t)n * 2);
-    w[n] = 0;
-    return w;
+/* BSTRs: the length in bytes just before the text, the text 8-byte aligned
+ * as 64-bit Windows has it (a 4-byte pad, then the length) */
+static WCHAR *bstr_alloc(const void *bytes, UINT n) {
+    uint8_t *b = malloc(8 + (size_t)n + 2);
+    if (!b) return 0;
+    *(uint32_t *)(b + 4) = n;
+    if (bytes) memcpy(b + 8, bytes, n);
+    else memset(b + 8, 0, n);
+    b[8 + n] = b[8 + n + 1] = 0;
+    return (WCHAR *)(b + 8);
 }
+static WCHAR *WINAPI SysAllocStringLen(const WCHAR *s, UINT n) { return bstr_alloc(s, n * 2); }
 static WCHAR *WINAPI SysAllocString(const WCHAR *s) { return s ? SysAllocStringLen(s, (UINT)w_len(s)) : 0; }
+static WCHAR *WINAPI SysAllocStringByteLen(const char *s, UINT n) { return bstr_alloc(s, n); }
 static void WINAPI SysFreeString(WCHAR *s) {
-    if (s) free((uint32_t *)s - 1);
+    if (s) free((uint8_t *)s - 8);
 }
 static UINT WINAPI SysStringLen(const WCHAR *s) { return s ? ((const uint32_t *)s)[-1] / 2 : 0; }
 static UINT WINAPI SysStringByteLen(const WCHAR *s) { return s ? ((const uint32_t *)s)[-1] : 0; }
-static void WINAPI VariantInit(void *v) { memset(v, 0, 24); }
-static HRESULT WINAPI VariantClear(void *v) {
-    memset(v, 0, 24);
+static INT WINAPI SysReAllocStringLen(WCHAR **old, const WCHAR *s, UINT n) {
+    WCHAR *w = SysAllocStringLen(s, n);
+    if (!w) return FALSE;
+    SysFreeString(*old);
+    *old = w;
+    return TRUE;
+}
+static INT WINAPI SysReAllocString(WCHAR **old, const WCHAR *s) {
+    return SysReAllocStringLen(old, s, s ? (UINT)w_len(s) : 0);
+}
+
+/* VARIANTs (24 bytes): what they hold is freed and copied by its type */
+enum { VT_EMPTY_ = 0, VT_BSTR_ = 8, VT_DISPATCH_ = 9, VT_UNKNOWN_ = 13, VT_ARRAY_ = 0x2000, VT_BYREF_ = 0x4000 };
+typedef struct {
+    uint16_t vt, r1, r2, r3;
+    union {
+        WCHAR *bstr;
+        void  *unk;
+        uint8_t raw[16];
+    } u;
+} variant_t;
+_Static_assert(sizeof(variant_t) == 24, "VARIANT is 24 bytes");
+
+static void com_unknown_call(void *unk, int slot) {
+    if (unk) ((ULONG (WINAPI *)(void *))(*(void ***)unk)[slot])(unk);     /* 1 AddRef, 2 Release */
+}
+static void WINAPI VariantInit(void *v) { memset(v, 0, sizeof(variant_t)); }
+static HRESULT WINAPI VariantClear(void *p) {
+    variant_t *v = p;
+    if (!v) return 0x80070057;                     /* E_INVALIDARG */
+    if (!(v->vt & VT_BYREF_)) {
+        if (v->vt == VT_BSTR_) SysFreeString(v->u.bstr);
+        else if (v->vt == VT_DISPATCH_ || v->vt == VT_UNKNOWN_) com_unknown_call(v->u.unk, 2);
+    }
+    memset(v, 0, sizeof(*v));
+    return 0;
+}
+static HRESULT WINAPI VariantCopy(void *dst, const void *src) {
+    variant_t *d = dst;
+    const variant_t *s = src;
+    variant_t t;
+    if (!d || !s) return 0x80070057;
+    if (d == s) return 0;
+    if ((s->vt & VT_ARRAY_) && !(s->vt & VT_BYREF_)) return 0x80004001;   /* SAFEARRAYs: not here */
+    t = *s;
+    if (!(t.vt & VT_BYREF_)) {
+        if (t.vt == VT_BSTR_ && t.u.bstr) {
+            t.u.bstr = SysAllocStringByteLen((const char *)s->u.bstr, SysStringByteLen(s->u.bstr));
+            if (!t.u.bstr) return 0x8007000E;      /* E_OUTOFMEMORY */
+        } else if (t.vt == VT_DISPATCH_ || t.vt == VT_UNKNOWN_) {
+            com_unknown_call(t.u.unk, 1);
+        }
+    }
+    VariantClear(d);
+    *d = t;
     return 0;
 }
 
 static const wexport_t oleaut[] = {
-    WEXPO("SysAllocString", SysAllocString, 2), WEXPO("SysAllocStringLen", SysAllocStringLen, 4),
+    WEXPO("SysAllocString", SysAllocString, 2), WEXPO("SysReAllocString", SysReAllocString, 3),
+    WEXPO("SysAllocStringLen", SysAllocStringLen, 4), WEXPO("SysReAllocStringLen", SysReAllocStringLen, 5),
     WEXPO("SysFreeString", SysFreeString, 6), WEXPO("SysStringLen", SysStringLen, 7),
-    WEXPO("SysStringByteLen", SysStringByteLen, 149), WEXPO("VariantInit", VariantInit, 8),
-    WEXPO("VariantClear", VariantClear, 9),
+    WEXPO("VariantInit", VariantInit, 8), WEXPO("VariantClear", VariantClear, 9),
+    WEXPO("VariantCopy", VariantCopy, 10), WEXPO("SysStringByteLen", SysStringByteLen, 149),
+    WEXPO("SysAllocStringByteLen", SysAllocStringByteLen, 150),
 };
 const wdll_t dll_oleaut32 = { "oleaut32.dll", oleaut, sizeof(oleaut) / sizeof(oleaut[0]) };
 
