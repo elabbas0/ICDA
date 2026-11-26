@@ -409,3 +409,14 @@ OpenGL, keys, GDI text and DirectWrite); the programs, left in `tests/winlayer/o
 run on ICDA too. In QEMU without KVM, give the guest `-cpu max,-avx,-avx2`:
 QEMU 8.2 emulates some AVX2 instructions wrongly, and llvmpipe's 2D
 drawing then goes wrong (an empty menu, a grey sky) or faults.
+
+`tests/winlayer/conformance.sh <winetest64.exe>` measures the layer
+against a conformance suite: Wine's test programs for each Windows DLL
+(`winetest64.exe` bundles them; Wine's CI publishes it daily), run under
+`icda-win` one test at a time and expected to pass as on Windows. It
+writes a scoreboard per DLL (tests passed, failed, crashed, or still
+running after the timeout, and checks failed) to
+`tests/winlayer/out/conformance`. For the layer's 22 DLLs, 215 tests: 18
+pass, 62 fail some checks, 122 crash and 13 do not finish; the crashes are
+the work list (missing parameter checks in the layer, the standard
+controls, dialogs and menus).
