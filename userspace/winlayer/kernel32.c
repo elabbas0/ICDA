@@ -3146,6 +3146,10 @@ DWORD WINAPI GetActiveProcessorCount(WORD group) {
     return (DWORD)ncpus();
 }
 
+/* one processor group, as on any machine with at most 64 processors */
+WORD WINAPI GetActiveProcessorGroupCount(void) { return 1; }
+WORD WINAPI GetMaximumProcessorGroupCount(void) { return 1; }
+
 DWORD WINAPI GetMaximumProcessorCount(WORD group) {
     (void)group;
     return (DWORD)ncpus();
@@ -4363,7 +4367,11 @@ FARPROC WINAPI GetProcAddress(HMODULE h, const char *name) {
     else p = ld_proc(m, name, 0);
     if (!p) {
         void *ld_delay_stub(wmodule_t *m, const char *name, int ordinal);
-        p = (uintptr_t)name < 0x10000 ? ld_delay_stub(m, 0, (int)(uintptr_t)name) : ld_delay_stub(m, name, 0);
+        void *ld_export_stub(wmodule_t *m, const char *name, int ordinal);
+        int by_number = (uintptr_t)name < 0x10000;
+        p = by_number ? ld_delay_stub(m, 0, (int)(uintptr_t)name) : ld_delay_stub(m, name, 0);
+        /* a function Windows' DLL has: a stub that fails as it would */
+        if (!p) p = by_number ? ld_export_stub(m, 0, (int)(uintptr_t)name) : ld_export_stub(m, name, 0);
         if (p) return p;
     }
     if (!p) {
@@ -5167,6 +5175,7 @@ static const wexport_t k32[] = {
     X(SetThreadStackGuarantee), X(GetCurrentProcessorNumber), X(GetCurrentThreadStackLimits), X(GetProcessTimes),
     X(GetThreadTimes), X(GetSystemTimes), X(GetSystemPowerStatus), X(GetLogicalProcessorInformation),
     X(GetLogicalProcessorInformationEx), X(GetActiveProcessorCount), X(GetMaximumProcessorCount),
+    X(GetActiveProcessorGroupCount), X(GetMaximumProcessorGroupCount),
     X(GetComputerNameW), X(GetComputerNameA), X(GetComputerNameExW), X(Beep), X(GetEnvironmentVariableA),
     X(GetEnvironmentVariableW), X(SetEnvironmentVariableA), X(SetEnvironmentVariableW), X(GetEnvironmentStringsW),
     X(GetEnvironmentStringsA), X(FreeEnvironmentStringsW), X(FreeEnvironmentStringsA), X(ExpandEnvironmentStringsW),

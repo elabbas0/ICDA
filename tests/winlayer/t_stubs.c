@@ -62,6 +62,24 @@ int main(void) {
               GetProcAddress(sh, (LPCSTR)680) != NULL && GetProcAddress(sh, (LPCSTR)680) == GetProcAddress(sh, "IsUserAnAdmin"),
               1);
     }
+    {
+        /* GetProcAddress: what Windows' DLL has is there (and fails as it
+         * would); what it does not have is not */
+        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+        HANDLE (WINAPI *pCreateFileTransactedW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE,
+                                                HANDLE, PUSHORT, PVOID) =
+            (void *)GetProcAddress(k32, "CreateFileTransactedW");
+        check("GetProcAddress of a missing Windows function", pCreateFileTransactedW != NULL, 1);
+        if (pCreateFileTransactedW)
+            check("  which fails as it would",
+                  (unsigned long long)(ULONG_PTR)pCreateFileTransactedW(L"x", GENERIC_READ, 0, NULL, OPEN_EXISTING, 0,
+                                                                        NULL, NULL, NULL, NULL),
+                  (unsigned long long)(ULONG_PTR)INVALID_HANDLE_VALUE);
+        check("  the same each time", (void *)GetProcAddress(k32, "CreateFileTransactedW") == (void *)pCreateFileTransactedW, 1);
+        check("GetProcAddress of no such function", GetProcAddress(k32, "NoSuchFunctionAtAll") == NULL, 1);
+        check("GetProcAddress of a function Windows lacks",
+              GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") == NULL, 1);
+    }
     printf("done, %d failed\n", fails);
     return fails;
 }

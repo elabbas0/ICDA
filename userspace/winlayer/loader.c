@@ -650,6 +650,35 @@ void *ld_delay_stub(wmodule_t *m, const char *name, int ordinal) {
     return 0;
 }
 
+static void *delay_stub_for(wmodule_t *dep, const char *label);
+
+/* GetProcAddress of a function Windows' DLL has and the builtin lacks: a
+ * stub that fails as the function would (programs call what they get, as
+ * on Windows every one of them is there); the same stub each time */
+void *ld_export_stub(wmodule_t *m, const char *name, int ordinal) {
+    static const char *const also[][2] = {
+        { "kernel32.dll", "kernelbase.dll" }, { "ole32.dll", "combase.dll" }, { "shell32.dll", "shcore.dll" },
+        { "advapi32.dll", "kernelbase.dll" }, { "user32.dll", "win32u.dll" },
+    };
+    const char *dll, *fn = name;
+    int found;
+    if (!m || !m->builtin) return 0;
+    dll = m->builtin->name;
+    if (!fn) fn = api_ordinal_name(m->name, ordinal);
+    if (!fn) fn = api_ordinal_name(dll, ordinal);
+    if (!fn) return 0;
+    found = api_exported(m->name, fn) || api_exported(dll, fn);
+    for (unsigned i = 0; !found && i < sizeof(also) / sizeof(also[0]); i++)
+        if (!strcmp(dll, also[i][0])) found = api_exported(also[i][1], fn);
+    if (!found) return 0;
+    {
+        char label[96];
+        if (name) snprintf(label, sizeof(label), "%s", name);
+        else snprintf(label, sizeof(label), "#%d", ordinal);
+        return delay_stub_for(m, label);
+    }
+}
+
 static void *delay_stub_for(wmodule_t *dep, const char *label) {
     delay_stub_t *d;
     void *fn = ld_delay_stub(dep, label[0] == '#' ? 0 : label, label[0] == '#' ? atoi(label + 1) : 0);

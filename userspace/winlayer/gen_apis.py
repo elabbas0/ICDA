@@ -81,6 +81,9 @@ STATUS = {"HRESULT": "h", "NTSTATUS": "n", "BOOL": "b", "WINBOOL": "b", "BOOLEAN
           "CONFIGRET": "c", "SECURITY_STATUS": "s"}
 
 
+PER_DLL = {}          # dll -> every function it exports
+
+
 def exports():
     """function name -> dll, from the import libraries"""
     found = {}
@@ -93,6 +96,7 @@ def exports():
             m = re.search(r" I __imp_(\w+)$", line)
             if m:
                 found.setdefault(m.group(1), dll)
+                PER_DLL.setdefault(dll, set()).add(m.group(1))
     return found
 
 
@@ -186,6 +190,21 @@ def main():
         line += entry
     out.write(line + '";\n')
     out.write("#define API_COUNT %d\n" % len(rows))
+    # each DLL's exports: the DLL's name, its functions, then an empty name
+    out.write("static const char api_exports[] =\n")
+    line = '    "'
+    count = 0
+    for dll in sorted(PER_DLL):
+        names = ["%s.dll" % dll] + sorted(PER_DLL[dll]) + [""]
+        for n in names:
+            entry = "%s\\0" % n
+            if len(line) + len(entry) > 116:
+                out.write(line + '"\n')
+                line = '    "'
+            line += entry
+        count += len(PER_DLL[dll])
+    out.write(line + '";\n')
+    out.write("#define API_EXPORTS %d\n" % count)
     out.write("static const struct { const char *dll; uint16_t ord; const char *name; } api_ordinals[] = {\n")
     for dll, o, name in ords:
         out.write('    { "%s", %d, "%s" },\n' % (dll, o, name))

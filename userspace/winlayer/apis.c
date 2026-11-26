@@ -11,13 +11,66 @@
 static const char *entries[API_COUNT];
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 
+/* each DLL's exports: its name and its functions' names, sorted */
+typedef struct {
+    const char  *dll;
+    const char **names;
+    int          n;
+} dll_exports_t;
+static dll_exports_t dlls[160];
+static int ndlls;
+static const char *export_names[API_EXPORTS];
+
 static void index_table(void) {
     const char *p = api_table;
+    int used = 0;
     for (int i = 0; i < API_COUNT; i++) {
         entries[i] = p;
         p += strlen(p) + 1;            /* the name */
         p += 2;                        /* its kind and NUL */
     }
+    for (p = api_exports; *p && ndlls < (int)(sizeof(dlls) / sizeof(dlls[0]));) {
+        dll_exports_t *d = &dlls[ndlls++];
+        d->dll = p;
+        p += strlen(p) + 1;
+        d->names = &export_names[used];
+        while (*p && used < API_EXPORTS) {
+            export_names[used++] = p;
+            d->n++;
+            p += strlen(p) + 1;
+        }
+        p++;                           /* the empty name that ends it */
+    }
+}
+
+static void lower_dll(const char *dll, char *low, size_t cap) {
+    size_t n = 0;
+    const char *b = dll;
+    for (const char *q = dll; q && *q; q++)
+        if (*q == '\\' || *q == '/') b = q + 1;
+    for (; b && b[n] && n + 5 < cap; n++) low[n] = (char)(b[n] >= 'A' && b[n] <= 'Z' ? b[n] + 32 : b[n]);
+    low[n] = 0;
+    if (!strchr(low, '.')) strcat(low, ".dll");
+}
+
+/* the DLL (Windows') exports a function of that name */
+int api_exported(const char *dll, const char *name) {
+    char low[64];
+    if (!dll || !name) return 0;
+    pthread_once(&once, index_table);
+    lower_dll(dll, low, sizeof(low));
+    for (int i = 0; i < ndlls; i++) {
+        int lo = 0, hi = dlls[i].n - 1;
+        if (strcmp(dlls[i].dll, low)) continue;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2, c = strcmp(name, dlls[i].names[mid]);
+            if (!c) return 1;
+            if (c < 0) hi = mid - 1;
+            else lo = mid + 1;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 /* the function's kind (see gen_apis.py), 0 if it is not known */
@@ -37,13 +90,7 @@ int api_kind(const char *name) {
 /* the name of a DLL's export number, 0 if not known */
 const char *api_ordinal_name(const char *dll, int ordinal) {
     char low[64];
-    size_t n = 0;
-    const char *b = dll;
-    for (const char *p = dll; p && *p; p++)
-        if (*p == '\\' || *p == '/') b = p + 1;
-    for (; b && b[n] && n + 5 < sizeof(low); n++) low[n] = (char)(b[n] >= 'A' && b[n] <= 'Z' ? b[n] + 32 : b[n]);
-    low[n] = 0;
-    if (!strchr(low, '.')) strcat(low, ".dll");
+    lower_dll(dll, low, sizeof(low));
     for (size_t i = 0; i < sizeof(api_ordinals) / sizeof(api_ordinals[0]); i++)
         if (api_ordinals[i].ord == ordinal && !strcmp(api_ordinals[i].dll, low)) return api_ordinals[i].name;
     return 0;

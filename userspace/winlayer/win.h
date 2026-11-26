@@ -113,6 +113,7 @@ void *builtin_proc(const wdll_t *d, const char *name, int ordinal);
 
 /* what Windows API functions return (apis.c): a missing function's failure */
 int         api_kind(const char *name);
+int         api_exported(const char *dll, const char *name);   /* Windows' DLL has it */
 const char *api_ordinal_name(const char *dll, int ordinal);
 uint64_t    api_failure(const char *name, int *known);
 
