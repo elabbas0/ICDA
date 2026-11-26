@@ -196,19 +196,50 @@ static BOOL WINAPI GetTokenInformation(HANDLE t, int cls, void *info, DWORD n, D
     wset_last_error(ERROR_NOT_SUPPORTED);
     return FALSE;
 }
-static BOOL WINAPI AllocateAndInitializeSid(void *auth, BYTE n, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f, DWORD g,
-                                            DWORD h, void **sid) {
-    (void)auth, (void)n, (void)a, (void)b, (void)c, (void)d, (void)e, (void)f, (void)g, (void)h;
-    *sid = calloc(1, 64);
+/* a SID: revision 1, the count, the 6-byte authority, the sub-authorities */
+static BOOL WINAPI AllocateAndInitializeSid(const BYTE *auth, BYTE n, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f,
+                                            DWORD g, DWORD h, void **sid) {
+    DWORD sub[8] = { a, b, c, d, e, f, g, h };
+    uint8_t *p;
+    if (!auth || !sid || n > 8) {
+        wset_last_error(ERROR_INVALID_PARAMETER);    /* Windows says so for more than 8 */
+        return FALSE;
+    }
+    p = calloc(1, 8 + 4 * (size_t)n);
+    if (!p) {
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    p[0] = 1, p[1] = n;
+    memcpy(p + 2, auth, 6);
+    memcpy(p + 8, sub, 4 * (size_t)n);
+    *sid = p;
     return TRUE;
 }
 static void *WINAPI FreeSid(void *sid) {
     free(sid);
     return 0;
 }
-static BOOL WINAPI CheckTokenMembership(HANDLE t, void *sid, BOOL *is) {
-    (void)t, (void)sid;
+/* the one user is in the groups every signed-in user is in: Everyone (S-1-1-0),
+ * Interactive (S-1-5-4), Authenticated Users (S-1-5-11) and Users
+ * (S-1-5-32-545); not Administrators */
+static BOOL WINAPI CheckTokenMembership(HANDLE t, const uint8_t *sid, BOOL *is) {
+    static const uint8_t groups[][16] = {
+        { 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 },
+        { 1, 1, 0, 0, 0, 0, 0, 5, 4, 0, 0, 0 },
+        { 1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0 },
+        { 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x21, 2, 0, 0 },
+    };
+    (void)t;
+    if (!sid || !is) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     *is = FALSE;
+    for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++) {
+        size_t len = 8 + 4 * (size_t)groups[i][1];
+        if (sid[1] == groups[i][1] && !memcmp(sid, groups[i], len)) *is = TRUE;
+    }
     return TRUE;
 }
 static BOOL WINAPI SecTrue(void) { return TRUE; }
@@ -261,6 +292,27 @@ static DWORD WINAPI GetNamedSecurityInfoW(const WCHAR *o, int t, DWORD i, void *
     return 0;
 }
 
+static BOOL WINAPI ConvertStringSecurityDescriptorToSecurityDescriptorA(const char *s, DWORD rev, void **sd, ULONG *n) {
+    WCHAR *w = utf8_to_w_dup(s);
+    BOOL r = ConvertStringSecurityDescriptorToSecurityDescriptorW(w, rev, sd, n);
+    free(w);
+    return r;
+}
+
+static DWORD WINAPI SetNamedSecurityInfoA(char *o, int t, DWORD i, void *a, void *b, void *c, void *d) {
+    WCHAR *w = utf8_to_w_dup(o);
+    DWORD r = SetNamedSecurityInfoW(w, t, i, a, b, c, d);
+    free(w);
+    return r;
+}
+
+static DWORD WINAPI GetNamedSecurityInfoA(const char *o, int t, DWORD i, void **a, void **b, void **c, void **d, void **sd) {
+    WCHAR *w = utf8_to_w_dup(o);
+    DWORD r = GetNamedSecurityInfoW(w, t, i, a, b, c, d, sd);
+    free(w);
+    return r;
+}
+
 static BOOL WINAPI IsValidSid(const void *sid) { return sid != 0; }
 static DWORD WINAPI GetLengthSid(const uint8_t *sid) { return sid ? 8u + 4u * sid[1] : 0; }
 static BOOL WINAPI EqualSid(const uint8_t *a, const uint8_t *b) {
@@ -287,7 +339,8 @@ static const wexport_t advapi[] = {
     WEXP(GetTokenInformation), WEXP(AllocateAndInitializeSid), WEXP(FreeSid), WEXP(CheckTokenMembership),
     WEXP(EventRegister),
     WEXP(ConvertSidToStringSidW), WEXP(ConvertSidToStringSidA), WEXP(ConvertStringSecurityDescriptorToSecurityDescriptorW),
-    WEXP(SetNamedSecurityInfoW), WEXP(GetNamedSecurityInfoW), WEXP(IsValidSid), WEXP(GetLengthSid), WEXP(EqualSid),
+    WEXP(ConvertStringSecurityDescriptorToSecurityDescriptorA), WEXP(SetNamedSecurityInfoW), WEXP(SetNamedSecurityInfoA),
+    WEXP(GetNamedSecurityInfoW), WEXP(GetNamedSecurityInfoA), WEXP(IsValidSid), WEXP(GetLengthSid), WEXP(EqualSid),
     WEXP(CopySid),
     WEXPN("ImpersonateSelf", SecTrue), WEXPN("RevertToSelf", SecTrue), WEXP(DuplicateTokenEx),
     WEXPN("EventUnregister", EventZero), WEXPN("EventWriteTransfer", EventZero), WEXPN("EventWrite", EventZero),
@@ -528,6 +581,39 @@ static BOOL WINAPI ShellExecuteExW(void *info) {
     return FALSE;
 }
 
+/* SHELLEXECUTEINFO (112 bytes): the verb, file, parameters and directory at
+ * 16..40, the class at 72 (read with SEE_MASK_CLASSNAME, 1); the W call's
+ * hInstApp (56) and hProcess (104) come back */
+static BOOL WINAPI ShellExecuteExA(void *info) {
+    static const int at[] = { 16, 24, 32, 40, 72 };
+    uint8_t *a = info, w[112];
+    WCHAR *s[5] = { 0 };
+    BOOL r;
+    if (!a || *(DWORD *)a < sizeof(w)) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    memcpy(w, a, sizeof(w));
+    for (int k = 0; k < 5; k++) {
+        const char *p = *(const char **)(a + at[k]);
+        if (k == 4 && !(*(DWORD *)(a + 4) & 1)) continue;
+        s[k] = p ? utf8_to_w_dup(p) : 0;
+        *(WCHAR **)(w + at[k]) = s[k];
+    }
+    r = ShellExecuteExW(w);
+    memcpy(a + 56, w + 56, 8);
+    memcpy(a + 104, w + 104, 8);
+    for (int k = 0; k < 5; k++) free(s[k]);
+    return r;
+}
+
+static int WINAPI SHCreateDirectoryExA(HWND w, const char *path, void *sa) {
+    WCHAR *p = utf8_to_w_dup(path);
+    int r = p ? SHCreateDirectoryExW(w, p, sa) : ERROR_PATH_NOT_FOUND;
+    free(p);
+    return r;
+}
+
 /* COM-style calls that have no object here say so, and give no pointer */
 static HRESULT WINAPI SHCreateAssociationRegistration(const GUID *iid, void **out) {
     (void)iid;
@@ -551,6 +637,18 @@ static UINT WINAPI DragQueryFileW(HANDLE d, UINT i, WCHAR *f, UINT n) {
     (void)d, (void)i, (void)f, (void)n;
     return 0;
 }
+/* i 0xFFFFFFFF: how many files; no buffer: a name's length in bytes */
+static UINT WINAPI DragQueryFileA(HANDLE d, UINT i, char *f, UINT n) {
+    WCHAR w[1024];
+    UINT r;
+    if (i == 0xFFFFFFFF) return DragQueryFileW(d, i, 0, 0);
+    r = DragQueryFileW(d, i, w, 1024);
+    if (!r || r >= 1024) return 0;
+    if (!f) return (UINT)w_to_utf8(w, -1, 0, 0) - 1;
+    if (!n) return 0;
+    w_to_utf8(w, -1, f, (int)(n > 0x7FFFFFFF ? 0x7FFFFFFF : n));
+    return (UINT)strlen(f);
+}
 static void WINAPI DragFinish(HANDLE d) { (void)d; }
 static HRESULT WINAPI ShellNotImpl(void) { return (HRESULT)0x80004001; }   /* E_NOTIMPL */
 static BOOL WINAPI ShellFalse(void) { return FALSE; }
@@ -560,11 +658,15 @@ static void *WINAPI ShellNull(void) { return 0; }
 static const wexport_t shell[] = {
     WEXP(CommandLineToArgvW), WEXP(SHGetFolderPathW), WEXP(SHGetFolderPathA), WEXP(SHGetSpecialFolderPathW),
     WEXP(SHGetSpecialFolderPathA), WEXP(SHGetKnownFolderPath), WEXP(SHCreateDirectoryExW), WEXP(ShellExecuteW),
-    WEXP(ShellExecuteA), WEXP(ShellExecuteExW), WEXP(DragAcceptFiles), WEXP(DragQueryFileW), WEXP(DragFinish),
+    WEXP(ShellExecuteA), WEXP(ShellExecuteExW), WEXP(ShellExecuteExA), WEXP(SHCreateDirectoryExA), WEXP(DragAcceptFiles),
+    WEXP(DragQueryFileW), WEXP(DragQueryFileA), WEXPN("DragQueryFile", DragQueryFileA), WEXP(DragFinish),
     WEXPN("SHOpenFolderAndSelectItems", ShellNotImpl), WEXPN("SHParseDisplayName", ShellNotImpl),
+    /* these ignore their arguments, so the A and W names share them */
     WEXPN("SHGetSpecialFolderLocation", ShellNotImpl), WEXPN("SHGetPathFromIDListW", ShellFalse),
-    WEXPN("SHBrowseForFolderW", ShellNull), WEXPN("Shell_NotifyIconW", ShellTrue), WEXPN("IsUserAnAdmin", ShellFalse),
-    WEXPN("SHGetFileInfoW", ShellNull), WEXPN("ExtractIconW", ShellNull), WEXPN("SHFileOperationW", ShellNotImpl),
+    WEXPN("SHGetPathFromIDListA", ShellFalse), WEXPN("SHBrowseForFolderW", ShellNull), WEXPN("SHBrowseForFolderA", ShellNull),
+    WEXPN("Shell_NotifyIconW", ShellTrue), WEXPN("Shell_NotifyIconA", ShellTrue), WEXPN("IsUserAnAdmin", ShellFalse),
+    WEXPN("SHGetFileInfoW", ShellNull), WEXPN("SHGetFileInfoA", ShellNull), WEXPN("ExtractIconW", ShellNull),
+    WEXPN("ExtractIconA", ShellNull), WEXPN("SHFileOperationW", ShellNotImpl), WEXPN("SHFileOperationA", ShellNotImpl),
     WEXPN("SHAppBarMessage", ShellNull), WEXPN("SHCreateItemFromParsingName", ShellNotImpl),
     WEXPN("SetCurrentProcessExplicitAppUserModelID", ShellNotImpl), WEXP(SHCreateAssociationRegistration),
     WEXP(SHChangeNotify), WEXP(SHGetPropertyStoreForWindow), WEXPN("SHCreateItemFromIDList", ShellOutNotImpl),
@@ -827,6 +929,8 @@ static const wexport_t imm[] = {
     WEXPN("ImmGetContext", ImmNull), WEXPN("ImmReleaseContext", ImmTrue), WEXPN("ImmAssociateContext", ImmNull),
     WEXPN("ImmAssociateContextEx", ImmTrue), WEXPN("ImmGetCompositionStringW", ImmZero),
     WEXPN("ImmSetCompositionStringW", ImmFalse), WEXPN("ImmGetCandidateListW", ImmZero),
+    WEXPN("ImmGetCompositionStringA", ImmZero), WEXPN("ImmSetCompositionStringA", ImmFalse),
+    WEXPN("ImmGetCandidateListA", ImmZero),
     WEXPN("ImmSetCandidateWindow", ImmTrue), WEXPN("ImmSetCompositionWindow", ImmTrue), WEXPN("ImmNotifyIME", ImmTrue),
     WEXPN("ImmGetIMEFileNameA", ImmZero), WEXPN("ImmGetOpenStatus", ImmFalse), WEXPN("ImmSetOpenStatus", ImmTrue),
     WEXPN("ImmGetDefaultIMEWnd", ImmNull), WEXPN("ImmDisableIME", ImmTrue), WEXPN("ImmGetConversionStatus", ImmFalse),
@@ -921,6 +1025,16 @@ static BOOL WINAPI GetFileVersionInfoExW(DWORD f, const WCHAR *path, DWORD h, DW
     return GetFileVersionInfoW(path, h, len, data);
 }
 
+static DWORD WINAPI GetFileVersionInfoSizeExA(DWORD f, const char *path, DWORD *h) {
+    (void)f;
+    return GetFileVersionInfoSizeA(path, h);
+}
+
+static BOOL WINAPI GetFileVersionInfoExA(DWORD f, const char *path, DWORD h, DWORD len, void *data) {
+    (void)f;
+    return GetFileVersionInfoA(path, h, len, data);
+}
+
 /* a node's key, value and first child */
 static const uint8_t *vnode(const uint8_t *n, const WCHAR **key, const void **val, UINT *vlen, int *vtype, const uint8_t **kids, const uint8_t **end) {
     uint16_t len = ((const uint16_t *)n)[0], value_len = ((const uint16_t *)n)[1], type = ((const uint16_t *)n)[2];
@@ -1003,6 +1117,7 @@ static BOOL WINAPI VerQueryValueA(const void *block, const char *sub, void **out
 
 static const wexport_t version[] = {
     WEXP(GetFileVersionInfoSizeW), WEXP(GetFileVersionInfoSizeA), WEXP(GetFileVersionInfoW), WEXP(GetFileVersionInfoA),
-    WEXP(GetFileVersionInfoSizeExW), WEXP(GetFileVersionInfoExW), WEXP(VerQueryValueW), WEXP(VerQueryValueA),
+    WEXP(GetFileVersionInfoSizeExW), WEXP(GetFileVersionInfoExW), WEXP(GetFileVersionInfoSizeExA),
+    WEXP(GetFileVersionInfoExA), WEXP(VerQueryValueW), WEXP(VerQueryValueA),
 };
 const wdll_t dll_version = { "version.dll", version, sizeof(version) / sizeof(version[0]) };

@@ -33,6 +33,8 @@ typedef struct {
     int      font_weight;     /* 400 normal, 700 bold */
     int      font_fixed;      /* fixed pitch (a console font) */
     int      stock;
+    int      selected;        /* DCs it is selected into */
+    int      doomed;          /* deleted while selected: freed when the last DC lets go */
 } gobj_t;
 
 static gobj_t *obj_get(void *h, int type) {
@@ -50,6 +52,7 @@ static gobj_t *obj_new(int type) {
 }
 
 static gobj_t stock[20];
+static void obj_unselect(void *p);
 
 __attribute__((constructor)) static void stock_init(void) {
     static const uint32_t colors[] = { 0xFFFFFF, 0xC0C0C0, 0x808080, 0x404040, 0x000000, 0 };
@@ -157,6 +160,7 @@ BOOL WINAPI DeleteDC(HDC dc) {
     if (!d || d == &screen_dc) return FALSE;
     /* a window's own DC stays */
     if (d->hwnd && wnd_get(d->hwnd) && wnd_get(d->hwnd)->dc == d) return TRUE;
+    obj_unselect(d->bitmap), obj_unselect(d->brush), obj_unselect(d->pen), obj_unselect(d->font);
     d->magic = 0;
     free(d);
     return TRUE;
@@ -200,29 +204,60 @@ static uint32_t bgra_of(uint32_t colorref) {
 
 /* ---- objects ---------------------------------------------------------------------------------- */
 
+static void obj_free(gobj_t *o) {
+    if (o->own_bits) free(o->bits);
+    o->magic = 0;
+    free(o);
+}
+
+/* a DC lets go of an object: one deleted while it was selected goes now */
+static void obj_unselect(void *p) {
+    gobj_t *o = obj_get(p, 0);
+    if (!o || o->stock || o->selected <= 0) return;
+    if (--o->selected == 0 && o->doomed) obj_free(o);
+}
+
 void *WINAPI SelectObject(HDC dc, void *h) {
     wdc_t *d = dc_get(dc);
     gobj_t *o = obj_get(h, 0);
-    void *old = 0;
-    if (!d || !o) return 0;
+    void **slot;
+    void *old;
+    if (!d || !o || o->doomed) return 0;
     switch (o->type) {
-    case OBJ_BITMAP: old = d->bitmap; d->bitmap = o; break;
-    case OBJ_BRUSH: old = d->brush; d->brush = o; break;
-    case OBJ_PEN: old = d->pen; d->pen = o; break;
-    case OBJ_FONT: old = d->font; d->font = o; break;
+    case OBJ_BITMAP: slot = &d->bitmap; break;
+    case OBJ_BRUSH: slot = &d->brush; break;
+    case OBJ_PEN: slot = &d->pen; break;
+    case OBJ_FONT: slot = &d->font; break;
     case OBJ_REGION: return (void *)1;     /* SIMPLEREGION */
-    default: break;
+    default: return 0;
+    }
+    old = *slot;
+    if (old == o) return old;
+    if (!o->stock) o->selected++;
+    *slot = o;
+    /* the program gets the old one back, so it stays until the program deletes it */
+    if (old) {
+        gobj_t *g = obj_get(old, 0);
+        if (g && !g->stock && g->selected > 0) g->selected--;
+        if (g && g->doomed && !g->selected) {
+            obj_free(g);
+            return &stock[0];
+        }
     }
     return old ? old : &stock[0];
 }
 
+/* an object selected into a DC is deleted when the DC lets it go, as
+ * Windows does */
 BOOL WINAPI DeleteObject(void *h) {
     gobj_t *o = obj_get(h, 0);
     if (!o) return FALSE;
     if (o->stock) return TRUE;
-    if (o->own_bits) free(o->bits);
-    o->magic = 0;
-    free(o);
+    if (o->selected > 0) {
+        o->doomed = 1;
+        return TRUE;
+    }
+    obj_free(o);
     return TRUE;
 }
 

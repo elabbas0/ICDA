@@ -295,18 +295,20 @@ void WINAPI BuildExplicitAccessWithNameW(EXPLICIT_ACCESS_W *e, WCHAR *name, DWOR
     e->inherit = inherit;
     BuildTrusteeWithNameW(&e->trustee, name);
 }
+/* the A structs are the W ones with UTF-8 names: TRUSTEE_A's name is a char * */
+void WINAPI BuildTrusteeWithNameA(TRUSTEE_W *t, char *name) { BuildTrusteeWithNameW(t, (WCHAR *)name); }
 void WINAPI BuildExplicitAccessWithNameA(EXPLICIT_ACCESS_W *e, char *name, DWORD perms, int mode, DWORD inherit) {
     BuildExplicitAccessWithNameW(e, (WCHAR *)name, perms, mode, inherit);
-    e->trustee.form = 0x101;    /* a narrow name: our own mark */
 }
 
 /* a trustee's SID: its own, or for a name the user's (CURRENT_USER and every
  * account name is the one user here) */
-static const uint8_t *trustee_sid(const TRUSTEE_W *t, uint8_t *buf) {
+static const uint8_t *trustee_sid(const TRUSTEE_W *t, uint8_t *buf, int narrow) {
     if (t->form == 0 && t->name) return t->name;
     if (t->form == 1 && t->name) {
         char a[80];
-        w_to_utf8(t->name, -1, a, sizeof(a));
+        if (narrow) snprintf(a, sizeof(a), "%s", (const char *)t->name);
+        else w_to_utf8(t->name, -1, a, sizeof(a));
         if (!strcmp(a, "EVERYONE") || !strcmp(a, "Everyone")) return parse_sid("S-1-1-0", buf) == 0 ? buf : user_sid;
         if (!strcmp(a, "SYSTEM")) return parse_sid("S-1-5-18", buf) == 0 ? buf : user_sid;
         if (!parse_sid(a, buf)) return buf;
@@ -314,7 +316,7 @@ static const uint8_t *trustee_sid(const TRUSTEE_W *t, uint8_t *buf) {
     return user_sid;
 }
 
-DWORD WINAPI SetEntriesInAclW(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out) {
+static DWORD set_entries(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out, int narrow) {
     DWORD size = sizeof(ACL);
     ACL *acl;
     if (!out) return ERROR_INVALID_PARAMETER;
@@ -325,7 +327,7 @@ DWORD WINAPI SetEntriesInAclW(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out
     if (old) AddAce(acl, 2, 0, old + 1, (DWORD)(acl_end(old) - (uint8_t *)(old + 1)));
     for (DWORD i = 0; i < n; i++) {
         uint8_t buf[68];
-        const uint8_t *sid = trustee_sid(&e[i].trustee, buf);
+        const uint8_t *sid = trustee_sid(&e[i].trustee, buf, narrow);
         if (e[i].mode == 4) continue;                                   /* REVOKE_ACCESS */
         add_ace(acl, e[i].mode == 3 ? 1 : 0, (BYTE)e[i].inherit, e[i].perms, sid);
     }
@@ -333,7 +335,8 @@ DWORD WINAPI SetEntriesInAclW(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out
     return 0;
 }
 
-DWORD WINAPI SetEntriesInAclA(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out) { return SetEntriesInAclW(n, e, old, out); }
+DWORD WINAPI SetEntriesInAclW(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out) { return set_entries(n, e, old, out, 0); }
+DWORD WINAPI SetEntriesInAclA(DWORD n, EXPLICIT_ACCESS_W *e, ACL *old, ACL **out) { return set_entries(n, e, old, out, 1); }
 
 /* ---- security descriptors ------------------------------------------------------------------------- */
 
@@ -494,16 +497,28 @@ DWORD WINAPI GetSecurityInfo(HANDLE h, int type, DWORD info, void **owner, void 
     return 0;
 }
 
-DWORD WINAPI BuildSecurityDescriptorW(TRUSTEE_W *owner, TRUSTEE_W *group, DWORD nacc, EXPLICIT_ACCESS_W *acc, DWORD naud,
-                                      EXPLICIT_ACCESS_W *aud, void *old, DWORD *size, void **sd) {
+static DWORD build_sd(TRUSTEE_W *owner, TRUSTEE_W *group, DWORD nacc, EXPLICIT_ACCESS_W *acc, DWORD *size, void **sd,
+                      int narrow) {
     ACL *dacl = 0;
     uint8_t ob[68], gb[68];
-    (void)naud, (void)aud, (void)old;
-    if (nacc) SetEntriesInAclW(nacc, acc, 0, &dacl);
-    *sd = make_relative(owner ? (void *)trustee_sid(owner, ob) : 0, group ? (void *)trustee_sid(group, gb) : 0, 0, dacl,
-                        SE_DACL_PRESENT, size);
+    if (!sd) return ERROR_INVALID_PARAMETER;
+    if (nacc) set_entries(nacc, acc, 0, &dacl, narrow);
+    *sd = make_relative(owner ? (void *)trustee_sid(owner, ob, narrow) : 0, group ? (void *)trustee_sid(group, gb, narrow) : 0,
+                        0, dacl, SE_DACL_PRESENT, size);
     if (dacl) LocalFree(dacl);
     return 0;
+}
+
+DWORD WINAPI BuildSecurityDescriptorW(TRUSTEE_W *owner, TRUSTEE_W *group, DWORD nacc, EXPLICIT_ACCESS_W *acc, DWORD naud,
+                                      EXPLICIT_ACCESS_W *aud, void *old, DWORD *size, void **sd) {
+    (void)naud, (void)aud, (void)old;
+    return build_sd(owner, group, nacc, acc, size, sd, 0);
+}
+
+DWORD WINAPI BuildSecurityDescriptorA(TRUSTEE_W *owner, TRUSTEE_W *group, DWORD nacc, EXPLICIT_ACCESS_W *acc, DWORD naud,
+                                      EXPLICIT_ACCESS_W *aud, void *old, DWORD *size, void **sd) {
+    (void)naud, (void)aud, (void)old;
+    return build_sd(owner, group, nacc, acc, size, sd, 1);
 }
 
 /* SDDL out: the owner and an allow-all DACL (what object_sd says) */
@@ -514,6 +529,23 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorW(void *sd, DWORD
     *out = LocalAlloc(0, sizeof(s) * 2);
     utf8_to_w(s, -1, *out, sizeof(s));
     if (len) *len = sizeof(s);
+    return TRUE;
+}
+
+/* the same string in UTF-8, in its own LocalAlloc block; *len counts the NUL */
+BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorA(void *sd, DWORD rev, DWORD info, char **out, ULONG *len) {
+    WCHAR *w;
+    int n;
+    if (!out || !ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, rev, info, &w, 0)) return FALSE;
+    n = w_to_utf8(w, -1, 0, 0);
+    *out = LocalAlloc(0, (SIZE_T)n);
+    if (*out) w_to_utf8(w, -1, *out, n);
+    LocalFree(w);
+    if (!*out) {
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    if (len) *len = (ULONG)n;
     return TRUE;
 }
 
@@ -530,6 +562,13 @@ BOOL WINAPI GetFileSecurityW(const WCHAR *name, DWORD info, void *sd, DWORD len,
     memcpy(sd, d, n);
     LocalFree(d);
     return TRUE;
+}
+
+BOOL WINAPI GetFileSecurityA(const char *name, DWORD info, void *sd, DWORD len, DWORD *need) {
+    WCHAR *w = utf8_to_w_dup(name);
+    BOOL r = GetFileSecurityW(w, info, sd, len, need);
+    free(w);
+    return r;
 }
 
 static BOOL WINAPI SecOk(void) { return TRUE; }
@@ -626,6 +665,8 @@ BOOL WINAPI CreateRestrictedToken(HANDLE t, DWORD flags, DWORD nd, void *dis, DW
 
 BOOL WINAPI CreateProcessAsUserW(HANDLE token, const WCHAR *app, WCHAR *cmd, void *pa, void *ta, BOOL inherit, DWORD flags,
                                  void *env, const WCHAR *dir, void *si, void *pi);   /* kernel32.c's */
+BOOL WINAPI CreateProcessAsUserA(HANDLE token, const char *app, char *cmd, void *pa, void *ta, BOOL inherit, DWORD flags,
+                                 void *env, const char *dir, void *si, void *pi);
 BOOL WINAPI CreateProcessWithTokenW(HANDLE token, DWORD logon, const WCHAR *app, WCHAR *cmd, DWORD flags, void *env,
                                     const WCHAR *dir, void *si, void *pi) {
     (void)token, (void)logon;
@@ -700,13 +741,14 @@ const wexport_t sec_exports[] = {
     X(SetSecurityDescriptorControl), X(GetSecurityDescriptorDacl), X(GetSecurityDescriptorSacl),
     X(GetSecurityDescriptorOwner), X(GetSecurityDescriptorGroup), X(GetSecurityDescriptorControl),
     X(IsValidSecurityDescriptor), X(GetSecurityDescriptorLength), X(MakeSelfRelativeSD), X(GetSecurityInfo),
-    X(BuildSecurityDescriptorW), X(ConvertSecurityDescriptorToStringSecurityDescriptorW), X(GetFileSecurityW),
+    X(BuildSecurityDescriptorW), X(BuildSecurityDescriptorA), X(ConvertSecurityDescriptorToStringSecurityDescriptorW),
+    X(ConvertSecurityDescriptorToStringSecurityDescriptorA), X(GetFileSecurityW), X(GetFileSecurityA), X(BuildTrusteeWithNameA),
     WEXPN("SetFileSecurityW", SecOk), WEXPN("SetFileSecurityA", SecOk), WEXPN("SetKernelObjectSecurity", SecOk),
     WEXPN("SetSecurityInfo", SecZero), WEXPN("SetNamedSecurityInfoW", SecZero), X(MapGenericMask), X(AccessCheck),
     X(AllocateLocallyUniqueId), X(LookupPrivilegeValueW), X(LookupPrivilegeValueA), X(AdjustTokenPrivileges),
     X(CreateRestrictedToken), WEXPN("SetTokenInformation", SecOk), WEXPN("SetThreadToken", SecOk),
     WEXPN("ImpersonateAnonymousToken", SecOk), WEXPN("ImpersonateNamedPipeClient", SecOk),
-    WEXPN("ImpersonateLoggedOnUser", SecOk), X(CreateProcessAsUserW), X(CreateProcessWithTokenW),
+    WEXPN("ImpersonateLoggedOnUser", SecOk), X(CreateProcessAsUserW), X(CreateProcessAsUserA), X(CreateProcessWithTokenW),
     X(RegisterEventSourceW), X(RegisterEventSourceA), WEXPN("ReportEventW", SecOk), WEXPN("ReportEventA", SecOk),
     WEXPN("DeregisterEventSource", SecOk), X(RegisterTraceGuidsW), X(RegisterTraceGuidsA),
     WEXPN("UnregisterTraceGuids", SecZero), WEXPN("TraceEvent", SecZero), X(GetTraceLoggerHandle),
@@ -714,8 +756,9 @@ const wexport_t sec_exports[] = {
     WEXPN("OpenSCManagerA", NoHandle), WEXPN("OpenServiceW", NoHandle), WEXPN("OpenServiceA", NoHandle),
     WEXPN("CloseServiceHandle", SecOk), WEXPN("QueryServiceStatus", NoAccess), WEXPN("QueryServiceStatusEx", NoAccess),
     WEXPN("QueryServiceConfigW", NoAccess), WEXPN("ChangeServiceConfigW", NoAccess), WEXPN("StartServiceW", NoAccess),
+    WEXPN("QueryServiceConfigA", NoAccess), WEXPN("ChangeServiceConfigA", NoAccess), WEXPN("StartServiceA", NoAccess),
     WEXPN("LsaOpenPolicy", LsaDenied), WEXPN("LsaClose", SecZero), WEXP(LsaNtStatusToWinError),
     WEXPN("LsaAddAccountRights", LsaDenied), WEXPN("LsaFreeMemory", SecZero), WEXPN("LookupAccountNameW", NoneMapped),
-    WEXPN("LogonUserW", NoAccess), WEXPN("RegDisablePredefinedCache", SecZero),
+    WEXPN("LookupAccountNameA", NoneMapped), WEXPN("LogonUserW", NoAccess), WEXPN("LogonUserA", NoAccess), WEXPN("RegDisablePredefinedCache", SecZero),
 };
 const int sec_nexports = sizeof(sec_exports) / sizeof(sec_exports[0]);

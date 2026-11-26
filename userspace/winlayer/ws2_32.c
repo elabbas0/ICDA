@@ -122,6 +122,12 @@ static SOCKET WINAPI WSASocketW(int af, int type, int proto, void *info, unsigne
     return w_socket(af, type, proto);
 }
 
+/* WSAPROTOCOL_INFOA differs from the W struct only in its last field, the
+ * protocol's name, which WSASocketW does not read */
+static SOCKET WINAPI WSASocketA(int af, int type, int proto, void *info, unsigned g, DWORD flags) {
+    return WSASocketW(af, type, proto, info, g, flags);
+}
+
 static int WINAPI w_closesocket(SOCKET s) { return close((int)s) == 0 ? 0 : fail(); }
 
 static int WINAPI w_bind(SOCKET s, const void *a, int len) {
@@ -622,7 +628,7 @@ static const wexport_t ws2[] = {
     WEXPO("getservbyname", w_getservbyname, 55), WEXPO("gethostname", w_gethostname, 57),
     WEXPO("WSAGetLastError", WSAGetLastError, 111), WEXPO("WSASetLastError", WSASetLastError, 112),
     WEXPO("WSAStartup", WSAStartup, 115), WEXPO("WSACleanup", WSACleanup, 116),
-    WEXPO("__WSAFDIsSet", w___WSAFDIsSet, 151), WEXP(WSASocketW), WEXPN("getaddrinfo", w_getaddrinfo),
+    WEXPO("__WSAFDIsSet", w___WSAFDIsSet, 151), WEXP(WSASocketW), WEXP(WSASocketA), WEXPN("getaddrinfo", w_getaddrinfo),
     WEXPN("freeaddrinfo", w_freeaddrinfo), WEXP(GetAddrInfoW), WEXP(FreeAddrInfoW), WEXPN("getnameinfo", w_getnameinfo),
     WEXPN("inet_pton", w_inet_pton), WEXPN("inet_ntop", w_inet_ntop), WEXP(WSACreateEvent), WEXP(WSACloseEvent),
     WEXP(WSASetEvent), WEXP(WSAResetEvent), WEXP(WSAEventSelect), WEXP(WSAWaitForMultipleEvents),

@@ -42,6 +42,7 @@ typedef struct { DWORD dwLowDateTime, dwHighDateTime; } FILETIME;
 typedef union { struct { DWORD LowPart; LONG HighPart; } u; LONGLONG QuadPart; } LARGE_INTEGER;
 typedef struct { DWORD Data1; WORD Data2, Data3; BYTE Data4[8]; } GUID;
 typedef struct { DWORD LowPart; LONG HighPart; } LUID;
+typedef struct { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; } SYSTEMTIME;
 
 /* error codes (GetLastError) */
 #define ERROR_SUCCESS               0
@@ -110,6 +111,7 @@ extern const wdll_t dll_kernel32, dll_ntdll, dll_msvcrt, dll_ucrt, dll_vcruntime
 /* the builtin for a DLL name (any case, with or without .dll), 0 if none */
 const wdll_t *builtin_find(const char *dll);
 void *builtin_proc(const wdll_t *d, const char *name, int ordinal);
+void *ansi_proc(const char *dll, const char *name);                 /* ansi.c */
 
 /* what Windows API functions return (apis.c): a missing function's failure */
 int         api_kind(const char *name);
@@ -187,6 +189,13 @@ HANDLE     h_new(int kind, void *obj);
 whandle_t *h_get(HANDLE h, int kind);    /* kind 0: any */
 void       h_close(HANDLE h);
 HANDLE     h_std(int which);             /* 0 in, 1 out, 2 err */
+
+/* named objects (thread.c): ns is the kind whose names they share */
+#define NS_TIMER 100
+HANDLE h_named(int kind, int ns, const WCHAR *name, void *obj);   /* obj malloc'd; freed if the name is in use */
+HANDLE h_open_named(int kind, int ns, const WCHAR *name);
+void   named_ref(void *obj, int delta);                           /* a handle duplicated (+1) or closed (-1) */
+HANDLE event_new(BOOL manual, BOOL initial, const WCHAR *name, int ns);
 
 /* waitable objects: one lock and one condition for all, so any wait can
  * look at several objects at once */

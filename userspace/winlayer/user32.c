@@ -302,21 +302,48 @@ static BOOL class_info(wclass_t *c, WNDCLASSEXW *wc, int ex) {
     return TRUE;
 }
 
+/* the class's name comes back as the pointer asked with, as on Windows; the
+ * result is the class's atom */
 BOOL WINAPI GetClassInfoExW(HINSTANCE i, const WCHAR *n, WNDCLASSEXW *wc) {
+    wclass_t *c = class_find(n);
     (void)i;
-    return class_info(class_find(n), wc, 1) ? (BOOL)class_find(n)->atom : FALSE;
+    if (!wc || !class_info(c, wc, 1)) return FALSE;
+    wc->lpszClassName = n;
+    return (BOOL)c->atom;
 }
 BOOL WINAPI GetClassInfoExA(HINSTANCE i, const char *n, WNDCLASSEXW *wc) {
+    wclass_t *c = class_find_a(n);
     (void)i;
-    return class_info(class_find_a(n), wc, 1) ? (BOOL)class_find_a(n)->atom : FALSE;
+    if (!wc || !class_info(c, wc, 1)) return FALSE;
+    wc->lpszClassName = n;
+    return (BOOL)c->atom;
 }
-BOOL WINAPI GetClassInfoW(HINSTANCE i, const WCHAR *n, WNDCLASSEXW *wc) {
-    WNDCLASSEXW x;
-    (void)i;
-    x.cbSize = sizeof(x);
-    if (!class_info(class_find(n), &x, 1)) return FALSE;
-    memcpy(wc, &x.style, sizeof(WNDCLASSW));
-    return TRUE;
+
+/* WNDCLASS is WNDCLASSEX without cbSize and hIconSm: field by field, since
+ * the pointers are 8-aligned and so not at the same offsets less 4 */
+static void class_plain(const WNDCLASSEXW *x, WNDCLASSW *wc) {
+    wc->style = x->style;
+    wc->lpfnWndProc = x->lpfnWndProc;
+    wc->cbClsExtra = x->cbClsExtra;
+    wc->cbWndExtra = x->cbWndExtra;
+    wc->hInstance = x->hInstance;
+    wc->hIcon = x->hIcon;
+    wc->hCursor = x->hCursor;
+    wc->hbrBackground = x->hbrBackground;
+    wc->lpszMenuName = x->lpszMenuName;
+    wc->lpszClassName = x->lpszClassName;
+}
+BOOL WINAPI GetClassInfoW(HINSTANCE i, const WCHAR *n, WNDCLASSW *wc) {
+    WNDCLASSEXW x = { .cbSize = sizeof(x) };
+    BOOL atom = wc ? GetClassInfoExW(i, n, &x) : FALSE;
+    if (atom) class_plain(&x, wc);
+    return atom;
+}
+BOOL WINAPI GetClassInfoA(HINSTANCE i, const char *n, WNDCLASSW *wc) {
+    WNDCLASSEXW x = { .cbSize = sizeof(x) };
+    BOOL atom = wc ? GetClassInfoExA(i, n, &x) : FALSE;
+    if (atom) class_plain(&x, wc);
+    return atom;
 }
 
 /* ---- windows ------------------------------------------------------------------------------- */
@@ -2658,44 +2685,175 @@ UINT WINAPI GetDpiForWindow(HWND h) {
 UINT WINAPI GetDpiForSystem(void) { return 96; }
 
 /* SystemParametersInfo: the work area and a few settings */
-BOOL WINAPI SystemParametersInfoW(UINT a, UINT u, void *p, UINT w) {
+/* ---- system parameters: Windows 10's, at 96 dpi ------------------------------------------------
+ * The interface font is Segoe UI, 9 points, which GDI and DirectWrite find as
+ * the nearest family there is.  The A calls have A structs (LOGFONTA: the face
+ * name in 32 bytes, not 32 WCHARs). */
+
+#define LF_W 92
+#define LF_A 60
+
+static void put32(uint8_t *p, int32_t v) { memcpy(p, &v, 4); }
+
+static void ui_font(uint8_t *lf, int wide) {
+    memset(lf, 0, wide ? LF_W : LF_A);
+    put32(lf, -12);              /* lfHeight: 9 points */
+    put32(lf + 16, 400);         /* lfWeight: normal */
+    lf[23] = 1;                  /* lfCharSet: DEFAULT_CHARSET */
+    if (wide) utf8_to_w("Segoe UI", -1, (WCHAR *)(lf + 28), 32);
+    else memcpy(lf + 28, "Segoe UI", 9);
+}
+
+/* a struct that starts with its size: the size must be one of these */
+static int sized(const void *p, UINT a, UINT b) {
+    UINT cb;
+    if (!p) return 0;
+    memcpy(&cb, p, 4);
+    return cb == a || cb == b ? (int)cb : 0;
+}
+
+/* NONCLIENTMETRICS: five sizes, the caption font, two sizes, the small
+ * caption font, two sizes, the menu, status and message fonts, and (since
+ * Vista) iPaddedBorderWidth: 504 or 500 bytes in W, 344 or 340 in A */
+static BOOL nonclient_metrics(uint8_t *p, int wide) {
+    int lf = wide ? LF_W : LF_A, full = 24 + 5 * lf + 16 + 4, cb = sized(p, (UINT)full, (UINT)full - 4), o = 4;
+    static const int top[5] = { 1, 17, 17, 36, 22 };   /* border, scroll bar width and height, caption */
+    if (!cb) return FALSE;
+    memset(p + 4, 0, (size_t)cb - 4);
+    for (int i = 0; i < 5; i++, o += 4) put32(p + o, top[i]);
+    ui_font(p + o, wide), o += lf;
+    put32(p + o, 22), put32(p + o + 4, 22), o += 8;    /* small caption */
+    ui_font(p + o, wide), o += lf;
+    put32(p + o, 19), put32(p + o + 4, 19), o += 8;    /* menu */
+    for (int i = 0; i < 3; i++) ui_font(p + o, wide), o += lf;
+    if (cb == full) put32(p + o, 4);                   /* iPaddedBorderWidth */
+    return TRUE;
+}
+
+static BOOL spi(UINT a, UINT u, void *p, UINT w, int wide) {
+    static WCHAR no_scheme_w[1];
+    static char no_scheme_a[1];
+    uint8_t *b = p;
     (void)w;
+    /* the effects (0x1000..0x104F) and timings (0x2000..0x204F): an even
+     * number gets (a BOOL, a DWORD), an odd one sets */
+    if (a >= 0x1000 && a < 0x1050 && !(a & 1)) {
+        static const UINT on[] = { 0x1002, 0x1004, 0x1006, 0x1008, 0x100E, 0x1012, 0x1014, 0x1016, 0x1018,
+                                   0x101A, 0x1020, 0x1022, 0x1024, 0x103E, 0x1042, 0x1048 };
+        BOOL v = FALSE;
+        for (size_t i = 0; i < sizeof(on) / sizeof(on[0]); i++) v |= on[i] == a;
+        if (!p) goto bad;
+        *(BOOL *)p = v;
+        return TRUE;
+    }
+    if (a >= 0x2000 && a < 0x2050 && !(a & 1)) {
+        DWORD v = a == 0x2000 ? 200000 : a == 0x2004 ? 3 : a == 0x2008 ? 1200 : a == 0x200A ? 2 : a == 0x200C ? 1200
+                : a == 0x2006 || a == 0x200E || a == 0x2010 || a == 0x2012 ? 1 : a == 0x2016 ? 5 : 0;
+        if (!p) goto bad;
+        *(DWORD *)p = v;
+        return TRUE;
+    }
     switch (a) {
     case 0x30: {                       /* SPI_GETWORKAREA */
         int sw, sh;
         RECT *r = p;
+        if (!r) goto bad;
         bk_screen(&sw, &sh);
         r->left = r->top = 0, r->right = sw, r->bottom = sh;
         return TRUE;
     }
-    case 0x70:                         /* SPI_GETMOUSESPEED */
-        *(int *)p = 10;
+    case 0x29:                         /* SPI_GETNONCLIENTMETRICS */
+        if (!nonclient_metrics(b, wide)) goto bad;
+        return TRUE;
+    case 0x1F:                         /* SPI_GETICONTITLELOGFONT */
+        if (!b) goto bad;
+        ui_font(b, wide);
+        return TRUE;
+    case 0x2D: {                       /* SPI_GETICONMETRICS: three sizes and the font */
+        int lf = wide ? LF_W : LF_A;
+        if (!sized(b, 16 + (UINT)lf, 16 + (UINT)lf)) goto bad;
+        put32(b + 4, 75), put32(b + 8, 75), put32(b + 12, 1);
+        ui_font(b + 16, wide);
+        return TRUE;
+    }
+    case 0x2B:                         /* SPI_GETMINIMIZEDMETRICS */
+        if (!sized(b, 20, 20)) goto bad;
+        put32(b + 4, 160), put32(b + 8, 0), put32(b + 12, 0), put32(b + 16, 8);   /* ARW_HIDE */
+        return TRUE;
+    case 0x42:                         /* SPI_GETHIGHCONTRAST: off */
+        if (!sized(b, 16, 16)) goto bad;
+        put32(b + 4, 0);
+        if (wide) *(WCHAR **)(b + 8) = no_scheme_w;
+        else *(char **)(b + 8) = no_scheme_a;
+        return TRUE;
+    case 0x48:                         /* SPI_GETANIMATION */
+        if (!sized(b, 8, 8)) goto bad;
+        put32(b + 4, 1);
+        return TRUE;
+    case 0x32: case 0x34: case 0x36: case 0x3A: case 0x3C: case 0x3E: case 0x40: case 0x74: {
+        /* the accessibility features (filter, toggle, mouse and sticky keys,
+         * their time-out, serial keys, sound sentry, audio description): all off */
+        UINT cb;
+        if (!b) goto bad;
+        memcpy(&cb, b, 4);
+        if (cb < 4 || cb > 256) goto bad;
+        memset(b + 4, 0, cb - 4);
+        return TRUE;
+    }
+    case 0x73:                         /* SPI_GETDESKWALLPAPER: none */
+        if (!p || !u) goto bad;
+        if (wide) *(WCHAR *)p = 0;
+        else *(char *)p = 0;
         return TRUE;
     case 0x03: {                       /* SPI_GETMOUSE: thresholds and acceleration */
         int *v = p;
+        if (!v) goto bad;
         v[0] = 6, v[1] = 10, v[2] = 1;
         return TRUE;
     }
-    case 0x68:                         /* SPI_GETWHEELSCROLLLINES */
-    case 0x6C:                         /* SPI_GETWHEELSCROLLCHARS */
-        *(UINT *)p = 3;
+    case 0x59:                         /* SPI_GETDEFAULTINPUTLANG */
+        if (!p) goto bad;
+        *(HKL *)p = (HKL)(uintptr_t)0x04090409;
         return TRUE;
-    case 0x10: case 0x0E: case 0x1E:   /* screen saver */
-        if (p) *(BOOL *)p = FALSE;
+    case 0x0D: case 0x18:              /* SPI_ICONHORIZONTALSPACING, SPI_ICONVERTICALSPACING */
+        if (p) *(int *)p = 75;
         return TRUE;
-    case 0x2029:                       /* SPI_GETMOUSESONAR etc. */
-    default:
-        if (p && u <= 4096 && a < 0x1000 && (a & 1) == 0 && a != 0x30) {
-            /* a GET: zeros are a safe answer */
-        }
+    case 0x01: case 0x19: case 0x23: case 0x26: case 0x4A: case 0x6E: case 0x82: case 0x8E: case 0x90:
+        /* beep, icon title wrap, task switching, full-window drag, font
+         * smoothing, the IME's window, window arranging, snap sizing, docking: on */
+        if (!p) goto bad;
+        *(BOOL *)p = TRUE;
+        return TRUE;
+    case 0x1B: case 0x10: case 0x38: case 0x44: case 0x46: case 0x53: case 0x54: case 0x5F: case 0x72: case 0x76:
+        /* menus to the left, screen saver, show sounds, keyboard preferred,
+         * screen reader, low power, power off, snap to the default button: off */
+        if (!p) goto bad;
+        *(BOOL *)p = FALSE;
+        return TRUE;
+    case 0x05: case 0x16:              /* SPI_GETBORDER 1, SPI_GETKEYBOARDDELAY 1 */
+    case 0x0A: case 0x0E: case 0x12: case 0x4F: case 0x50: case 0x5E: case 0x62: case 0x64: case 0x66:
+    case 0x68: case 0x6A: case 0x6C: case 0x70: case 0x78: case 0x7A: case 0x7C: {
+        int v = a == 0x05 || a == 0x16 ? 1 : a == 0x0A ? 31 : a == 0x62 || a == 0x64 ? 4 : a == 0x66 || a == 0x6A ? 400
+              : a == 0x68 || a == 0x6C ? 3 : a == 0x70 ? 10 : a >= 0x78 ? 5000 : 0;
+        if (!p) goto bad;
+        *(int *)p = v;
         return TRUE;
     }
+    default:
+        /* a setting changed: kept by nobody, which is the same to the program */
+        if (wtrace) wlog("SystemParametersInfo(0x%x): taken as a setting", a);
+        return TRUE;
+    }
+bad:
+    wset_last_error(ERROR_INVALID_PARAMETER);
+    return FALSE;
 }
 
-BOOL WINAPI SystemParametersInfoA(UINT a, UINT u, void *p, UINT w) { return SystemParametersInfoW(a, u, p, w); }
+BOOL WINAPI SystemParametersInfoW(UINT a, UINT u, void *p, UINT w) { return spi(a, u, p, w, 1); }
+BOOL WINAPI SystemParametersInfoA(UINT a, UINT u, void *p, UINT w) { return spi(a, u, p, w, 0); }
 BOOL WINAPI SystemParametersInfoForDpi(UINT a, UINT u, void *p, UINT w, UINT dpi) {
     (void)dpi;
-    return SystemParametersInfoW(a, u, p, w);
+    return spi(a, u, p, w, 1);
 }
 
 DWORD WINAPI GetSysColor(int i) {
@@ -3102,7 +3260,7 @@ BOOL WINAPI InvertRect(HDC dc, const RECT *r);
 #define X(f) WEXP(f)
 static const wexport_t u32[] = {
     X(RegisterClassExW), X(RegisterClassExA), X(RegisterClassW), X(RegisterClassA), X(UnregisterClassW),
-    X(UnregisterClassA), X(GetClassInfoExW), X(GetClassInfoExA), X(GetClassInfoW), X(CreateWindowExW),
+    X(UnregisterClassA), X(GetClassInfoExW), X(GetClassInfoExA), X(GetClassInfoW), X(GetClassInfoA), X(CreateWindowExW),
     X(CreateWindowExA), X(DestroyWindow), X(IsWindow), X(IsWindowVisible), X(IsWindowEnabled), X(EnableWindow),
     X(IsIconic), X(IsZoomed), X(IsChild), X(GetParent), X(GetAncestor), X(SetParent), X(GetDesktopWindow),
     X(GetShellWindow), X(GetWindow), X(GetTopWindow), X(GetWindowThreadProcessId), X(EnumWindows),

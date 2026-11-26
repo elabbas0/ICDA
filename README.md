@@ -351,6 +351,20 @@ NTSTATUS or a Win32 error code), and gives the names behind the export
 numbers programs import `oleaut32`, `ws2_32`, `comctl32`, `shlwapi` and
 `shell32` functions by.
 
+The ANSI code page is UTF-8 (65001), so the text of the ANSI ("A")
+functions is UTF-8: a program written for them reads and writes names in
+any language, and their counts are bytes. Every A function whose Unicode
+("W") version the layer has is there too (`ansi.c`, or beside the W one
+where it needs the DLL's own state), each keeping Windows' rule for a
+buffer that is too small (the size needed, or a cut, or
+`ERROR_INSUFFICIENT_BUFFER`, as that function does). Named events,
+mutexes, semaphores and waitable timers are found by their names while a
+handle to them is open, so a program that checks whether it is running
+already (a named mutex and `ERROR_ALREADY_EXISTS`) finds out; dates and
+times are written from Windows' pictures (`dddd, MMMM d, yyyy`, `h:mm tt`)
+in US English; and `SystemParametersInfo` answers as Windows 10 does at
+96 dpi, its interface fonts Segoe UI at 9 points.
+
 `C:` is `~/.windows/c` (`ICDA_WIN_PREFIX` names another folder) and `Z:` is
 `/`, with names found whatever their case. The registry is
 `C:\Windows\registry.txt`, shared by every program using the drive. A
@@ -405,7 +419,7 @@ a release without it, and ships it as a file of its own, so an update to the
 Windows layer does not download the WebKit pack again. `tests/winlayer/run.sh` builds test programs with
 MinGW-w64 and checks them under `icda-win` on Linux (the C runtimes,
 threads and waits, files, the registry, processes, version resources,
-OpenGL, keys, GDI text and DirectWrite); the programs, left in `tests/winlayer/out`,
+OpenGL, keys, GDI text, DirectWrite and the A functions); the programs, left in `tests/winlayer/out`,
 run on ICDA too. In QEMU without KVM, give the guest `-cpu max,-avx,-avx2`:
 QEMU 8.2 emulates some AVX2 instructions wrongly, and llvmpipe's 2D
 drawing then goes wrong (an empty menu, a grey sky) or faults.
@@ -417,7 +431,7 @@ against a conformance suite: Wine's test programs for each Windows DLL
 writes a scoreboard per DLL (tests passed, failed, crashed, or still
 running after the timeout, and checks failed) to
 `tests/winlayer/out/conformance`. For the layer's 22 DLLs, 215 tests: 18
-pass, 68 fail some checks, 111 crash and 18 do not finish, with 828,580
+pass, 70 fail some checks, 110 crash and 17 do not finish, with 3,201,212
 checks run; the crashes are the work list (the standard controls, dialogs
 and menus among them).
 

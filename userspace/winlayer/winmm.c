@@ -489,5 +489,6 @@ static const wexport_t mm[] = {
     WEXPN("mciSendCommandW", wmm_nodriver), WEXPN("mciSendCommandA", wmm_nodriver), WEXP(timeBeginPeriod),
     WEXP(timeEndPeriod), WEXP(timeGetTime), WEXP(timeGetDevCaps), WEXP(timeGetSystemTime), WEXP(timeSetEvent),
     WEXP(timeKillEvent), WEXP(PlaySoundW), WEXPN("PlaySoundA", PlaySoundW), WEXPN("sndPlaySoundW", PlaySoundW),
+    WEXPN("sndPlaySoundA", PlaySoundW),     /* PlaySoundW plays nothing and reads no argument */
 };
 const wdll_t dll_winmm = { "winmm.dll", mm, sizeof(mm) / sizeof(mm[0]) };

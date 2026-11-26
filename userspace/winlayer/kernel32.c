@@ -1227,6 +1227,15 @@ BOOL WINAPI FindNextFileA(HANDLE h, WIN32_FIND_DATAA *data) {
     return TRUE;
 }
 
+HANDLE WINAPI FindFirstFileExA(const char *spec, int level, WIN32_FIND_DATAA *data, int op, void *filter, DWORD flags) {
+    WIN32_FIND_DATAW w;
+    WCHAR *s = utf8_to_w_dup(spec);
+    HANDLE h = FindFirstFileExW(s, level, &w, op, filter, flags);
+    free(s);
+    if (h != INVALID_HANDLE_VALUE) find_a(&w, data);
+    return h;
+}
+
 BOOL WINAPI FindClose(HANDLE h) {
     whandle_t *w = h_get(h, H_FIND);
     if (!w) return FALSE;
@@ -1719,7 +1728,11 @@ BOOL WINAPI GetVolumePathNameW(const WCHAR *path, WCHAR *out, DWORD n) {
 
 BOOL WINAPI GetVolumeNameForVolumeMountPointW(const WCHAR *mp, WCHAR *out, DWORD n) {
     (void)mp;
-    return put_w("\\\\?\\Volume{1cda0000-0000-0000-0000-000000000001}\\", out, n) > 0;
+    if (put_w("\\\\?\\Volume{1cda0000-0000-0000-0000-000000000001}\\", out, n) >= n) {
+        wset_last_error(206);     /* ERROR_FILENAME_EXCED_RANGE */
+        return FALSE;
+    }
+    return TRUE;
 }
 
 DWORD WINAPI GetFinalPathNameByHandleW(HANDLE h, WCHAR *out, DWORD n, DWORD flags) {
@@ -1924,6 +1937,9 @@ BOOL WINAPI CloseHandle(HANDLE h) {
         return FindClose(h);
     case H_THREAD:
         break;          /* the thread object stays: it may still run */
+    case H_EVENT: case H_MUTEX: case H_SEMAPHORE:
+        named_ref(w->obj, -1);
+        break;
     default:
         break;
     }
@@ -1956,6 +1972,7 @@ BOOL WINAPI DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD
         *dst = h_new(H_MAPPING, w->obj);
     } else {
         *dst = h_new(w->kind, w->obj);
+        if (*dst && (w->kind == H_EVENT || w->kind == H_MUTEX || w->kind == H_SEMAPHORE)) named_ref(w->obj, 1);
     }
     if (opts & 1) CloseHandle(src);      /* DUPLICATE_CLOSE_SOURCE */
     return *dst != 0;
@@ -2582,10 +2599,6 @@ void WINAPI GetSystemTimeAsFileTime(FILETIME *ft) {
 
 void WINAPI GetSystemTimePreciseAsFileTime(FILETIME *ft) { GetSystemTimeAsFileTime(ft); }
 
-typedef struct {
-    WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds;
-} SYSTEMTIME;
-
 static void tm_to_st(const struct tm *t, int ms, SYSTEMTIME *st) {
     st->wYear = (WORD)(t->tm_year + 1900);
     st->wMonth = (WORD)(t->tm_mon + 1);
@@ -2745,13 +2758,25 @@ HANDLE WINAPI CreateEventW(void *sa, BOOL manual, BOOL initial, const WCHAR *nam
 BOOL WINAPI ResetEvent(HANDLE h);
 
 HANDLE WINAPI CreateWaitableTimerExW(void *sa, const WCHAR *name, DWORD flags, DWORD access) {
-    (void)name, (void)access;
-    return CreateEventW(sa, !(flags & 2) /* not a synchronization timer: manual */, FALSE, 0);
+    (void)sa, (void)access;
+    return event_new(!(flags & 2) /* not a synchronization timer: manual */, FALSE, name, NS_TIMER);
 }
 
 HANDLE WINAPI CreateWaitableTimerW(void *sa, BOOL manual, const WCHAR *name) {
-    (void)name;
-    return CreateEventW(sa, manual, FALSE, 0);
+    (void)sa;
+    return event_new(manual, FALSE, name, NS_TIMER);
+}
+
+HANDLE WINAPI OpenWaitableTimerW(DWORD access, BOOL inherit, const WCHAR *name) {
+    (void)access, (void)inherit;
+    return h_open_named(H_EVENT, NS_TIMER, name);
+}
+
+HANDLE WINAPI OpenWaitableTimerA(DWORD access, BOOL inherit, const char *name) {
+    WCHAR *w = name ? utf8_to_w_dup(name) : 0;
+    HANDLE h = OpenWaitableTimerW(access, inherit, w);
+    free(w);
+    return h;
 }
 
 typedef struct {
@@ -3437,10 +3462,41 @@ BOOL WINAPI GetCPInfo(UINT cp, CPINFO *i) {
     return TRUE;
 }
 
+/* CPINFOEX: the CPINFO (18 bytes), UnicodeDefaultChar at 18, CodePage at 20
+ * and its name at 24: 260 WCHARs in the W struct (544 bytes), 260 bytes in
+ * the A one (284) */
+BOOL WINAPI IsValidCodePage(UINT cp);
+static BOOL cp_info_ex(UINT cp, uint8_t *b, int wide) {
+    static const struct { UINT cp; const char *name; } names[] = {
+        { CP_UTF8, "65001 (UTF-8)" }, { 1252, "1252  (ANSI - Latin I)" }, { 28591, "28591 (ISO 8859-1 Latin I)" },
+        { 850, "850   (OEM - Multilingual Latin I)" }, { 437, "437   (OEM - United States)" }, { 20127, "20127 (US-ASCII)" },
+    };
+    UINT real = cp == 0 || cp == 1 ? GetACP() : cp;     /* CP_ACP, CP_OEMCP */
+    const char *name = 0;
+    if (!b || !IsValidCodePage(cp)) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    memset(b, 0, wide ? 544 : 284);
+    GetCPInfo(real, (CPINFO *)b);
+    *(WCHAR *)(b + 18) = real == CP_UTF8 ? 0xFFFD : '?';
+    *(UINT *)(b + 20) = real;
+    for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+        if (names[k].cp == real) name = names[k].name;
+    if (!name) name = "";
+    if (wide) utf8_to_w(name, -1, (WCHAR *)(b + 24), 260);
+    else snprintf((char *)b + 24, 260, "%s", name);
+    return TRUE;
+}
+
 BOOL WINAPI GetCPInfoExW(UINT cp, DWORD f, void *i) {
     (void)f;
-    memset(i, 0, 20 + 2 + 12 + 2 + 4 + 520);
-    return GetCPInfo(cp, i);
+    return cp_info_ex(cp, i, 1);
+}
+
+BOOL WINAPI GetCPInfoExA(UINT cp, DWORD f, void *i) {
+    (void)f;
+    return cp_info_ex(cp, i, 0);
 }
 
 BOOL WINAPI IsValidCodePage(UINT cp) { return cp == CP_UTF8 || is_latin1(cp) || cp == 20127 || cp == 0 || cp == 1; }
@@ -3743,24 +3799,160 @@ int WINAPI GetTimeFormatEx(const WCHAR *locale, DWORD f, const SYSTEMTIME *st, c
     return GetTimeFormatW(0x409, f, st, fmt, buf, n);
 }
 
-int WINAPI GetDateFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
-    char a[64];
+/* ---- dates and times as text: Windows' pictures, in US English --------------------------
+ * Date: d dd (day), ddd dddd (its name), M MM (month), MMM MMMM (its name),
+ * y yy yyyy (year), g gg (era).  Time: h hh (12-hour), H HH, m mm, s ss,
+ * t tt (A / AM).  'text' is copied; '' is a quote.  Anything else is copied. */
+
+static const char *const day_names[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+static const char *const month_names[12] = { "January", "February", "March", "April", "May", "June", "July",
+                                             "August", "September", "October", "November", "December" };
+
+static int days_in(int y, int m) {
+    static const int d[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    return d[m - 1] + (m == 2 && ((y % 4 == 0 && y % 100) || y % 400 == 0));
+}
+
+/* the day of the week (Sakamoto's method): Windows works it out, not reading wDayOfWeek */
+static int weekday(int y, int m, int d) {
+    static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (m < 3) y--;
+    return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+typedef struct {
+    char  *out;
+    size_t len, cap, lit;       /* lit: where the text after the last element began */
+    int    any;                 /* an element has been written */
+    int    drop_lit;            /* the first element was left out: so is the text after it */
+} pic_t;
+
+/* what does not fit is counted, not written; cap is never 0 */
+static void pic_put(pic_t *p, const char *s, size_t n) {
+    if (p->len + 1 < p->cap) {
+        size_t room = p->cap - 1 - p->len;
+        memcpy(p->out + p->len, s, n < room ? n : room);
+    }
+    p->len += n;
+}
+
+/* TIME_NO... flags leave an element out, with the separator before it */
+static void pic_skip(pic_t *p) {
+    if (p->any) p->len = p->lit;
+    else p->drop_lit = 1;
+}
+
+static void pic_elem(pic_t *p, const char *s) {
+    if (p->drop_lit) p->len = p->lit, p->drop_lit = 0;
+    pic_put(p, s, strlen(s));
+    p->lit = p->len;
+    p->any = 1;
+}
+
+static int picture(const char *fmt, const SYSTEMTIME *st, int date, DWORD f, char *out, size_t cap) {
+    pic_t p = { out, 0, cap, 0, 0, 0 };
+    char v[32];
+    while (*fmt) {
+        char c = *fmt;
+        int n = 1;
+        if (c == '\'') {
+            for (fmt++; *fmt; fmt++) {
+                if (*fmt == '\'') {
+                    if (fmt[1] != '\'') break;
+                    fmt++;
+                }
+                pic_put(&p, fmt, 1);
+            }
+            if (*fmt) fmt++;     /* the closing quote */
+            continue;
+        }
+        while (fmt[n] == c) n++;
+        if (date && c == 'd') {
+            if (n >= 3) snprintf(v, sizeof(v), n == 3 ? "%.3s" : "%s", day_names[weekday(st->wYear, st->wMonth, st->wDay)]);
+            else snprintf(v, sizeof(v), n == 2 ? "%02u" : "%u", st->wDay);
+            pic_elem(&p, v);
+        } else if (date && c == 'M') {
+            if (n >= 3) snprintf(v, sizeof(v), n == 3 ? "%.3s" : "%s", month_names[st->wMonth - 1]);
+            else snprintf(v, sizeof(v), n == 2 ? "%02u" : "%u", st->wMonth);
+            pic_elem(&p, v);
+        } else if (date && c == 'y') {
+            if (n >= 3) snprintf(v, sizeof(v), "%04u", st->wYear);
+            else snprintf(v, sizeof(v), n == 2 ? "%02u" : "%u", st->wYear % 100);
+            pic_elem(&p, v);
+        } else if (date && c == 'g') {
+            pic_elem(&p, "A.D.");
+        } else if (!date && (c == 'h' || c == 'H')) {
+            unsigned h = st->wHour;
+            if (c == 'h' && !(f & 8)) h = h % 12 ? h % 12 : 12;      /* TIME_FORCE24HOURFORMAT */
+            snprintf(v, sizeof(v), n >= 2 ? "%02u" : "%u", h);
+            pic_elem(&p, v);
+        } else if (!date && (c == 'm' || c == 's')) {
+            if ((f & 1) || (c == 's' && (f & 2))) pic_skip(&p);      /* TIME_NOMINUTESORSECONDS, TIME_NOSECONDS */
+            else {
+                snprintf(v, sizeof(v), n >= 2 ? "%02u" : "%u", c == 'm' ? st->wMinute : st->wSecond);
+                pic_elem(&p, v);
+            }
+        } else if (!date && c == 't') {
+            if (f & (4 | 8)) pic_skip(&p);                          /* TIME_NOTIMEMARKER, or 24 hours */
+            else pic_elem(&p, st->wHour < 12 ? (n >= 2 ? "AM" : "A") : (n >= 2 ? "PM" : "P"));
+        } else {
+            pic_put(&p, fmt, (size_t)n);
+        }
+        fmt += n;
+    }
+    if (p.drop_lit) p.len = p.lit;
+    if (cap) out[p.len < cap ? p.len : cap - 1] = 0;
+    return (int)p.len;
+}
+
+/* the counted rule: n 0 asks for the size, with the NUL; too small fails */
+static int put_counted(const char *a, WCHAR *buf, int n) {
+    int need = utf8_to_w(a, -1, 0, 0);
+    if (!n) return need;
+    if (n < 0 || !buf) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (need > n) {
+        wset_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    utf8_to_w(a, -1, buf, n);
+    return need;
+}
+
+static int date_time(int date, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
+    char pic[256], a[1024];     /* no picture of 255 bytes writes more than 4 times as many */
     SYSTEMTIME now;
-    (void)lcid, (void)f, (void)fmt;
     if (!st) GetLocalTime(&now), st = &now;
-    snprintf(a, sizeof(a), "%u/%u/%04u", st->wMonth, st->wDay, st->wYear);
-    if (!n) return utf8_to_w(a, -1, 0, 0);
-    return (int)put_w(a, buf, (DWORD)n) + 1;
+    if (date ? (st->wMonth < 1 || st->wMonth > 12 || st->wDay < 1 || st->wDay > days_in(st->wYear, st->wMonth) ||
+                st->wYear < 1601 || st->wYear > 30827)
+             : (st->wHour > 23 || st->wMinute > 59 || st->wSecond > 59 || st->wMilliseconds > 999)) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (fmt) {
+        if (date && (f & (1 | 2 | 8))) {      /* a picture and DATE_SHORTDATE, _LONGDATE or _YEARMONTH */
+            wset_last_error(1004);            /* ERROR_INVALID_FLAGS */
+            return 0;
+        }
+        w_to_utf8(fmt, -1, pic, sizeof(pic));
+    } else if (date)
+        snprintf(pic, sizeof(pic), "%s", (f & 2) ? "dddd, MMMM d, yyyy" : (f & 8) ? "MMMM yyyy" : "M/d/yyyy");
+    else
+        snprintf(pic, sizeof(pic), "%s", "h:mm:ss tt");
+    picture(pic, st, date, date ? 0 : f, a, sizeof(a));
+    return put_counted(a, buf, n);
+}
+
+int WINAPI GetDateFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
+    (void)lcid;
+    return date_time(1, f, st, fmt, buf, n);
 }
 
 int WINAPI GetTimeFormatW(DWORD lcid, DWORD f, const SYSTEMTIME *st, const WCHAR *fmt, WCHAR *buf, int n) {
-    char a[64];
-    SYSTEMTIME now;
-    (void)lcid, (void)f, (void)fmt;
-    if (!st) GetLocalTime(&now), st = &now;
-    snprintf(a, sizeof(a), "%02u:%02u:%02u", st->wHour, st->wMinute, st->wSecond);
-    if (!n) return utf8_to_w(a, -1, 0, 0);
-    return (int)put_w(a, buf, (DWORD)n) + 1;
+    (void)lcid;
+    return date_time(0, f, st, fmt, buf, n);
 }
 
 /* FormatMessage: system messages are short English ones, and a program's
@@ -4467,6 +4659,7 @@ BOOL WINAPI FreeResource(HGLOBAL h) {
 typedef BOOL (WCALLBACK *ENUMRESNAMEPROCW)(HMODULE, const WCHAR *, WCHAR *, LONG_PTR);
 typedef BOOL (WCALLBACK *ENUMRESNAMEPROCA)(HMODULE, const char *, char *, LONG_PTR);
 typedef BOOL (WCALLBACK *ENUMRESTYPEPROCW)(HMODULE, WCHAR *, LONG_PTR);
+typedef BOOL (WCALLBACK *ENUMRESTYPEPROCA)(HMODULE, char *, LONG_PTR);
 
 typedef struct {
     HMODULE     h;
@@ -4478,12 +4671,13 @@ typedef struct {
 
 static int res_enum_cb(void *ctx, const WCHAR *name) {
     res_enum_t *e = ctx;
-    if (e->types) return ((ENUMRESTYPEPROCW)e->fn)(e->h, (WCHAR *)name, e->param);
     if (e->ansi) {
         char a[256];
         const char *n = (uintptr_t)name < 0x10000 ? (const char *)name : (w_to_utf8(name, -1, a, sizeof(a)), a);
+        if (e->types) return ((ENUMRESTYPEPROCA)e->fn)(e->h, (char *)n, e->param);
         return ((ENUMRESNAMEPROCA)e->fn)(e->h, e->type, (char *)n, e->param);
     }
+    if (e->types) return ((ENUMRESTYPEPROCW)e->fn)(e->h, (WCHAR *)name, e->param);
     return ((ENUMRESNAMEPROCW)e->fn)(e->h, e->type, (WCHAR *)name, e->param);
 }
 
@@ -4515,6 +4709,16 @@ BOOL WINAPI EnumResourceNamesExW(HMODULE h, const WCHAR *type, void *fn, LONG_PT
 BOOL WINAPI EnumResourceTypesW(HMODULE h, void *fn, LONG_PTR p) {
     res_enum_t e = { h ? h : ld_main()->base, 0, fn, p, 0, 1 };
     return ld_enum_resources(ld_by_handle(h), 0, res_enum_cb, &e) > 0;
+}
+
+BOOL WINAPI EnumResourceTypesA(HMODULE h, void *fn, LONG_PTR p) {
+    res_enum_t e = { h ? h : ld_main()->base, 0, fn, p, 1, 1 };
+    return ld_enum_resources(ld_by_handle(h), 0, res_enum_cb, &e) > 0;
+}
+
+BOOL WINAPI EnumResourceNamesExA(HMODULE h, const char *type, void *fn, LONG_PTR p, DWORD f, WORD lang) {
+    (void)f, (void)lang;
+    return EnumResourceNamesA(h, type, fn, p);
 }
 
 /* ---- processes ------------------------------------------------------------------------------- */
@@ -4804,6 +5008,12 @@ BOOL WINAPI CreateProcessAsUserW(HANDLE tok, const WCHAR *app, WCHAR *cmd, void 
                                  void *env, const WCHAR *dir, STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
     (void)tok;
     return CreateProcessW(app, cmd, psa, tsa, inherit, flags, env, dir, si, pi);
+}
+
+BOOL WINAPI CreateProcessAsUserA(HANDLE tok, const char *app, char *cmd, void *psa, void *tsa, BOOL inherit, DWORD flags,
+                                 void *env, const char *dir, STARTUPINFOW *si, PROCESS_INFORMATION *pi) {
+    (void)tok;
+    return CreateProcessA(app, cmd, psa, tsa, inherit, flags, env, dir, si, pi);
 }
 
 /* Windows's WinExec: a program and its arguments in one string */
@@ -5119,23 +5329,19 @@ BOOL WINAPI FlsFree(DWORD i);
 void *WINAPI FlsGetValue(DWORD i);
 BOOL WINAPI FlsSetValue(DWORD i, void *v);
 
-HANDLE WINAPI OpenEventW(DWORD a, BOOL i, const WCHAR *n) {
-    (void)a, (void)i, (void)n;
-    wset_last_error(ERROR_FILE_NOT_FOUND);
-    return 0;
-}
-HANDLE WINAPI OpenMutexW(DWORD a, BOOL i, const WCHAR *n) {
-    (void)a, (void)i, (void)n;
-    wset_last_error(ERROR_FILE_NOT_FOUND);
-    return 0;
-}
+HANDLE WINAPI OpenEventW(DWORD a, BOOL i, const WCHAR *n);
+HANDLE WINAPI OpenMutexW(DWORD a, BOOL i, const WCHAR *n);
+HANDLE WINAPI OpenSemaphoreW(DWORD a, BOOL i, const WCHAR *n);
+HANDLE WINAPI OpenSemaphoreA(DWORD a, BOOL i, const char *n);
 HANDLE WINAPI CreateMutexExW(void *sa, const WCHAR *name, DWORD flags, DWORD access) {
     (void)access;
     return CreateMutexW(sa, (flags & 1) != 0, name);
 }
 HANDLE WINAPI CreateEventExA(void *sa, const char *name, DWORD flags, DWORD access) {
-    (void)name;
-    return CreateEventExW(sa, 0, flags, access);
+    WCHAR *w = name ? utf8_to_w_dup(name) : 0;
+    HANDLE h = CreateEventExW(sa, w, flags, access);
+    free(w);
+    return h;
 }
 
 static const wexport_t k32[] = {
@@ -5145,7 +5351,7 @@ static const wexport_t k32[] = {
     X(GetFileAttributesExW), X(GetFileAttributesExA), X(SetFileAttributesW), X(GetFileInformationByHandle),
     X(GetFileInformationByHandleEx), X(DeleteFileW), X(DeleteFileA), X(MoveFileExW), X(MoveFileW), X(MoveFileA),
     X(CopyFileW), X(CreateDirectoryW), X(CreateDirectoryA), X(RemoveDirectoryW), X(RemoveDirectoryA),
-    X(FindFirstFileExW), X(FindFirstFileW), X(FindNextFileW), X(FindFirstFileA), X(FindNextFileA), X(FindClose),
+    X(FindFirstFileExW), X(FindFirstFileW), X(FindNextFileW), X(FindFirstFileA), X(FindNextFileA), X(FindFirstFileExA), X(FindClose),
     X(GetCurrentDirectoryW), X(GetCurrentDirectoryA), X(SetCurrentDirectoryW), X(SetCurrentDirectoryA),
     X(GetFullPathNameA), X(GetFullPathNameW), X(GetLongPathNameW), X(GetShortPathNameW), X(GetTempPathW),
     X(GetTempPathA), X(GetTempPath2W), X(GetTempFileNameW), X(GetSystemDirectoryW), X(GetSystemDirectoryA),
@@ -5188,7 +5394,7 @@ static const wexport_t k32[] = {
     X(GetEnvironmentStringsA), X(FreeEnvironmentStringsW), X(FreeEnvironmentStringsA), X(ExpandEnvironmentStringsW),
     X(ExpandEnvironmentStringsA), X(GetCommandLineA), X(GetCommandLineW), X(GetStartupInfoW), X(GetStartupInfoA),
     WEXPN("GetEnvironmentStrings", GetEnvironmentStringsA), X(MultiByteToWideChar), X(WideCharToMultiByte),
-    X(GetACP), X(GetOEMCP), X(GetCPInfo), X(GetCPInfoExW), X(IsValidCodePage), X(IsDBCSLeadByte),
+    X(GetACP), X(GetOEMCP), X(GetCPInfo), X(GetCPInfoExW), X(GetCPInfoExA), X(IsValidCodePage), X(IsDBCSLeadByte),
     X(IsDBCSLeadByteEx), X(CompareStringW), X(CompareStringEx), X(CompareStringOrdinal), X(CompareStringA),
     X(LCMapStringW), X(LCMapStringEx), X(LCMapStringA), X(GetStringTypeW), X(GetStringTypeExW), X(GetStringTypeA),
     X(lstrlenA), X(lstrlenW), X(lstrcpyA), X(lstrcpyW), X(lstrcpynA), X(lstrcpynW), X(lstrcatA), X(lstrcatW),
@@ -5214,7 +5420,7 @@ static const wexport_t k32[] = {
     X(FreeLibraryAndExitThread), X(GetProcAddress), X(DisableThreadLibraryCalls), X(SetDllDirectoryW),
     X(SetDllDirectoryA), X(AddDllDirectory), X(RemoveDllDirectory), X(SetDefaultDllDirectories), X(FindResourceExW),
     X(FindResourceW), X(FindResourceA), X(FindResourceExA), X(LoadResource), X(LockResource), X(SizeofResource),
-    X(FreeResource), X(EnumResourceNamesW), X(EnumResourceNamesA), X(EnumResourceNamesExW), X(EnumResourceTypesW),
+    X(FreeResource), X(EnumResourceNamesW), X(EnumResourceNamesA), X(EnumResourceNamesExW), X(EnumResourceNamesExA), X(EnumResourceTypesW), X(EnumResourceTypesA),
     X(ExitProcess), X(TerminateProcess), X(CreateProcessAsUserW), X(WinExec), X(GetVolumePathNameW),
     X(GetVolumeNameForVolumeMountPointW), X(GetFinalPathNameByHandleW), X(SetProcessWorkingSetSize),
     X(SetProcessWorkingSetSizeEx), X(SetFileInformationByHandle), X(DosDateTimeToFileTime),
@@ -5236,7 +5442,8 @@ static const wexport_t k32[] = {
     X(RtlPcToFileHeader), X(RtlUnwindEx), X(RtlUnwind), X(EncodePointer), X(DecodePointer), X(EncodeSystemPointer),
     X(DecodeSystemPointer), X(FlushProcessWriteBuffers), X(CopyFile2), X(CreateSymbolicLinkW), X(CreateSymbolicLinkA),
     X(CreateEventW), X(CreateEventA), X(CreateEventExW), X(CreateEventExA), X(SetEvent),
-    X(ResetEvent), X(PulseEvent), X(OpenEventW), X(CreateMutexW), X(CreateMutexA), X(CreateMutexExW), X(OpenMutexW),
+    X(ResetEvent), X(PulseEvent), X(OpenEventW), X(CreateMutexW), X(CreateMutexA), X(CreateMutexExW), X(OpenMutexW), X(OpenSemaphoreW),
+    X(OpenSemaphoreA), X(OpenWaitableTimerW), X(OpenWaitableTimerA),
     X(ReleaseMutex), X(CreateSemaphoreW), X(CreateSemaphoreA), X(CreateSemaphoreExW), X(ReleaseSemaphore),
     X(WaitForMultipleObjects), X(WaitForSingleObject), X(WaitForSingleObjectEx), X(WaitForMultipleObjectsEx),
     X(SignalObjectAndWait), X(CreateThread), X(ResumeThread), X(SuspendThread), X(ExitThread), X(GetExitCodeThread),

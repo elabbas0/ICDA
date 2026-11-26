@@ -297,17 +297,156 @@ int wobj_signaled(whandle_t *h, int consume) {
     }
 }
 
-HANDLE WINAPI CreateEventW(void *sa, BOOL manual, BOOL initial, const WCHAR *name) {
+/* ---- names ----------------------------------------------------------------------------
+ * A named event, mutex, semaphore or waitable timer is found by its name while
+ * a handle to it is open, as on Windows; the names are this process's (ICDA's
+ * Windows programs share no objects between processes).  "Global\" and
+ * "Local\" are the same place here: there is one session.  A timer is an
+ * event inside, with names of its own (ns: NS_TIMER). */
+
+typedef struct named {
+    struct named *next;
+    int           ns;
+    void         *obj;
+    int           handles;
+    WCHAR         name[];
+} named_t;
+
+static named_t *names;
+static pthread_mutex_t nlock = PTHREAD_MUTEX_INITIALIZER;
+
+static const WCHAR *after(const WCHAR *n, const char *prefix) {
+    for (; *prefix; prefix++, n++)
+        if (*n != (WCHAR)*prefix) return 0;
+    return n;
+}
+
+static const WCHAR *name_part(const WCHAR *n) {
+    const WCHAR *p = after(n, "Global\\");
+    if (!p) p = after(n, "Local\\");
+    return p ? p : n;
+}
+
+static named_t *named_find(const WCHAR *name) {
+    const WCHAR *n = name_part(name);
+    for (named_t *e = names; e; e = e->next)
+        if (!w_cmp(e->name, n)) return e;
+    return 0;
+}
+
+/* a new object's handle, or under a name in use the old object's
+ * (ERROR_ALREADY_EXISTS; obj is freed); a name used by another kind fails
+ * with ERROR_INVALID_HANDLE */
+HANDLE h_named(int kind, int ns, const WCHAR *name, void *obj) {
+    named_t *e;
+    HANDLE h;
+    if (!obj) {
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    if (!name || !*name) {
+        h = h_new(kind, obj);
+        if (!h) free(obj);
+        else wset_last_error(0);
+        return h;
+    }
+    pthread_mutex_lock(&nlock);
+    e = named_find(name);
+    if (e) {
+        free(obj);
+        if (e->ns != ns) {
+            pthread_mutex_unlock(&nlock);
+            wset_last_error(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        h = h_new(kind, e->obj);
+        if (h) e->handles++;
+        pthread_mutex_unlock(&nlock);
+        if (h) wset_last_error(ERROR_ALREADY_EXISTS);
+        return h;
+    }
+    e = calloc(1, sizeof(*e) + (w_len(name_part(name)) + 1) * sizeof(WCHAR));
+    h = e ? h_new(kind, obj) : 0;
+    if (!h) {
+        pthread_mutex_unlock(&nlock);
+        free(e), free(obj);
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    e->ns = ns, e->obj = obj, e->handles = 1;
+    memcpy(e->name, name_part(name), (w_len(name_part(name)) + 1) * sizeof(WCHAR));
+    e->next = names, names = e;
+    pthread_mutex_unlock(&nlock);
+    wset_last_error(0);
+    return h;
+}
+
+/* OpenEvent and the others: no such name is ERROR_FILE_NOT_FOUND */
+HANDLE h_open_named(int kind, int ns, const WCHAR *name) {
+    named_t *e;
+    HANDLE h = 0;
+    if (!name) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&nlock);
+    e = named_find(name);
+    if (e && e->ns == ns) {
+        h = h_new(kind, e->obj);
+        if (h) e->handles++;
+    }
+    pthread_mutex_unlock(&nlock);
+    if (!h) wset_last_error(e ? ERROR_INVALID_HANDLE : ERROR_FILE_NOT_FOUND);
+    return h;
+}
+
+/* a handle to obj opened (DuplicateHandle, +1) or closed (-1): the name goes
+ * with the last one */
+void named_ref(void *obj, int delta) {
+    pthread_mutex_lock(&nlock);
+    for (named_t **p = &names; *p; p = &(*p)->next)
+        if ((*p)->obj == obj) {
+            named_t *e = *p;
+            e->handles += delta;
+            if (e->handles <= 0) *p = e->next, free(e);
+            break;
+        }
+    pthread_mutex_unlock(&nlock);
+}
+
+HANDLE event_new(BOOL manual, BOOL initial, const WCHAR *name, int ns) {
     wevent_t *e = calloc(1, sizeof(*e));
-    (void)sa, (void)name;
-    e->manual = manual;
-    e->signaled = initial;
-    return h_new(H_EVENT, e);
+    if (e) e->manual = manual, e->signaled = initial;
+    return h_named(H_EVENT, ns, name, e);
+}
+
+HANDLE WINAPI CreateEventW(void *sa, BOOL manual, BOOL initial, const WCHAR *name) {
+    (void)sa;
+    return event_new(manual, initial, name, H_EVENT);
+}
+
+/* the A names: UTF-8 */
+static HANDLE create_a(HANDLE (*make)(void *, const WCHAR *, void *), void *sa, const char *name, void *ctx) {
+    WCHAR *w = name ? utf8_to_w_dup(name) : 0;
+    HANDLE h = make(sa, w, ctx);
+    free(w);
+    return h;
+}
+
+typedef struct { BOOL manual, initial; } event_args_t;
+static HANDLE make_event(void *sa, const WCHAR *name, void *ctx) {
+    event_args_t *a = ctx;
+    return CreateEventW(sa, a->manual, a->initial, name);
 }
 
 HANDLE WINAPI CreateEventA(void *sa, BOOL manual, BOOL initial, const char *name) {
-    (void)name;
-    return CreateEventW(sa, manual, initial, 0);
+    event_args_t a = { manual, initial };
+    return create_a(make_event, sa, name, &a);
+}
+
+HANDLE WINAPI OpenEventW(DWORD access, BOOL inherit, const WCHAR *name) {
+    (void)access, (void)inherit;
+    return h_open_named(H_EVENT, H_EVENT, name);
 }
 
 HANDLE WINAPI CreateEventExW(void *sa, const WCHAR *name, DWORD flags, DWORD access) {
@@ -339,16 +478,30 @@ BOOL WINAPI PulseEvent(HANDLE h) {
     return ResetEvent(h);
 }
 
+/* asked to own a mutex that already exists, the caller does not get it */
 HANDLE WINAPI CreateMutexW(void *sa, BOOL owned, const WCHAR *name) {
     wmutex_t *m = calloc(1, sizeof(*m));
-    (void)sa, (void)name;
-    if (owned) m->owner = thread_id(), m->count = 1;
-    return h_new(H_MUTEX, m);
+    HANDLE h;
+    (void)sa;
+    if (!m) {
+        wset_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    h = h_named(H_MUTEX, H_MUTEX, name, m);
+    if (h && owned && wget_last_error() != ERROR_ALREADY_EXISTS) {
+        m->owner = thread_id(), m->count = 1;
+        wset_last_error(0);
+    }
+    return h;
 }
 
-HANDLE WINAPI CreateMutexA(void *sa, BOOL owned, const char *name) {
-    (void)name;
-    return CreateMutexW(sa, owned, 0);
+static HANDLE make_mutex(void *sa, const WCHAR *name, void *ctx) { return CreateMutexW(sa, *(BOOL *)ctx, name); }
+
+HANDLE WINAPI CreateMutexA(void *sa, BOOL owned, const char *name) { return create_a(make_mutex, sa, name, &owned); }
+
+HANDLE WINAPI OpenMutexW(DWORD access, BOOL inherit, const WCHAR *name) {
+    (void)access, (void)inherit;
+    return h_open_named(H_MUTEX, H_MUTEX, name);
 }
 
 BOOL WINAPI ReleaseMutex(HANDLE h) {
@@ -369,16 +522,38 @@ BOOL WINAPI ReleaseMutex(HANDLE h) {
 }
 
 HANDLE WINAPI CreateSemaphoreW(void *sa, LONG initial, LONG max, const WCHAR *name) {
-    wsem_t *s = calloc(1, sizeof(*s));
-    (void)sa, (void)name;
-    s->count = initial;
-    s->max = max;
-    return h_new(H_SEMAPHORE, s);
+    wsem_t *s;
+    (void)sa;
+    if (max <= 0 || initial < 0 || initial > max) {
+        wset_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    s = calloc(1, sizeof(*s));
+    if (s) s->count = initial, s->max = max;
+    return h_named(H_SEMAPHORE, H_SEMAPHORE, name, s);
+}
+
+typedef struct { LONG initial, max; } sem_args_t;
+static HANDLE make_sem(void *sa, const WCHAR *name, void *ctx) {
+    sem_args_t *a = ctx;
+    return CreateSemaphoreW(sa, a->initial, a->max, name);
 }
 
 HANDLE WINAPI CreateSemaphoreA(void *sa, LONG initial, LONG max, const char *name) {
-    (void)name;
-    return CreateSemaphoreW(sa, initial, max, 0);
+    sem_args_t a = { initial, max };
+    return create_a(make_sem, sa, name, &a);
+}
+
+HANDLE WINAPI OpenSemaphoreW(DWORD access, BOOL inherit, const WCHAR *name) {
+    (void)access, (void)inherit;
+    return h_open_named(H_SEMAPHORE, H_SEMAPHORE, name);
+}
+
+HANDLE WINAPI OpenSemaphoreA(DWORD access, BOOL inherit, const char *name) {
+    WCHAR *w = name ? utf8_to_w_dup(name) : 0;
+    HANDLE h = OpenSemaphoreW(access, inherit, w);
+    free(w);
+    return h;
 }
 
 HANDLE WINAPI CreateSemaphoreExW(void *sa, LONG initial, LONG max, const WCHAR *name, DWORD flags, DWORD access) {

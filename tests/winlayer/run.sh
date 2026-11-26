@@ -29,6 +29,7 @@ $CC -O1 -o $O/t_dwrite.exe t_dwrite.c -ldwrite
 $CC -O1 -o $O/t_barrier.exe t_barrier.c
 $CC -O1 -o $O/t_except.exe t_except.c
 x86_64-w64-mingw32-g++ -O1 -static -o $O/t_cxx.exe t_cxx.cpp
+$CC -O1 -o $O/t_ansi.exe t_ansi.c -lws2_32 -lshell32 -ladvapi32 -lgdi32 -luser32
 $CC -O1 -o $O/t_stubs.exe t_stubs.c -ldsound -ldinput8 -ldxguid -lxinput1_4 -lshlwapi -lole32 -liphlpapi -lsecur32 -luuid
 # the thread-local variables of t_console come from the winpthreads DLL of
 # MinGW: a DLL of the program, loaded from its folder
@@ -103,6 +104,11 @@ timeout 60 ./icda-win t_stubs.exe > t_stubs.out 2>&1
 grep -q "^done, 0 failed" t_stubs.out
 check "t_stubs.exe: missing functions fail correctly" $?
 grep "^FAIL" t_stubs.out
+# the A functions: UTF-8 strings, counts in bytes, the A rule for small buffers
+timeout 60 ./icda-win t_ansi.exe > t_ansi.out 2>&1
+grep -q "^done, 0 failed" t_ansi.out
+check "t_ansi.exe: ANSI functions in UTF-8" $?
+grep "^FAIL" t_ansi.out
 # bad pointers passed to the API fail the call, as on Windows
 timeout 60 ./icda-win t_barrier.exe > t_barrier.out 2>&1
 grep -q "^done, 0 failed" t_barrier.out
