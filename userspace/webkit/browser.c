@@ -75,6 +75,7 @@ typedef struct {
     guint ack_source;              /* the frame complete waiting to be sent, or 0 */
     uint32_t last_ack;             /* when the last one was sent (ms) */
     unsigned still;                /* frames in a row that changed nothing on screen */
+    uint32_t draw_ms;              /* what drawing a frame takes lately (ms, averaged): frame complete to the frame */
     /* memory (below) */
     uint32_t last_shown;           /* when it was last the active tab (ms) */
     int discarded;                 /* its web process was ended to free memory: loads again when selected */
@@ -434,7 +435,9 @@ static void frame_stats(unsigned t0) {
 #define STILL_AFTER     30
 #define HIDDEN_FRAME_MS 1000
 #define INPUT_HOLD_MS   500
+#define BUSY_FRAME_MS   50         /* the slowest pace a busy page is given: 20 frames a second */
 static uint32_t last_input;        /* ms of the last key or pointer event */
+static int busy_pace;              /* one or two processors (heavy pages, below) */
 
 static gboolean frame_complete(gpointer data) {
     tab_t *t = (tab_t *)data;
@@ -447,6 +450,14 @@ static gboolean frame_complete(gpointer data) {
 static uint32_t frame_interval(tab_t *t) {
     if (!ntabs || t != tabs[active]) return HIDDEN_FRAME_MS;
     if (t->still >= STILL_AFTER && now_ms() - last_input > INPUT_HOLD_MS) return STILL_FRAME_MS;
+    /* On one or two processors a page whose frames take long to draw would
+     * be drawing all the time, and its scripts (and everything else) wait
+     * behind the drawing: a frame's turn is then one and a half times what
+     * drawing it takes, so a third of the time is left over. */
+    if (busy_pace && t->draw_ms > FRAME_MS * 2 / 3) {
+        uint32_t ms = t->draw_ms + t->draw_ms / 2;
+        return ms > BUSY_FRAME_MS ? BUSY_FRAME_MS : ms;
+    }
     return FRAME_MS;
 }
 
@@ -553,6 +564,12 @@ static void frame_done(tab_t *t, int changed, int y0, int y1, unsigned t0) {
         timing("first picture", "");
     }
     frame_stats(t0);
+    {   /* how long the page took to draw this frame, when it was drawing one
+         * after another (a longer wait is a page with nothing to draw) */
+        uint32_t took = t0 - t->last_ack;
+        if (t->last_ack && took < 200) t->draw_ms = (t->draw_ms * 7 + took + 4) / 8;
+        else t->draw_ms = 0;
+    }
     t->still = changed ? 0 : t->still < 1000000 ? t->still + 1 : t->still;
     pace_frame(t);
 }
@@ -939,6 +956,152 @@ static gboolean memory_watch(gpointer d) {
     return G_SOURCE_CONTINUE;
 }
 
+/* ---- heavy pages ---------------------------------------------------------------------------
+ *
+ * What a page costs here is mostly drawn and decoded on the processors:
+ * without the GPU, Mesa composites every frame in software, and video is
+ * always decoded in software.  Three things keep heavy sites usable:
+ *
+ *   - video the machine cannot play smoothly is not offered: a script at the
+ *     start of every document answers the questions players ask
+ *     (MediaSource.isTypeSupported, canPlayType, mediaCapabilities) with no
+ *     for AV1 in software, for more than MEDIA frames a second and for
+ *     pictures larger than the limit, so YouTube and the like pick H.264 or
+ *     VP9 at a size that plays (720p at 30 in software, 480p on one or two
+ *     processors; 1080p at 60 on the GPU);
+ *   - requests to advertising and tracking networks from other sites' pages
+ *     are not made (WebKit's content filter, compiled once into the cache):
+ *     on news sites they are most of the scripts that keep running.
+ *     SURFER_TRACKERS=allow turns it off;
+ *   - on one or two processors a page's frames take at most about two thirds
+ *     of the time (pace, in frame pacing), leaving the rest to its scripts. */
+static WebKitUserContentManager *content;
+static int ncpu = 1;
+
+static const char media_script[] =
+    "(function(){'use strict';"
+    "var MAXH=%d,MAXW=%d,MAXFPS=%d,AV1=%d;"
+    "function size(w,h){if(!w&&!h)return true;if(w&&h)return w*h<=MAXW*MAXH*1.05;return (h||0)<=MAXH&&(w||0)<=MAXW;}"
+    "function ok(type){"
+      "if(typeof type!=='string')return true;"
+      "var t=type.toLowerCase(),m,w=0,h=0;"
+      "if(!AV1&&/codecs\\s*=\\s*\"?[^\";]*av01/.test(t))return false;"
+      "if((m=/framerate=(\\d+)/.exec(t))&&+m[1]>MAXFPS)return false;"
+      "if((m=/width=(\\d+)/.exec(t)))w=+m[1];"
+      "if((m=/height=(\\d+)/.exec(t)))h=+m[1];"
+      "return size(w,h);}"
+    "function wrap(o){"
+      "if(!o||typeof o.isTypeSupported!=='function')return;"
+      "var f=o.isTypeSupported.bind(o);"
+      "o.isTypeSupported=function(t){return ok(t)&&f(t);};}"
+    "try{wrap(window.MediaSource);wrap(window.ManagedMediaSource);wrap(window.WebKitMediaSource);}catch(e){}"
+    "try{var p=HTMLMediaElement.prototype,c=p.canPlayType;"
+      "p.canPlayType=function(t){return ok(t)?c.call(this,t):'';};}catch(e){}"
+    "try{var mc=navigator.mediaCapabilities;if(mc&&mc.decodingInfo){var d=mc.decodingInfo.bind(mc);"
+      "mc.decodingInfo=function(cfg){"
+        "var v=cfg&&cfg.video;"
+        "if(v&&(!ok(v.contentType)||(v.framerate&&parseFloat(v.framerate)>MAXFPS)||!size(v.width,v.height)))"
+          "return Promise.resolve({supported:false,smooth:false,powerEfficient:false,configuration:cfg});"
+        "return d(cfg);};}}catch(e){}"
+    "})();";
+
+/* advertising and tracking networks: hosts (and their subdomains) that other
+ * sites' pages load scripts, frames and beacons from.  Nothing a page needs to
+ * work: no logins, no video hosts, no tag managers. */
+static const char *const tracker_hosts[] = {
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com", "google-analytics.com", "adservice.google.com",
+    "amazon-adsystem.com", "adnxs.com", "adsrvr.org", "criteo.com", "criteo.net", "rubiconproject.com", "pubmatic.com",
+    "openx.net", "casalemedia.com", "indexww.com", "taboola.com", "outbrain.com", "moatads.com", "scorecardresearch.com",
+    "quantserve.com", "quantcast.com", "chartbeat.com", "chartbeat.net", "bluekai.com", "krxd.net", "demdex.net",
+    "everesttech.net", "omtrdc.net", "2o7.net", "adform.net", "smartadserver.com", "teads.tv", "sharethrough.com",
+    "triplelift.com", "3lift.com", "yieldmo.com", "media.net", "bidswitch.net", "contextweb.com", "lijit.com",
+    "sovrn.com", "gumgum.com", "advertising.com", "adsafeprotected.com", "doubleverify.com", "mathtag.com",
+    "rlcdn.com", "agkn.com", "exelator.com", "crwdcntrl.net", "tapad.com", "zemanta.com", "revcontent.com", "mgid.com",
+    "adroll.com", "hotjar.com", "mouseflow.com", "fullstory.com", "newrelic.com", "nr-data.net", "permutive.com",
+    "permutive.app", "parsely.com", "optimizely.com", "segment.io", "mixpanel.com", "amplitude.com", "bounceexchange.com",
+    "sail-horizon.com", "onetag-sys.com", "33across.com", "imrworldwide.com", "liadm.com", "id5-sync.com", "pippio.com",
+    "adtechus.com", "serving-sys.com", "flashtalking.com", "innovid.com", "springserve.com", "spotxchange.com",
+    "freewheel.tv", "fwmrm.net", "admanmedia.com", "aniview.com", "connatix.com", "primis.tech", "vidazoo.com",
+};
+#define TRACKER_FILTER "icda-trackers-2"
+
+static void filter_ready(WebKitUserContentFilter *f, GError *err, const char *how) {
+    if (f) {
+        webkit_user_content_manager_add_filter(content, f);
+        webkit_user_content_filter_unref(f);
+        slog("trackers: requests to %d advertising and tracking networks are not made (%s)",
+             (int)G_N_ELEMENTS(tracker_hosts), how);
+    } else {
+        slog("trackers: the filter could not be %s: %s", how, err ? err->message : "?");
+    }
+    if (err) g_error_free(err);
+}
+
+static void filter_saved(GObject *o, GAsyncResult *res, gpointer d) {
+    GError *err = NULL;
+    (void)d;
+    filter_ready(webkit_user_content_filter_store_save_finish(WEBKIT_USER_CONTENT_FILTER_STORE(o), res, &err), err, "compiled");
+}
+
+static void filter_loaded(GObject *o, GAsyncResult *res, gpointer d) {
+    WebKitUserContentFilterStore *store = WEBKIT_USER_CONTENT_FILTER_STORE(o);
+    WebKitUserContentFilter *f = webkit_user_content_filter_store_load_finish(store, res, NULL);
+    (void)d;
+    if (f) {
+        filter_ready(f, NULL, "from the cache");
+        return;
+    }
+    {   /* the first start (or a new list): one rule a host, WebKit compiles them */
+        GString *json = g_string_new("[");
+        GBytes *bytes;
+        for (size_t i = 0; i < G_N_ELEMENTS(tracker_hosts); i++) {
+            g_string_append(json, i ? ",{\"trigger\":{\"url-filter\":\"^https?://([^/]+\\\\.)?" : "{\"trigger\":{\"url-filter\":\"^https?://([^/]+\\\\.)?");
+            for (const char *p = tracker_hosts[i]; *p; p++) {
+                if (*p == '.') g_string_append(json, "\\\\.");
+                else g_string_append_c(json, *p);
+            }
+            g_string_append(json, "[:/]\",\"load-type\":[\"third-party\"]},\"action\":{\"type\":\"block\"}}");
+        }
+        g_string_append_c(json, ']');
+        bytes = g_string_free_to_bytes(json);
+        webkit_user_content_filter_store_save(store, TRACKER_FILTER, bytes, NULL, filter_saved, NULL);
+        g_bytes_unref(bytes);
+    }
+}
+
+static void heavy_setup(void) {
+    int max_h, max_w, max_fps, av1;
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    char *js;
+    WebKitUserScript *script;
+    ncpu = n > 0 ? (int)n : 1;
+    busy_pace = ncpu <= 2 && !getenv("SURFER_FULL_RATE");
+    if (gpu_mode && ncpu > 2) { max_w = 1920; max_h = 1080; max_fps = 60; av1 = 1; }
+    else if (ncpu > 2) { max_w = 1280; max_h = 720; max_fps = 30; av1 = 0; }
+    else { max_w = 854; max_h = 480; max_fps = 30; av1 = 0; }
+    content = webkit_user_content_manager_new();
+    if (!getenv("SURFER_MEDIA_ANY")) {
+        js = g_strdup_printf(media_script, max_h, max_w, max_fps, av1);
+        script = webkit_user_script_new(js, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+        webkit_user_content_manager_add_script(content, script);
+        webkit_user_script_unref(script);
+        g_free(js);
+        slog("video: up to %dx%d at %d frames a second%s (%d processor%s, drawing on the %s)", max_w, max_h, max_fps,
+             av1 ? "" : ", no AV1", ncpu, ncpu == 1 ? "" : "s", gpu_mode ? "GPU" : "CPU");
+    }
+    {
+        const char *tr = getenv("SURFER_TRACKERS");
+        if (tr && !strcmp(tr, "allow")) {
+            slog("trackers: allowed (SURFER_TRACKERS=allow)");
+        } else {
+            char *dir = g_build_filename(g_get_user_cache_dir(), "surfer-filters", NULL);
+            WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new(dir);
+            webkit_user_content_filter_store_load(store, TRACKER_FILTER, NULL, filter_loaded, NULL);
+            g_free(dir);
+        }
+    }
+}
+
 static void select_tab(int i) {
     tab_t *t;
     if (i < 0 || i >= ntabs) return;
@@ -988,7 +1151,7 @@ static int add_tab(const char *url, WebKitWebView *related) {
         t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "related-view", related, NULL));
     } else {
         t->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend, "settings", settings,
-                                               "web-context", web_context, NULL));
+                                               "web-context", web_context, "user-content-manager", content, NULL));
     }
     set_sizes(t);
     g_signal_connect(t->view, "notify::title", G_CALLBACK(on_title), NULL);
@@ -1546,6 +1709,11 @@ int main(int argc, char **argv) {
      * 4 GB machine.  Below 6 GB, going back loads the page again from the
      * disk cache instead. */
     if (ram_mb < 6144) webkit_settings_set_enable_page_cache(settings, FALSE);
+    /* WebGL drawn by the processors takes them all and still crawls: without
+     * the GPU, pages are told there is none and use what they have for that
+     * (maps their flat tiles, sites a still picture) */
+    if (!gpu_mode) webkit_settings_set_enable_webgl(settings, FALSE);
+    heavy_setup();
     g_signal_connect(webkit_network_session_get_default(), "download-started", G_CALLBACK(on_download), NULL);
 
     add_tab(url, NULL);
