@@ -1,5 +1,8 @@
 # Surfer on WebKit: performance before and after
 
+The second round (frames at the rate the picture changes, video, the advertising filter, two
+processors) is in [round-2.md](round-2.md).
+
 Before: `6b27adf`, the commit before this work (ICDA 1.10.3's code). After: frame pacing, partial window updates and memory
 management in `userspace/webkit/browser.c` and `userspace/gui.c`, and live `/proc` in the kernel
 (`kernel/linux/lx.c`, `lx_vm.c`, `kernel/memory/vmm.c`).

@@ -192,7 +192,9 @@ of memory, the tab shown longest ago is discarded: its name stays in the tab
 strip, and it loads again when you select it. Tabs playing sound are kept.
 `/tmp/surfer.log` shows the limits in use. `tests/webkit-bench/run.sh`
 measures Surfer before and after a change; the measurements of these changes
-are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md).
+are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md)
+(frame pacing by change, video, the advertising filter:
+[round-2.md](docs/verification/webkit-performance/round-2.md)).
 
 The engine (WebKit with its JavaScript JIT, and GStreamer for video and
 sound) is in the Linux root, `/linux`. Without it Surfer falls back to its
