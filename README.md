@@ -161,8 +161,8 @@ frame that shows nothing new is waste. Frames come 60 a second while a key or
 the pointer is in use, while the picture keeps changing (a video, a scroll, a
 smooth animation) and while a page loads; otherwise as often as the picture
 really changes (twice as often: a ticker that changes ten times a second gets
-20 frames, not 60); 15 a second after half a second with no change, 4 after a
-second, and one a second for tabs that are not shown. A key press, the
+20 frames, not 60); 15 a second after half a second with no change, 4 after
+five seconds, and one a second for tabs that are not shown. A key press, the
 pointer or a change brings the full rate back at once. On one or two
 processors a page whose frames take long to draw gets at most two thirds of
 the time for drawing, so its scripts still run (`SURFER_FULL_RATE=1` turns

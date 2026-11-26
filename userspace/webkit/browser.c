@@ -438,14 +438,17 @@ static void frame_stats(unsigned t0) {
  * changed, and that costs up to 70 ms of processor time on a page with
  * blurred or layered parts (microsoft.com, cnn.com): a page whose banner ticks
  * ten times a second was drawn 62 times a second, 52 of them the same picture.
- * After half a second with no change it is 15 a second, after a second 4 (a
- * page animating something invisible), and once a second for a tab that is
- * not shown.  A key, the pointer or a change seen at once brings 60 back. */
+ * After half a second with no change it is 15 a second, after five seconds 4
+ * (a page animating something invisible), and once a second for a tab that
+ * is not shown.  A key, the pointer or a change seen at once brings 60 back.
+ * Five seconds, not less: an animation that comes back every few seconds (a
+ * slideshow, Wikipedia's banner every 3 s) would wait for a slow frame to
+ * start, and its first quarter of a second would be skipped. */
 #define FRAME_MS        16
 #define STILL_FRAME_MS  66
 #define STILL_AFTER_MS  500
 #define QUIET_FRAME_MS  250
-#define QUIET_AFTER_MS  1000
+#define QUIET_AFTER_MS  5000
 #define HIDDEN_FRAME_MS 1000
 #define INPUT_HOLD_MS   500
 #define BUSY_FRAME_MS   50         /* the slowest pace a busy page is given: 20 frames a second */
