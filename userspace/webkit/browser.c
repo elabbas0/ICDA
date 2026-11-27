@@ -1766,8 +1766,8 @@ int main(int argc, char **argv) {
     }
     memory_setup();
     settings = webkit_settings_new();
-    webkit_settings_set_user_agent(settings,
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15");
+    /* the user agent is WebKit's own: a Safari version high enough that sites
+     * do not turn it away, and WebKit's list of sites given another one */
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, getenv("WPE_CONSOLE") != NULL);
     webkit_settings_set_enable_smooth_scrolling(settings, FALSE);
     /* Back to a page from another site is instant because its web process is
