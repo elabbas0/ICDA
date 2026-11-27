@@ -122,7 +122,8 @@ scenarios, the /proc emulation in both:
 | Processor, at rest / scrolling | 6.4 / 7.6 cores | 6.1 / 7.1 (−5% / −7%) |
 | Memory | 4.21 GB | 4.43 GB (+5%) |
 
-Every scenario entered the kernel less (CNN −55%, Wikipedia −71% at rest), frames the same. Its
+Every scenario entered the kernel less (CNN −55%, Wikipedia −71% at rest), frames the same;
+Speedometer 3.1 the same (10.5 and 8.76 with mimalloc, 9.80 and 9.35 without, alternately). Its
 system calls and memory flags are ones WebKit already uses (it reserves no more than WebKit's own
 128 GiB regions). Surfer adds it to LD_PRELOAD for the processes WebKit starts
 (`SURFER_MALLOC=musl` leaves it out); Surfer's own process keeps musl's.
