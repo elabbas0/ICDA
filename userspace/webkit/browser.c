@@ -1735,6 +1735,11 @@ int main(int argc, char **argv) {
     if (!gpu_mode) {
         env_default("LIBGL_ALWAYS_SOFTWARE", "1");
         env_default("GALLIUM_DRIVER", "llvmpipe");
+        /* Skia paints the page with its own code for the processor, on half
+         * of them, not through Mesa doing a GPU's work: as fast, and 2-7%
+         * less memory (WebKit 2.54 on six pages; Mesa still puts the layers
+         * together) */
+        env_default("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1");
     }
     env_default("EGL_PLATFORM", "wayland");
     env_default("GSETTINGS_BACKEND", "memory");
