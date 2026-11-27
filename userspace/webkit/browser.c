@@ -1729,6 +1729,8 @@ int main(int argc, char **argv) {
             FILE *f = fopen(GPU_OFF_FLAG, "w");          /* the rest of the session stays in software */
             if (f) { fprintf(f, "%s\n", gpu_reason); fclose(f); }
         }
+        /* the engine actually loaded (Terminal: cat /tmp/surfer.log) */
+        slog("WebKit %u.%u.%u", webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version());
         slog("drawing on the %s%s%s", gpu_mode ? "GPU" : "CPU (software)", gpu_mode ? "" : ": ", gpu_mode ? "" : gpu_reason);
         write_mode();
     }
