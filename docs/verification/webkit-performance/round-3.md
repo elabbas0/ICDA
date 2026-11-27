@@ -89,6 +89,55 @@ thread). ICDA now accepts it, as it does `sched_setscheduler` and `setpriority`.
 new engine adds `nanosleep`, `timerfd_create`, `timerfd_settime`, `utimensat` and
 `prctl(PR_SET_VMA)`, all handled; its `madvise`, `clone` and `mmap` flags are ones 2.40.5 used.
 
+## Memory
+
+Per process, a static page: the web process 157 MB on 2.40, 171 MB on 2.54, nearly all of it the
+larger library (file-backed; 2.54's libWPEWebKit is 120 MB); the network process 22 and 28 MB. CNN:
+the web process's anonymous memory 1070 MB on 2.40, 1345 MB on 2.54.
+
+CNN alone on an emulated 4 GB machine (Surfer then has WebKit give memory back from 676 MB, harder
+from 1024 MB, and end the page at 1638 MB), two runs each unless said:
+
+| | Memory (PSS) | Cores at rest / scrolling |
+|---|---:|---:|
+| WebKit 2.40.5 (one run) | 1299 MB | 2.42 / – |
+| WebKit 2.54.3 (four runs) | 1557–1648 MB | 1.03–1.11 / 1.76–2.02 |
+| 2.54.3 with Safari 16.4's user agent | 1565–1580 MB | 0.99–1.04 / 1.59–1.73 |
+| 2.54.3, one Skia painting thread | 1514–1596 MB | 1.01–1.08 / 1.77–1.94 |
+| 2.54.3, JavaScript heap growing slower¹ | 1523–1559 MB | 0.98–1.01 / 1.66–1.69 |
+
+¹ `JSC_smallHeapGrowthFactor=1.5 JSC_mediumHeapGrowthFactor=1.25`.
+
+About 60 MB of the difference is CNN sending more to a newer Safari; the rest is the engine, and
+mostly JavaScript's heap: growing it more slowly saves about 100 MB, but Speedometer 3.1 drops to
+7.94 (11.2–11.6 by default), so it is not used. One painting thread saves less than the runs vary.
+Nothing changed: the page stays below the 1638 MB WebKit counts against (its anonymous memory, 1345
+MB), and with eight heavy tabs on 4 GB 2.54 used less memory than 2.40 (above).
+
+## AV1 through dav1d (measured, not shipped)
+
+GStreamer's dav1d decoder is in GStreamer's Rust plugins (gst-plugins-rs), which Alpine 3.20 does not
+package (3.21 does, for the same GStreamer 1.24); the dav1d library itself is in 3.20. With 3.21's
+plugin (0.13.3) in the bench container, 10 s of video decoded alone, processor seconds:
+
+| | VP9 | AV1, libaom | AV1, dav1d |
+|---|---:|---:|---:|
+| 720p | 2.13 | 3.39 | 2.44 |
+| 1080p | 3.20 | 5.54 | 3.17 (0.84 s on the clock: all processors) |
+
+In Surfer (`SURFER_MEDIA_ANY=1`, and a GStreamer registry that lists the plugin), streaming AV1 played
+every frame at the cost of VP9: 720p 1.32 cores against 1.36, 1080p 1.53 against 1.57. AV1 needs about
+a third less data than VP9 for the same picture. Shipping it needs the plugin built for Alpine 3.20
+(from the gst-plugin-dav1d crate) or taken from Alpine 3.21's package; neither is done yet.
+
+## The GPU path
+
+Not run: this host has no GPU, no DRM device and no udmabuf, and Surfer's GPU mode needs ICDA's Intel
+driver (`/dev/dri/renderD128`) and a GPU renderer (it refuses llvmpipe). Every WebKit and WPE function
+it calls exists in 2.54.3. New on 2.54 with the GPU: WebGL is drawn in a GPU process
+(`WPEGPUProcess`, in the root), which software mode never starts (WebGL is off there), so the system
+call audit above has not seen it.
+
 ## Building it
 
 Clang 17, Alpine 3.20's default, cannot compile WebKit 2.54 with GCC 13's C++ library (a parameter
@@ -101,5 +150,6 @@ which Alpine 3.20 does not have, so the engine is built without it. On musl, WPE
 - Surfer with this engine on ICDA itself: here QEMU has no KVM, and ICDA's desktop with WebKit under
   emulation is too slow to test. The system calls above are the part of ICDA it relies on that
   changed; a run on hardware (or QEMU with WHPX/KVM) is the check that remains.
-- AV1: GStreamer's dav1d decoder (fast, on all processors) is not in Alpine 3.20's GStreamer, so AV1
-  stays off and YouTube sends VP9.
+- AV1: measured above; the dav1d plugin is not in the root yet, so AV1 stays off and YouTube sends
+  VP9.
+- The GPU path, on ICDA hardware with its Intel driver.
