@@ -32,7 +32,7 @@ if ! docker image inspect $IMAGE >/dev/null 2>&1; then
         -v "$PWD/userspace/webkit/out:/engine:ro" $CA alpine:3.20 sh -c '
         apk add --no-cache build-base pkgconf glib-dev libsoup3-dev libxkbcommon-dev wayland-dev mesa-dev \
             mesa-dri-gallium mesa-egl mesa-gles mesa-gbm font-dejavu font-noto fontconfig glib-networking gstreamer \
-            gstreamer-tools gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav python3 procps-ng \
+            gstreamer-tools gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav python3 procps-ng mimalloc2 \
             $(cat /engine/engine-$WEBKIT.deps) >/dev/null
         tar -xzf /engine/engine-$WEBKIT.tar.gz -C /'
     docker commit icda-webkit-bench-setup $IMAGE >/dev/null

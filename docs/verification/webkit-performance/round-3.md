@@ -89,6 +89,44 @@ thread). ICDA now accepts it, as it does `sched_setscheduler` and `setpriority`.
 new engine adds `nanosleep`, `timerfd_create`, `timerfd_settime`, `utimensat` and
 `prctl(PR_SET_VMA)`, all handled; its `madvise`, `clone` and `mmap` flags are ones 2.40.5 used.
 
+## Entering ICDA's kernel
+
+On ICDA every system call and page fault takes the kernel's one lock, so how often a browser enters
+the kernel matters there more than its processor time. WebKit 2.54.3 as built entered it more than
+2.40.5 did: in the 13 scenarios above, system calls and page faults together went from 155,894 to
+217,707 a second at rest (+40%) and from 366,236 to 434,729 while scrolling (+19%), although
+processor time fell. Per thread, on the animation page at rest, a second:
+
+| Thread | 2.40.5 | 2.54.3 |
+|---|---:|---:|
+| Compositor: page faults | 4,753 | 10,424 |
+| Compositor: system calls | 1,964 | 2,906 |
+| Web process, main thread: system calls | 654 | 3,062 |
+| Messages from the UI process: system calls | 859 | 1,735 |
+
+The main thread's calls are GLib waking its own loop (a write, a poll and a read on its eventfd)
+each time WebKit 2.54's run loop sets a timer, at the pace of the display link (60 a second
+while anything animates), which is WebKit's own code. The compositor's page faults are musl's
+malloc: it gives every large block back to the kernel when freed, so buffers made each frame cost
+an mmap, an munmap and fresh page faults each frame. Skia painting through GL (Mesa) instead of on
+the processor is worse (90,000 futex calls in 10 s against 29,000); one painting thread changes
+nothing.
+
+With mimalloc (Alpine's mimalloc2) under WebKit's processes, alternately with musl's malloc, 8
+scenarios, the /proc emulation in both:
+
+| | musl | mimalloc |
+|---|---:|---:|
+| System calls and page faults a second, at rest | 195,606 | 101,147 (−48%) |
+| … while scrolling | 248,317 | 132,665 (−47%) |
+| Processor, at rest / scrolling | 6.4 / 7.6 cores | 6.1 / 7.1 (−5% / −7%) |
+| Memory | 4.21 GB | 4.43 GB (+5%) |
+
+Every scenario entered the kernel less (CNN −55%, Wikipedia −71% at rest), frames the same. Its
+system calls and memory flags are ones WebKit already uses (it reserves no more than WebKit's own
+128 GiB regions). Surfer adds it to LD_PRELOAD for the processes WebKit starts
+(`SURFER_MALLOC=musl` leaves it out); Surfer's own process keeps musl's.
+
 ## Memory
 
 Per process, a static page: the web process 157 MB on 2.40, 171 MB on 2.54, nearly all of it the

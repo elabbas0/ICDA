@@ -15,11 +15,12 @@
 cd "$(dirname "$0")/../.."
 # Surfer's WebKit is not Alpine's (2.40.5, from 2023): userspace/webkit/engine
 # builds a current WPE WebKit, put into the root with the Alpine packages its
-# libraries need (engine-<version>.deps)
+# libraries need (engine-<version>.deps); mimalloc2 is the allocator Surfer
+# gives WebKit's processes (browser.c)
 . userspace/webkit/engine/versions.sh
 ENGINE=userspace/webkit/out/engine-$WEBKIT.tar.gz
 RELEASE_PKGS="ca-certificates font-dejavu glib-networking gsettings-desktop-schemas gstreamer gst-libav
-  gst-plugins-bad gst-plugins-base gst-plugins-good mesa-dri-gallium mesa-egl mesa-gbm mesa-gles"
+  gst-plugins-bad gst-plugins-base gst-plugins-good mesa-dri-gallium mesa-egl mesa-gbm mesa-gles mimalloc2"
 if [ "${ICDA_ROOT:-}" = minimal ]; then
     PKGS_ALL="$*"
     ENGINE=
