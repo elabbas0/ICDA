@@ -3351,6 +3351,8 @@ static uint64_t lx_syscall_inner(struct registers *regs) {
             return 8;
         }
         case 203: case 142: case 144: return 0;       /* sched_setaffinity / setparam / setscheduler */
+        case 314: return 0;                           /* sched_setattr: WebKit 2.54 sets each thread's
+                                                         nice level and utilization clamp */
         case 140: return 20;                          /* getpriority: nice 0 (the call gives 20 - nice) */
         case 141: return 0;                           /* setpriority: every thread is equal here */
         case 143: return a1 ? zero_user((void *)a1, 4) : 0;   /* sched_getparam */
