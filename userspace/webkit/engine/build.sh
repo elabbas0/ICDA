@@ -61,10 +61,12 @@ for p in libwpe-$LIBWPE wpebackend-fdo-$FDO; do
 done
 L=/usr/lib/llvm18/bin
 export CC=$L/clang CXX=$L/clang++ AR=$L/llvm-ar NM=$L/llvm-nm RANLIB=$L/llvm-ranlib
-export LDFLAGS="-fuse-ld=lld -Wl,-O1,--as-needed"
+# -lintl: with the gettext header of Alpine, bindtextdomain() is from libintl, not musl
+export LDFLAGS="-fuse-ld=lld -Wl,-O1,--as-needed -lintl"
 export CFLAGS="-O2 -g0 -U_FORTIFY_SOURCE" CXXFLAGS="-O2 -g0 -U_FORTIFY_SOURCE"
 export WEBKIT_NINJA_COMPILE_MAX=$JOBS
-[ -f webkit/build.ninja ] || cmake -S wpewebkit-$WEBKIT -B webkit -G Ninja \
+cmake -S wpewebkit-$WEBKIT -B webkit -G Ninja \
+    -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS" -DCMAKE_MODULE_LINKER_FLAGS="$LDFLAGS" \
     -DPORT=WPE -DCMAKE_BUILD_TYPE=Release -DCMAKE_SKIP_RPATH=ON -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
     -DENABLE_DOCUMENTATION=OFF -DENABLE_INTROSPECTION=OFF -DENABLE_JOURNALD_LOG=OFF -DENABLE_BUBBLEWRAP_SANDBOX=OFF \
     -DENABLE_WEBDRIVER=OFF -DENABLE_SPEECH_SYNTHESIS=OFF -DENABLE_SPELLCHECK=OFF -DENABLE_MINIBROWSER=OFF \
