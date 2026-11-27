@@ -154,6 +154,13 @@ a missing DHCP offer from a missing acknowledgement.
 
 ## Surfer on WebKit
 
+Surfer runs on WPE WebKit 2.54.3, built for ICDA by
+`userspace/webkit/engine/build.sh` (Alpine, whose packages make ICDA's Linux
+root, has no WPE WebKit newer than 2.40.5, from 2023): twice as fast at
+JavaScript-heavy pages (Speedometer 3.1: 11.4 against 5.8), with the web
+platform and the security fixes of three more years. Without a GPU, Skia
+paints pages on half the processors with its own code.
+
 Surfer shows a page's frames at the pace the page needs. Without a GPU each
 frame is the whole page put together again in software, whatever changed (up
 to 70 ms of processor time on a page with blurred or layered parts), so a
@@ -177,10 +184,7 @@ all: it decodes on one processor at half VP9's speed. Without the GPU, pages
 are told there is no WebGL (drawn by the processors it takes them all and
 still crawls). Requests to 88 advertising and tracking networks from other
 sites' pages are not made, except on YouTube's own pages, which stop playing
-when they fail (`SURFER_TRACKERS=allow` makes them all). Known in
-WebKit 2.40 with GStreamer 1.24: about half of the muted streaming videos
-(MSE) that are out of view when they load never start; WebKit pauses muted
-videos out of view, and that pause comes before the player has its source.
+when they fail (`SURFER_TRACKERS=allow` makes them all).
 
 Memory is watched, because swap is far slower than memory (and a live start
 has none). A page gives memory back as it
@@ -203,7 +207,9 @@ classic engine, which cannot run sites such as YouTube. Releases 1.11.1 and
 removed it; a release built from the full root brings it back. So
 `tests/linux/mkroot.sh` always builds the root a release ships, with WebKit,
 GStreamer and the Windows layer (`ICDA_ROOT=minimal` makes a small one for
-tests of the Linux personality, never to be released);
+tests of the Linux personality, never to be released) and builds the engine
+first when `userspace/webkit/out` does not have it (hours on four
+processors; then the tarball is reused);
 `scripts/ota-release.sh` refuses a root without WebKit, or with fewer than
 half of the last release's Linux files; and the updater keeps a system's
 WebKit when a release does not have it.
