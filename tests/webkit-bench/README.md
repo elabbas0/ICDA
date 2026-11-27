@@ -16,8 +16,9 @@ the medians, screenshots of the first run of each scenario).
 
 ## What runs
 
-The browser is the real `browser.c` and `gui.c`, built with Alpine 3.20's
-WPE WebKit 2.40.5 (what ICDA ships) and drawing with Mesa's software
+The browser is the real `browser.c` and `gui.c`, built with Surfer's engine
+(`userspace/webkit/engine`: WPE WebKit 2.54.3 for Alpine 3.20, what ICDA
+ships; `run.sh` builds it first when it is not) and drawing with Mesa's software
 renderer (ICDA's "Software" mode). Only ICDA's window manager is emulated
 (`host/icda_sys.h`): it hands out the window, composites what `gui_flush`
 publishes as ICDA's compositor does, counts it, and types and scrolls from a

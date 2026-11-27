@@ -13,21 +13,28 @@
 # in it; ICDA_ROOT=minimal makes a small root for tests of the Linux
 # personality alone, which is never to be released.
 cd "$(dirname "$0")/../.."
-RELEASE_PKGS="ca-certificates cog font-dejavu glib-networking gsettings-desktop-schemas gstreamer gst-libav
-  gst-plugins-bad gst-plugins-base gst-plugins-good mesa-dri-gallium mesa-egl mesa-gbm mesa-gles wpewebkit"
+# Surfer's WebKit is not Alpine's (2.40.5, from 2023): userspace/webkit/engine
+# builds a current WPE WebKit, put into the root with the Alpine packages its
+# libraries need (engine-<version>.deps)
+. userspace/webkit/engine/versions.sh
+ENGINE=userspace/webkit/out/engine-$WEBKIT.tar.gz
+RELEASE_PKGS="ca-certificates font-dejavu glib-networking gsettings-desktop-schemas gstreamer gst-libav
+  gst-plugins-bad gst-plugins-base gst-plugins-good mesa-dri-gallium mesa-egl mesa-gbm mesa-gles"
 if [ "${ICDA_ROOT:-}" = minimal ]; then
     PKGS_ALL="$*"
+    ENGINE=
 else
-    PKGS_ALL="$(echo $RELEASE_PKGS) $*"
-    # Surfer's engine (icda-webkit, the release's icda-surfer) is built first when it is not
-    [ -f userspace/webkit/out/icda-webkit ] || sh userspace/webkit/build.sh
+    # Surfer (icda-webkit, the release's icda-surfer) and its engine are built first when they are not
+    [ -f userspace/webkit/out/icda-webkit ] && [ -f $ENGINE ] || sh userspace/webkit/build.sh
     [ -f userspace/webkit/out/icda-webkit ] || { echo "mkroot: icda-webkit did not build (userspace/webkit/build.sh)"; exit 1; }
+    [ -f $ENGINE ] || { echo "mkroot: the engine did not build (userspace/webkit/engine/build.sh)"; exit 1; }
+    PKGS_ALL="$(echo $RELEASE_PKGS) $(cat userspace/webkit/out/engine-$WEBKIT.deps) $*"
 fi
 # Windows programs: the Windows layer (icda-win) ships in every root, so it is
 # built first when it is not
 [ -f userspace/winlayer/out/icda-win ] || sh userspace/winlayer/build.sh
 [ -f userspace/winlayer/out/icda-win ] || { echo "mkroot: icda-win did not build (userspace/winlayer/build.sh)"; exit 1; }
-MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$PKGS_ALL" -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
+MSYS_NO_PATHCONV=1 docker run --rm --dns 8.8.8.8 -e PKGS="$PKGS_ALL" -e ENGINE="$ENGINE" -v "$(pwd -W 2>/dev/null || pwd):/w" -w /w alpine:3.20 sh -c '
 set -e
 apk add --no-cache gcc musl-dev zlib-dev dosfstools mtools sfdisk >/dev/null
 R=/tmp/root
@@ -36,6 +43,11 @@ R=/tmp/root
 PKGS="$PKGS mesa-osmesa libmspack freetype"
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
     -U --allow-untrusted --root $R --initdb add musl zlib busybox $PKGS >/dev/null
+# Surfer'"'"'s engine: its libraries and processes (not its headers)
+if [ -n "$ENGINE" ]; then
+  tar -xzf $ENGINE -C $R
+  rm -rf $R/usr/include $R/usr/lib/pkgconfig
+fi
 S=/tmp/stage/linux
 mkdir -p $S
 # links: FAT has none, so they are listed in .symlinks (link, tab, target)
@@ -91,6 +103,5 @@ mcopy -i $IMG@@1048576 /tmp/stage/dyntest ::/dyntest
 [ -f tests/linux/out/wpe-icda ] && mcopy -i $IMG@@1048576 tests/linux/out/wpe-icda ::/wpe-icda
 mcopy -i $IMG@@1048576 tests/linux/wpe/run.sh ::/wpe.sh
 mcopy -i $IMG@@1048576 tests/linux/wpe/dbg.sh ::/dbg.sh
-mcopy -i $IMG@@1048576 tests/linux/cog.sh ::/cog.sh
 mdir -i $IMG@@1048576 ::/
 '

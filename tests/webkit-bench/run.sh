@@ -16,19 +16,25 @@ cd "$(dirname "$0")/../.."
 BEFORE=${1:-HEAD}
 OUT=${2:-.verify/webkit-bench}
 [ $# -gt 2 ] && shift 2 || set --
-IMAGE=icda-webkit-bench
+# Surfer's engine, as ICDA ships it (userspace/webkit/engine: built first when it is not, hours)
+. userspace/webkit/engine/versions.sh
+sh userspace/webkit/engine/build.sh
+IMAGE=icda-webkit-bench-$WEBKIT
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 CA=${BENCH_CA:+-v $BENCH_CA:/etc/ssl/certs/ca-certificates.crt:ro}
 
-# Alpine 3.20: the WebKit ICDA ships (WPE WebKit 2.40.5), Mesa's software renderer, GStreamer
+# Alpine 3.20 as ICDA's Linux root: Surfer's engine, Mesa's software renderer, GStreamer
 if ! docker image inspect $IMAGE >/dev/null 2>&1; then
     echo "[bench] making the image"
     docker rm -f icda-webkit-bench-setup >/dev/null 2>&1 || true
-    docker run --name icda-webkit-bench-setup --network host -e HTTPS_PROXY -e https_proxy $CA alpine:3.20 sh -c '
-        apk add --no-cache build-base pkgconf wpewebkit wpewebkit-dev libwpebackend-fdo libwpebackend-fdo-dev libwpe-dev \
-            glib-dev wayland-dev mesa-dev mesa-dri-gallium mesa-egl mesa-gles mesa-gbm font-dejavu font-noto fontconfig \
-            glib-networking gstreamer gstreamer-tools gst-plugins-base gst-plugins-good gst-libav python3 procps-ng >/dev/null'
+    docker run --name icda-webkit-bench-setup --network host -e HTTPS_PROXY -e https_proxy -e WEBKIT=$WEBKIT \
+        -v "$PWD/userspace/webkit/out:/engine:ro" $CA alpine:3.20 sh -c '
+        apk add --no-cache build-base pkgconf glib-dev libsoup3-dev libxkbcommon-dev wayland-dev mesa-dev \
+            mesa-dri-gallium mesa-egl mesa-gles mesa-gbm font-dejavu font-noto fontconfig glib-networking gstreamer \
+            gstreamer-tools gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav python3 procps-ng \
+            $(cat /engine/engine-$WEBKIT.deps) >/dev/null
+        tar -xzf /engine/engine-$WEBKIT.tar.gz -C /'
     docker commit icda-webkit-bench-setup $IMAGE >/dev/null
     docker rm icda-webkit-bench-setup >/dev/null
 fi

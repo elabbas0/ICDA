@@ -66,9 +66,10 @@ def main():
                         "video/x-raw,width=640,height=360,framerate=30/1", "!", "vp8enc", "deadline=1", "!", "webmmux", "!",
                         "filesink", f"location={os.path.join(pages, 'test.webm')}"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # and for pages/mse.html: 720p VP9, 20 s
+        # and for pages/mse.html: 720p VP9, 20 s, 8-bit 4:2:0 as on the web (without
+        # format=I420 the encoder takes 12-bit 4:4:4, which WebKit 2.54 does not show)
         subprocess.run(["gst-launch-1.0", "-q", "videotestsrc", "num-buffers=600", "pattern=ball", "!",
-                        "video/x-raw,width=1280,height=720,framerate=30/1", "!", "vp9enc", "deadline=1", "cpu-used=8", "!",
+                        "video/x-raw,format=I420,width=1280,height=720,framerate=30/1", "!", "vp9enc", "deadline=1", "cpu-used=8", "!",
                         "webmmux", "!", "filesink", f"location={os.path.join(pages, 'test-vp9.webm')}"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
