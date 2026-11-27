@@ -165,7 +165,7 @@ if [ "$PUBLISH" = "--publish" ]; then
     OBJS=$( (cd "$OUT" && find EFI SYSTEM manifest.txt -type f) | wc -l | tr -d ' ')
     OBJS_DONE=0
     (cd "$OUT" && find EFI SYSTEM manifest.txt -type f | LC_ALL=C sort) | while read -r rel; do
-        blob=$(git hash-object -w "$OUT/$rel")
+        blob=$(git hash-object -w --no-filters "$OUT/$rel")
         GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
         OBJS_DONE=$((OBJS_DONE + 1))
         progress "hashing" "$OBJS_DONE" "$OBJS" "$rel"
@@ -192,7 +192,7 @@ if [ "$PUBLISH" = "--publish" ]; then
             PIECES_TOTAL=$(ls "$tmp"/p* | wc -l | tr -d ' ')
             PIECES_DONE=0
             for p in "$tmp"/p*; do
-                echo "${p##*/p} $(git hash-object -w "$p")" >> "$CACHE/blobs.txt"
+                echo "${p##*/p} $(git hash-object -w --no-filters "$p")" >> "$CACHE/blobs.txt"
                 PIECES_DONE=$((PIECES_DONE + 1))
                 progress "webkit pieces" "$PIECES_DONE" "$PIECES_TOTAL" \
                     "${p##*/p}  $(wc -c < "$p" | tr -d ' ') bytes"
@@ -211,12 +211,12 @@ if [ "$PUBLISH" = "--publish" ]; then
                 tmp=$(mktemp -d)
                 split -b "$PART" -d -a 1 "$src" "$tmp/p"
                 for p in "$tmp"/p*; do
-                    blob=$(git hash-object -w "$p")
+                    blob=$(git hash-object -w --no-filters "$p")
                     GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel.part${p##*/p}"
                 done
                 rm -rf "$tmp"
             else
-                blob=$(git hash-object -w "$src")
+                blob=$(git hash-object -w --no-filters "$src")
                 GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$rel"
             fi
         done < "$CACHE/loose.txt"
