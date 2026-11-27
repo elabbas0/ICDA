@@ -43,7 +43,7 @@ def main():
     ap.add_argument("--step-timeout", type=float, default=20)
     a = ap.parse_args()
     pages = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
-    server = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1"], cwd=pages,
+    server = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rangeserve.py"), str(PORT), pages], cwd=pages,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
     args = argparse.Namespace(bin=a.bin, url=f"{BASE}/static.html", urls=None, out=a.out, label="functional",

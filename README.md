@@ -198,7 +198,8 @@ strip, and it loads again when you select it. Tabs playing sound are kept.
 measures Surfer before and after a change; the measurements of these changes
 are in [docs/verification/webkit-performance](docs/verification/webkit-performance/README.md)
 (frame pacing by change, video, the advertising filter:
-[round-2.md](docs/verification/webkit-performance/round-2.md)).
+[round-2.md](docs/verification/webkit-performance/round-2.md); WebKit 2.54.3 against 2.40.5:
+[round-3.md](docs/verification/webkit-performance/round-3.md)).
 
 The engine (WebKit with its JavaScript JIT, and GStreamer for video and
 sound) is in the Linux root, `/linux`. Without it Surfer falls back to its

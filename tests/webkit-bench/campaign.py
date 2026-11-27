@@ -74,7 +74,7 @@ def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         print("campaign: no gst-launch-1.0 (gstreamer-tools): local-video and local-mse play nothing", file=sys.stderr)
-    server = subprocess.Popen([sys.executable, "-m", "http.server", "18080", "--bind", "127.0.0.1"], cwd=pages,
+    server = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rangeserve.py"), "18080", pages], cwd=pages,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
     only = set(args.only.split(",")) if args.only else None
