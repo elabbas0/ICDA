@@ -17,6 +17,9 @@ PKG=$(pkg-config --list-all | grep -o "^wpe-webkit-[0-9.]*" | head -1)
 gcc -O2 -Wall -Wno-unused-function -DICDA_SYS_BASE=0x1C000 -Iuserspace -o userspace/webkit/out/icda-webkit \
     userspace/webkit/browser.c userspace/webkit/ic_mem_libc.c userspace/gui.c userspace/ic_gfx.c userspace/ic_font.c \
     $(pkg-config --cflags --libs $PKG wpebackend-fdo-1.0 wpe-1.0 glib-2.0 gobject-2.0 wayland-server egl glesv2) -lm
+# the engine it was built against, for tests/linux/check-root.sh: a release
+# ships it only with a root that has this very engine
+echo "$WEBKIT $(sha256sum /usr/lib/libWPEWebKit-2.0.so.1.* | cut -d" " -f1)" > userspace/webkit/out/icda-webkit.engine
 echo "built userspace/webkit/out/icda-webkit ($PKG $(pkg-config --modversion $PKG))"
 '
 # the GStreamer sound output for WebKit's media

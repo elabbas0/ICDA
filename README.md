@@ -212,8 +212,14 @@ tests of the Linux personality, never to be released) and builds the engine
 first when `userspace/webkit/out` does not have it (hours on four
 processors; then the tarball is reused);
 `scripts/ota-release.sh` refuses a root without WebKit, or with fewer than
-half of the last release's Linux files; and the updater keeps a system's
-WebKit when a release does not have it.
+half of the last release's Linux files, or one that does not work with
+what ships beside it: `tests/linux/check-root.sh` (also run by
+`mkroot.sh`) checks that the root's WebKit is the engine Surfer was built
+against and that every program in the root, Surfer, the Windows layer and
+the sound output find their libraries in it. The updater installs a
+release's files in one step, so the root, Surfer and the Windows layer
+arrive together, and it keeps a system's WebKit when a release does not
+have it.
 
 ## Dialogs
 

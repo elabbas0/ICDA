@@ -105,3 +105,8 @@ mcopy -i $IMG@@1048576 tests/linux/wpe/run.sh ::/wpe.sh
 mcopy -i $IMG@@1048576 tests/linux/wpe/dbg.sh ::/dbg.sh
 mdir -i $IMG@@1048576 ::/
 '
+# the root works with what ships beside it (a release checks it again)
+if [ -n "$ENGINE" ]; then
+    sh tests/linux/check-root.sh .verify/linuxroot userspace/webkit/out/icda-webkit \
+        userspace/webkit/out/libgsticda.so userspace/winlayer/out/icda-win
+fi

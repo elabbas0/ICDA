@@ -57,6 +57,16 @@ fi
 [ -f userspace/winlayer/out/icda-win ] || [ -n "${NO_WEBKIT:-}" ] || {
     echo "icda-win missing and did not build: not publishing a release without the Windows layer"; exit 1; }
 
+# The root, Surfer and the Windows layer ship together (the updater installs
+# a release's files in one step), so they must work together: the root's
+# WebKit is the engine Surfer was built against, and every program in the
+# root and every one shipped beside it finds its libraries in the root
+if [ -z "${NO_WEBKIT:-}" ]; then
+    sh tests/linux/check-root.sh "$LINUXROOT" userspace/webkit/out/icda-webkit userspace/webkit/out/libgsticda.so \
+        userspace/winlayer/out/icda-win || {
+        echo "not publishing: the Linux root and the programs shipped beside it do not work together"; exit 1; }
+fi
+
 echo "[ota] building"
 spin "kernel + apps" "$OUT.build.log" env MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/workspace" -w /workspace icda-toolchain \
     sh -c 'make > /tmp/b.log 2>&1 || { tail -20 /tmp/b.log; exit 1; }'
