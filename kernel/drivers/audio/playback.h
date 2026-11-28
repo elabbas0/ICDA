@@ -30,6 +30,7 @@ int64_t audio_stream_position(int id);
 int64_t audio_stream_queued(int id);
 int     audio_stream_control(int id, int paused, uint32_t volume);
 void    audio_stream_close(int id);
+void    audio_proc_exit(uint64_t pid);   /* closes the streams a process left open */
 void    audio_master_set(uint32_t volume, int muted);   /* 0..256 */
 uint32_t audio_master_get(int *muted);
 

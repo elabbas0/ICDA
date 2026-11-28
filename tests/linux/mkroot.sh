@@ -70,6 +70,21 @@ EOS
 [ -x $R/usr/bin/glib-compile-schemas ] && chroot $R /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas || true
 [ -x $R/usr/bin/gio-querymodules ] && chroot $R /usr/bin/gio-querymodules /usr/lib/gio/modules || true
 [ -x $R/usr/bin/fc-cache ] && chroot $R /usr/bin/fc-cache -s || true
+# GStreamer plugin registry, so programs do not read every plugin on first use
+# (icda-webkit sets GST_REGISTRY to it, with GST_REGISTRY_UPDATE=no).  Made
+# here, while the root still has its links: after links.sh nothing in it can
+# run, and the registry was silently missing from every root before 1.12.
+if [ -d $R/usr/lib/gstreamer-1.0 ]; then
+  apk -X https://dl-cdn.alpinelinux.org/alpine/v3.20/main -X https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
+      -U --allow-untrusted --root $R add gstreamer-tools >/dev/null
+  [ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $R/usr/lib/gstreamer-1.0/
+  GST_REGISTRY=/gst-registry.bin GST_REGISTRY_FORK=no chroot $R /usr/bin/gst-inspect-1.0 >/dev/null
+  [ -s $R/gst-registry.bin ] || { echo "mkroot: no GStreamer registry"; exit 1; }
+fi
+# fontconfig lists /etc/fonts/conf.d, and ICDA follows links only when a path
+# is opened: its links become copies of the rules they name (without them
+# "serif" is no alias and WebKit aborted on pages with audio players)
+chroot $R /bin/busybox sh -c '"'"'for l in /etc/fonts/conf.d/*; do [ -L "$l" ] || continue; t=$(/bin/busybox readlink -f "$l"); [ -f "$t" ] && /bin/busybox cp "$t" "$l.copy" && /bin/busybox mv -f "$l.copy" "$l"; done'"'"'
 chroot $R /bin/busybox sh /links.sh
 for d in lib usr etc; do [ -d $R/$d ] && cp -r $R/$d $S/ 2>/dev/null || true; done
 cp $R/.symlinks $S/.symlinks
@@ -80,16 +95,13 @@ for b in $R/usr/bin/*; do [ -e "$b" ] && [ ! -L "$b" ] && cp "$b" $S/usr/bin/; d
 [ -f userspace/webkit/out/icda-webkit ] && cp userspace/webkit/out/icda-webkit $S/usr/bin/icda-webkit || true
 cp userspace/winlayer/out/icda-win $S/usr/bin/icda-win
 [ -f userspace/webkit/out/libgsticda.so ] && cp userspace/webkit/out/libgsticda.so $S/usr/lib/gstreamer-1.0/ || true
-# GStreamer plugin registry, so programs do not read every plugin on first use
-# (icda-webkit sets GST_REGISTRY to it, with GST_REGISTRY_UPDATE=no)
-if [ -d $S/usr/lib/gstreamer-1.0 ]; then
-  apk add --no-cache gstreamer-tools >/dev/null
-  cp $S/usr/lib/gstreamer-1.0/libgsticda.so $R/usr/lib/gstreamer-1.0/ 2>/dev/null || true
+# the GStreamer registry made above
+if [ -f $R/gst-registry.bin ]; then
   mkdir -p $S/usr/lib/icda
-  cp /usr/bin/gst-inspect-1.0 $R/tmp-gst-inspect
-  GST_REGISTRY=/gst-registry.bin chroot $R /tmp-gst-inspect >/dev/null 2>&1 || true
-  cp $R/gst-registry.bin $S/usr/lib/icda/gst-registry.bin 2>/dev/null || true
+  cp $R/gst-registry.bin $S/usr/lib/icda/gst-registry.bin
 fi
+# Surfer'"'"'s fontconfig rules (FONTCONFIG_FILE), for roots made before conf.d was copied
+mkdir -p $S/usr/lib/icda && cp userspace/webkit/fonts.conf $S/usr/lib/icda/fonts.conf
 gcc -O2 -o /tmp/stage/dyntest tests/linux/dyn/dyntest.c -lz -pthread
 du -sh $S
 rm -rf .verify/linuxroot && cp -r $S .verify/linuxroot

@@ -13,9 +13,11 @@
  *   - feeds input from the commands appended to the file BENCH_CTL:
  *       scroll <seconds> <notches per second>   wheel over the page
  *       click <x> <y>                           left button press + release
+ *       rclick, mclick <x> <y>                  the right, the middle button
  *       move <x> <y>                            pointer motion
  *       type <text>                             characters as key presses
- *       key <byte>                              one key byte (13 Enter, 20 Ctrl+T ...)
+ *       key <byte> [<byte> ...]                 key bytes, at once (13 Enter, 20 Ctrl+T,
+ *                                               27 91 66 the down arrow ...)
  *       open <url>                              Ctrl+T, the address, Enter
  *   - prints "benchwm:" statistics lines to stderr every 500 ms. */
 #ifndef BENCH_HOST_ICDA_SYS_H
@@ -117,18 +119,23 @@ static void bwm_command(char *line) {
         bwm.scroll_period = (long long)(1000 / rate);
         bwm.scroll_next = bwm.scroll_start;
         if (!bwm.mouse_x) bwm_mouse(bwm.w / 2, bwm.h / 2 + 40, 0, 0);
-    } else if (!strcmp(line, "click") || !strcmp(line, "move")) {
-        int x = 0, y = 0;
+    } else if (!strcmp(line, "click") || !strcmp(line, "rclick") || !strcmp(line, "mclick") || !strcmp(line, "move")) {
+        int x = 0, y = 0, b = line[0] == 'r' ? GUI_BTN_RIGHT : line[0] == 'm' && line[1] == 'c' ? GUI_BTN_MIDDLE : GUI_BTN_LEFT;
         sscanf(arg, "%d %d", &x, &y);
         bwm_mouse(x, y, 0, 0);
-        if (line[0] == 'c') {
-            bwm_mouse(x, y, GUI_BTN_LEFT, 0);
+        if (strcmp(line, "move")) {
+            bwm_mouse(x, y, b, 0);
             bwm_mouse(x, y, 0, 0);
         }
     } else if (!strcmp(line, "type")) {
         for (const char *s = arg; *s; s++) bwm_key((unsigned char)*s);
-    } else if (!strcmp(line, "key")) {
-        bwm_key((uint32_t)atoi(arg));
+    } else if (!strcmp(line, "key") || !strcmp(line, "keys")) {
+        /* keys: several bytes at once, as a key's escape sequence comes */
+        char *p = arg, *end;
+        for (long v = strtol(p, &end, 10); end != p; v = strtol(p, &end, 10)) {
+            bwm_key((uint32_t)v);
+            p = end;
+        }
     } else if (!strcmp(line, "open")) {
         bwm_key(20);                                    /* Ctrl+T: a new tab, the address bar focused */
         for (const char *s = arg; *s; s++) bwm_key((unsigned char)*s);

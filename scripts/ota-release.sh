@@ -110,6 +110,8 @@ body=$(mktemp)
         # launcher in its existing pack so UI fixes do not replace that pack.
         set -- loose:linux/usr/bin/icda-surfer=userspace/webkit/out/icda-webkit \
                linux/usr/lib/gstreamer-1.0/libgsticda.so=userspace/webkit/out/libgsticda.so \
+               loose:linux/usr/lib/icda/gst-registry.bin=userspace/webkit/out/gst-registry.bin \
+               loose:linux/usr/lib/icda/fonts.conf=userspace/webkit/fonts.conf \
                loose:linux/usr/bin/icda-win=userspace/winlayer/out/icda-win \
                loose:linux/usr/bin/icda-llm=userspace/llm/out/icda-llm \
                loose:linux/usr/bin/icda-say=userspace/llm/out/icda-say \

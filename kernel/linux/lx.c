@@ -848,6 +848,16 @@ int lx_overlay_path(char *path) {
     vfs_node_t *root = vfs_root();
     char alt[LX_PATH_MAX];
     if (path[0] != '/' || vfs_resolve(root, path)) return 0;
+    /* /var/tmp is the temporary folder Linux programs expect to be able to
+     * write (WebKit buffers media to /var/tmp/WebKit-Media-*; without it an
+     * audio or video page failed and its web process aborted): ICDA's /tmp,
+     * in memory */
+    if (has_prefix(path, "/var/tmp") && (path[8] == 0 || path[8] == '/')) {
+        kstrcpy(alt, "/tmp", LX_PATH_MAX);
+        kstrcpy(alt + 4, path + 8, LX_PATH_MAX - 4);
+        kstrcpy(path, alt, LX_PATH_MAX);
+        return 1;
+    }
     refresh_roots();
     /* a path into a Linux root itself (a loader that found a library there) */
     for (uint64_t i = 0; i < n_roots; i++) {
@@ -2424,6 +2434,17 @@ static void deliver_signals(struct registers *regs, int after_call) {
                 lxvm_describe(p, regs->rip, where, sizeof(where));
                 serial_write(" at ");
                 serial_write(where);
+                serial_write("\n");
+                /* its last calls (number=result): a failed one is often why */
+                serial_write("    last calls");
+                for (int i = 0; i < 16; i++) {
+                    int k = (t->lx_last_pos + i) & 15;
+                    if (!t->lx_last_nr[k] && !t->lx_last_ret[k]) continue;
+                    serial_write(" ");
+                    dump_num(t->lx_last_nr[k]);
+                    serial_write("=");
+                    dump_num(t->lx_last_ret[k]);
+                }
                 serial_write("\n");
                 lx_report_stack(p, regs->rsp);
             }

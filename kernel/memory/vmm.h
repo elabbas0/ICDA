@@ -109,7 +109,7 @@ int vmm_swap_fault(addr_space_t *as, uint64_t virt);
 /* puts a swap entry at virt (mremap) */
 int vmm_set_swap_entry(addr_space_t *as, uint64_t virt, pte_t e);
 /* user pages in memory (mapped_pages less those in swap) */
-uint64_t vmm_resident_pages(const addr_space_t *as);
+uint64_t vmm_resident_pages(addr_space_t *as);
 
 
 int vmm_page_writable(addr_space_t *as, uint64_t virt);

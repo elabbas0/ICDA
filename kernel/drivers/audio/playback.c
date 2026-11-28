@@ -34,7 +34,11 @@
 #define LEAD_BYTES      23040U
 #define CHUNK_FRAMES    512U
 #define MAX_VOICES      32
-#define MAX_STREAMS     4
+/* Streams belong to the process that opened them and close when it ends: a
+ * web page's every <audio> and <video> holds one from when it is ready to
+ * play, and with four, none given back by a page that crashed or a tab that
+ * closed, sound stopped working until the next restart. */
+#define MAX_STREAMS     16
 #define STREAM_SECONDS  2U
 #define IDLE_STOP_TICKS 6000U                   /* stop the stream after a minute of silence */
 /* A real codec's speaker amplifier takes 100-200 ms to wake once a stream
@@ -73,6 +77,7 @@ typedef struct {
     uint32_t  rate;
     int       paused;
     int32_t   vol;
+    uint64_t  owner;            /* pid of the process that opened it */
 } stream_t;
 
 static voice_t  voices[MAX_VOICES];
@@ -664,13 +669,21 @@ int audio_stream_open(uint32_t rate, uint32_t channels) {
         s->step = (uint32_t)(((uint64_t)rate << 16) / MIX_RATE);
         s->paused = 0;
         s->vol = 256;
+        {
+            process_t *p = sched_current_process();
+            s->owner = p ? p->pid : 0;
+        }
         return i + 1;
     }
     return -1;
 }
 
+/* the caller's own stream: an id it kept after closing its stream, now
+ * another process's, is not */
 static stream_t *stream_get(int id) {
+    process_t *p = sched_current_process();
     if (id < 1 || id > MAX_STREAMS || !streams[id - 1].used) return 0;
+    if (p && streams[id - 1].owner && streams[id - 1].owner != p->pid) return 0;
     return &streams[id - 1];
 }
 
@@ -711,10 +724,20 @@ int audio_stream_control(int id, int paused, uint32_t volume) {
     return 0;
 }
 
-void audio_stream_close(int id) {
-    stream_t *s = stream_get(id);
-    if (!s) return;
+static void stream_free(stream_t *s) {
+    s->used = 0;
     kfree(s->ring);
     s->ring = 0;
-    s->used = 0;
+    s->owner = 0;
+}
+
+void audio_stream_close(int id) {
+    stream_t *s = stream_get(id);
+    if (s) stream_free(s);
+}
+
+/* a process ended: its streams go with it */
+void audio_proc_exit(uint64_t pid) {
+    for (int i = 0; i < MAX_STREAMS; i++)
+        if (streams[i].used && streams[i].owner == pid) stream_free(&streams[i]);
 }

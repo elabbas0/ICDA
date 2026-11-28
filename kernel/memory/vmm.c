@@ -5,6 +5,7 @@
 #include "../cpu/pat.h"
 #include "../cpu/smp.h"
 #include "../drivers/console/console.h"
+#include "../drivers/serial/serial.h"
 #include "../drivers/display/framebuffer.h"
 
 extern uint8_t kernel_end[];
@@ -606,10 +607,44 @@ uint64_t vmm_count_present(addr_space_t *as, uint64_t start, uint64_t end) {
     return n;
 }
 
-/* user pages in memory: mapped less those in swap */
-uint64_t vmm_resident_pages(const addr_space_t *as) {
+/* user pages in memory: mapped less those in swap.
+ *
+ * The counter is checked against the machine: a web process on ICDA was once
+ * seen at 3.4 million gigabytes resident (a corrupted counter, cause not yet
+ * found), and WebKit, which measures its page processes by this figure
+ * (/proc/self/statm), ended the page as "using too much memory".  A count
+ * past the machine's memory is recounted from the page tables, repaired,
+ * and reported on the serial port with what it was. */
+uint64_t vmm_resident_pages(addr_space_t *as) {
+    uint64_t resident;
     if (!as) return 0;
-    return as->mapped_pages > as->swapped_pages ? as->mapped_pages - as->swapped_pages : 0;
+    resident = as->mapped_pages > as->swapped_pages ? as->mapped_pages - as->swapped_pages : 0;
+    if (resident > pmm_total_frames()) {
+        static int reported;
+        uint64_t present = vmm_count_present(as, 0, 0x0000800000000000ULL);
+        if (reported < 20) {
+            char buf[200];
+            int n = 0;
+            const char *s = "[vmm] resident count was ";
+            uint64_t vals[3] = { as->mapped_pages, as->swapped_pages, present };
+            reported++;
+            while (*s) buf[n++] = *s++;
+            for (int k = 0; k < 3; k++) {
+                char t[24];
+                int m = 0;
+                uint64_t v = vals[k];
+                do { t[m++] = (char)('0' + v % 10); v /= 10; } while (v);
+                while (m) buf[n++] = t[--m];
+                s = k == 0 ? " pages (swapped " : k == 1 ? "), present " : ": repaired\n";
+                while (*s) buf[n++] = *s++;
+            }
+            buf[n] = 0;
+            serial_write(buf);
+        }
+        as->mapped_pages = present + as->swapped_pages;
+        resident = present;
+    }
+    return resident;
 }
 
 /* Bookkeeping for a page entry the walker cleared */
