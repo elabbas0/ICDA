@@ -33,6 +33,7 @@
 #include "../fs/fd.h"
 #include "../cpu/gdt.h"
 #include "../linux/lx.h"
+#include "../linux/lx_vm.h"
 #include "../dev/devops.h"
 #include "uaccess.h"
 #include "native_abi.h"
@@ -888,6 +889,10 @@ static uint64_t sys_list_procs(char *buf, uint64_t cap) {
     buf[0] = '\0';
     out = append_text(buf, out, cap, "pid ppid sid pgid kind state exit\n");
     for (proc = sched_first_process(); proc; proc = proc->next_all) {
+        /* reaped processes are gone (their records stay): listing every one
+         * ever started filled Activity's buffer, newest first, and the
+         * long-running programs (Surfer, the window manager) fell off it */
+        if (proc->state == PROCESS_REAPED) continue;
         out = append_uint(buf, out, cap, proc->pid);
         out = append_text(buf, out, cap, " ");
         out = append_uint(buf, out, cap, proc->parent ? proc->parent->pid : 0);
@@ -1022,7 +1027,16 @@ static uint64_t sys_proc_stats(uint64_t pid, syscall_proc_stats_t *out) {
 static uint64_t sys_sys_stats(syscall_sys_stats_t *out) {
     if (!out || !user_range_prepare_cur_w(out, sizeof(*out))) return (uint64_t)-U_EFAULT;
     out->mem_total = pmm_usable_frames() * PAGE_SIZE_4K;
-    out->mem_free = pmm_free_frames() * PAGE_SIZE_4K;
+    {   /* free: what programs can have now - free frames and the cached file
+         * pages no process maps, which the allocator takes back before it
+         * runs out (as Linux's MemAvailable).  Counting that cache as used
+         * made Activity show the machine nearly full (7.9 of 8 GB) */
+        uint64_t cached = 0, reclaimable = 0, avail = pmm_free_frames();
+        lxvm_cache_usage(&cached, &reclaimable);
+        avail += reclaimable;
+        if (avail > pmm_usable_frames()) avail = pmm_usable_frames();
+        out->mem_free = avail * PAGE_SIZE_4K;
+    }
     out->cpus = smp_cpu_count() ? smp_cpu_count() : 1;
     out->idle_ticks = sched_idle_ticks();
     out->uptime_ticks = sched_ticks();

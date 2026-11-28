@@ -153,6 +153,31 @@ void sched_reap_exited_linux_vms(void) {
     }
 }
 
+/* An ended thread out of the run ring gives back its memory: its two kernel
+ * stacks (32 KB) and, unless its process still names it as its main thread,
+ * its record.  They were never freed: every thread ever started kept 36 KB,
+ * and WebKit and GStreamer start threads all the time, so a long browsing
+ * session filled the machine (Activity showed 7.9 of 8 GB in use).  Nothing
+ * else holds an ended thread: no processor runs it (checked by the caller),
+ * a process's on_cpu is cleared when it is switched away, and futex and
+ * event waits find threads by walking the ring. */
+static void free_dead_thread(thread_t *t) {
+    /* user processes' threads only: their stacks all come from
+     * alloc_kernel_stack (the boot and idle threads' do not, and kernel
+     * threads seldom end) */
+    if (!t->owner || t->owner->kind != PROCESS_USER) return;
+    if (t->kernel_stack_top) {
+        pmm_free_range(VIRT_TO_PHYS(t->kernel_stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
+        t->kernel_stack_top = 0;
+    }
+    if (t->user_entry_stack_top) {
+        pmm_free_range(VIRT_TO_PHYS(t->user_entry_stack_top - KERNEL_STACK_SIZE), KERNEL_STACK_PAGES);
+        t->user_entry_stack_top = 0;
+    }
+    if (t->owner && t->owner->on_cpu == t) t->owner->on_cpu = NULL;
+    if (t->owner->main_thread != t) pmm_free(VIRT_TO_PHYS((uint64_t)t));
+}
+
 /* Every tick on the BSP; also drops ended threads from the run ring.  They
  * stayed in it for good, so every walk of the ring (each tick, each switch,
  * each futex or event wake) grew with every thread ever started - WebKit
@@ -165,7 +190,11 @@ static void wake_blocked_threads(void) {
     do {
         process_t *proc = thread->owner;
         thread_t *n = thread->next;
-        while (n != start && n != thread && n->state == THREAD_ZOMBIE && !thread_on_a_cpu(n)) n = n->next;
+        while (n != start && n != thread && n->state == THREAD_ZOMBIE && !thread_on_a_cpu(n)) {
+            thread_t *dead = n;
+            n = n->next;
+            free_dead_thread(dead);
+        }
         thread->next = n;
         if (thread->state == THREAD_BLOCKED && thread->wake_tick != 0 && thread->wake_tick <= uptime_ticks &&
             (thread->block_reason == THREAD_BLOCK_SLEEP || thread->block_reason == THREAD_BLOCK_INPUT ||

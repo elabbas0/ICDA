@@ -613,16 +613,18 @@ uint64_t vmm_count_present(addr_space_t *as, uint64_t start, uint64_t end) {
  * seen at 3.4 million gigabytes resident (a corrupted counter, cause not yet
  * found), and WebKit, which measures its page processes by this figure
  * (/proc/self/statm), ended the page as "using too much memory".  A count
- * past the machine's memory is recounted from the page tables, repaired,
- * and reported on the serial port with what it was. */
+ * past the memory the machine has in use is recounted from the page tables,
+ * repaired, and reported on the serial port with what it was. */
 uint64_t vmm_resident_pages(addr_space_t *as) {
     uint64_t resident;
     if (!as) return 0;
     resident = as->mapped_pages > as->swapped_pages ? as->mapped_pages - as->swapped_pages : 0;
-    if (resident > pmm_total_frames()) {
+    /* no process has more pages in memory than the machine has in use: a
+     * count past that has drifted (Activity showed a process at 7.9 GB) */
+    if (resident > pmm_usable_frames() - pmm_free_frames()) {
         static int reported;
         uint64_t present = vmm_count_present(as, 0, 0x0000800000000000ULL);
-        if (reported < 20) {
+        if (present != resident && reported < 20) {
             char buf[200];
             int n = 0;
             const char *s = "[vmm] resident count was ";
